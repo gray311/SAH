@@ -1,0 +1,62 @@
+type: agent
+name: outer_h1_proposer
+description: >-
+  H1 — the FIXED outer harness. Runs the proposer M_phi (Qwen3.5-9B + LoRA phi)
+  through a draft -> validate -> submit loop to produce ONE candidate H2 spec.
+  This package never changes during training (plan.md §0.3); only phi does.
+max_context_tokens: 131072
+system_prompt: ./system.md
+system_prompt_type: file
+tool_call_mode: structured
+max_iterations: 8
+retry_attempts: 2
+retry_backoff_max_seconds: 30
+timeout: 600
+
+# Endpoint fields are overridden at runtime (propose.py); sampling here is part
+# of H1 and is preserved: temperature 1.0 for candidate diversity (GRPO group).
+llm_config:
+  model: qwen3.5-9b
+  base_url: http://127.0.0.1:8800/v1
+  api_key: EMPTY
+  api_type: openai_chat_completion
+  max_tokens: 8192
+  temperature: 1.0
+  top_p: 0.95
+  stream: false
+
+sandbox_config:
+  type: local
+  work_dir: /tmp
+
+tools:
+  - name: validate_spec
+    yaml_path: ./tools/validate_spec.tool.yaml
+    binding: outer.harness.tools.design:validate_spec
+  - name: submit_spec
+    yaml_path: ./tools/submit_spec.tool.yaml
+    binding: outer.harness.tools.design:submit_spec
+
+stop_tools: [submit_spec]
+
+skills:
+  - ./skills/harness-design
+
+middlewares:
+  # custom: push the proposer to submit before the iteration cap
+  - import: outer.harness.middlewares.submit_reminder:SubmitReminderMiddleware
+    params:
+      remind_from_iteration: 6
+      max_iterations: 8
+  # built-in: keep validator feedback bounded
+  - import: nexau.archs.main_sub.execution.middleware.long_tool_output:LongToolOutputMiddleware
+    params:
+      max_output_chars: 6000
+      head_lines: 30
+      tail_lines: 20
+      head_chars: 3000
+      tail_chars: 3000
+      bypass_tool_names: [submit_spec, LoadSkill]
+
+tracers:
+  - import: nexau.archs.tracer.adapters.in_memory:InMemoryTracer

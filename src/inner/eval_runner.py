@@ -42,6 +42,7 @@ def evaluate_program(
     timeout_s: Optional[float] = None,
     python_exe: str = sys.executable,
     workdir: Optional[Path] = None,
+    subsample: Optional[int] = None,
 ) -> EvalOutcome:
     """Write ``program`` to a temp file and score it with ``task``'s evaluator."""
     timeout = timeout_s if timeout_s is not None else task.per_eval_timeout_s
@@ -57,6 +58,7 @@ def evaluate_program(
         "program_path": str(prog_path),
         "shim_path": str(task.shim_path),
         "result_path": str(res_path),
+        "subsample": subsample,
     }))
 
     env = dict(os.environ)

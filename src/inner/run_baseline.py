@@ -107,6 +107,8 @@ def main() -> None:
     ap.add_argument("--eval-python", default=os.environ.get("INNER_EVAL_PYTHON", sys.executable),
                     help="interpreter with the task deps (numpy/scipy/jax/...) for eval subprocess")
     ap.add_argument("--no-trajectory", action="store_true")
+    ap.add_argument("--seed-programs-file", default=None,
+                    help="JSON {task_id: program_text | {program: text}}; overrides the task's initial program (best-program inheritance across outer rounds)")
     ap.add_argument("--out", default=None, help="output dir (default runs/inner_baseline/<ts>)")
     args = ap.parse_args()
 
@@ -117,6 +119,21 @@ def main() -> None:
     (out_dir / "results").mkdir(exist_ok=True)
 
     tasks = _select(args)
+    if args.seed_programs_file:
+        inherited = json.loads(Path(args.seed_programs_file).read_text())
+        for task in tasks:
+            ent = inherited.get(task.task_id)
+            if not ent:
+                continue
+            text = ent["program"] if isinstance(ent, dict) else ent
+            ov = out_dir / f"seed_override__{task.task_id}.py"
+            ov.write_text(text)
+            task.initial_program_path = ov
+            parents = ent.get("parents") if isinstance(ent, dict) else None
+            if parents:
+                task.crossover_parents = parents  # consumed by harness_runner
+            print(f"[inherit] {task.task_id}: rollout starts from inherited best program "
+                  f"({len(text)} chars, {len(parents or [])} crossover parents)", flush=True)
     provenance = {
         "timestamp": ts, "mode": "seed_only" if args.seed_only else "agent",
         "n_tasks": len(tasks), "task_ids": [t.task_id for t in tasks],

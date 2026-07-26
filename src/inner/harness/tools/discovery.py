@@ -42,6 +42,22 @@ def evaluate_solution() -> str:
     return "\n".join(parts)
 
 
+def probe_solution() -> str:
+    """Cheap approximate score of the CURRENT program on subsampled data."""
+    session = get_session()
+    if session.ledger.probe_calls >= session.ledger.max_probe_calls:
+        return "probe budget exhausted; use evaluate_solution for the real score."
+    out = session.probe()
+    left = session.ledger.max_probe_calls - session.ledger.probe_calls
+    if out.error:
+        return (f"PROBE (subsampled, approximate): FAILED — {out.error}\n"
+                f"{left} probes left. Fix the program before a full evaluation.")
+    return (f"PROBE (subsampled, approximate) combined_score = {out.combined_score:.6g}. "
+            f"NOT comparable to full scores and NOT counted as an evaluation; use it "
+            f"only to rank your own variants cheaply. {left} probes left. "
+            f"Run evaluate_solution when confident.")
+
+
 def finish(summary: str) -> str:
     """End the session (stop tool)."""
     session = get_session()

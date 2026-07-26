@@ -49,6 +49,17 @@ def main() -> None:
     req = json.loads(Path(sys.argv[1]).read_text())
     out = {"combined_score": 0.0, "validity": 0.0, "error": None, "metrics": {}}
     try:
+        if req.get("subsample"):
+            # cheap-probe mode: evaluator sees only the first N rows of any CSV
+            import pandas as _pd
+            _orig_read_csv = _pd.read_csv
+            _n = int(req["subsample"])
+
+            def _sub_read_csv(*a, **kw):
+                kw.setdefault("nrows", _n)
+                return _orig_read_csv(*a, **kw)
+
+            _pd.read_csv = _sub_read_csv
         ev_path = Path(req["evaluator_path"])
         # make the evaluator importable: its own dir, the runtime shim, and the task dir
         for p in (req.get("shim_path"), str(ev_path.parent), str(ev_path.parent.parent)):

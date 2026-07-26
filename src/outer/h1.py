@@ -14,7 +14,7 @@ from typing import Any, Dict
 
 import yaml
 
-H1_VERSION = "h1/0.3-instancewise"
+H1_VERSION = "h1/0.4-feedback"
 H1_PACKAGE = Path(__file__).resolve().parent / "harness"
 
 _SEED_PROGRAM_CAP = 5000  # chars of the seed program shown to the proposer
@@ -76,3 +76,33 @@ def h1_hash() -> str:
             h.update(str(f.relative_to(H1_PACKAGE)).encode())
             h.update(f.read_bytes())
     return "sha256:" + h.hexdigest()[:16]
+
+
+def render_feedback(fb: dict) -> str:
+    """Compact previous-visit telemetry section appended to the H1 user message."""
+    lines = [
+        "\n\n## Telemetry from the previous visit (round %s)" % fb.get("round"),
+    ]
+    if fb.get("analyst_note"):
+        lines.append("ANALYST NOTE: " + fb["analyst_note"])
+    lines += [
+        "The starting score was %.6g; the best of 8 candidate harnesses reached %.6g."
+        % (fb.get("base_score", 0.0), (fb.get("best_score") or fb.get("base_score", 0.0))),
+        "%s of the candidates made NO progress past the starting program." % fb.get("n_stuck_at_base", "?"),
+        "Per-candidate outcomes (k: score, evals used, stop reason, changed fields):",
+    ]
+    for c in fb.get("candidates", []):
+        if c.get("invalid"):
+            lines.append("  k%s: INVALID SPEC (never rolled out)" % c["k"])
+            continue
+        lines.append("  k%s: score=%s evals=%s stop=%s changed=%s%s" % (
+            c["k"],
+            ("%.6g" % c["score"]) if c.get("score") is not None else "?",
+            c.get("evals"), c.get("stop"), ",".join(c.get("changed", [])),
+            (" err=" + c["err"]) if c.get("err") else ""))
+    lines.append(
+        "Diagnose WHY those harnesses failed to progress (e.g. the strategy they pushed "
+        "saturated, edits kept failing, budget was wasted on timeouts) and design a harness "
+        "that overcomes that specific failure mode. Do not resubmit a near-copy of a design "
+        "that already stalled.")
+    return "\n".join(lines)

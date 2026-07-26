@@ -33,6 +33,7 @@ _TEXT_FIELDS = {
 _TOOL_DESC_FIELDS = {  # tool name -> max chars
     "edit_solution": 1600,
     "evaluate_solution": 1000,
+    "probe_solution": 1000,
     "finish": 600,
 }
 # numeric field -> (min, max, is_int)

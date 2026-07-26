@@ -64,15 +64,26 @@ class InnerResult:
 
 
 def _initial_message(task: EFTTask, seed_score: float, seed_valid: float, budget: int) -> str:
-    return (
+    msg = (
         f"# Task\n{task.spec.strip()}\n\n"
         f"# Current program\n```python\n{task.initial_program}\n```\n\n"
         f"# Baseline\nThe seed program scores combined_score = {seed_score:.6g} "
         f"(validity {seed_valid:g}). Beat it. You have {budget} evaluations.\n\n"
-        "Load the discovery-optimization skill, then start by proposing an "
-        "improved EVOLVE-BLOCK with edit_solution and scoring it with "
-        "evaluate_solution."
     )
+    parents = getattr(task, "crossover_parents", None)
+    if parents:
+        msg += "# Alternative high-scoring approaches (different search basins)\n"
+        msg += ("These reached similar scores via DIFFERENT strategies. Consider "
+                "hybridizing their ideas with the current program — crossover often "
+                "escapes local optima that pure mutation cannot:\n")
+        for i, par in enumerate(parents):
+            msg += (f"\n## Alternative {i+1} (score {par.get('score', 0):.6g})\n"
+                    f"```python\n{par.get('program', '')[:4000]}\n```\n")
+        msg += "\n"
+    msg += ("Load the discovery-optimization skill, then start by proposing an "
+            "improved EVOLVE-BLOCK with edit_solution and scoring it with "
+            "evaluate_solution.")
+    return msg
 
 
 def _override_llm(config, ep: LLMEndpoint, *, preserve_sampling: bool = False,

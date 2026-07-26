@@ -39,6 +39,14 @@ _TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
     "evaluate_solution": {
         "input_schema": {"type": "object", "properties": {}, "additionalProperties": False},
     },
+    "probe_solution": {
+        "input_schema": {"type": "object", "properties": {}, "additionalProperties": False},
+        "default_description": (
+            "Cheaply score the CURRENT program on SUBSAMPLED data (~2000 rows). "
+            "Fast; does NOT consume the evaluation budget; approximate and NOT "
+            "comparable to full scores — use it to rank variants when full "
+            "evaluation is slow, then confirm with evaluate_solution."),
+    },
     "finish": {
         "input_schema": {
             "type": "object",
@@ -78,7 +86,9 @@ def materialize(effective: Dict[str, Any], cand_dir: Path, *,
     tool_descs = effective.get("tool_descriptions", {})
     for name, schema in _TOOL_SCHEMAS.items():
         doc = {"type": "tool", "name": name,
-               "description": tool_descs.get(name, "").strip() or f"The {name} tool.",
+               "description": tool_descs.get(name, "").strip()
+                              or schema.get("default_description")
+                              or f"The {name} tool.",
                "input_schema": schema["input_schema"]}
         (cand_dir / "tools" / f"{name}.tool.yaml").write_text(_yaml_str(doc))
 
@@ -90,6 +100,11 @@ def materialize(effective: Dict[str, Any], cand_dir: Path, *,
         "from inner.harness.tools.runtime import get_session  # shared session bridge (fixed runtime)",
     )
     (cand_dir / "middlewares" / "budget_reminder.py").write_text(mw_text)
+    sr_text = (INNER_HARNESS / "middleware" / "stall_restart.py").read_text().replace(
+        "from inner.harness.tools.runtime import get_session",
+        "from inner.harness.tools.runtime import get_session  # shared session bridge (fixed runtime)",
+    )
+    (cand_dir / "middlewares" / "stall_restart.py").write_text(sr_text)
 
     # --- agent.yaml --- #
     sampling = effective.get("sampling", {})
@@ -121,13 +136,16 @@ def materialize(effective: Dict[str, Any], cand_dir: Path, *,
         "tools": [
             {"name": n, "yaml_path": f"./tools/{n}.tool.yaml",
              "binding": f"inner.harness.tools.discovery:{n}"}
-            for n in ("edit_solution", "evaluate_solution", "finish")
+            for n in ("edit_solution", "evaluate_solution", "probe_solution", "finish")
         ],
         "stop_tools": ["finish"],
         "skills": ["./skills/discovery-optimization"],
         "middlewares": [
             {"import": "middlewares.budget_reminder:BudgetReminderMiddleware",
              "params": {"remind_from_left": int(mw_p.get("budget_reminder_from_left", 3))}},
+            {"import": "middlewares.stall_restart:StallRestartMiddleware",
+             "params": {"stall_after": int(mw_p.get("stall_after", 8)),
+                        "max_restarts": int(mw_p.get("max_restarts", 2))}},
             {"import": "nexau.archs.main_sub.execution.middleware.long_tool_output:LongToolOutputMiddleware",
              "params": {"max_output_chars": int(mw_p.get("long_tool_output_max_chars", 8000)),
                         "head_lines": 40, "tail_lines": 20,

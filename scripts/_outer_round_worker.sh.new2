@@ -78,7 +78,6 @@ python3 -m outer.outer_round propose \
   --n-replicas "$PROPOSE_REPLICAS" --model "$SERVED_MODEL" \
   --max-evals "$MAX_EVALS" ${PROPOSER_SEED:+--seed "$PROPOSER_SEED"} \
   ${SEED_PROGRAMS_FILE:+--seed-programs-file "$SEED_PROGRAMS_FILE"} \
-  ${FEEDBACK_FILE:+--feedback-file "$FEEDBACK_FILE"} \
   --parallel "${PROPOSE_PAR:-8}" \
   2>&1 | tee "$ROUND_DIR/propose.log"
 
@@ -126,47 +125,23 @@ if [ -n "${MPHI_PATH:-}" ]; then
     RB=8801; RN=$((N_REPLICAS - 1))
   fi
 fi
-run_rollout(){ # tid k evals logsuffix
-  local tid="$1" k="$2" evals="$3" sfx="$4"
-  local port=$((RB + ROLL_IDX % RN)); ROLL_IDX=$((ROLL_IDX + 1))
-  local cdir; cdir=$(printf '%s/tasks/%s/cand%02d' "$ROUND_DIR" "$tid" "$k")
+idx=0; rc=0
+for pair in "${PAIRS[@]:-}"; do
+  [ -n "$pair" ] || continue
+  tid="${pair%%:*}"; k="${pair##*:}"
+  port=$((RB + idx % RN)); idx=$((idx + 1))
+  cdir=$(printf '%s/tasks/%s/cand%02d' "$ROUND_DIR" "$tid" "$k")
+  while (( $(jobs -rp | wc -l) >= MAX_PAR )); do wait -n || rc=1; done
   OPENAI_BASE_URL="http://127.0.0.1:$port/v1" python3 -m inner.run_baseline \
     --harness-dir "$cdir" --ids "$tid" \
     --base-url "http://127.0.0.1:$port/v1" --model "$SERVED_MODEL" \
-    --max-evals "$evals" ${EVAL_TIMEOUT:+--eval-timeout "$EVAL_TIMEOUT"} \
+    --max-evals "$MAX_EVALS" ${EVAL_TIMEOUT:+--eval-timeout "$EVAL_TIMEOUT"} \
     ${SEED_PROGRAMS_FILE:+--seed-programs-file "$SEED_PROGRAMS_FILE"} \
     --eval-python python3 --no-trajectory \
     --out "$ROUND_DIR/rollouts/$tid/cand$(printf '%02d' "$k")" \
-    > "$ROUND_DIR/rollout_logs/${tid}-cand$(printf '%02d' "$k")${sfx}.log" 2>&1 &
-}
-ROLL_IDX=0; rc=0
-if [ -n "${SCREEN_EVALS:-}" ]; then
-  # Successive halving: every candidate gets a cheap SCREEN_EVALS rollout,
-  # only the top PROMOTE go on to a full MAX_EVALS rollout. load_rollout_score
-  # takes the max over run subdirs, so collect automatically sees the best.
-  log "cascade pass 1: ${#PAIRS[@]} candidates @ $SCREEN_EVALS evals"
-  for pair in "${PAIRS[@]:-}"; do
-    [ -n "$pair" ] || continue
-    while (( $(jobs -rp | wc -l) >= MAX_PAR )); do wait -n || rc=1; done
-    run_rollout "${pair%%:*}" "${pair##*:}" "$SCREEN_EVALS" "-screen"
-  done
-  while (( $(jobs -rp | wc -l) > 0 )); do wait -n || rc=1; done
-  mapfile -t PROMOTED < <(python3 "$REPO/scripts/cascade_promote.py" "$ROUND_DIR" "${PROMOTE:-4}")
-  log "cascade pass 2: ${#PROMOTED[@]} promoted @ $MAX_EVALS evals"
-  for pair in "${PROMOTED[@]:-}"; do
-    [ -n "$pair" ] || continue
-    while (( $(jobs -rp | wc -l) >= MAX_PAR )); do wait -n || rc=1; done
-    run_rollout "${pair%%:*}" "${pair##*:}" "$MAX_EVALS" "-full"
-  done
-  while (( $(jobs -rp | wc -l) > 0 )); do wait -n || rc=1; done
-else
-  for pair in "${PAIRS[@]:-}"; do
-    [ -n "$pair" ] || continue
-    while (( $(jobs -rp | wc -l) >= MAX_PAR )); do wait -n || rc=1; done
-    run_rollout "${pair%%:*}" "${pair##*:}" "$MAX_EVALS" ""
-  done
-  while (( $(jobs -rp | wc -l) > 0 )); do wait -n || rc=1; done
-fi
+    > "$ROUND_DIR/rollout_logs/${tid}-cand$(printf '%02d' "$k").log" 2>&1 &
+done
+while (( $(jobs -rp | wc -l) > 0 )); do wait -n || rc=1; done
 log "rollouts finished (rc=$rc)"
 
 # --- collect --- #

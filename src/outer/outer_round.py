@@ -74,18 +74,40 @@ def cmd_propose(args) -> None:
         if args.n_replicas > 0 else [args.base_url]
 
     # per-task context: base spec (that task's current best harness) + user message
+    inherited = {}
+    if getattr(args, "seed_programs_file", None):
+        try:
+            inherited = json.loads(Path(args.seed_programs_file).read_text())
+        except Exception as e:
+            print(f"[propose] WARNING: seed-programs-file unreadable ({e}); using task seeds")
+
     ctx: Dict[str, Dict[str, Any]] = {}
     for tid in args.tasks:
         task = get_task(tid)
         base_spec = hs.read_base_spec(Path(bases[tid]["package"]))
+        ent = inherited.get(tid)
+        if ent:  # inheritance: rollouts start from the current best program
+            seed_prog = ent["program"] if isinstance(ent, dict) else ent
+            seed_sc = float(ent.get("score", bases[tid]["score"])) if isinstance(ent, dict) \
+                else float(bases[tid]["score"])
+        else:
+            seed_prog, seed_sc = task.initial_program, float(bases[tid]["seed_score"])
+        fb_text = ""
+        if getattr(args, "feedback_file", None):
+            try:
+                fb = json.loads(Path(args.feedback_file).read_text()).get(tid)
+                if fb:
+                    fb_text = h1.render_feedback(fb)
+            except Exception as e:
+                print(f"[propose] WARNING: feedback-file unreadable ({e})")
         ctx[tid] = {
             "base_spec": base_spec,
             "user_message": h1.build_user_message(
                 task_id=tid, task_spec=task.spec,
-                seed_program=task.initial_program,
-                seed_score=float(bases[tid]["seed_score"]),
+                seed_program=seed_prog,
+                seed_score=seed_sc,
                 base_score=float(bases[tid]["score"]),
-                base_spec=base_spec, max_evals=args.max_evals),
+                base_spec=base_spec, max_evals=args.max_evals) + fb_text,
         }
 
     jobs = [(tid, k) for tid in args.tasks for k in range(args.k)]
@@ -159,13 +181,31 @@ def cmd_collect(args) -> None:
              for t in json.loads((round_dir / "trajectories.json").read_text())}
     system_text = (h1.H1_PACKAGE / "system.md").read_text()
 
+    import os
+    adv_mode = os.environ.get("SAH_ADV", "v2")
+    ceilings = {}
+    try:
+        ft = json.loads((Path(__file__).resolve().parents[2]
+                         / "results" / "finch_targets.json").read_text())
+        ceilings = {t: (v.get("sota_combined") or v.get("finch_combined"))
+                    for t, v in ft.get("targets", {}).items()}
+    except Exception:
+        pass
+
     groups, batch_rows = {}, []
     next_bases = dict(meta.get("bases_in", {}))  # carry forward ALL tasks' bases
     for tid in meta["tasks_order"]:
         pt = meta["per_task"][tid]
-        g = rw.compute_task_group(
-            task_id=tid, candidates=pt["candidates"],
-            rollout_root=round_dir / "rollouts", base_score=float(pt["base_score"]))
+        if adv_mode == "legacy":
+            g = rw.compute_task_group(
+                task_id=tid, candidates=pt["candidates"],
+                rollout_root=round_dir / "rollouts", base_score=float(pt["base_score"]))
+        else:
+            g = rw.compute_task_group_v2(
+                task_id=tid, candidates=pt["candidates"],
+                rollout_root=round_dir / "rollouts", base_score=float(pt["base_score"]),
+                ceiling=ceilings.get(tid), sharpen_alpha=float(os.environ.get("SAH_ALPHA", "0.3")))
+            print(f"  [{tid}] advantages: {g['adv_mode']} ceiling={g.get('ceiling')}")
         groups[tid] = g
         for row in g["rows"]:
             t = trajs.get((tid, row["k"]), {})
@@ -193,6 +233,74 @@ def cmd_collect(args) -> None:
               f"(cand{g['best_k']:02d})" if g["best_k"] is not None else
               f"  {tid}: base={g['base_score']:.6g} best=n/a",
               "IMPROVED" if g["improved"] else "")
+
+    # inner-telemetry digest for the NEXT visit's H1 context (blind mutation ->
+    # informed debugging): what each candidate's rollout actually did
+    fb_path = round_dir.parent / "task_feedback.json"
+    try:
+        feedback = json.loads(fb_path.read_text()) if fb_path.exists() else {}
+    except Exception:
+        feedback = {}
+    for tid, g in groups.items():
+        cands = []
+        for row in g["rows"]:
+            ent = {"k": row["k"], "score": row["score"],
+                   "changed": [c.split(".")[-1] for c in row.get("changed_fields", [])][:6]}
+            for res in sorted((round_dir / "rollouts" / tid / f"cand{row['k']:02d}").glob("*/results/*.json")):
+                try:
+                    d = json.loads(res.read_text())
+                    led = d.get("ledger") or {}
+                    ent.update({"evals": led.get("evaluator_calls"),
+                                "llm_calls": led.get("llm_calls"),
+                                "stop": d.get("stop_reason"),
+                                "err": (str(d.get("error"))[:120] if d.get("error") else None)})
+                except Exception:
+                    pass
+            if not row["valid"]:
+                ent["invalid"] = True
+            cands.append(ent)
+        n_stuck = sum(1 for c in cands if c.get("score") is not None
+                      and abs((c["score"] or 0) - g["base_score"]) < 1e-9)
+        feedback[tid] = {"round": meta["round"], "base_score": g["base_score"],
+                         "best_score": g["best_score"], "best_k": g["best_k"],
+                         "n_stuck_at_base": n_stuck, "candidates": cands}
+    fb_path.write_text(json.dumps(feedback, indent=1))
+
+    # global best-program inheritance: merge this round's winners into
+    # <outer_root>/best_programs.json (next steps' rollouts start there)
+    bp_path = round_dir.parent / "best_programs.json"
+    try:
+        best_programs = json.loads(bp_path.read_text()) if bp_path.exists() else {}
+    except Exception:
+        best_programs = {}
+    for tid, g in groups.items():
+        if g["best_k"] is None or g["best_score"] is None:
+            continue
+        prev = best_programs.get(tid, {})
+        if isinstance(prev, dict) and prev.get("score", float("-inf")) >= g["best_score"]:
+            continue
+        prog = None
+        for res in sorted((round_dir / "rollouts" / tid / f"cand{g['best_k']:02d}").glob("*/results/*.json")):
+            try:
+                d = json.loads(res.read_text())
+                if d.get("best_program"):
+                    prog = d["best_program"]
+            except Exception:
+                pass
+        if prog:
+            # lineage crossover parents: the displaced best becomes a parent
+            # (diverse basin material for future hybridization), cap 2
+            parents = list((prev or {}).get("parents") or [])
+            if isinstance(prev, dict) and prev.get("program") and \
+               prev["program"] != prog:
+                parents = [{"score": prev["score"], "program": prev["program"]}] + parents
+            best_programs[tid] = {"score": g["best_score"], "program": prog,
+                                  "round": meta["round"], "k": g["best_k"],
+                                  "parents": parents[:2]}
+            print(f"  [inherit] {tid}: best_programs.json <- round{meta['round']:03d}/"
+                  f"cand{g['best_k']:02d} ({g['best_score']:.6g}, "
+                  f"{len(parents[:2])} parents)")
+    bp_path.write_text(json.dumps(best_programs, indent=1))
 
     with open(round_dir / "grpo_batch.jsonl", "w") as f:
         for row in batch_rows:
@@ -225,6 +333,10 @@ def main() -> None:
     p.add_argument("--parallel", type=int, default=8)
     p.add_argument("--max-evals", type=int, default=20)
     p.add_argument("--tasks", nargs="*", default=DEFAULT_TASKS)
+    p.add_argument("--seed-programs-file", default=None,
+                   help="global best_programs.json; H1 sees the inherited program as the rollout starting point")
+    p.add_argument("--feedback-file", default=None,
+                   help="global task_feedback.json; H1 sees a telemetry digest of the previous visit's rollouts")
     p.set_defaults(fn=cmd_propose)
 
     c = sub.add_parser("collect", help="per-task rewards + GRPO batch + next bases")

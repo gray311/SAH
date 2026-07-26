@@ -37,11 +37,66 @@ python3 "$SAH/src/training/grpo_to_replay.py" --rounds "$ROUND_DIR" --out "$REPL
 N_ROWS=$(wc -l < "$REPLAY")
 [ "$N_ROWS" -ge 2 ] || { echo "only $N_ROWS trainable rows — no gradient signal; aborting"; exit 1; }
 
+# Cross-step archive: bank this round's strongly-positive rows, and (opt-in
+# via ARCHIVE_MIX=n) mix n archived winner-trajectories from OTHER tasks into
+# the replay — amortization signal + small-batch noise damping. Off by default.
+ARCHIVE="$(dirname "$ROUND_DIR")/replay_archive.jsonl"
+python3 - "$REPLAY" "$ARCHIVE" "${ARCHIVE_MIX:-0}" <<'PYEOF'
+import json, sys
+replay, archive, mix = sys.argv[1], sys.argv[2], int(sys.argv[3])
+rows = [json.loads(l) for l in open(replay)]
+# bank winners (advantage > 0.3) into the archive, dedup by (task, round, k)
+try:
+    arch = [json.loads(l) for l in open(archive)]
+except FileNotFoundError:
+    arch = []
+seen = {(a["metadata"]["task_id"], a["metadata"]["round"], a["metadata"]["k"]) for a in arch}
+for r in rows:
+    md = r["metadata"]
+    if md.get("advantage", 0) > 0.3 and (md["task_id"], md["round"], md["k"]) not in seen:
+        arch.append(r)
+open(archive, "w").write("".join(json.dumps(a) + "\n" for a in arch))
+if mix > 0 and arch:
+    cur_tasks = {r["metadata"]["task_id"] for r in rows}
+    pool = [a for a in arch if a["metadata"]["task_id"] not in cur_tasks]
+    pool.sort(key=lambda a: -a["metadata"]["round"])  # freshest first
+    extra = pool[:mix]
+    if extra:
+        open(replay, "a").write("".join(json.dumps(a) + "\n" for a in extra))
+        print(f"[archive] mixed {len(extra)} winner rows from other tasks "
+              f"(archive size {len(arch)})")
+print(f"[archive] banked; archive={len(arch)} rows")
+PYEOF
+N_ROWS=$(wc -l < "$REPLAY")
+
+# Pad short groups (e.g. after sanitize_grpo_batch drops poisoned rows) up to
+# GLOBAL_BATCH_SIZE with zero-advantage copies: zero advantage => zero policy-
+# gradient contribution, they only satisfy slime's fixed batch geometry.
+GBS=8
+if [ "$N_ROWS" -lt "$GBS" ]; then
+  python3 - "$REPLAY" "$GBS" <<'PY'
+import json, sys
+path, gbs = sys.argv[1], int(sys.argv[2])
+rows = [json.loads(l) for l in open(path)]
+i = 0
+while len(rows) < gbs:
+    pad = json.loads(json.dumps(rows[i % len(rows)]))
+    if isinstance(pad.get("metadata"), dict) and "advantage" in pad["metadata"]:
+        pad["metadata"]["advantage"] = 0.0
+    if "advantage" in pad:
+        pad["advantage"] = 0.0
+    rows.append(pad); i += 1
+open(path, "w").write("".join(json.dumps(r) + "\n" for r in rows))
+print(f"[pad] replay padded to {gbs} rows (zero-advantage fillers)")
+PY
+  N_ROWS="$GBS"
+fi
+
 echo "[2/3] submit GRPO training ($N_ROWS rows, LoRA r64/a128, lr 6e-5, 3 epochs)"
 mkdir -p "$SAVE_CKPT" "$LOG_ROOT/slurm"
 TRAIN_ENV=(RUN_SCRIPT="$W/scripts/train/run_qwen35_grpo_offline_lora.sh"
            PROMPT_DATA="$REPLAY" SAVE_CKPT="$SAVE_CKPT" HF_CKPT="$BASE_HF"
-           LR=6e-5 LORA_RANK=64 LORA_ALPHA=128 NUM_GPUS=4 NUM_EPOCH=3
+           LR="${LR:-3e-5}" KL_COEF="${KL_COEF:-0.05}" LORA_RANK=64 LORA_ALPHA=128 NUM_GPUS=4 NUM_EPOCH="${NUM_EPOCH:-3}"
            ROLLOUT_BATCH_SIZE="$N_ROWS" GLOBAL_BATCH_SIZE=8 MICRO_BATCH_SIZE=1
            LOG_PROBS_CHUNK_SIZE=2048)
 [ -n "$PREV_CKPT" ] && TRAIN_ENV+=(LOAD_CKPT="$PREV_CKPT" LORA_RESUME=1)

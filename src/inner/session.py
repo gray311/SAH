@@ -24,6 +24,8 @@ class BudgetLedger:
 
     max_evaluator_calls: int = 10
     evaluator_calls: int = 0
+    max_probe_calls: int = 30
+    probe_calls: int = 0
     edit_calls: int = 0
     llm_input_tokens: int = 0
     llm_output_tokens: int = 0
@@ -122,6 +124,27 @@ class InnerSession:
             wall_s=out.wall_s, is_new_best=is_best,
         ))
         self._pending_edit_mode, self._pending_edit_note = "edit_eval", ""
+        return out
+
+    def probe(self, subsample: int = 2000) -> EvalOutcome:
+        """Cheap approximate evaluation on subsampled data (first N CSV rows).
+
+        Guidance only: does NOT count against the evaluation budget and does
+        NOT update best-so-far (probe scores are not comparable to full ones).
+        """
+        self.ledger.probe_calls += 1
+        out = evaluate_program(
+            self.task, self.current_program,
+            timeout_s=min(self.eval_timeout_s or 120.0, 120.0),
+            python_exe=self.python_exe or __import__("sys").executable,
+            subsample=subsample,
+        )
+        self.history.append(StepRecord(
+            step=len(self.history), kind="probe",
+            edit_mode="probe", edit_note=f"subsample={subsample}",
+            combined_score=out.combined_score, validity=out.validity,
+            error=out.error, wall_s=out.wall_s, is_new_best=False,
+        ))
         return out
 
     def seed_baseline(self) -> EvalOutcome:

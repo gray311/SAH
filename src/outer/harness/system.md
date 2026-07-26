@@ -58,3 +58,13 @@ strategy in the prompt/skill text is exactly the point of instance-wise
 harness design; parameter-only tweaks rarely help much. Then validate and
 submit. The spec must change at least one field relative to the current
 harness.
+
+## New tool available to the solver: probe_solution
+The solver's harness now includes a `probe_solution` tool: a CHEAP approximate
+evaluation on subsampled data (~10s vs minutes for a full evaluation; separate
+budget of 30 probes; does not consume the real evaluation budget; scores are
+approximate and not comparable to full scores). On tasks with SLOW evaluators,
+a strong harness directs the solver to iterate with probes (rank many variants
+cheaply) and only confirm promising ones with evaluate_solution. You may write
+`tool_descriptions.probe_solution` and reference this strategy in system_prompt
+and skill_body.

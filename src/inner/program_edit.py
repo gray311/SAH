@@ -56,6 +56,12 @@ def split_program(program: str) -> SplitProgram:
     end = program.index(BLOCK_END)
     prefix = program[:start]  # preserved verbatim (imports etc.)
     suffix = program[end + len(BLOCK_END):]  # preserved verbatim (fixed entry fn)
+    # Strip DUPLICATE end markers that accumulate in the suffix across
+    # inheritance rounds (assemble re-adds exactly one END). Without this, each
+    # split->assemble cycle leaks one extra "# EVOLVE-BLOCK-END" line forever.
+    kept = [ln for ln in suffix.splitlines() if ln.strip() != BLOCK_END]
+    real = "\n".join(kept).strip("\n")
+    suffix = ("\n" + real) if real else ""
     # block = text strictly between the end of the START marker line and BLOCK_END
     block = program[start:end]
     block = block[block.index("\n") + 1:] if "\n" in block else ""

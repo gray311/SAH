@@ -47,6 +47,23 @@ def _dump_history(agent) -> List[Dict[str, Any]]:
     return out
 
 
+def _make_repair_fn(base_url: str, model: str, api_key: str, timeout: float):
+    """Repair callable bound to the SAME frozen served model (capability
+    parity — never a stronger external model)."""
+    from openai import OpenAI
+    client = OpenAI(base_url=base_url, api_key=api_key or "EMPTY", timeout=timeout)
+
+    def repair(system: str, user: str) -> str:
+        resp = client.chat.completions.create(
+            model=model, temperature=0.2, max_tokens=2048,
+            messages=[{"role": "system", "content": system},
+                      {"role": "user", "content": user}],
+            extra_body={"chat_template_kwargs": {"enable_thinking": False}})
+        return resp.choices[0].message.content or ""
+
+    return repair
+
+
 def run_once(k: int, *, base_spec: Dict[str, Any], user_message: str,
               base_url: str, model: str, api_key: str, seed: Optional[int],
               timeout: float) -> CandidateRecord:

@@ -78,6 +78,7 @@ python3 -m outer.outer_round propose \
   --n-replicas "$PROPOSE_REPLICAS" --model "$SERVED_MODEL" \
   --max-evals "$MAX_EVALS" ${PROPOSER_SEED:+--seed "$PROPOSER_SEED"} \
   ${SEED_PROGRAMS_FILE:+--seed-programs-file "$SEED_PROGRAMS_FILE"} \
+  ${FORCE_TOOL_FRAC:+--force-tool-frac "$FORCE_TOOL_FRAC"} \
   ${FEEDBACK_FILE:+--feedback-file "$FEEDBACK_FILE"} \
   --parallel "${PROPOSE_PAR:-8}" \
   2>&1 | tee "$ROUND_DIR/propose.log"
@@ -135,6 +136,7 @@ run_rollout(){ # tid k evals logsuffix
     --base-url "http://127.0.0.1:$port/v1" --model "$SERVED_MODEL" \
     --max-evals "$evals" ${EVAL_TIMEOUT:+--eval-timeout "$EVAL_TIMEOUT"} \
     ${SEED_PROGRAMS_FILE:+--seed-programs-file "$SEED_PROGRAMS_FILE"} \
+  ${FORCE_TOOL_FRAC:+--force-tool-frac "$FORCE_TOOL_FRAC"} \
     --eval-python python3 --no-trajectory \
     --out "$ROUND_DIR/rollouts/$tid/cand$(printf '%02d' "$k")" \
     > "$ROUND_DIR/rollout_logs/${tid}-cand$(printf '%02d' "$k")${sfx}.log" 2>&1 &

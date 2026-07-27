@@ -114,11 +114,27 @@ def cmd_propose(args) -> None:
     print(f"[propose] {len(args.tasks)} tasks x K={args.k} = {len(jobs)} H1 runs "
           f"across {len(base_urls)} replica(s)")
 
+    # Structured exploration (opt-in via --force-tool-frac): a fraction of each
+    # task's K candidates are told they MUST add a new tool. This breaks the
+    # declarative-only prior of a phi trained before the generative genome
+    # existed — like forcing an unexplored arm — without touching the fixed H1.
+    force_frac = float(getattr(args, "force_tool_frac", 0.0) or 0.0)
+    force_ks = set(range(min(args.k, max(0, round(args.k * force_frac)))))
+    _FORCE_MSG = ("\n\n## REQUIRED FOR THIS CANDIDATE\nThis candidate MUST include "
+                  "at least one entry under `new_tools` that gives the solver a "
+                  "genuinely new capability (a task-specific probe, an input "
+                  "analyzer, a custom mutation/scoring operator). Follow the worked "
+                  "example exactly for the YAML block-scalar format. A candidate "
+                  "with no new_tools is not acceptable here.")
+
     def run(idx_job):
         idx, (tid, k) = idx_job
         seed = (args.seed * 1000 + idx) if args.seed is not None else None
+        msg = ctx[tid]["user_message"]
+        if k in force_ks:
+            msg = msg + _FORCE_MSG
         return tid, pp.run_once(
-            k, base_spec=ctx[tid]["base_spec"], user_message=ctx[tid]["user_message"],
+            k, base_spec=ctx[tid]["base_spec"], user_message=msg,
             base_url=base_urls[idx % len(base_urls)], model=args.model,
             api_key="EMPTY", seed=seed, timeout=600.0)
 
@@ -343,6 +359,8 @@ def main() -> None:
     p.add_argument("--parallel", type=int, default=8)
     p.add_argument("--max-evals", type=int, default=20)
     p.add_argument("--tasks", nargs="*", default=DEFAULT_TASKS)
+    p.add_argument("--force-tool-frac", type=float, default=0.0,
+                   help="fraction of each task's K candidates required to add a new tool (0..1)")
     p.add_argument("--seed-programs-file", default=None,
                    help="global best_programs.json; H1 sees the inherited program as the rollout starting point")
     p.add_argument("--feedback-file", default=None,

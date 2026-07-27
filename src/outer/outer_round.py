@@ -261,9 +261,12 @@ def cmd_collect(args) -> None:
             cands.append(ent)
         n_stuck = sum(1 for c in cands if c.get("score") is not None
                       and abs((c["score"] or 0) - g["base_score"]) < 1e-9)
+        prev_note = (feedback.get(tid) or {}).get("analyst_note")
         feedback[tid] = {"round": meta["round"], "base_score": g["base_score"],
                          "best_score": g["best_score"], "best_k": g["best_k"],
                          "n_stuck_at_base": n_stuck, "candidates": cands}
+        if prev_note:  # analyst notes are curated externally — never wipe them
+            feedback[tid]["analyst_note"] = prev_note
     fb_path.write_text(json.dumps(feedback, indent=1))
 
     # global best-program inheritance: merge this round's winners into
@@ -279,12 +282,15 @@ def cmd_collect(args) -> None:
         prev = best_programs.get(tid, {})
         if isinstance(prev, dict) and prev.get("score", float("-inf")) >= g["best_score"]:
             continue
-        prog = None
+        prog, prog_score = None, float("-inf")
         for res in sorted((round_dir / "rollouts" / tid / f"cand{g['best_k']:02d}").glob("*/results/*.json")):
             try:
                 d = json.loads(res.read_text())
-                if d.get("best_program"):
-                    prog = d["best_program"]
+                # pick the program from the RUN that produced the best score —
+                # under the cascade a screen run can beat the full run, and
+                # taking "last file wins" banked a mismatched program (r25 txn)
+                if d.get("best_program") and float(d.get("best_score", -1e18)) > prog_score:
+                    prog, prog_score = d["best_program"], float(d["best_score"])
             except Exception:
                 pass
         if prog:

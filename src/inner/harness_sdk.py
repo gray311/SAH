@@ -81,14 +81,18 @@ class ToolContext:
                 out.append(str(p.relative_to(td)))
         return out[:50]
 
-    def read_input_sample(self, name: str, nrows: int = 1000) -> str:
-        """First ``nrows`` lines of a task input file (never evaluator code)."""
+    def _safe_path(self, name: str):
         td = Path(self._s.task.task_dir).resolve()
         p = (td / name).resolve()
-        if not str(p).startswith(str(td)) or "evaluator" in name:
-            return "ERROR: path not allowed"
-        if not p.exists():
-            return "ERROR: no such file"
+        if not str(p).startswith(str(td)) or "evaluator" in name or not p.exists():
+            return None
+        return p
+
+    def read_input_sample(self, name: str, nrows: int = 1000) -> str:
+        """First ``nrows`` lines of a task input file (never evaluator code)."""
+        p = self._safe_path(name)
+        if p is None:
+            return "ERROR: path not allowed or missing"
         nrows = min(int(nrows), SAMPLE_CAP)
         buf = io.StringIO()
         with open(p, "r", errors="replace") as f:
@@ -97,6 +101,15 @@ class ToolContext:
                     break
                 buf.write(line)
         return buf.getvalue()
+
+    def read_input_df(self, name: str, nrows: int = 2000):
+        """Parse a CSV task input into a pandas DataFrame (<=SAMPLE_CAP rows).
+        Lets generated tools analyze data without importing io/csv themselves."""
+        import pandas as pd
+        p = self._safe_path(name)
+        if p is None:
+            raise ValueError(f"input not allowed or missing: {name}")
+        return pd.read_csv(p, nrows=min(int(nrows), SAMPLE_CAP))
 
     # ---- scratch ----------------------------------------------------------
     def scratch_write(self, name: str, text: str) -> str:
@@ -140,3 +153,7 @@ class MockContext(ToolContext):
     def budget_left(self): return {"evaluations": 10, "probes": 10}
     def list_task_inputs(self): return ["input.csv"]
     def read_input_sample(self, name, nrows=1000): return self._sample
+    def read_input_df(self, name, nrows=2000):
+        import pandas as pd, io as _io
+        self.calls.append("read_input_df")
+        return pd.read_csv(_io.StringIO(self._sample))

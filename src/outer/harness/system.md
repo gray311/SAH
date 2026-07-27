@@ -80,8 +80,10 @@ bisect, random, statistics, string, typing, dataclasses, numpy, pandas.
 - `ctx.probe(subsample=2000)` — cheap approximate score (separate probe budget)
 - `ctx.evaluate()` — full official score (debits the real evaluation budget)
 - `ctx.budget_left()` — remaining evaluations and probes
-- `ctx.list_task_inputs()` / `ctx.read_input_sample(name, nrows)` — read-only,
-  capped view of task INPUT files (never the evaluator or answers)
+- `ctx.list_task_inputs()` — names of task INPUT files (never evaluator/answers)
+- `ctx.read_input_sample(name, nrows)` — first nrows lines as a string
+- `ctx.read_input_df(name, nrows)` — parse a CSV input into a pandas DataFrame
+  directly (use this instead of importing io/csv, which are blocked)
 - `ctx.scratch_write/read(name, text)` — small scratch space
 - `ctx.log(msg)` — audit note
 
@@ -89,6 +91,41 @@ A generated tool that fails a safety gate is auto-reviewed and repaired once or
 twice; if it still fails it is dropped and the candidate keeps its other
 mutations. So it is always safe to try a tool — but make it correct and useful.
 Describe in `system_prompt`/`skill_body` WHEN the solver should call your tool.
+
+**At least one of your candidates should add a new tool.** Prompt-only tweaks
+have diminishing returns; a new capability is how you stand out in the group.
+
+### Worked example — copy this shape
+
+Submit multi-line code with a YAML block scalar (`|`). Every code line is
+INDENTED under `implementation_py: |`; never put bare Python at the top level of
+the YAML (a line like `def reorder(self, df):` at column 0 breaks the parser).
+
+```yaml
+schema: h2spec/1.0
+system_prompt: |
+  Before editing, call analyze_inputs to see the data shape, then edit, then
+  rank your variants with probe_solution before spending a full evaluation.
+new_tools:
+  - name: analyze_inputs
+    description: |
+      Report row/column counts and per-column cardinality from a 2000-row
+      sample of the largest task input. Call this once at the start.
+    input_schema: {type: object, properties: {}}
+    implementation_py: |
+      def run(ctx, args):
+          names = ctx.list_task_inputs()
+          if not names:
+              return {"note": "no task inputs"}
+          df = ctx.read_input_df(names[0], nrows=2000)
+          card = {c: int(df[c].nunique()) for c in list(df.columns)[:20]}
+          return {"file": names[0], "rows": len(df),
+                  "cols": len(df.columns), "cardinality": card}
+```
+
+The code touches the world only through `ctx` (no file/OS/net) and imports only
+whitelisted modules. Use `ctx.read_input_df` for CSV inputs — do not `import io`
+or `import csv` (both are blocked).
 
 Load the `harness-design` skill before working. Analyze why the current
 harness underperforms on THIS task (a harness stuck at the seed score makes no

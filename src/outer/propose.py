@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 from outer import harness_spec as hs
-from outer.h1 import H1_PACKAGE  # noqa: F401 (used by run_once)
+from outer.proposer_io import H1_PACKAGE  # noqa: F401 (used by run_once)
 from outer.propose_session import ProposeSession, propose_scope
 from outer.reviewer.reviewer import review_tool_code
 

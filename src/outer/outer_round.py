@@ -31,7 +31,7 @@ _SRC = Path(__file__).resolve().parents[1]
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
-from outer import h1, harness_spec as hs, propose as pp, rewards as rw  # noqa: E402
+from outer import proposer_io as pio, harness_spec as hs, propose as pp, rewards as rw  # noqa: E402
 from outer.materialize import materialize, INNER_HARNESS  # noqa: E402
 
 REPO = _SRC.parent
@@ -97,12 +97,12 @@ def cmd_propose(args) -> None:
             try:
                 fb = json.loads(Path(args.feedback_file).read_text()).get(tid)
                 if fb:
-                    fb_text = h1.render_feedback(fb)
+                    fb_text = pio.render_feedback(fb)
             except Exception as e:
                 print(f"[propose] WARNING: feedback-file unreadable ({e})")
         ctx[tid] = {
             "base_spec": base_spec,
-            "user_message": h1.build_user_message(
+            "user_message": pio.build_user_message(
                 task_id=tid, task_spec=task.spec,
                 seed_program=seed_prog,
                 seed_score=seed_sc,
@@ -177,7 +177,7 @@ def cmd_propose(args) -> None:
     (round_dir / "round.json").write_text(json.dumps({
         "round": args.round, "created": time.strftime("%Y%m%d-%H%M%S"),
         "mode": "instance_wise",
-        "h1_version": h1.H1_VERSION, "h1_package_hash": h1.h1_hash(),
+        "h1_version": pio.H1_VERSION, "h1_package_hash": pio.h1_hash(),
         "proposer": {"base_urls": base_urls, "model": args.model, "seed": args.seed},
         "tasks_order": args.tasks, "max_evals": args.max_evals, "k": args.k,
         "bases_in": bases,
@@ -196,7 +196,7 @@ def cmd_collect(args) -> None:
     prompts = json.loads((round_dir / "prompts.json").read_text())
     trajs = {(t["task_id"], t["k"]): t
              for t in json.loads((round_dir / "trajectories.json").read_text())}
-    system_text = (h1.H1_PACKAGE / "system.md").read_text()
+    system_text = (pio.H1_PACKAGE / "system.md").read_text()
 
     import os
     adv_mode = os.environ.get("SAH_ADV", "v2")

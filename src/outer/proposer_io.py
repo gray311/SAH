@@ -1,8 +1,12 @@
-"""H1 round-context builder + versioning (instance-wise).
+"""Proposer I/O — round-context builder + versioning (NOT the H1 harness).
 
-The proposer harness H1 itself is the declarative NexAU package at
-``src/outer/harness/`` — fixed forever (plan.md §0.3). This module builds the
-round-varying USER message for ONE task instance (plan.md §2.2:
+The H1 harness itself (system prompt, tools, skill, sampling) is the declarative
+NexAU package at ``src/outer/harness/`` — fixed forever (plan.md §0.3). This
+module is only the surrounding glue: it builds the round-varying USER message
+fed to that harness, renders feedback, and hashes the package for provenance.
+Renamed from ``h1.py`` (that name wrongly implied it *was* H1).
+
+It builds the round-varying USER message for ONE task instance (plan.md §2.2:
 H_j ~ pi_phi(H | tau, H1)): the task's public spec, its seed program (excerpt),
 the current best harness spec for this task, and its scores.
 """

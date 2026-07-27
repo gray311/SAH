@@ -59,6 +59,36 @@ _TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
 }
 
 
+_BUILTIN_OPTIONAL = {"probe_solution"}
+
+
+def _build_tool_list(effective: Dict[str, Any], cand_dir: Path) -> list:
+    """Assemble agent.yaml tool entries: core built-ins (minus removed
+    optionals) + generated custom tools (h2spec/1.0)."""
+    removed = set(effective.get("remove_tools", []))
+    builtins = [n for n in ("edit_solution", "evaluate_solution",
+                            "probe_solution", "finish")
+                if n not in (removed & _BUILTIN_OPTIONAL)]
+    tools = [{"name": n, "yaml_path": f"./tools/{n}.tool.yaml",
+              "binding": f"inner.harness.tools.discovery:{n}"} for n in builtins]
+    for t in effective.get("new_tools", []):
+        name = t["name"]
+        (cand_dir / "custom_tools").mkdir(exist_ok=True)
+        (cand_dir / "custom_tools" / f"{name}.py").write_text(t["implementation_py"])
+        (cand_dir / "tools" / f"{name}.tool.yaml").write_text(_yaml_str({
+            "type": "tool", "name": name,
+            "description": t["description"],
+            "input_schema": t.get("input_schema") or {"type": "object", "properties": {}},
+        }))
+        # bind every generated tool to the single dispatcher; its source path
+        # rides through NexAU extra_kwargs (merged into the tool call params)
+        src = str((cand_dir / "custom_tools" / f"{name}.py").resolve())
+        tools.append({"name": name, "yaml_path": f"./tools/{name}.tool.yaml",
+                      "binding": "inner.harness.tools.custom_runtime:custom_tool",
+                      "extra_kwargs": {"py_path": src}})
+    return tools
+
+
 def _yaml_str(data: Dict[str, Any]) -> str:
     return yaml.safe_dump(data, sort_keys=False, allow_unicode=True, width=100)
 
@@ -133,11 +163,7 @@ def materialize(effective: Dict[str, Any], cand_dir: Path, *,
             "stream": False,
         },
         "sandbox_config": {"type": "local", "work_dir": "/tmp"},
-        "tools": [
-            {"name": n, "yaml_path": f"./tools/{n}.tool.yaml",
-             "binding": f"inner.harness.tools.discovery:{n}"}
-            for n in ("edit_solution", "evaluate_solution", "probe_solution", "finish")
-        ],
+        "tools": _build_tool_list(effective, cand_dir),
         "stop_tools": ["finish"],
         "skills": ["./skills/discovery-optimization"],
         "middlewares": [

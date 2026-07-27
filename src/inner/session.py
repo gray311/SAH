@@ -35,6 +35,9 @@ class BudgetLedger:
     def evaluator_budget_left(self) -> int:
         return max(0, self.max_evaluator_calls - self.evaluator_calls)
 
+    def exhausted(self) -> bool:  # alias for the SDK
+        return self.evaluator_exhausted()
+
     def evaluator_exhausted(self) -> bool:
         return self.evaluator_calls >= self.max_evaluator_calls
 
@@ -146,6 +149,13 @@ class InnerSession:
             error=out.error, wall_s=out.wall_s, is_new_best=False,
         ))
         return out
+
+    def history_note(self, note: str) -> None:
+        """Record a free-text note from a custom tool (audit trail only)."""
+        self.history.append(StepRecord(
+            step=len(self.history), kind="note", edit_mode="note",
+            edit_note=str(note)[:400], combined_score=self.best_score,
+            validity=1.0, error=None, wall_s=0.0, is_new_best=False))
 
     def seed_baseline(self) -> EvalOutcome:
         """Evaluate the seed once to initialise best-so-far (not charged to budget)."""

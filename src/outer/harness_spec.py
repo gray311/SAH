@@ -22,7 +22,17 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import yaml
 
-SCHEMA_VERSION = "h2spec/0.1"
+SCHEMA_VERSION = "h2spec/1.0"
+# 0.1 specs are still accepted (declarative-only surface); 1.0 adds new_tools[]
+# with generated implementation code, gated + reviewed at propose time.
+_ACCEPTED_SCHEMAS = {"h2spec/0.1", "h2spec/1.0"}
+
+# generated-tool structural limits (code SAFETY is enforced by outer.static_gates
+# + the reviewer self-test, NOT here — this only checks the spec shape)
+_TOOL_NAME_RE = re.compile(r"^[a-z][a-z0-9_]{2,31}$")
+_RESERVED_TOOL_NAMES = {"edit_solution", "evaluate_solution", "probe_solution",
+                        "finish"}
+_MAX_NEW_TOOLS = 3
 
 # field -> (type, max_chars) for text fields
 _TEXT_FIELDS = {
@@ -51,7 +61,8 @@ _MIDDLEWARE_FIELDS = {
     "long_tool_output_max_chars": (2000, 20000, True),
 }
 _TOP_KEYS = {"schema", "system_prompt", "skill_description", "skill_body",
-             "tool_descriptions", "sampling", "agent", "middleware"}
+             "tool_descriptions", "sampling", "agent", "middleware",
+             "new_tools", "remove_tools"}
 
 
 @dataclass
@@ -93,8 +104,8 @@ def parse_and_validate(text: str) -> SpecValidation:
         errors.append(f"unknown top-level keys (fail closed): {sorted(unknown)}")
 
     out: Dict[str, Any] = {"schema": SCHEMA_VERSION}
-    if "schema" in data and data["schema"] != SCHEMA_VERSION:
-        errors.append(f"schema must be {SCHEMA_VERSION!r}, got {data['schema']!r}")
+    if "schema" in data and data["schema"] not in _ACCEPTED_SCHEMAS:
+        errors.append(f"schema must be one of {sorted(_ACCEPTED_SCHEMAS)}, got {data['schema']!r}")
 
     for key, cap in _TEXT_FIELDS.items():
         if key in data:
@@ -145,6 +156,62 @@ def parse_and_validate(text: str) -> SpecValidation:
                         good[key] = v
             if good:
                 out[group] = good
+
+    # --- generative surface (h2spec/1.0): new_tools[] + remove_tools[] ------
+    if "remove_tools" in data:
+        rt = data["remove_tools"]
+        if not isinstance(rt, list) or not all(isinstance(x, str) for x in rt):
+            errors.append("remove_tools: must be a list of tool names")
+        else:
+            # only optional built-ins may be removed; core edit/evaluate/finish stay
+            removable = {"probe_solution"}
+            bad = set(rt) - removable
+            if bad:
+                errors.append(f"remove_tools: not removable {sorted(bad)} "
+                              f"(only {sorted(removable)})")
+            else:
+                out["remove_tools"] = sorted(set(rt))
+
+    if "new_tools" in data:
+        nt = data["new_tools"]
+        if not isinstance(nt, list):
+            errors.append("new_tools: must be a list")
+        elif len(nt) > _MAX_NEW_TOOLS:
+            errors.append(f"new_tools: {len(nt)} exceeds cap {_MAX_NEW_TOOLS}")
+        else:
+            seen, good_tools = set(), []
+            for i, t in enumerate(nt):
+                if not isinstance(t, dict):
+                    errors.append(f"new_tools[{i}]: must be a mapping")
+                    continue
+                extra = set(t) - {"name", "description", "input_schema",
+                                  "implementation_py"}
+                if extra:
+                    errors.append(f"new_tools[{i}]: unknown keys {sorted(extra)}")
+                name = t.get("name")
+                if not isinstance(name, str) or not _TOOL_NAME_RE.match(name or ""):
+                    errors.append(f"new_tools[{i}].name: must match [a-z][a-z0-9_]{{2,31}}")
+                elif name in _RESERVED_TOOL_NAMES:
+                    errors.append(f"new_tools[{i}].name: {name!r} is reserved")
+                elif name in seen:
+                    errors.append(f"new_tools[{i}].name: duplicate {name!r}")
+                else:
+                    seen.add(name)
+                desc = t.get("description")
+                if not isinstance(desc, str) or not desc.strip() or len(desc) > 800:
+                    errors.append(f"new_tools[{i}].description: non-empty string <=800 chars")
+                code = t.get("implementation_py")
+                if not isinstance(code, str) or "def run" not in code:
+                    errors.append(f"new_tools[{i}].implementation_py: must be code defining run(ctx, args)")
+                sch = t.get("input_schema", {"type": "object", "properties": {}})
+                if not isinstance(sch, dict):
+                    errors.append(f"new_tools[{i}].input_schema: must be a JSON-schema mapping")
+                if name and name in seen and isinstance(code, str) and isinstance(desc, str):
+                    good_tools.append({"name": name, "description": desc.strip(),
+                                       "input_schema": sch,
+                                       "implementation_py": code})
+            if good_tools:
+                out["new_tools"] = good_tools
 
     mutated = set(out) - {"schema"}
     if not mutated:
@@ -238,6 +305,12 @@ def merge_with_base(spec: Dict[str, Any], base: Dict[str, Any]) -> Dict[str, Any
     for group in ("sampling", "agent", "middleware"):
         if group in spec:
             eff.setdefault(group, {}).update(spec[group])
+    # generative surface (h2spec/1.0): tools are additive per candidate; the
+    # base never carries new_tools, so a plain copy is the effective set.
+    if "new_tools" in spec:
+        eff["new_tools"] = spec["new_tools"]
+    if "remove_tools" in spec:
+        eff["remove_tools"] = spec["remove_tools"]
     eff["schema"] = SCHEMA_VERSION
     return eff
 

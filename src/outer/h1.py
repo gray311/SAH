@@ -14,7 +14,7 @@ from typing import Any, Dict
 
 import yaml
 
-H1_VERSION = "h1/0.4-feedback"
+H1_VERSION = "h1/1.0-generative"
 H1_PACKAGE = Path(__file__).resolve().parent / "harness"
 
 _SEED_PROGRAM_CAP = 5000  # chars of the seed program shown to the proposer
@@ -95,6 +95,8 @@ def render_feedback(fb: dict) -> str:
         if c.get("invalid"):
             lines.append("  k%s: INVALID SPEC (never rolled out)" % c["k"])
             continue
+        if c.get("tools"):
+            lines.append("  k%s: tools=%s" % (c["k"], ", ".join(c["tools"])))
         lines.append("  k%s: score=%s evals=%s stop=%s changed=%s%s" % (
             c["k"],
             ("%.6g" % c["score"]) if c.get("score") is not None else "?",

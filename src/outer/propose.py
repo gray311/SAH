@@ -25,6 +25,7 @@ class CandidateRecord:
     raw_submission: str = ""
     spec: Optional[Dict[str, Any]] = None        # validated partial spec
     effective: Optional[Dict[str, Any]] = None   # spec folded over base
+    review_log: list = field(default_factory=list)  # per-tool gate/repair outcomes
     changed_fields: List[str] = field(default_factory=list)
     spec_hash: str = ""
     trajectory: List[Dict[str, Any]] = field(default_factory=list)
@@ -82,8 +83,35 @@ def run_once(k: int, *, base_spec: Dict[str, Any], user_message: str,
         except Exception as e:
             err = f"{type(e).__name__}: {e}"
 
+    # h2spec/1.0: gate + reviewer-repair every generated tool BEFORE the
+    # candidate is accepted. The repairer is the SAME frozen served model
+    # (capability parity — the reviewer cannot inject knowledge the executor
+    # lacks). Tools that never pass are dropped; if that leaves the spec with
+    # no real mutation, the candidate is invalid (fail-closed).
+    review_log: List[Dict[str, Any]] = []
+    if session.submitted and session.effective and session.effective.get("new_tools"):
+        repair_fn = _make_repair_fn(base_url, model, api_key, timeout)
+        kept = []
+        for tool in session.effective["new_tools"]:
+            outcome = review_tool_code(tool["implementation_py"], repair_fn=repair_fn,
+                                       max_rounds=2)
+            review_log.append({"name": tool["name"], "ok": outcome.ok,
+                               "rounds": outcome.rounds,
+                               "error": outcome.final_error,
+                               "history": outcome.history})
+            if outcome.ok:
+                tool["implementation_py"] = outcome.code  # accept repaired code
+                kept.append(tool)
+        if kept:
+            session.effective["new_tools"] = kept
+        else:
+            session.effective.pop("new_tools", None)
+            if "new_tools" in session.changed_fields:
+                session.changed_fields.remove("new_tools")
+
     rec = CandidateRecord(
-        k=k, valid=bool(session.submitted and session.effective is not None),
+        k=k, valid=bool(session.submitted and session.effective is not None
+                        and session.changed_fields),
         raw_submission=session.raw_submission,
         spec=session.partial_spec, effective=session.effective,
         changed_fields=session.changed_fields,
@@ -94,6 +122,7 @@ def run_once(k: int, *, base_spec: Dict[str, Any], user_message: str,
         stop_reason="harness_error" if err else
                     ("submitted" if session.submitted else "no_submission"),
     )
+    rec.review_log = review_log
     if err:
         rec.errors = [err]
     elif not session.submitted:

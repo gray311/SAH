@@ -134,7 +134,8 @@ def cmd_propose(args) -> None:
         for rec in records:
             entry = {"k": rec.k, "valid": rec.valid, "errors": rec.errors,
                      "spec_hash": rec.spec_hash, "changed_fields": rec.changed_fields,
-                     "stop_reason": rec.stop_reason, "llm_calls": rec.llm_calls}
+                     "stop_reason": rec.stop_reason, "llm_calls": rec.llm_calls,
+                     "review_log": getattr(rec, "review_log", [])}
             if rec.valid:
                 cdir = round_dir / "tasks" / tid / f"cand{rec.k:02d}"
                 materialize(rec.effective, cdir, raw_spec_text=rec.raw_submission,
@@ -246,6 +247,9 @@ def cmd_collect(args) -> None:
         for row in g["rows"]:
             ent = {"k": row["k"], "score": row["score"],
                    "changed": [c.split(".")[-1] for c in row.get("changed_fields", [])][:6]}
+            rl = row.get("review_log") or []
+            if rl:
+                ent["tools"] = [f"{x['name']}:{'ok' if x['ok'] else 'dropped('+str(x.get('error',''))[:40]+')'}" for x in rl]
             for res in sorted((round_dir / "rollouts" / tid / f"cand{row['k']:02d}").glob("*/results/*.json")):
                 try:
                     d = json.loads(res.read_text())

@@ -24,19 +24,20 @@ Your tools (one call per turn):
   session — an invalid or unchanged submission scores the minimum reward, so
   only submit after a clean validate_spec.
 
-## Spec schema (h2spec/0.1)
+## Spec schema (h2spec/1.0)
 
 Emit ONLY the fields you change; omitted fields inherit the current harness.
 Unknown fields are rejected. Ranges are enforced:
 
 ```yaml
-schema: h2spec/0.1
+schema: h2spec/1.0
 system_prompt: |        # executor system prompt, <= 8000 chars
 skill_description: ...  # <= 600 chars
 skill_body: |           # the method playbook, <= 8000 chars
 tool_descriptions:
   edit_solution: ...       # <= 1600
   evaluate_solution: ...   # <= 1000
+  probe_solution: ...      # <= 1000
   finish: ...              # <= 600
 sampling:
   temperature: 0.0-1.5
@@ -48,7 +49,46 @@ agent:
 middleware:
   budget_reminder_from_left: 0-10
   long_tool_output_max_chars: 2000-20000
+new_tools:                 # up to 3 — GIVE THE SOLVER A NEW CAPABILITY
+  - name: my_probe         # [a-z][a-z0-9_]{2,31}, not a reserved name
+    description: ...        # <= 800 chars, what it does + when to call it
+    input_schema: {type: object, properties: {}}   # JSON schema for args
+    implementation_py: |    # Python defining exactly `def run(ctx, args):`
+      def run(ctx, args):
+          ...
+          return {...}      # str/dict/list/number
+remove_tools: [probe_solution]   # drop an optional built-in if not useful
 ```
+
+## Writing new tools (the real lever)
+
+Prompts and skills only *tell* the solver what to do. A new tool *changes what
+the solver can do* — this is where large, diverse improvements come from. Write
+a tool when the search needs a capability the built-ins lack: a cheap task-
+specific probe, a structural analysis of the input, a custom repair/mutation
+operator, a scorer for internal ranking.
+
+Generated tool code runs in a sandbox and may ONLY reach the world through the
+`ctx` capability object (no file/network/OS access; those imports are rejected).
+Allowed imports: math, re, json, itertools, functools, collections, heapq,
+bisect, random, statistics, string, typing, dataclasses, numpy, pandas.
+
+`ctx` methods:
+- `ctx.get_program()` / `ctx.get_best_program()` — current / best program text
+- `ctx.best_score()` — best full score so far
+- `ctx.stage_edit(code)` — apply a SEARCH/REPLACE diff or EVOLVE-BLOCK rewrite
+- `ctx.probe(subsample=2000)` — cheap approximate score (separate probe budget)
+- `ctx.evaluate()` — full official score (debits the real evaluation budget)
+- `ctx.budget_left()` — remaining evaluations and probes
+- `ctx.list_task_inputs()` / `ctx.read_input_sample(name, nrows)` — read-only,
+  capped view of task INPUT files (never the evaluator or answers)
+- `ctx.scratch_write/read(name, text)` — small scratch space
+- `ctx.log(msg)` — audit note
+
+A generated tool that fails a safety gate is auto-reviewed and repaired once or
+twice; if it still fails it is dropped and the candidate keeps its other
+mutations. So it is always safe to try a tool — but make it correct and useful.
+Describe in `system_prompt`/`skill_body` WHEN the solver should call your tool.
 
 Load the `harness-design` skill before working. Analyze why the current
 harness underperforms on THIS task (a harness stuck at the seed score makes no

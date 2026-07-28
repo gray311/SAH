@@ -16,6 +16,14 @@ log(){ echo "[$(date -Is)] $*"; }
 
 ROUND_DIR="$OUT_DIR/round$(printf '%03d' "$ROUND_ID")"
 mkdir -p "$ROUND_DIR"
+PROTOCOL="${PROTOCOL:-sah}"
+PROTOCOL_STATE="${PROTOCOL_STATE:-}"
+PROTOCOL_ROUND="${PROTOCOL_ROUND:-}"
+TOTAL_ROUNDS="${TOTAL_ROUNDS:-}"
+ROLLOUT_REPEATS="${ROLLOUT_REPEATS:-3}"
+PROMOTION_REPEATS="${PROMOTION_REPEATS:-$ROLLOUT_REPEATS}"
+PLATEAU_ROUNDS="${PLATEAU_ROUNDS:-3}"
+CONFIDENCE_Z="${CONFIDENCE_Z:-0}"
 
 # --- deps --- #
 export UV_BREAK_SYSTEM_PACKAGES=1
@@ -51,7 +59,26 @@ for g in $(seq 0 $((N_REPLICAS - 1))); do
   log "replica $g serves: $ckpt"
   VPIDS+=("$(serve_replica "$g" "$port" "$ckpt" "$OUT_DIR/vllm-$g.log")")
 done
-trap 'for p in "${VPIDS[@]:-}"; do kill -9 -- "-$p" 2>/dev/null || kill -9 "$p" 2>/dev/null || true; done' EXIT
+cleanup_vllm(){
+  local exit_code=$?
+  trap - EXIT
+  log "shutdown: exit_code=$exit_code; stopping ${#VPIDS[@]} vLLM process group(s)"
+  for p in "${VPIDS[@]:-}"; do
+    kill -TERM -- "-$p" 2>/dev/null || kill -TERM "$p" 2>/dev/null || true
+  done
+  sleep 3
+  for p in "${VPIDS[@]:-}"; do
+    kill -9 -- "-$p" 2>/dev/null || kill -9 "$p" 2>/dev/null || true
+    ps -o pid,ppid,stat,etime,cmd -p "$p" 2>/dev/null || true
+  done
+  ps -eo user,pid,ppid,stat,etime,cmd | awk '/[v]llm/ {print}' || true
+  log "GPU cleanup snapshot follows (authorized job node only)"
+  nvidia-smi --query-compute-apps=pid,process_name,used_memory \
+    --format=csv,noheader 2>/dev/null || true
+  log "shutdown complete"
+  exit "$exit_code"
+}
+trap cleanup_vllm EXIT
 for g in $(seq 0 $((N_REPLICAS - 1))); do
   port=$((8800 + g)); ok=0
   for _ in $(seq 1 240); do
@@ -70,7 +97,7 @@ export OPENAI_API_KEY=EMPTY
 # With split serving, propose targets ONLY replica 0 (M_phi); otherwise all.
 PROPOSE_REPLICAS="$N_REPLICAS"
 [ -n "${MPHI_PATH:-}" ] && PROPOSE_REPLICAS=1
-log "propose: task(s) [$TASKS], K=$K, H1-agent runs across $PROPOSE_REPLICAS replica(s)"
+log "propose: protocol=$PROTOCOL task(s) [$TASKS], K=$K across $PROPOSE_REPLICAS replica(s)"
 python3 -m outer.outer_round propose \
   --round-dir "$ROUND_DIR" --round "$ROUND_ID" --k "$K" \
   --tasks $TASKS \
@@ -80,6 +107,10 @@ python3 -m outer.outer_round propose \
   ${SEED_PROGRAMS_FILE:+--seed-programs-file "$SEED_PROGRAMS_FILE"} \
   ${FORCE_TOOL_FRAC:+--force-tool-frac "$FORCE_TOOL_FRAC"} \
   ${FEEDBACK_FILE:+--feedback-file "$FEEDBACK_FILE"} \
+  --protocol "$PROTOCOL" \
+  ${PROTOCOL_STATE:+--protocol-state "$PROTOCOL_STATE"} \
+  ${PROTOCOL_ROUND:+--protocol-round "$PROTOCOL_ROUND"} \
+  ${TOTAL_ROUNDS:+--total-rounds "$TOTAL_ROUNDS"} \
   --parallel "${PROPOSE_PAR:-8}" \
   2>&1 | tee "$ROUND_DIR/propose.log"
 
@@ -141,7 +172,58 @@ run_rollout(){ # tid k evals logsuffix
     > "$ROUND_DIR/rollout_logs/${tid}-cand$(printf '%02d' "$k")${sfx}.log" 2>&1 &
 }
 ROLL_IDX=0; rc=0
-if [ -n "${SCREEN_EVALS:-}" ]; then
+if [ "$PROTOCOL" = "adaptive_v1" ]; then
+  # Adaptive v1 uses matched repeated base/candidate outcomes and an isolated
+  # promotion channel. Promotion scores never enter proposer rewards/context.
+  mapfile -t ADAPTIVE_RUNS < <(python3 - "$ROUND_DIR" "$ROLLOUT_REPEATS" "$PROMOTION_REPEATS" "$PROPOSER_SEED" <<'PY'
+import json, sys
+rd, outcome_repeats, promotion_repeats, seed = sys.argv[1], int(sys.argv[2]), int(sys.argv[3]), int(sys.argv[4])
+meta = json.load(open(f"{rd}/round.json"))
+for ti, tid in enumerate(meta["tasks_order"]):
+    pt = meta["per_task"][tid]
+    for rep in range(outcome_repeats):
+        s = seed + ti * 100000 + rep
+        print("|".join((tid, f"base-outcome-r{rep:02d}", pt["base_package"],
+                        f"{rd}/rollouts/{tid}/base/outcome/repeat{rep:02d}", str(s))))
+    for rep in range(promotion_repeats):
+        s = seed + ti * 100000 + 50000 + rep
+        print("|".join((tid, f"champion-promotion-r{rep:02d}", pt["champion_package"],
+                        f"{rd}/rollouts/{tid}/champion/promotion/repeat{rep:02d}", str(s))))
+    for cand in pt["candidates"]:
+        if not cand["valid"]:
+            continue
+        k, cdir = int(cand["k"]), cand["dir"]
+        for rep in range(outcome_repeats):
+            s = seed + ti * 100000 + rep
+            print("|".join((tid, f"cand{k:02d}-outcome-r{rep:02d}", cdir,
+                            f"{rd}/rollouts/{tid}/cand{k:02d}/outcome/repeat{rep:02d}", str(s))))
+        for rep in range(promotion_repeats):
+            s = seed + ti * 100000 + 50000 + rep
+            print("|".join((tid, f"cand{k:02d}-promotion-r{rep:02d}", cdir,
+                            f"{rd}/rollouts/{tid}/cand{k:02d}/promotion/repeat{rep:02d}", str(s))))
+PY
+)
+  run_adaptive_rollout(){ # tid label harness_dir output_dir request_seed
+    local tid="$1" label="$2" harness_dir="$3" output_dir="$4" request_seed="$5"
+    local port=$((RB + ROLL_IDX % RN)); ROLL_IDX=$((ROLL_IDX + 1))
+    OPENAI_BASE_URL="http://127.0.0.1:$port/v1" python3 -m inner.run_baseline \
+      --harness-dir "$harness_dir" --ids "$tid" \
+      --base-url "http://127.0.0.1:$port/v1" --model "$SERVED_MODEL" \
+      --max-evals "$MAX_EVALS" ${EVAL_TIMEOUT:+--eval-timeout "$EVAL_TIMEOUT"} \
+      ${SEED_PROGRAMS_FILE:+--seed-programs-file "$SEED_PROGRAMS_FILE"} \
+      --request-seed "$request_seed" --eval-python python3 \
+      --out "$output_dir" \
+      > "$ROUND_DIR/rollout_logs/${tid}-${label}.log" 2>&1 &
+  }
+  log "adaptive rollouts: ${#ADAPTIVE_RUNS[@]} matched outcome/promotion runs"
+  for spec in "${ADAPTIVE_RUNS[@]:-}"; do
+    [ -n "$spec" ] || continue
+    IFS='|' read -r tid label harness_dir output_dir request_seed <<< "$spec"
+    while (( $(jobs -rp | wc -l) >= MAX_PAR )); do wait -n || rc=1; done
+    run_adaptive_rollout "$tid" "$label" "$harness_dir" "$output_dir" "$request_seed"
+  done
+  while (( $(jobs -rp | wc -l) > 0 )); do wait -n || rc=1; done
+elif [ -n "${SCREEN_EVALS:-}" ]; then
   # Successive halving: every candidate gets a cheap SCREEN_EVALS rollout,
   # only the top PROMOTE go on to a full MAX_EVALS rollout. load_rollout_score
   # takes the max over run subdirs, so collect automatically sees the best.
@@ -171,5 +253,9 @@ fi
 log "rollouts finished (rc=$rc)"
 
 # --- collect --- #
-python3 -m outer.outer_round collect --round-dir "$ROUND_DIR" 2>&1 | tee "$ROUND_DIR/collect.log"
+python3 -m outer.outer_round collect --round-dir "$ROUND_DIR" \
+  --protocol "$PROTOCOL" \
+  ${PROTOCOL_STATE:+--protocol-state "$PROTOCOL_STATE"} \
+  --confidence-z "$CONFIDENCE_Z" --plateau-rounds "$PLATEAU_ROUNDS" \
+  2>&1 | tee "$ROUND_DIR/collect.log"
 log "round $ROUND_ID done -> $ROUND_DIR"

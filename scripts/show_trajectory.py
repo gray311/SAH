@@ -94,14 +94,17 @@ def main() -> None:
             print(f"  {t['name']:22s} -> {t['binding']}")
 
     print("\n===== 6. INNER ROLLOUT OUTCOME =====")
-    hits = list((rd / "rollouts" / tid / f"cand{k:02d}").glob("*/results/*.json"))
+    hits = list((rd / "rollouts" / tid / f"cand{k:02d}").rglob("results/*.json"))
     if not hits:
-        hits = list((rd / "rollouts" / tid / f"cand{k:02d}").glob("*/checkpoints/*.json"))
+        hits = list((rd / "rollouts" / tid / f"cand{k:02d}").rglob("checkpoints/*.json"))
     if hits:
         d = json.loads(sorted(hits)[-1].read_text())
         led = d.get("ledger") or {}
         print(f"  best_score={d.get('best_score')} evals={led.get('evaluator_calls')} "
               f"probes={led.get('probe_calls')} stop={d.get('stop_reason')}")
+        inner_trace = d.get("trajectory") or []
+        print(f"  inner_trajectory_messages={len(inner_trace)} "
+              f"roles={[str(m.get('role', '?')) for m in inner_trace]}")
         notes = [s for s in (d.get("steps") or [])
                  if isinstance(s, dict) and s.get("kind") == "note"]
         if notes:

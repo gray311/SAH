@@ -62,7 +62,8 @@ def _agent_run(task: EFTTask, args, out_dir: Path) -> dict:
 
     ep = LLMEndpoint(model=args.model, base_url=args.base_url, api_key=args.api_key,
                      temperature=args.temperature, top_p=args.top_p, max_tokens=args.max_tokens,
-                     timeout=args.llm_timeout, enable_thinking=args.thinking)
+                     timeout=args.llm_timeout, enable_thinking=args.thinking,
+                     seed=args.request_seed)
     if args.max_iters > 0:
         max_iters = args.max_iters
     elif args.harness_dir:
@@ -98,6 +99,8 @@ def main() -> None:
     ap.add_argument("--max-tokens", type=int, default=8192)
     ap.add_argument("--llm-timeout", type=float, default=600.0)
     ap.add_argument("--thinking", action="store_true", help="enable Qwen thinking (default off)")
+    ap.add_argument("--request-seed", type=int, default=None,
+                    help="optional serving seed for matched repeated rollouts")
     # budget / eval
     ap.add_argument("--max-evals", type=int, default=10, help="evaluator-call budget per task")
     ap.add_argument("--max-iters", type=int, default=0, help="agent-loop cap; 0 = auto (3*max_evals+8; candidate packages keep their agent.yaml value)")
@@ -139,6 +142,7 @@ def main() -> None:
         "n_tasks": len(tasks), "task_ids": [t.task_id for t in tasks],
         "base_url": args.base_url, "model": args.model, "temperature": args.temperature,
         "top_p": args.top_p, "max_tokens": args.max_tokens, "max_evals": args.max_evals,
+        "request_seed": args.request_seed,
         "eval_python": args.eval_python, "argv": sys.argv,
     }
     (out_dir / "provenance.json").write_text(json.dumps(provenance, indent=2))

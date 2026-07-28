@@ -84,28 +84,33 @@ def convert_row(row: dict, tools: list, normalize) -> dict:
     msgs = _sanitize_roles(msgs)
     if msgs[-1].get("role") == "assistant":
         msgs = msgs + [CLOSE_TURN]  # close the trailing turn for the loss mask
+    row_tools = row.get("tools", tools)
     return {
         "messages": msgs,
-        "tools": tools,
+        "tools": row_tools,
         "metadata": {
             "advantage": row["advantage"], "reward": row["reward"],
             "seed": f"r{row['round']:03d}_{row.get('task_id','all')}_c{row['k']:02d}",
             "round": row["round"], "k": row["k"], "task_id": row.get("task_id"),
             "valid": row["valid"], "spec_hash": row.get("spec_hash", ""),
-            "tools": tools,
+            "tools": row_tools,
         },
     }
 
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--rounds", nargs="+", required=True,
+    ap.add_argument("--rounds", nargs="+", default=None,
                     help="round dirs containing grpo_batch.jsonl")
+    ap.add_argument("--batch-files", nargs="+", default=None,
+                    help="explicit proposer batch JSONL files (Adaptive v1)")
     ap.add_argument("--out", required=True)
     ap.add_argument("--keep-zero", action="store_true",
                     help="keep |advantage| < eps rows (default: drop, matching Weave)")
     ap.add_argument("--eps", type=float, default=1e-6)
     args = ap.parse_args()
+    if bool(args.rounds) == bool(args.batch_files):
+        ap.error("provide exactly one of --rounds or --batch-files")
 
     tools = _h1_tool_schemas()
     try:
@@ -118,8 +123,13 @@ def main() -> None:
     out.parent.mkdir(parents=True, exist_ok=True)
     n_in = n_out = 0
     with open(out, "w") as f:
-        for rd in args.rounds:
-            for line in (Path(rd) / "grpo_batch.jsonl").read_text().splitlines():
+        inputs = (
+            [Path(rd) / "grpo_batch.jsonl" for rd in args.rounds]
+            if args.rounds
+            else [Path(path) for path in args.batch_files]
+        )
+        for source in inputs:
+            for line in source.read_text().splitlines():
                 if not line.strip():
                     continue
                 n_in += 1

@@ -23,6 +23,7 @@ full spec.
 | `src/inner/` | inner loop: EFT task registry, program-edit (EVOLVE-BLOCK / SEARCH-REPLACE), subprocess-isolated evaluator, `run_baseline` CLI, the initial `H2` NexAU package (`harness/`) and candidate scaffold (`harness_candidate/`) |
 | `src/outer/` | outer loop: `HarnessSpec` typed genome + fail-closed validation, the fixed `H1` proposer NexAU package (`harness/`), `propose`/`materialize`/`rewards`/`outer_round` (per-task GRPO group) |
 | `src/training/` | `grpo_batch -> Weave slime replay` conversion + LoRA training driver |
+| `src/protocols/` | optional protocol adapters; Adaptive v1 is isolated here and imports only when selected |
 | `scripts/` | Slurm sbatch + in-container workers for one outer step (propose → rollouts → collect → train → merge) |
 | `results/` | `maintable.md` (vs official Qwen3.5-9B / Finch-9B), campaign targets, baselines |
 
@@ -40,6 +41,22 @@ proposer `H1` — is a declarative **NexAU package** (`agent.yaml` + `tools/` + 
 Cluster paths are read from `$CODE_ROOT / $DATASET_ROOT / $MODEL_ROOT / $RUN_ROOT`
 (see `config/workspace_env.sh` on the cluster); scripts assume a GB200 (aarch64) +
 Slurm + pyxis/enroot environment.
+
+## Training modes
+
+The current SAH path remains the default. A local optional `adaptive_v1`
+protocol reuses SAH's H2 materializer, frozen inner executor, rollout service,
+and proposer trainer while changing only proposal/context, dual-frontier
+selection, and the plateau-gated update cadence:
+
+```bash
+bash scripts/unified_campaign.sh sah <existing fresh_campaign args...>
+bash scripts/unified_campaign.sh adaptive_v1 <task> <rounds> <round_base> [workspace]
+```
+
+See [`docs/ADAPTIVE_V1_UNIFICATION.md`](docs/ADAPTIVE_V1_UNIFICATION.md) for
+the exact shared boundary, Agent topology, state/recovery semantics, and local
+tests.
 
 ## Status
 

@@ -61,6 +61,58 @@ _TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
 
 _BUILTIN_OPTIONAL = {"probe_solution"}
 
+# generated-middleware wrapper: the model supplies just the hook function body;
+# we wrap it in a NexAU Middleware subclass that fails OPEN (a crashing hook
+# never kills the rollout) and only ever appends a framework message.
+_MW_WRAPPER = '''"""Generated middleware (h2spec/1.0) — wrapped, fail-open."""
+from nexau.archs.main_sub.execution.hooks import (
+    BeforeModelHookInput, HookResult, Middleware)
+from nexau.core.messages import Message, Role, TextBlock
+
+{user_code}
+
+class GeneratedMiddleware(Middleware):
+    def {hook}(self, hook_input):
+        try:
+            note = {hook}(hook_input)
+        except Exception:
+            return HookResult.no_changes()
+        if not note:
+            return HookResult.no_changes()
+        try:
+            msg = Message(role=Role.FRAMEWORK, content=[TextBlock(text=str(note)[:2000])])
+            return HookResult.with_modifications(messages=[*hook_input.messages, msg])
+        except Exception:
+            return HookResult.no_changes()
+'''
+
+
+def _build_skill_list(effective: Dict[str, Any], cand_dir: Path) -> list:
+    """Materialize M_phi-generated skills into skills/<name>/SKILL.md."""
+    out = []
+    for sk in effective.get("new_skills", []):
+        name = sk["name"]
+        d = cand_dir / "skills" / name
+        d.mkdir(parents=True, exist_ok=True)
+        header = f"# {name}\n\n{sk.get('description', '').strip()}\n\n"
+        (d / "SKILL.md").write_text(header + sk["body"].strip() + "\n")
+        out.append(f"./skills/{name}")
+    return out
+
+
+def _build_custom_middlewares(effective: Dict[str, Any], cand_dir: Path) -> list:
+    """Materialize generated middleware code (gated+reviewed at propose time)
+    into middlewares/<name>.py wrapped in a fail-open Middleware subclass."""
+    out = []
+    for mw in effective.get("new_middlewares", []):
+        name = mw["name"]
+        (cand_dir / "middlewares").mkdir(parents=True, exist_ok=True)
+        code = _MW_WRAPPER.format(user_code=mw["implementation_py"].strip(),
+                                  hook=mw["hook"])
+        (cand_dir / "middlewares" / f"{name}.py").write_text(code)
+        out.append({"import": f"middlewares.{name}:GeneratedMiddleware", "params": {}})
+    return out
+
 
 def _build_tool_list(effective: Dict[str, Any], cand_dir: Path) -> list:
     """Assemble agent.yaml tool entries: core built-ins (minus removed
@@ -165,8 +217,8 @@ def materialize(effective: Dict[str, Any], cand_dir: Path, *,
         "sandbox_config": {"type": "local", "work_dir": "/tmp"},
         "tools": _build_tool_list(effective, cand_dir),
         "stop_tools": ["finish"],
-        "skills": ["./skills/discovery-optimization"],
-        "middlewares": [
+        "skills": ["./skills/discovery-optimization"] + _build_skill_list(effective, cand_dir),
+        "middlewares": _build_custom_middlewares(effective, cand_dir) + [
             {"import": "middlewares.budget_reminder:BudgetReminderMiddleware",
              "params": {"remind_from_left": int(mw_p.get("budget_reminder_from_left", 3))}},
             {"import": "middlewares.stall_restart:StallRestartMiddleware",

@@ -62,7 +62,13 @@ _MIDDLEWARE_FIELDS = {
 }
 _TOP_KEYS = {"schema", "system_prompt", "skill_description", "skill_body",
              "tool_descriptions", "sampling", "agent", "middleware",
-             "new_tools", "remove_tools"}
+             "new_tools", "remove_tools", "new_skills", "new_middlewares"}
+
+_SKILL_NAME_RE = re.compile(r"^[a-z][a-z0-9-]{2,39}$")
+_MW_NAME_RE = re.compile(r"^[a-z][a-z0-9_]{2,31}$")
+_MW_HOOKS = {"before_model", "after_model", "before_tool", "after_tool"}
+_MAX_NEW_SKILLS = 2
+_MAX_NEW_MIDDLEWARES = 2
 
 
 @dataclass
@@ -213,6 +219,74 @@ def parse_and_validate(text: str) -> SpecValidation:
             if good_tools:
                 out["new_tools"] = good_tools
 
+    # --- new_skills[]: extra skill playbooks (pure text, no code risk) -------
+    if "new_skills" in data:
+        ns = data["new_skills"]
+        if not isinstance(ns, list):
+            errors.append("new_skills: must be a list")
+        elif len(ns) > _MAX_NEW_SKILLS:
+            errors.append(f"new_skills: {len(ns)} exceeds cap {_MAX_NEW_SKILLS}")
+        else:
+            seen, good = set(), []
+            for i, s in enumerate(ns):
+                if not isinstance(s, dict):
+                    errors.append(f"new_skills[{i}]: must be a mapping"); continue
+                extra = set(s) - {"name", "description", "body"}
+                if extra:
+                    errors.append(f"new_skills[{i}]: unknown keys {sorted(extra)}")
+                name = s.get("name")
+                if not isinstance(name, str) or not _SKILL_NAME_RE.match(name or ""):
+                    errors.append(f"new_skills[{i}].name: must match [a-z][a-z0-9-]{{2,39}}")
+                elif name in seen or name == "discovery-optimization":
+                    errors.append(f"new_skills[{i}].name: duplicate/reserved {name!r}")
+                else:
+                    seen.add(name)
+                desc = s.get("description", "")
+                body = s.get("body")
+                if not isinstance(body, str) or not body.strip() or len(body) > 8000:
+                    errors.append(f"new_skills[{i}].body: non-empty string <=8000 chars")
+                if name in seen and isinstance(body, str) and body.strip():
+                    good.append({"name": name, "description": str(desc).strip()[:600],
+                                 "body": body.strip()})
+            if good:
+                out["new_skills"] = good
+
+    # --- new_middlewares[]: generated hooks (code — same safety chain) --------
+    if "new_middlewares" in data:
+        nm = data["new_middlewares"]
+        if not isinstance(nm, list):
+            errors.append("new_middlewares: must be a list")
+        elif len(nm) > _MAX_NEW_MIDDLEWARES:
+            errors.append(f"new_middlewares: {len(nm)} exceeds cap {_MAX_NEW_MIDDLEWARES}")
+        else:
+            seen, good = set(), []
+            for i, mw in enumerate(nm):
+                if not isinstance(mw, dict):
+                    errors.append(f"new_middlewares[{i}]: must be a mapping"); continue
+                extra = set(mw) - {"name", "description", "hook", "implementation_py"}
+                if extra:
+                    errors.append(f"new_middlewares[{i}]: unknown keys {sorted(extra)}")
+                name = mw.get("name")
+                if not isinstance(name, str) or not _MW_NAME_RE.match(name or ""):
+                    errors.append(f"new_middlewares[{i}].name: must match [a-z][a-z0-9_]{{2,31}}")
+                elif name in seen:
+                    errors.append(f"new_middlewares[{i}].name: duplicate {name!r}")
+                else:
+                    seen.add(name)
+                hook = mw.get("hook")
+                if hook not in _MW_HOOKS:
+                    errors.append(f"new_middlewares[{i}].hook: must be one of {sorted(_MW_HOOKS)}")
+                code = mw.get("implementation_py")
+                if not isinstance(code, str) or "def " not in code:
+                    errors.append(f"new_middlewares[{i}].implementation_py: must be a hook function body")
+                desc = mw.get("description", "")
+                if name in seen and isinstance(code, str) and hook in _MW_HOOKS:
+                    good.append({"name": name, "hook": hook,
+                                 "description": str(desc).strip()[:600],
+                                 "implementation_py": code})
+            if good:
+                out["new_middlewares"] = good
+
     mutated = set(out) - {"schema"}
     if not mutated:
         errors.append("spec mutates nothing (all fields missing/invalid)")
@@ -311,6 +385,10 @@ def merge_with_base(spec: Dict[str, Any], base: Dict[str, Any]) -> Dict[str, Any
         eff["new_tools"] = spec["new_tools"]
     if "remove_tools" in spec:
         eff["remove_tools"] = spec["remove_tools"]
+    if "new_skills" in spec:
+        eff["new_skills"] = spec["new_skills"]
+    if "new_middlewares" in spec:
+        eff["new_middlewares"] = spec["new_middlewares"]
     eff["schema"] = SCHEMA_VERSION
     return eff
 
@@ -329,4 +407,14 @@ def differs_from_base(effective: Dict[str, Any], base: Dict[str, Any]) -> Tuple[
         for key, val in effective.get(group, {}).items():
             if val != base.get(group, {}).get(key):
                 changed.append(f"{group}.{key}")
+    # generative surface (h2spec/1.0): the base never carries these, so their
+    # presence in the effective spec is itself a change
+    for t in effective.get("new_tools", []):
+        changed.append(f"new_tools.{t.get('name', '?')}")
+    for sk in effective.get("new_skills", []):
+        changed.append(f"new_skills.{sk.get('name', '?')}")
+    for mw in effective.get("new_middlewares", []):
+        changed.append(f"new_middlewares.{mw.get('name', '?')}")
+    if effective.get("remove_tools"):
+        changed.append("remove_tools")
     return (len(changed) > 0, changed)

@@ -58,7 +58,30 @@ new_tools:                 # up to 3 — GIVE THE SOLVER A NEW CAPABILITY
           ...
           return {...}      # str/dict/list/number
 remove_tools: [probe_solution]   # drop an optional built-in if not useful
+new_skills:                # up to 2 — ADD A METHOD PLAYBOOK the solver loads
+  - name: my-skill         # [a-z][a-z0-9-]{2,39}
+    description: ...        # <= 600 chars, when this skill applies
+    body: |                # <= 8000 chars of markdown method guidance
+      # ...
+new_middlewares:           # up to 2 — HOOK the solver's loop
+  - name: my_hook          # [a-z][a-z0-9_]{2,31}
+    hook: before_model     # before_model | after_model | before_tool | after_tool
+    description: ...
+    implementation_py: |    # `def <hook>(hook_input): return <str or None>`
+      def before_model(hook_input):
+          return "a reminder string, or None to do nothing"
 ```
+
+## Three levers beyond text
+
+- **new_tools**: a capability the built-ins lack (a probe, an analyzer, a scorer).
+- **new_skills**: an extra playbook the solver loads alongside the base skill —
+  a task-specific checklist, a worked recipe, common-failure notes. Pure text.
+- **new_middlewares**: a hook that fires every turn — e.g. remind the solver to
+  probe before a full eval, or to restart when stalled. The hook returns a
+  short string (injected as a framework message) or None. It is wrapped
+  fail-open: a crash is ignored. Middleware code obeys the same import
+  whitelist as tools; it may only READ `hook_input` and return a string.
 
 ## Writing new tools (the real lever)
 

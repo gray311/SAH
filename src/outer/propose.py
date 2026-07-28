@@ -124,8 +124,26 @@ def run_once(k: int, *, base_spec: Dict[str, Any], user_message: str,
             session.effective["new_tools"] = kept
         else:
             session.effective.pop("new_tools", None)
-            if "new_tools" in session.changed_fields:
-                session.changed_fields.remove("new_tools")
+            session.changed_fields = [c for c in session.changed_fields
+                                      if not c.startswith("new_tools")]
+
+    # h2spec/1.0: generated middlewares run IN-PROCESS — gate them (stricter),
+    # drop any that fail. (Skills are pure text: no gate needed.)
+    if session.submitted and session.effective and session.effective.get("new_middlewares"):
+        from outer.static_gates import check_middleware_code
+        kept_mw = []
+        for mw in session.effective["new_middlewares"]:
+            ok, errs = check_middleware_code(mw["implementation_py"], mw["hook"])
+            review_log.append({"name": "mw:" + mw["name"], "ok": ok, "rounds": 0,
+                               "error": None if ok else "; ".join(errs), "history": []})
+            if ok:
+                kept_mw.append(mw)
+        if kept_mw:
+            session.effective["new_middlewares"] = kept_mw
+        else:
+            session.effective.pop("new_middlewares", None)
+            session.changed_fields = [c for c in session.changed_fields
+                                      if not c.startswith("new_middlewares")]
 
     rec = CandidateRecord(
         k=k, valid=bool(session.submitted and session.effective is not None

@@ -65,3 +65,36 @@ def check_tool_code(code: str) -> Tuple[bool, List[str]]:
             errors.append("global/nonlocal not allowed")
 
     return (not errors), sorted(set(errors))
+
+def check_middleware_code(code: str, hook: str) -> Tuple[bool, List[str]]:
+    """Gate a generated middleware hook body. Same import/builtin restrictions
+    as tools, but requires exactly one top-level `def <hook>(hook_input):` and
+    is even stricter — a middleware runs IN-PROCESS on every model turn."""
+    errors: List[str] = []
+    if len(code) > MAX_CODE_CHARS:
+        errors.append(f"code exceeds {MAX_CODE_CHARS} chars")
+    try:
+        tree = ast.parse(code)
+    except SyntaxError as e:
+        return False, [f"syntax error: {e}"]
+    hook_defs = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == hook]
+    if len(hook_defs) != 1:
+        errors.append(f"must define exactly one top-level `def {hook}(hook_input):`")
+    elif [a.arg for a in hook_defs[0].args.args][:1] != ["hook_input"]:
+        errors.append(f"{hook}() signature must be (hook_input)")
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            mods = [a.name for a in node.names] if isinstance(node, ast.Import) else [node.module or ""]
+            for m in mods:
+                root = m.split(".")[0]
+                if root in FORBIDDEN_MODULES:
+                    errors.append(f"forbidden import: {m}")
+                elif root not in IMPORT_WHITELIST:
+                    errors.append(f"import not in whitelist: {m}")
+        elif isinstance(node, ast.Name) and node.id in FORBIDDEN_NAMES:
+            errors.append(f"forbidden builtin: {node.id}")
+        elif isinstance(node, ast.Attribute) and node.attr.startswith("__") and node.attr not in ("__init__",):
+            errors.append(f"forbidden dunder access: .{node.attr}")
+        elif isinstance(node, (ast.Global, ast.Nonlocal)):
+            errors.append("global/nonlocal not allowed")
+    return (not errors), sorted(set(errors))

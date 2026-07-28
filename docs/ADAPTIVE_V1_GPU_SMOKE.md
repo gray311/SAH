@@ -1,126 +1,138 @@
-# Adaptive v1 local GPU loop validation
+# Adaptive v1 final-code local GPU validation
 
 - Date: 2026-07-28
 - Result: PASS
+- Tested branch commit: `4dc9a8b`
 - SAH substrate: `f9868c3ea06e1323d67e3817065035287662108e`
 
-This validation used ignored local fixtures and did not add model weights,
-datasets, adapters, or runtime traces to the repository. It contains two
-complementary checks:
+This check ran the final unified code for four protocol rounds with real
+Qwen3.5-9B inference, NexAU outer and inner Agents, matched outcome/promotion
+rollouts, one real rank-8 LoRA optimizer step, adapter serving, and a
+cross-process campaign resume.
 
-1. an earlier five-round controller/training loop with real Qwen3.5-9B
-   inference, NexAU inner execution, and one real LoRA
-   backward/update/save; and
-2. a final two-round format revalidation after moving the Adaptive outer
-   proposer into a declarative NexAU H1 package and removing the
-   Adaptive-only H2 overlay.
+The dataset, model weights, adapter, raw traces, and experiment logs stayed in
+ignored local fixtures. They are not committed to the repository.
 
-The five-round run validates the controller, replay, update, adapter serving,
-and long-loop behavior. Its outer proposals used the earlier direct
-OpenAI-compatible endpoint adapter, so it is not used as evidence for the
-final NexAU H1 format. The final two-round run is the format/runtime evidence
-for the code on this branch.
+## Run topology
 
-## Final NexAU-format revalidation
+Phase 1 used a base Qwen3.5-9B vLLM service for rounds 0 and 1. After round 1
+produced a digest-bound training manifest, that service was stopped and a real
+LoRA update ran on a different authorized GPU. `commit-update` recorded the
+adapter only after the optimizer and save completed.
 
-Both rounds used real Qwen3.5-9B vLLM inference for:
+Phase 2 started in a new shell/Python process. It recovered protocol round 2,
+the working H2, the adapter path, the previous checkpoint, and the committed
+batch from `campaign-status`. It then served:
 
-- Adaptive outer H1 via `nexau.AgentConfig.from_yaml` and a fresh `Agent` per
-  sequential sample;
-- every accepted inner H2 via the unchanged SAH NexAU runner.
+- trained `mphi-final` on GPU 0 for Adaptive H1 proposals; and
+- unchanged base `qwen3.5-final` on GPU 1 for frozen H2 execution.
 
-| protocol round | NexAU outer traces | one assistant call each | valid native SAH H2 | NexAU inner traces | inner errors | controller decision |
-|---:|---:|---|---:|---:|---:|---|
-| 0 | 4 | yes | 3 | 8 / 8 non-empty | 0 | `waiting_for_plateau` |
-| 1 | 4 | yes | 3 | 8 / 8 non-empty | 0 | `skipped_no_future_round` |
+This makes rounds 2 and 3 direct evidence that the committed update can be
+loaded and consumed after an orchestration restart.
 
-All six generated candidate `spec.yaml` files passed the unmodified SAH
-`h2spec/1.0` validator, and all six packages loaded through NexAU
-`AgentConfig.from_yaml`. Round 1 reused the same atomic protocol state and its
-outer context included round 0's archive/evidence. The final state recorded
-`rounds_seen=2` and collected rounds `[0,1]`.
+## Four-round result
 
-## GPU/service isolation
+| protocol round | proposer | valid native H2 | matched inner runs | controller decision |
+|---:|---|---:|---:|---|
+| 0 | base `qwen3.5-final` | 4 / 4 | 20 / 20 | `waiting_for_plateau` |
+| 1 | base `qwen3.5-final` | 1 / 4 | 8 / 8 | `train_required` |
+| 2 | trained `mphi-final` | 2 / 4 | 12 / 12 | `skipped_no_signed_contrast` |
+| 3 | trained `mphi-final` | 2 / 4 | 12 / 12 | `skipped_no_future_round` |
 
-- In the final two-round format check, one isolated GPU 0 vLLM service backed
-  both the sequential H1 and H2 calls; no other user's service or GPU was
-  reused.
-- In the earlier five-round training check, GPU 0 served the active proposer
-  adapter for outer proposals, GPU 1 served the unchanged base checkpoint for
-  inner execution, and the real LoRA update used a separate GPU.
-- All services were stopped after the loop; the final audit showed all four
-  GPUs at 0 MiB with no remaining compute process.
+All 52 planned rollout processes exited successfully. The final controller
+state recorded:
 
-## Earlier five-round controller/training result
+- collected rounds `[0, 1, 2, 3]`;
+- `next_protocol_round=4`;
+- `policy_updates=1`;
+- the round-1 adapter still active; and
+- `pending_training=null`.
 
-| protocol round | proposer | valid candidates | outer traces | inner results | controller decision |
-|---:|---|---:|---:|---:|---|
-| 0 | base model | 4 / 8 | 8 | 10 | `train_required` |
-| 1 | committed adapter | 3 / 4 | 4 | 8 | `skipped_no_future_round` in the original two-round smoke |
-| 2 | same committed adapter | 1 / 4 | 4 | 4 | `skipped_no_signed_contrast` |
-| 3 | same committed adapter | 3 / 4 | 4 | 8 | `skipped_no_signed_contrast` |
-| 4 | same committed adapter | 3 / 4 | 4 | 8 | `skipped_no_future_round` |
+The fixture reached its score ceiling (`1.0`) in round 0. The later skip
+decisions are therefore expected: the controller neither manufactures signed
+credit at the ceiling nor trains an adapter that no future round can consume.
 
-All 24 earlier outer trajectories were non-empty. All 38 inner results retained
-non-empty trajectories, and none reported an inner error. Controller state
-finished with `rounds_seen=5`, collected rounds `[0,1,2,3,4]`,
-`policy_updates=1`, and the committed adapter still active. As noted above,
-these outer traces predate the final NexAU H1 normalization.
+## Trace and package evidence
 
-Round 1 was originally collected as the final round of the initial two-round
-smoke. The extension resumed the same atomic state for rounds 2–4 with a
-five-round horizon. Its no-update decision would also have been
-`skipped_no_signed_contrast` if that longer horizon had been declared in the
-first run, so this resume did not suppress a usable policy update.
+Every round recorded `h1_version=adaptive-h1/1.0` and the same whole-package
+hash, `sha256:81eb14383fe5f483`.
+
+- 16 / 16 outer trajectories were non-empty.
+- 16 / 16 outer trajectories contained exactly one assistant message.
+- Rounds 2 and 3 recorded `proposer.model=mphi-final`.
+- All 9 accepted candidate specs passed the unmodified SAH
+  `h2spec/1.0` validator.
+- All 9 accepted packages loaded through NexAU `AgentConfig.from_yaml`.
+- 52 / 52 inner result trajectories were non-empty.
+- 52 / 52 inner runs ended with `stop_reason=completed`.
+- No inner step reported an error, and every recorded score/advantage was
+  finite.
+- Seven invalid or duplicate proposals failed closed and were never executed
+  as H2.
+- Candidate packages contained no generated `__pycache__` directories.
+
+The files retain the normal SAH layout: `round.json`, `prompts.json`,
+`trajectories.json`, rollout results, `round_summary.json`, and
+`next_bases.json`. Adaptive additionally records
+`adaptive_rollout_plan.json`, the atomic protocol state, and (only when
+required) a training batch plus digest-bound manifest.
 
 ## Real policy update
 
-Round 0 produced six signed policy rows: four positive actions and two
-fail-closed compiler rejections. A rank-8 LoRA weighted policy-gradient step
-then completed on the same Qwen3.5-9B weights:
+The round-1 batch contained eight policy rows:
+
+- 4 positive;
+- 3 negative; and
+- 1 neutral.
+
+The real Qwen3.5-9B LoRA step reported:
 
 - trainable parameters: `1,114,112`;
-- gradient norm before clipping: `1.0408626794815063`;
-- parameter delta L2: `0.01534217948182527`;
-- adapter digest changed from
-  `03906ece3aeb1613de503fb3a18e41eec8c79fed420fcc21e8c3357c4983ffba`
-  to
-  `c0d2c4fb169070626e5bbbeb97983ab2498b84b8b2cc644108211baca295f450`;
-- peak allocated CUDA memory: `29,647,298,560` bytes.
+- gradient norm before clipping: `0.1732354611158371`;
+- parameter delta L2: `0.015336642475539794`;
+- adapter digest before:
+  `0908e76daceefbfcd81e8cbd342bc209155f94887b28f7988e5cd2310e8b9fb9`;
+- adapter digest after:
+  `dcf66cc32cb0e03d29a157e7529753c440e0d1222fc13137205e7dedd036f951`;
+- peak allocated CUDA memory: `34,025,406,976` bytes.
 
-The update manifest was committed only after save success. The next four
-earlier rounds all used that committed adapter for proposal. The local replay
-conversion preserved all 6/6 signed rows and emitted `tools=[]`, matching the
-Adaptive plain-text action contract. The final two-round format revalidation
-did not trigger another optimizer step: its small fixture reached the score
-ceiling and the declared second round had no future round that could consume a
-new adapter.
+The non-zero gradient and parameter delta plus the changed digest demonstrate
+that an optimizer step changed the saved adapter. The phase-2 vLLM log then
+explicitly reported loading that adapter as `mphi-final`.
 
-## What the later rounds establish
+## GPU and service cleanup
 
-The fixture reached its exact score ceiling (`1.0`) in round 0. Later valid
-candidates could therefore be neutral but not positively improve the record.
-The controller correctly accumulated evidence and advanced the plateau counter
-without manufacturing positive credit or repeatedly training on negative-only
-data. This is the expected Adaptive v1 safety behavior: the loop continued,
-while optimizer work was skipped when no signed causal contrast existed.
+Only GPUs 0 and 1, both verified idle before launch, were used. GPUs 2 and 3
+were occupied by pre-existing Ray/vLLM workloads and were not reused,
+signalled, or stopped.
 
-Consequently, the earlier run proves one real policy update followed by four
-adapter-backed protocol rounds and correct no-op gating; it does not claim
-multiple useful weight updates on a saturated task. The final two-round run
-separately proves the outer NexAU H1 → native SAH H2 → inner NexAU execution
-path and cross-round archive carryover.
+At successful experiment exit:
 
-## Cleanup record
+- both experiment vLLM process groups were stopped;
+- GPU 0 reported `0 MiB`;
+- GPU 1 reported `0 MiB`; and
+- no experiment-owned trainer, vLLM, or supervisor process remained.
 
-Every vLLM service used by these checks was stopped at experiment exit. The
-final audit on 2026-07-28 reported all four GPUs at 0 MiB, no compute
-processes, and no remaining experiment process.
+An earlier discarded launch stopped before rollout because an extra local
+package-audit fixture used the wrong import working directory. The candidate
+itself was valid; the fixture was corrected, independently checked, and the
+clean four-round campaign above was restarted from scratch. Its process group
+and GPU allocation were cleaned before the restart.
 
-## Remaining environment-specific check
+## Static checks
 
-The production `train_mphi_step.sh` path uses the original Slime/4-GPU,
-Weave, merge, Lustre, and Slurm environment. Those external services are not
-available on this local node, so that scheduler-specific path was syntax- and
-unit-tested but not submitted. The local GPU run instead proves the underlying
-forward/backward/optimizer/save/serve and protocol state transitions.
+After the GPU run:
+
+- all 18 Adaptive protocol tests passed;
+- Python compilation passed;
+- `bash -n` passed for the unified campaign, worker, sbatch, and trainer
+  scripts; and
+- `git diff --check` passed.
+
+## Environment boundary
+
+This is a real local GPU training/serve/resume validation, not a production
+Slime/Slurm submission. The production `train_mphi_step.sh` path additionally
+depends on external Lustre, Weave, Slime, pyxis/enroot, and scheduler services
+that are not available in this workspace. That scheduler-specific path was
+syntax- and unit-tested but not submitted here.

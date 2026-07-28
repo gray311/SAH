@@ -217,13 +217,12 @@ final-round skip, Adaptive plain-text replay, and the unchanged default SAH
 collector.
 
 Local result on 2026-07-28: all 18 Adaptive protocol tests passed, as did Python
-compilation, shell syntax checks, and `git diff --check`. Final-format GPU
-revalidation completed two consecutive rounds with real Qwen3.5-9B inference:
-8/8 outer traces came from NexAU H1 Agents with exactly one assistant call,
-6 candidates were valid native SAH H2 packages, and all 16 NexAU inner traces
-were non-empty with no inner errors. The second round inherited the first
-round's archive/context. An earlier five-round loop additionally completed a
-real LoRA optimizer step; see
-[`ADAPTIVE_V1_GPU_SMOKE.md`](ADAPTIVE_V1_GPU_SMOKE.md). The production
+compilation, shell syntax checks, and `git diff --check`. The final-code GPU
+validation completed four protocol rounds with real Qwen3.5-9B inference, one
+real rank-8 LoRA optimizer/save step, and a fresh-process resume that served
+the saved adapter for rounds 2 and 3. All 16 outer NexAU traces had exactly one
+assistant call; all 9 accepted candidates were native SAH H2 packages; and all
+52 matched inner NexAU runs completed with non-empty traces and no step error.
+See [`ADAPTIVE_V1_GPU_SMOKE.md`](ADAPTIVE_V1_GPU_SMOKE.md). The production
 Slime/Slurm job was not run because its external Lustre, Weave, and scheduler
 environment is not available in this workspace.

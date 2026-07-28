@@ -7,11 +7,11 @@
 # main campaign is untouched. RL budget = n_steps (reset from scratch).
 set -uo pipefail
 source /lustre/fsw/portfolios/av/users/yingzim/config/workspace_env.sh
-TASK="$1"; NSTEPS="$2"; RBASE="$3"; FTF="${4:-0.25}"
+TASK="$1"; NSTEPS="$2"; RBASE="$3"; FTF="${4:-0.25}"; WS="${5:-$RUN_ROOT/self_adapt_harness/fresh_cp}"
 SAH="$CODE_ROOT/self_adapt_harness"
 OUT="$RUN_ROOT/self_adapt_harness/outer"
-WS="$RUN_ROOT/self_adapt_harness/fresh_cp"
 BASE_PHI="$MODEL_ROOT/base/Qwen3.5-9B/c202236235762e1c871ad0ccb60c8ee5ba337b9a"
+TAG=$(echo "$TASK" | sed 's/.*__//; s/_//g' | cut -c1-8)   # short per-task checkpoint tag
 log(){ echo "[$(date -Is)] [fresh:${TASK##*__}] $*"; }
 
 bases="$WS/round000_bases.json"
@@ -21,7 +21,7 @@ phi="$BASE_PHI"                    # step 1 proposer = base
 for i in $(seq 0 $((NSTEPS - 1))); do
   [ -f "$WS/STOP" ] && { log "STOP flag — exiting"; break; }
   R=$((RBASE + i)); RD="$OUT/round$(printf '%03d' "$R")"
-  STAG=$(printf "fcp%03d" "$i")
+  STAG=$(printf "f_%s_%02d" "$TAG" "$i")
   log "step $((i+1))/$NSTEPS: round$R propose (phi=$(basename "$phi")) ftf=$FTF"
 
   JOB=""

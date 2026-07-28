@@ -111,8 +111,13 @@ def run_once(k: int, *, base_spec: Dict[str, Any], user_message: str,
         repair_fn = _make_repair_fn(base_url, model, api_key, timeout)
         kept = []
         for tool in session.effective["new_tools"]:
-            outcome = review_tool_code(tool["implementation_py"], repair_fn=repair_fn,
-                                       max_rounds=2)
+            try:
+                outcome = review_tool_code(tool["implementation_py"],
+                                           repair_fn=repair_fn, max_rounds=2)
+            except Exception as e:  # a reviewer failure drops one tool, never the round
+                review_log.append({"name": tool["name"], "ok": False, "rounds": 0,
+                                   "error": f"reviewer crashed: {e}", "history": []})
+                continue
             review_log.append({"name": tool["name"], "ok": outcome.ok,
                                "rounds": outcome.rounds,
                                "error": outcome.final_error,

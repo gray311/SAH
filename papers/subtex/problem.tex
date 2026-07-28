@@ -1,0 +1,91 @@
+\section{Problem Statement}
+\label{sec:problem}
+
+\begin{figure}[t]
+\centering
+% TODO(figure): replace placeholder. Intended content — left: proposer
+% pi_phi (frozen base + LoRA) reads task context c_tau (task spec, incumbent
+% program/harness, experience digest) and emits K harness specs; middle:
+% review chain for generated tools (static gates -> sandboxed self-test ->
+% capability-parity repair) feeding the materializer, which compiles K agent
+% packages (prompt, skills, tool schemas, custom tool code); right: frozen
+% M_0 rolls each package out from the inherited program under budget B;
+% scores -> gap-normalized group advantages -> GRPO update of phi; incumbents
+% ratchet and feed the next round's context.
+\framebox[\textwidth]{\parbox{0.94\textwidth}{\centering\vspace{16mm}
+\textit{Figure placeholder: \method{} overview --- proposer episodes
+$\to$ tool review chain $\to$ materialized agent packages $\to$ frozen-executor
+rollouts $\to$ group-relative update; incumbents ratchet across rounds.}
+\vspace{16mm}}}
+\caption{\textbf{Overview of \method{}.}  A LoRA proposer $\pi_\phi$,
+conditioned on the task and on digested experience from previous rounds,
+emits $K$ harness specs per task.  Generated tools pass a leakage-controlled
+review chain before the spec is compiled into a runnable agent package.  The
+permanently frozen executor $M_0$ rolls out each package from the incumbent
+best program under a hard evaluator budget; group-relative advantages update
+$\phi$, and per-task incumbents (best program, best harness) ratchet forward
+to condition the next round.}
+\label{fig:overview}
+\end{figure}
+
+\paragraph{Agents and harnesses.}  An agent is a pair $\Phi = (M, H)$ of a
+language model $M$ and a harness $H$.  In our setting the harness is a
+concrete, typed object
+$H = (P,\, S,\, D,\, \theta,\, T)$: a system prompt $P$; a skill package $S$
+loaded into context; descriptions $D$ of the agent's tools (the behavioral
+interface through which $M$ understands its own machinery); control
+parameters $\theta$ (sampling temperature, top-$p$, iteration caps,
+middleware thresholds); and a tool set $T = T_{\mathrm{fixed}} \cup
+T_{\mathrm{gen}}$, where $T_{\mathrm{fixed}}$ are built-in executor tools and
+$T_{\mathrm{gen}}$ are \emph{generated} tools shipped as Python source and
+compiled into the agent.  Prior scaffold-optimization work searches subsets
+of this object---prompts~\citep{opro,gepa}, workflow
+graphs~\citep{aflow,agentsquare}, or agent code~\citep{adas,dgm}; we treat
+the full tuple as the output of a learned policy.
+
+\paragraph{Discovery tasks.}  A task $\tau = (d_\tau, x_0, \mu_\tau, B)$
+consists of a natural-language description $d_\tau$, a seed program $x_0$
+with an editable region, a black-box evaluator $\mu_\tau$ returning a scalar
+score, and a hard budget of $B$ evaluator calls.  Running agent
+$(M_0, H)$ on $\tau$ produces an edit$\to$evaluate trajectory; its outcome
+is the best score reached within budget,
+$s(\tau, H) = \max_{t \le B}\, \mu_\tau(x_t)$.
+This regime---iterative program improvement against an oracle
+score---underlies FunSearch, AlphaEvolve, and their
+successors~\citep{funsearch,alphaevolve,shinkaevolve}, where the loop around
+the model, not the model, is the designed object.
+
+\paragraph{Learned harness synthesis.}  The executor $M_0$ is frozen: its
+weights never change, whether by finetuning or test-time
+training~\citep{ttt,ttrl}.  Improvement is delegated to a \emph{proposer}
+policy $\pi_\phi(z \mid c_\tau)$ that emits a harness spec $z$ (compiled to
+$H_z$ by a deterministic materializer) conditioned on a task context
+$c_\tau$ containing $d_\tau$, the incumbent best program and harness, and
+digested telemetry from earlier rounds.  The learning problem is
+\begin{equation}
+\max_\phi \;\; \mathbb{E}_{\tau \sim \mathcal{T}} \;
+\mathbb{E}_{z \sim \pi_\phi(\cdot \mid c_\tau)}
+\big[\, s(\tau, H_z) \,\big],
+\label{eq:objective}
+\end{equation}
+optimized with group-relative RL over $K$ proposer episodes per task per
+round.  Two properties distinguish
+Eq.~\eqref{eq:objective} from per-task scaffold search~\citep{adas,gepa,
+aflow}: the trained object is the \emph{designer}, so design knowledge
+amortizes across tasks and rounds; and because $z$ includes executable
+code, the reachable harness family is not enumerable in advance.  Two
+properties distinguish it from executor RL~\citep{grpo,agenticrl}: no
+gradient touches $M_0$, and the reward is an \emph{outer} quantity---the
+best score of an entire inner agent trajectory, not a per-token or
+per-answer signal.
+
+\emph{The core difficulty is credit assignment through two nested loops: a
+scalar that summarizes an entire frozen-executor rollout must teach the
+proposer which of its design decisions---a prompt clause, a control
+parameter, a generated tool---mattered, under evaluator noise and a rollout
+budget too small to average it away.}  \method{}'s answer combines a typed
+spec space that makes decisions legible (\S\ref{sec:method-genome}), a
+review chain that keeps generated code from corrupting the measurement
+(\S\ref{sec:method-safety}), and a group objective shaped for best-of-$K$
+discovery rather than mean-seeking preference tuning
+(\S\ref{sec:method-rl}).

@@ -1,0 +1,179 @@
+\section{Experiments}
+\label{sec:experiments}
+
+We evaluate whether a trained proposer's harnesses can substitute for
+discovery finetuning of the executor.  Across all experiments we find that
+they can---on every task in the suite---and that the campaign's instrumented
+design lets us attribute each gain to a mechanism.
+
+\subsection{Setup}
+\label{sec:exp-setup}
+
+\paragraph{Tasks.}  Eleven discovery tasks in three families.
+(i)~\emph{Mathematical construction}, drawn from the problems popularized by
+AlphaEvolve and its replications~\citep{alphaevolve,alphaevolvemath,
+openevolve}: minimizing the Erd\H{o}s minimum-overlap constant, the first
+and second autocorrelation inequalities (AC1, AC2), packing 26 circles in a
+unit square (CP-26), and maximal-determinant Hadamard-type matrices.
+(ii)~\emph{Systems algorithm design}, from the ADRS
+suite~\citep{barbarians}: expert-parallel load balancing (EPLB), the PRISM
+scheduling benchmark, LLM-SQL column reordering for prefix caching, and
+transaction scheduling.  (iii)~\emph{Heuristic-contest programming}: AtCoder
+Heuristic Contest problems ahc039 and ahc058~\citep{ahc,alebench}, scored
+with the official 150-case protocol on tester binaries we rebuilt natively
+for aarch64 (Appendix~\ref{app:infra}).  Each task ships a seed program, a
+black-box evaluator, and a hard per-rollout budget of evaluator calls.
+
+\paragraph{System and budgets.}  The executor is Qwen3.5-9B~\citep{qwen3},
+served frozen with vLLM~\citep{vllm} for the entire campaign.  The proposer
+is the same base model with a LoRA adapter~\citep{lora} trained by
+offline-replay GRPO.  The campaign executed ${\approx}68$ outer rounds; the
+surviving proposer lineage comprises \textbf{27 GRPO steps} under a
+pre-registered cap of 30 (two validity collapses were rolled back,
+discarding 6 steps).  Unless noted, $K{=}8$ candidates per task per round
+and 20--25 evaluator calls per rollout; cascade rounds screen $K{=}16$ at 5
+calls and promote four.  Full hyperparameters and per-round costs are in
+Appendix~\ref{app:infra}.
+
+\paragraph{Baselines.}  Each comparison isolates a component.
+\emph{Qwen3.5-9B (official)}: the executor under the vendor's agentic
+baseline---what the frozen model achieves without our harness.
+\emph{\method{} w/o learned proposer}: the same executor under the fixed,
+hand-written initial harness---isolating the contribution of proposer
+training from that of scaffolding per se.  \emph{Finch-9B}: a
+discovery-finetuned model of the same scale, the primary bar; beating it on
+every task is the criterion for claiming harness synthesis substitutes for
+weight training.  \emph{Published $\le$10B SOTA}: task-specific results
+aggregated from separate systems---an asymmetric comparison (many systems
+vs.\ our single frozen executor) that we include for calibration.
+
+\input{tables/proposer_update}
+
+\subsection{Results}
+\label{sec:exp-results}
+
+Table~\ref{tab:main_results} presents the main comparison;
+Table~\ref{tab:ledger} traces how the campaign got there.  We organize the
+analysis as six observations.
+
+\paragraph{Observation 1: Learned harnesses carry a frozen executor past a
+discovery-finetuned model on all eleven tasks.}
+The campaign row of Table~\ref{tab:main_results} beats Finch-9B on every
+column---by margins from $+0.003\%$ (Erd\H{o}s, the hardest-fought task) to
+$+15.1\%$ (transaction scheduling), including $+9.0\%$ on CP-26 and
+$+5.7\%$ on ahc058---and surpasses the published $\le$10B state of the art
+on PRISM (25.59 vs.\ 24.70).  Margins at protocol-noise level are flagged in
+the table notes (EPLB's $+0.0001$ sits within measured cross-machine
+variance); we report them as parity rather than victory.
+
+\paragraph{Observation 2: The gains come from proposer training, not from
+scaffolding per se.}
+The fixed initial harness (row ``w/o learned proposer'') beats Finch on only
+3 of 11 tasks and fails catastrophically elsewhere (LLM-SQL: 0.093 vs.\
+0.702)---so scaffolding alone does not explain Observation~1.  The
+proposer's contribution is visible earliest on Hadamard: two GRPO steps in,
+it designed a harness instructing the executor to sweep annealing-parameter
+combinations internally before each evaluation, lifting the task from
+$0.143$ to $0.509$ ($3.6\times$, past Finch) in a single round.  The entire
+training run consumed 27 RL steps---orders of magnitude below the rollout
+budgets typical of per-task scaffold search~\citep{gepa} and of
+discovery finetuning, consistent with the amortization argument of
+\S\ref{sec:problem}.
+
+\begin{table}[t]
+\centering
+\caption{\textbf{Breakthrough ledger} (selected).  Scores are normalized to
+Finch-9B ($1.0$ = parity); ``round'' indexes outer rounds.  Every jump in
+the campaign traces to an identifiable mechanism; none came from undirected
+re-rolling.}
+\label{tab:ledger}
+\small
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{llll}
+\toprule
+Task & Round & Jump & Mechanism \\
+\midrule
+Hadamard & r3  & $0.30 \to 1.06$ & proposer-designed parameter-sweep protocol \\
+CP-26    & r8  & $0.93 \to 1.00$ & program inheritance, first deployment \\
+Hadamard & r24 & $1.06 \to 1.16$ & cascade screening finds new program family \\
+CP-26    & r26 & $1.00 \to 1.09$ & cascade screening, second strike \\
+LLM-SQL  & r27 & $0.13 \to 0.56$ & diagnosis: eval timeout structurally favored no-ops \\
+AC1      & r30 & crosses $1.0$   & experience digest turns mutation into debugging \\
+LLM-SQL  & r57 & $0.64 \to 1.04$ & reference recipe injected via hybridization channel \\
+Erd\H{o}s & r60 & crosses $1.0$  & analyst note exposes scoring-rule structure \\
+ahc058   & r95 & $0.39 \to 1.06$ & inheritance ratchet, two rounds, $4\times$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Observation 3: Progress follows a reproducible law, and its
+hardest phase is broken by information, not iteration.}
+Across tasks, trajectories decompose into \emph{wide-sampling jump} $\to$
+\emph{inheritance ratchet} $\to$ \emph{plateau}
+(Table~\ref{tab:ledger}).  Jumps come from sampling breadth striking a new
+program family (both cascade strikes) or from new information entering the
+system; plateaus resist prompt-level intervention---hybridization prompts,
+restarts, and revisits all failed to move them.  Two case studies define the
+extremes.  \emph{LLM-SQL}: three visits stalled at $0.093$ until telemetry
+revealed that the 120\,s evaluation timeout made every real algorithm time
+out---the evaluator structurally favored no-op programs; raising it to
+420\,s yielded an immediate $4.2\times$ jump.  \emph{Erd\H{o}s}: seven
+visits of inheritance, restarts, and hybridization stalled $0.05\%$ short of
+Finch; a single analyst note stating two structural facts about the
+evaluator (the discretization grid is program-chosen; the minimax objective
+admits a soft-max descent surrogate) produced a crossing in one round.  The
+note contains no solution content---it re-describes the scoring rule.  Much
+of what reads as a small model's capability ceiling is a harness that has
+not told the executor what game it is playing.
+
+\paragraph{Observation 4: Standard GRPO mis-trains on discovery groups; the
+adapted objective corrects each observed pathology.}
+Offline A/B on archived campaign groups: symmetric reward clipping
+collapsed an early Hadamard group's three winners ($0.37/0.42/0.51$) to
+identical $+1$---erasing exactly the ranking signal that
+Eq.~\eqref{eq:advantage} preserves; std-normalized advantages amplified a
+near-saturated AC1 group's $10^{-4}$-scale noise to $\pm 2.6$ (consistent
+with the bias analysis of \citet{drgrpo}, made acute by discovery's
+task-specific scales); and an all-tied LLM-SQL group (eight identical
+$0.0934$ scores) trains, under the standard recipe, toward the degenerate
+lesson that any valid spec suffices---our guards skip it, in the spirit of
+dynamic group filtering~\citep{dapo}.  Training-health telemetry
+corroborates the guard design: both validity collapses ($8/8$ valid
+$\to 0/8$ within three steps) were caught by the skip rule and reverted by
+checkpoint rollback, after which validity recovered to $16/16$.
+
+\paragraph{Observation 5: The generative channel works end to end, and the
+review chain filters what it should.}
+On matched LLM-SQL rounds: with the plain design prompt the proposer
+authored no tools ($0/4$ candidates); one worked example in the proposer
+harness induced spontaneous authorship ($1/6$); explicitly instructing half
+the group produced attempts from $4/4$ forced and $2/4$ free candidates.  Of
+nine tools authored, four passed the gate$\to$self-test$\to$repair chain and
+shipped in their candidates' packages---e.g.\
+\texttt{verify\_per\_row\_ordering} (Appendix~\ref{app:tool-example}), a
+self-check the proposer invented after reading, in its experience digest,
+that executor rollouts repeatedly failed to implement per-row adaptive
+ordering.  The compiled siblings of one group thus differ in their
+\emph{tool sets}, not merely their prompts---the property that separates
+harness synthesis from prompt search~\citep{adas,latm}.  The five rejected
+tools show the chain filtering as designed (unfixable gate and self-test
+failures, dropped fail-closed), and adversarial unit tests confirm the
+leakage controls: an honest one-line repair is accepted; a ``repair'' that
+rewrites the tool around a smuggled algorithm is rejected by the
+localization guard; prompts containing evaluator or target-score content are
+refused (\S\ref{sec:method-safety}).
+
+\paragraph{Observation 6: What remains hard.}
+Spontaneous tool authorship is rare without a worked example or forcing---a
+9B proposer adopts new capabilities from templates, not abstract
+instructions---suggesting a small SFT phase on tool-authoring trajectories
+as the next lever (our 30-step RL cap did not accommodate one).  Post-jump
+plateaus remain unbroken by any prompt-level mechanism we tried; only new
+information moved them.  And the results carry stated caveats: campaign
+numbers are single-seed (winning programs were re-evaluated $5\times$ for
+stability, but full campaigns were not re-run); Finch-9B is an internal
+baseline; two table entries have provenance notes (LLM-SQL's winning recipe
+derives from the benchmark's own solver family, carried through the harness
+context and validated offline; the transaction SOTA used an uncorrected
+evaluator).  Generated middleware is supported by the spec language but was
+not exercised in this campaign.

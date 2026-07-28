@@ -1,0 +1,119 @@
+\section{The harness spec language}
+\label{app:h2spec}
+
+A candidate is a partial YAML document validated fail-closed and merged over
+the incumbent spec.  Fields:
+
+\begin{center}
+\small
+\begin{tabular}{lll}
+\toprule
+Field & Type & Semantics \\
+\midrule
+\texttt{system\_prompt}      & text & executor system prompt \\
+\texttt{skill\_description}  & text & skill card shown in tool list \\
+\texttt{skill\_body}         & text & skill playbook body \\
+\texttt{tool\_descriptions}  & map  & descriptions of the fixed tools \\
+\texttt{sampling}            & map  & temperature, top-$p$, top-$k$, max tokens \\
+\texttt{agent}               & map  & iteration cap \\
+\texttt{middleware}          & map  & budget-reminder onset; stall-restart \\
+                             &      & threshold/cap; output truncation \\
+\midrule
+\texttt{new\_tools}          & list & $\le 3$; name, description, JSON schema, \\
+                             &      & \emph{Python implementation} \\
+\texttt{new\_skills}         & list & additional skill packages \\
+\texttt{remove\_tools}       & list & removable optional tools only \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Generated tool names must match \verb|^[a-z][a-z0-9_]{2,31}$| and may not
+shadow reserved names.  Implementations are limited to 6{,}000 characters.
+The materializer compiles a spec deterministically: identical specs produce
+byte-identical packages, and the spec hash de-duplicates candidates within a
+group.
+
+\section{Capability surface of generated tools}
+\label{app:sdk}
+
+Generated tools receive a \texttt{ctx} object exposing:
+\texttt{get\_program()}, \texttt{get\_best\_program()}, \texttt{best\_score()},
+\texttt{stage\_edit(code)}, \texttt{probe()} (subsampled, budget-free,
+$\sim$8$\times$ cheaper), \texttt{evaluate()} (budgeted),
+\texttt{budget\_left()}, \texttt{list\_task\_inputs()},
+\texttt{read\_input\_sample(name, n)}, \texttt{read\_input\_df(name, n)},
+\texttt{scratch\_write/read}, and \texttt{log}.  Path resolution refuses
+evaluator and ground-truth locations; there is no network, filesystem, or
+subprocess access.  The static gate whitelist is \texttt{math}, \texttt{re},
+\texttt{json}, \texttt{itertools}, \texttt{functools}, \texttt{collections},
+\texttt{heapq}, \texttt{bisect}, \texttt{random}, \texttt{statistics},
+\texttt{string}, \texttt{typing}, \texttt{dataclasses}, \texttt{numpy},
+\texttt{pandas}.  Self-tests run under \texttt{RLIMIT\_CPU} 20\,s and
+\texttt{RLIMIT\_AS} 6\,GB against a mock context.
+
+\section{A proposer-authored tool}
+\label{app:tool-example}
+
+The tool below was written end-to-end by the 9B proposer during the LLM-SQL
+rounds of \S\ref{sec:exp-results} (Obs.~5) and passed the review chain without repairs.
+It is a self-check the proposer designed after observing, in the experience
+digest, that most executor rollouts failed to implement per-row adaptive
+column ordering.
+
+\begin{quote}\footnotesize
+\begin{verbatim}
+def run(ctx, args):
+    program_code = ctx.get_program()
+    if not isinstance(program_code, str):
+        return {"status": "error",
+                "message": "Cannot verify - program is not source code"}
+    checks_passed = 0
+    if "for r in range" in program_code or "for row_idx" in program_code \
+            or "per-row" in program_code.lower():
+        checks_passed += 1
+    if "column_orderings" in program_code or "orderings" in program_code \
+            or "per_row" in program_code.lower():
+        checks_passed += 1
+    if "bonus" in program_code.lower() or "match" in program_code.lower():
+        checks_passed += 1
+    if "** 2" in program_code or "len(" in program_code:
+        checks_passed += 1
+    if checks_passed >= 3:
+        return {"status": "likely_valid", "checks_passed": checks_passed}
+    return {"status": "likely_invalid", "checks_passed": checks_passed}
+\end{verbatim}
+\end{quote}
+
+The materialized candidate's agent configuration binds this tool alongside
+the four fixed tools; sibling candidates in the same group carry different
+tool sets (or none), so the group is diverse at the level of executable
+machinery.
+
+\section{Campaign infrastructure and hyperparameters}
+\label{app:infra}
+
+\paragraph{Serving and training.}  Executor and proposer are served with
+vLLM on aarch64 nodes (4-GPU allocations); proposer episodes for a round run
+against replicated endpoints.  GRPO training uses LoRA adapters with an
+offline replay format; each outer round contributes one training batch of
+per-episode advantages.  A KL penalty (coefficient 0.05--0.1) anchors the
+policy to the frozen base; checkpoints sit behind a symlink for zero-cost
+rollback.
+
+\paragraph{Round configuration.}  $K{=}8$ (cascade: 16 screened at 5
+evaluator calls, top 4 promoted); rollout budgets 20--25 evaluator calls
+(task-dependent, up to 40 for promoted cascade runs); evaluation timeout
+420\,s (raised from 120\,s after the diagnosis of \S\ref{sec:exp-results} (Obs.~3));
+proposer sampling temperature 1.0 with per-episode seeds; proposer episode
+cap 12 agent iterations.  Groups with all-tied rewards, sub-noise score
+differences, or fewer than $K/2$ valid candidates are excluded from training.
+
+\paragraph{AHC protocol.}  The official x86 tester binaries fail silently
+under qemu-user emulation on aarch64 hosts (empty outputs score as 1 point).
+We rebuilt the testers natively from the AtCoder Rust sources and report
+official 150-case totals; both AHC entries in Table~\ref{tab:main_results}
+carry this note.
+
+\paragraph{Provenance.}  Per-task provenance (rounds, scores, evaluator
+versions, and the LLM-SQL reference-recipe lineage) is recorded in the
+released campaign ledger alongside the code.

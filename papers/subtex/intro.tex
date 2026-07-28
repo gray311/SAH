@@ -1,0 +1,113 @@
+\section{Introduction}
+\label{sec:introduction}
+
+Large language models act in the world through \emph{agents}: a model
+embedded in a harness, the surrounding software that defines its system
+prompt, tools, skills, context policy, and control
+loop~\citep{weng2026harness,anthropicagents}.  Tool-using agents interleave
+reasoning with external actions~\citep{react,toolformer}; coding agents
+succeed or fail with the design of their agent--computer
+interface~\citep{sweagent,autogen}; embodied and web agents live inside
+hand-built perception--action scaffolds~\citep{voyager,webarena,osworld};
+and verbal-feedback loops turn a fixed model into an iterative
+improver~\citep{reflexion,selfrefine}.  The lesson is sharpest in
+\emph{discovery}: FunSearch and AlphaEvolve pair a frozen LLM with a
+carefully engineered evolutionary scaffold and produce mathematical and
+algorithmic results beyond human baselines~\citep{funsearch,alphaevolve,
+alphaevolvemath,openevolve,shinkaevolve,eoh,llmsr,aiscientist}---the weights
+supply raw capability, while the harness decides how much of it becomes
+measurable progress.  Agent behavior is thus a property of the coupled
+model--harness system, not of the weights alone; yet the harnesses behind
+these results are hand-built per domain by experts, through trial and error
+that never accumulates into a reusable artifact.
+
+Two routes around this bottleneck have been explored, and both stop short.
+The first \emph{searches} the scaffold per task: instruction and prompt
+optimization~\citep{ape,opro,promptbreeder,evoprompt,mipro,metaprompting},
+compilation and textual-gradient frameworks~\citep{dspy,textgrad,trace},
+reflective prompt evolution~\citep{gepa}, and the automated design of whole
+agentic systems and workflows~\citep{adas,aflow,agentsquare,agentsymbolic}
+up to agents that rewrite their own code~\citep{dgm,sica,godelagent,stop,
+alita,selfevolvesurvey}.  These methods rediscover design knowledge from
+scratch for every new task, at deployment time, under rollout budgets that
+routinely reach thousands of episodes~\citep{gepa}; nothing they learn is
+amortized into a reusable designer.  The second route \emph{trains the
+executor}: RLHF and reasoning-RL pipelines~\citep{instructgpt,ppo,grpo,
+dapo}, agentic RL over multi-turn environments~\citep{agenticrl,ragen,tmax,
+openclawrl}, and discovery-finetuned models---but per-domain weight training
+is compute-intensive, entangles capability with configuration, and is simply
+unavailable when the executor is frozen by policy, safety review, or an API
+boundary.  History suggests a third stage: hand-designed pipelines gave way
+to searched ones, and searched ones to learned
+components~\citep{learn2learn,hypernetworks,adas}.  \emph{Can the ability to
+design harnesses itself be learned from rollout experience, so that a single
+trained proposer synthesizes strong, task-conditioned harnesses for an
+executor that never changes?}
+
+We introduce \method{} to answer this question.  The executor $M_0$ is
+\textbf{permanently frozen}; a harness \emph{proposer} $\pi_\phi$---the same
+base model with a LoRA adapter~\citep{lora}---is trained with group-relative
+reinforcement learning~\citep{grpo,rloo} to emit, per task, a complete
+harness specification: system prompt, skill playbook, tool descriptions,
+sampling and control parameters, and \emph{new executable tools} as Python
+source.  Each spec compiles deterministically into a runnable agent package;
+the frozen executor rolls it out under a hard evaluator budget; and the
+group's relative outcomes are the proposer's only learning signal
+(Figure~\ref{fig:overview}).  The proposer is conditioned on
+\emph{experience}: the incumbent best program and harness, and a digest of
+what every previous candidate did, scored, and died of.  A key assumption is
+that rollout score under the frozen executor is a faithful measure of
+harness quality; we discuss where this assumption frays---evaluator noise,
+timeout artifacts---and how the system detects such fraying from telemetry.
+
+Three properties motivate this formulation.  \emph{Amortization}: search
+cost is paid at training time; synthesis for a new round is a single
+proposer episode, in contrast to per-task scaffold search---the same
+argument that motivates learned optimizers and
+hypernetworks~\citep{learn2learn,hypernetworks}.  \emph{Expressiveness}:
+because the spec's generative channel carries executable code, the
+reachable harness space is not limited to prompt
+variations~\citep{adas,latm,voyager}---a proposed agent can differ from its
+siblings in what machinery exists, not only in how it is described.
+\emph{Attribution and safety}: freezing $M_0$ makes every point of
+improvement attributable to the harness, and keeps the executor's behavioral
+properties intact---but letting an optimizer write code that runs inside an
+evaluation loop invites reward hacking and specification
+gaming~\citep{skalse2022,specgaming,denison2024,baker2025,metr2025,
+impossiblebench}.  We therefore make evaluation integrity a design
+invariant: generated tools act only through a capability-bounded SDK that
+cannot reach the evaluator, pass fail-closed static gates and sandboxed
+self-tests, and are repaired---when broken---by \emph{the same frozen model}
+under a localization guard, so the repair channel can fix bugs but cannot
+inject knowledge (\S\ref{sec:method-safety}).  We do not finetune the
+executor, and we do not co-train proposer and executor; both are deliberate
+scoping choices.
+
+We evaluate on eleven discovery tasks spanning the mathematical
+constructions popularized by the AlphaEvolve
+line~\citep{alphaevolve,alphaevolvemath}---the Erd\H{o}s minimum-overlap
+problem, two autocorrelation inequalities, circle packing, and maximal
+Hadamard determinants---four systems-algorithm benchmarks from the ADRS
+suite~\citep{barbarians}, and two AtCoder Heuristic Contest
+problems~\citep{ahc,alebench}.  Under a pre-registered budget of at most 30
+RL steps (27 used), the learned proposer's harnesses carry the frozen 9B
+executor~\citep{qwen3} past the discovery-finetuned Finch-9B on
+\textbf{all eleven tasks}---by $+5.7\%$ on ahc058, $+9.0\%$ on circle
+packing, and $+15.1\%$ on transaction scheduling---and past the published
+$\le$10B state of the art on PRISM (25.59 vs.\ 24.70); the same executor
+under the fixed initial harness clears only 3 of 11
+(Table~\ref{tab:main_results}).  The proposer also demonstrates the
+generative channel end to end, authoring novel tools that survive review and
+change the compiled agent's tool set (\S\ref{sec:exp-results}).
+
+Beyond the headline comparison, the campaign is instrumented so that every
+score movement is explainable.  A breakthrough ledger
+(Table~\ref{tab:ledger}) traces each jump to sampling breadth striking a new
+program family, to the inheritance ratchet compounding it, or to new
+information entering the system; the two hardest tasks fell not to more
+iteration but to \emph{diagnosis}---an evaluation timeout that structurally
+favored no-op programs, and a scoring rule whose structure the executor had
+never been told.  We take this as the paper's central qualitative finding:
+much of what reads as a small model's capability ceiling is a harness that
+has not told the executor what game it is playing---and a trained proposer,
+fed the right experience, learns to close exactly that gap.

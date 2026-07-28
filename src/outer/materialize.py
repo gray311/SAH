@@ -94,8 +94,11 @@ def _build_skill_list(effective: Dict[str, Any], cand_dir: Path) -> list:
         name = sk["name"]
         d = cand_dir / "skills" / name
         d.mkdir(parents=True, exist_ok=True)
-        header = f"# {name}\n\n{sk.get('description', '').strip()}\n\n"
-        (d / "SKILL.md").write_text(header + sk["body"].strip() + "\n")
+        # NexAU requires YAML frontmatter (--- name/description ---) before the body
+        desc = (sk.get("description", "") or f"Task-specific playbook: {name}").strip()
+        desc = desc.replace("\n", " ").replace(":", " -")[:400]
+        fm = f"---\nname: {name}\ndescription: {desc}\n---\n\n"
+        (d / "SKILL.md").write_text(fm + sk["body"].strip() + "\n")
         out.append(f"./skills/{name}")
     return out
 

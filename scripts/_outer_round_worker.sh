@@ -136,7 +136,6 @@ run_rollout(){ # tid k evals logsuffix
     --base-url "http://127.0.0.1:$port/v1" --model "$SERVED_MODEL" \
     --max-evals "$evals" ${EVAL_TIMEOUT:+--eval-timeout "$EVAL_TIMEOUT"} \
     ${SEED_PROGRAMS_FILE:+--seed-programs-file "$SEED_PROGRAMS_FILE"} \
-  ${FORCE_TOOL_FRAC:+--force-tool-frac "$FORCE_TOOL_FRAC"} \
     --eval-python python3 --no-trajectory \
     --out "$ROUND_DIR/rollouts/$tid/cand$(printf '%02d' "$k")" \
     > "$ROUND_DIR/rollout_logs/${tid}-cand$(printf '%02d' "$k")${sfx}.log" 2>&1 &

@@ -30,6 +30,7 @@ from outer.materialize import materialize
 
 PROTOCOL = "adaptive_v1"
 STATE_SCHEMA = "sah.adaptive-v1-state/1"
+H1_VERSION = "adaptive-h1/1.0"
 ACTION_AXES = {"prompt", "search", "inference", "context", "profiles"}
 ACTION_FIELDS = {
     "proposal_id",
@@ -69,17 +70,24 @@ OBJECTIVE = (
 
 ALIASES = {
     "system_prompt": "/system_prompt",
-    "max_iterations": "/max_iterations",
-    "temperature": "/llm/temperature",
-    "max_tokens": "/llm/max_tokens",
-    "skills": "/skills",
+    "max_iterations": "/agent/max_iterations",
+    "temperature": "/sampling/temperature",
+    "max_tokens": "/sampling/max_tokens",
+}
+
+# Accept existing Adaptive v1 actions while presenting only native h2spec/1.0
+# pointers in new proposer contexts and artifacts.
+LEGACY_POINTER_ALIASES = {
+    "/max_iterations": "/agent/max_iterations",
+    "/llm/temperature": "/sampling/temperature",
+    "/llm/max_tokens": "/sampling/max_tokens",
 }
 
 MUTABLE_POINTERS = (
     "/system_prompt",
-    "/max_iterations",
-    "/llm/temperature",
-    "/llm/max_tokens",
+    "/agent/max_iterations",
+    "/sampling/temperature",
+    "/sampling/max_tokens",
 )
 
 
@@ -93,6 +101,16 @@ def _canonical(value: Any) -> str:
 
 def _digest(value: Any) -> str:
     return "sha256:" + hashlib.sha256(_canonical(value).encode()).hexdigest()[:16]
+
+
+def h1_package_hash() -> str:
+    """Hash every source file in the fixed Adaptive H1 package."""
+    digest = hashlib.sha256()
+    for path in sorted(ADAPTIVE_H1_PACKAGE.rglob("*")):
+        if path.is_file() and "__pycache__" not in path.parts:
+            digest.update(str(path.relative_to(ADAPTIVE_H1_PACKAGE)).encode())
+            digest.update(path.read_bytes())
+    return "sha256:" + digest.hexdigest()[:16]
 
 
 def _extract_json_object(text: str) -> Mapping[str, Any]:
@@ -222,15 +240,11 @@ def read_adaptive_base(package_dir: Path) -> tuple[Dict[str, Any], Dict[str, Any
     """Read the native SAH H2 spec and expose only its supported mutable fields."""
     package_dir = Path(package_dir)
     base = hs.read_base_spec(package_dir)
-    agent = yaml.safe_load((package_dir / "agent.yaml").read_text()) or {}
     view = {
         "/system_prompt": base["system_prompt"],
-        "/max_iterations": int(base["agent"]["max_iterations"]),
-        "/llm/temperature": float(base["sampling"]["temperature"]),
-        "/llm/max_tokens": int(base["sampling"]["max_tokens"]),
-        # Visible for honest capability reporting, but not in mutable_set_fields:
-        # SAH has no stable profile registry, so profile edits fail closed.
-        "/skills": [str(item) for item in agent.get("skills", []) or []],
+        "/agent/max_iterations": int(base["agent"]["max_iterations"]),
+        "/sampling/temperature": float(base["sampling"]["temperature"]),
+        "/sampling/max_tokens": int(base["sampling"]["max_tokens"]),
     }
     return base, view
 
@@ -253,11 +267,11 @@ def _validate_pointer(pointer: str, value: Any) -> Any:
         if not isinstance(value, str) or not 40 <= len(value.strip()) <= 8000:
             raise ValueError("/system_prompt: expected 40..8000 characters")
         return value.strip()
-    if pointer == "/max_iterations":
+    if pointer == "/agent/max_iterations":
         return integer(8, 80)
-    if pointer == "/llm/temperature":
+    if pointer == "/sampling/temperature":
         return number(0.0, 1.5)
-    if pointer == "/llm/max_tokens":
+    if pointer == "/sampling/max_tokens":
         return integer(1024, 16384)
     raise ValueError(f"unknown or non-mutable HarnessOpt field: {pointer!r}")
 
@@ -307,7 +321,9 @@ def compile_action(
     working = _json_clone(base_view)
     for atom in action.edit_atoms:
         if atom.kind == "set":
-            pointer = ALIASES.get(atom.field, atom.field)
+            pointer = ALIASES.get(
+                atom.field, LEGACY_POINTER_ALIASES.get(atom.field, atom.field)
+            )
             if not pointer.startswith("/"):
                 pointer = "/" + pointer.replace(".", "/")
             if pointer not in MUTABLE_POINTERS:
@@ -336,9 +352,24 @@ def compile_action(
 
     effective = _json_clone(base_spec)
     effective["system_prompt"] = working["/system_prompt"]
-    effective.setdefault("agent", {})["max_iterations"] = working["/max_iterations"]
-    effective.setdefault("sampling", {})["temperature"] = working["/llm/temperature"]
-    effective.setdefault("sampling", {})["max_tokens"] = working["/llm/max_tokens"]
+    effective.setdefault("agent", {})["max_iterations"] = working[
+        "/agent/max_iterations"
+    ]
+    effective.setdefault("sampling", {})["temperature"] = working[
+        "/sampling/temperature"
+    ]
+    effective.setdefault("sampling", {})["max_tokens"] = working[
+        "/sampling/max_tokens"
+    ]
+    rendered = yaml.safe_dump(
+        effective, sort_keys=False, allow_unicode=True, width=100
+    )
+    validation = hs.parse_and_validate(rendered)
+    if not validation.valid:
+        raise ValueError(
+            "compiled native h2spec/1.0 is invalid: "
+            + "; ".join(validation.errors)
+        )
     return effective, changed
 
 
@@ -349,6 +380,7 @@ def default_state() -> Dict[str, Any]:
         "created": time.strftime("%Y%m%d-%H%M%S"),
         "tasks": {},
         "active_adapter": None,
+        "pending_training": None,
         "committed_batches": [],
     }
 
@@ -384,13 +416,17 @@ def _task_state(
     *,
     base_package: str,
     base_score: float,
+    seed_score: Optional[float] = None,
 ) -> Dict[str, Any]:
     existing = dict((state.get("tasks") or {}).get(task_id) or {})
+    working = dict(
+        existing.get("working")
+        or {"package": base_package, "score": base_score, "from": "initial"}
+    )
+    if seed_score is not None:
+        working.setdefault("seed_score", float(seed_score))
     return {
-        "working": dict(
-            existing.get("working")
-            or {"package": base_package, "score": base_score, "from": "initial"}
-        ),
+        "working": working,
         "champion": dict(
             existing.get("champion")
             or {"package": base_package, "score": base_score, "from": "initial"}
@@ -436,9 +472,9 @@ def _capability_contract() -> Dict[str, Any]:
         ),
         "constraints": {
             "/system_prompt": {"type": "string", "min_length": 40, "max_length": 8000},
-            "/max_iterations": {"type": "integer", "min": 8, "max": 80},
-            "/llm/temperature": {"type": "number", "min": 0.0, "max": 1.5},
-            "/llm/max_tokens": {"type": "integer", "min": 1024, "max": 16384},
+            "/agent/max_iterations": {"type": "integer", "min": 8, "max": 80},
+            "/sampling/temperature": {"type": "number", "min": 0.0, "max": 1.5},
+            "/sampling/max_tokens": {"type": "integer", "min": 1024, "max": 16384},
         },
         "always_protected": [
             "budgets", "evaluator", "ledger", "model", "policy", "splits",
@@ -598,8 +634,6 @@ def make_nexau_generator(
         llm.base_url = base_url
         llm.api_key = api_key or "EMPTY"
         llm.timeout = timeout
-        llm.temperature = float(generation["temperature"])
-        llm.max_tokens = int(generation["max_tokens"])
         extra = getattr(llm, "extra_params", None)
         if not isinstance(extra, dict):
             extra = {}
@@ -639,8 +673,6 @@ def propose_group(
     base_user_context: str,
     known_evidence_ids: Iterable[str],
     generate: GenerationFn,
-    temperature: float = 0.8,
-    max_tokens: int = 2048,
 ) -> List[CandidateRecord]:
     """Sequential K sampling so later samples see prior valid actions."""
     records: List[CandidateRecord] = []
@@ -678,8 +710,6 @@ def propose_group(
             + json.dumps(diversity, ensure_ascii=False, default=str)
         )
         generation = {
-            "temperature": temperature,
-            "max_tokens": max_tokens,
             "seed": base_seed + round_index * 1000 + sample_index,
         }
         try:
@@ -839,7 +869,11 @@ def cmd_propose(args, *, load_bases: Callable[..., Dict[str, Dict[str, Any]]]) -
         base_package = str(bases[tid]["package"])
         base_score = float(bases[tid]["score"])
         task_state = _task_state(
-            state, tid, base_package=base_package, base_score=base_score
+            state,
+            tid,
+            base_package=base_package,
+            base_score=base_score,
+            seed_score=float(bases[tid]["seed_score"]),
         )
         base_spec, base_view = read_adaptive_base(Path(base_package))
         entry = inherited.get(tid)
@@ -861,7 +895,7 @@ def cmd_propose(args, *, load_bases: Callable[..., Dict[str, Dict[str, Any]]]) -
             seed_score=seed_score,
             base_score=base_score,
             max_evals=args.max_evals,
-            current_harness=base_view,
+            current_harness=base_spec,
             task_state=task_state,
         )
         prompts[tid] = base_context
@@ -957,6 +991,8 @@ def cmd_propose(args, *, load_bases: Callable[..., Dict[str, Dict[str, Any]]]) -
             "valid (sequential Adaptive v1 samples)"
         )
 
+    h1_document = yaml.safe_load((ADAPTIVE_H1_PACKAGE / "agent.yaml").read_text()) or {}
+    h1_sampling = dict(h1_document.get("llm_config") or {})
     metadata = {
         "round": args.round,
         "protocol_round": protocol_round,
@@ -964,11 +1000,13 @@ def cmd_propose(args, *, load_bases: Callable[..., Dict[str, Dict[str, Any]]]) -
         "mode": "instance_wise",
         "protocol": PROTOCOL,
         "protocol_state": str(state_path),
+        "h1_version": H1_VERSION,
+        "h1_package_hash": h1_package_hash(),
         "proposer_topology": {
             "llm_agents": 1,
             "proposer": "NexAU Agent with ModelHarnessActionPolicy-compatible JSON",
             "runtime": "nexau.AgentConfig.from_yaml",
-            "package": str(ADAPTIVE_H1_PACKAGE),
+            "package": "src/protocols/adaptive_v1_harness",
             "samples": args.k,
             "analyzer": "deterministic_context_builder",
             "builder": "deterministic_action_compiler",
@@ -979,8 +1017,9 @@ def cmd_propose(args, *, load_bases: Callable[..., Dict[str, Dict[str, Any]]]) -
             "base_urls": base_urls,
             "model": args.model,
             "seed": args.seed,
-            "temperature": 0.8,
-            "max_tokens": 2048,
+            "temperature": h1_sampling.get("temperature"),
+            "top_p": h1_sampling.get("top_p"),
+            "max_tokens": h1_sampling.get("max_tokens"),
         },
         "tasks_order": args.tasks,
         "max_evals": args.max_evals,

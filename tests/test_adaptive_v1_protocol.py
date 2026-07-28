@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -52,6 +53,10 @@ class AdaptiveProposalTests(unittest.TestCase):
         source = (REPO / "src/protocols/adaptive_v1_proposal.py").read_text()
         self.assertNotIn("from openai import OpenAI", source)
         self.assertIn("def make_nexau_generator(", source)
+        self.assertNotIn('llm.temperature = float(generation[', source)
+        self.assertNotIn('llm.max_tokens = int(generation[', source)
+        self.assertEqual(adaptive.H1_VERSION, "adaptive-h1/1.0")
+        self.assertRegex(adaptive.h1_package_hash(), r"^sha256:[0-9a-f]{16}$")
 
     def test_sequential_samples_see_prior_valid_actions(self) -> None:
         responses = iter(
@@ -175,7 +180,7 @@ class AdaptiveProposalTests(unittest.TestCase):
         effective, changed = adaptive.compile_action(
             action, base_spec=base, base_view=self.view
         )
-        self.assertEqual(changed, ["/llm/temperature"])
+        self.assertEqual(changed, ["/sampling/temperature"])
         self.assertEqual(effective["new_skills"], base["new_skills"])
         self.assertEqual(effective["sampling"]["temperature"], 0.2)
         self.assertNotIn("adaptive_runtime", effective)
@@ -183,6 +188,34 @@ class AdaptiveProposalTests(unittest.TestCase):
         validation = hs.parse_and_validate(rendered)
         self.assertTrue(validation.valid, validation.errors)
         self.assertEqual(base, base_before)
+
+    def test_native_h2_pointers_and_schema_validation_fail_closed(self) -> None:
+        self.assertEqual(
+            adaptive.MUTABLE_POINTERS,
+            (
+                "/system_prompt",
+                "/agent/max_iterations",
+                "/sampling/temperature",
+                "/sampling/max_tokens",
+            ),
+        )
+        self.assertNotIn("skills", adaptive.ALIASES)
+        invalid_base = json.loads(json.dumps(self.base))
+        invalid_base["sampling"]["top_p"] = 9.0
+        action = adaptive.HarnessAction.from_dict(
+            {
+                "proposal_id": "candidate",
+                "axis": "inference",
+                "hypothesis": "change a native SAH sampling field",
+                "edit_atoms": [
+                    {"kind": "set", "field": "temperature", "value": 0.2}
+                ],
+            }
+        )
+        with self.assertRaisesRegex(ValueError, "compiled native h2spec/1.0"):
+            adaptive.compile_action(
+                action, base_spec=invalid_base, base_view=self.view
+            )
 
     def test_adaptive_candidate_is_native_sah_nexau_package(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -311,6 +344,22 @@ class AdaptiveProposalTests(unittest.TestCase):
         self.assertNotIn("mutable_set_fields", payload)
         self.assertIn('"truncated": true', rendered)
 
+    def test_context_can_expose_the_complete_native_h2spec(self) -> None:
+        rendered, payload = adaptive.build_user_context(
+            task_id="task",
+            round_index=0,
+            task_spec="spec",
+            seed_program="pass",
+            seed_score=0.0,
+            base_score=1.0,
+            max_evals=20,
+            current_harness=self.base,
+            task_state={"archive": {}, "controller": {}},
+        )
+        self.assertEqual(payload["current_harness"]["schema"], "h2spec/1.0")
+        self.assertIn("tool_descriptions", payload["current_harness"])
+        self.assertIn('"schema": "h2spec/1.0"', rendered)
+
 
 def _write_rollouts(root: Path, task_id: str, scores, program_prefix: str) -> None:
     for index, score in enumerate(scores):
@@ -367,7 +416,7 @@ def _make_round(
         "edit_atoms": [
             {
                 "kind": "set",
-                "field": "/llm/temperature",
+                "field": "/sampling/temperature",
                 "value": 0.1,
             }
         ],
@@ -388,7 +437,7 @@ def _make_round(
             "valid": True,
             "errors": [],
             "spec_hash": f"hash-{round_index}-1",
-            "changed_fields": ["/llm/temperature"],
+            "changed_fields": ["/sampling/temperature"],
             "action": action1,
         },
     ]
@@ -509,9 +558,42 @@ class AdaptiveControllerTests(unittest.TestCase):
             )
             self.assertTrue((rounds[3] / "adaptive_train_batch.jsonl").exists())
             state = json.loads(state_path.read_text())
+            self.assertEqual(
+                state["pending_training"]["manifest_path"],
+                str(rounds[3] / "adaptive_train_manifest.json"),
+            )
+            pending_status = adaptive.campaign_status(
+                state_path=state_path, task_id=task_id
+            )
+            self.assertEqual(
+                pending_status["pending_training"]["protocol_round"], 3
+            )
             controller = state["tasks"][task_id]["controller"]
             self.assertGreater(len(controller["pending_examples"]), 0)
             self.assertEqual(controller["policy_updates"], 0)
+
+            blocked_round = _make_round(
+                root,
+                round_index=4,
+                task_id=task_id,
+                state_path=state_path,
+                base_score=103.0,
+                champion_score=110.0,
+                positive_score=102.0,
+                negative_score=90.0,
+                total_rounds=6,
+            )
+            with self.assertRaisesRegex(
+                ValueError, "uncommitted training batch"
+            ):
+                adaptive.cmd_collect(
+                    SimpleNamespace(
+                        round_dir=str(blocked_round),
+                        protocol_state=str(state_path),
+                        confidence_z=0.0,
+                        plateau_rounds=3,
+                    )
+                )
 
             adaptive.commit_update(
                 state_path=state_path,
@@ -526,6 +608,116 @@ class AdaptiveControllerTests(unittest.TestCase):
             self.assertEqual(controller["policy_updates"], 1)
             self.assertEqual(controller["rounds_since_confirmed_record"], 0)
             self.assertEqual(controller["last_training_decision"], "trained")
+            self.assertIsNone(committed["pending_training"])
+            status = adaptive.campaign_status(
+                state_path=state_path, task_id=task_id
+            )
+            self.assertEqual(status["next_protocol_round"], 4)
+            self.assertEqual(status["active_adapter"]["path"], "/merged/mphi_u000")
+            self.assertEqual(status["working"]["seed_score"], 0.0)
+
+    def test_missing_matched_base_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            state_path = root / "adaptive_state.json"
+            task_id = "fixture_task"
+            round_dir = _make_round(
+                root,
+                round_index=0,
+                task_id=task_id,
+                state_path=state_path,
+                base_score=100.0,
+                champion_score=100.0,
+                positive_score=110.0,
+                negative_score=90.0,
+            )
+            shutil.rmtree(
+                round_dir / "rollouts" / task_id / "base" / "outcome"
+            )
+            with self.assertRaisesRegex(
+                ValueError, "missing matched base outcome"
+            ):
+                adaptive.cmd_collect(
+                    SimpleNamespace(
+                        round_dir=str(round_dir),
+                        protocol_state=str(state_path),
+                        confidence_z=0.0,
+                        plateau_rounds=3,
+                    )
+                )
+            self.assertFalse(state_path.exists())
+
+    def test_missing_promotion_never_falls_back_to_outcome(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            state_path = root / "adaptive_state.json"
+            task_id = "fixture_task"
+            round_dir = _make_round(
+                root,
+                round_index=0,
+                task_id=task_id,
+                state_path=state_path,
+                base_score=100.0,
+                champion_score=100.0,
+                positive_score=110.0,
+                negative_score=90.0,
+            )
+            shutil.rmtree(
+                round_dir
+                / "rollouts"
+                / task_id
+                / "cand00"
+                / "promotion"
+            )
+            adaptive.cmd_collect(
+                SimpleNamespace(
+                    round_dir=str(round_dir),
+                    protocol_state=str(state_path),
+                    confidence_z=0.0,
+                    plateau_rounds=3,
+                )
+            )
+            summary = json.loads((round_dir / "round_summary.json").read_text())
+            group = summary["groups"][task_id]
+            self.assertEqual(group["working_k"], 0)
+            self.assertIsNone(group["champion_k"])
+            self.assertIsNone(group["rows"][0]["promotion_score"])
+
+    def test_missing_champion_reference_disables_promotion(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            state_path = root / "adaptive_state.json"
+            task_id = "fixture_task"
+            round_dir = _make_round(
+                root,
+                round_index=0,
+                task_id=task_id,
+                state_path=state_path,
+                base_score=100.0,
+                champion_score=100.0,
+                positive_score=110.0,
+                negative_score=90.0,
+            )
+            shutil.rmtree(
+                round_dir
+                / "rollouts"
+                / task_id
+                / "champion"
+                / "promotion"
+            )
+            adaptive.cmd_collect(
+                SimpleNamespace(
+                    round_dir=str(round_dir),
+                    protocol_state=str(state_path),
+                    confidence_z=0.0,
+                    plateau_rounds=3,
+                )
+            )
+            group = json.loads(
+                (round_dir / "round_summary.json").read_text()
+            )["groups"][task_id]
+            self.assertFalse(group["champion_reference_available"])
+            self.assertIsNone(group["champion_k"])
 
     def test_final_round_never_requests_unused_update(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

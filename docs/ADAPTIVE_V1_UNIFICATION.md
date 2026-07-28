@@ -56,7 +56,10 @@ src/protocols/adaptive_v1_harness/
 
 `system.md` is byte-for-byte the final Adaptive v1 proposal prompt. A fresh
 NexAU Agent is constructed for each sequential sample, and its actual message
-history is recorded as the outer trajectory.
+history is recorded as the outer trajectory. As in SAH, `agent.yaml` is the
+single source of truth for H1 sampling; runtime code overrides only the served
+endpoint/model, timeout, and per-sample seed. Every round records an
+`h1_version` and whole-package hash.
 
 The adapter itself is split along the same boundary:
 
@@ -90,7 +93,10 @@ selecting `adaptive_v1`.
 Adaptive does not extend or relax `outer/harness_spec.py`. Its deterministic
 compiler accepts only fields already represented by native `h2spec/1.0`:
 `system_prompt`, `agent.max_iterations`, `sampling.temperature`, and
-`sampling.max_tokens`. Unsupported context/profile operations fail closed.
+`sampling.max_tokens`. The public pointers use those same native paths
+(`/agent/max_iterations`, `/sampling/temperature`, and
+`/sampling/max_tokens`); legacy Adaptive aliases remain accepted. Unsupported
+context/profile operations fail closed.
 
 Every accepted action is compiled into a complete native SAH spec, validated
 by the unmodified SAH schema, and passed directly to the existing
@@ -99,6 +105,10 @@ shape (`agent.yaml`, `prompt.md`, `spec.yaml`, `tools/`, `skills/`,
 `middlewares/`). `spec.yaml` contains the full native H2 spec and uses SAH's
 own `spec_hash`; there is no Adaptive runtime overlay or post-materialization
 patch.
+
+The proposer context includes the complete current native H2 spec, not an
+Adaptive-only flattened surrogate. The mutable contract remains sparse, so
+seeing inherited tools/skills/middleware does not authorize modifying them.
 
 The shared additions are backward-compatible:
 
@@ -129,6 +139,7 @@ K=4
 MAX_EVALS=20
 ROLLOUT_REPEATS=3
 PROMOTION_REPEATS=3
+ROLLOUT_SEED=104729
 PLATEAU_ROUNDS=3
 CONFIDENCE_Z=0
 PROPOSER_SEED=23
@@ -146,7 +157,21 @@ The Adaptive state is a task-keyed atomic JSON file containing:
 - public outcome attempts and operator statistics;
 - pending/replay policy examples;
 - confirmed-record plateau counters;
-- committed proposer batches and the active adapter.
+- committed proposer batches and the active adapter;
+- an explicit pending-training record when a signed batch has not yet been
+  committed.
+
+Campaign startup reads this state through:
+
+```bash
+PYTHONPATH=src python -m protocols.adaptive_v1 campaign-status \
+  --state <adaptive_v1_state.json> --task <task_id>
+```
+
+It restores the next protocol round, working H2, active adapter, and previous
+LoRA checkpoint. Existing pending train/merge job IDs are resumed rather than
+submitted twice, and partial/untracked artifact rounds fail closed instead of
+being overwritten.
 
 Collection writes `adaptive_train_batch.jsonl` and a digest-bound manifest
 only when training is required. It does **not** claim training succeeded.
@@ -162,7 +187,14 @@ PYTHONPATH=src python -m protocols.adaptive_v1 commit-update \
 
 Only this commit clears pending examples, moves them to replay, resets the
 plateau window, and increments `policy_updates`. A failed/interrupted trainer
-leaves the controller truthfully uncommitted.
+leaves the controller truthfully uncommitted and blocks collection of a later
+round.
+
+Matched rollout evidence also fails closed: a missing base outcome aborts
+collection; a missing champion reference or candidate promotion can never be
+replaced with outcome evidence and therefore cannot advance the champion.
+`adaptive_rollout_plan.json` records every channel, package, repeat, and
+request seed.
 
 ## Local validation
 
@@ -179,10 +211,12 @@ git diff --check
 The tests exercise exact prompt provenance, the declarative Adaptive NexAU H1
 package, actual NexAU trace preservation, sequential diversity, native SAH
 schema compilation/package parity, dual-frontier selection,
-plateau-triggered signed batches, explicit commit/recovery, final-round skip,
-Adaptive plain-text replay, and the unchanged default SAH collector.
+plateau-triggered signed batches, missing-reference fail-closed behavior,
+explicit adapter/working-frontier recovery, pending-batch blocking,
+final-round skip, Adaptive plain-text replay, and the unchanged default SAH
+collector.
 
-Local result on 2026-07-28: all 13 Adaptive protocol tests passed, as did Python
+Local result on 2026-07-28: all 18 Adaptive protocol tests passed, as did Python
 compilation, shell syntax checks, and `git diff --check`. Final-format GPU
 revalidation completed two consecutive rounds with real Qwen3.5-9B inference:
 8/8 outer traces came from NexAU H1 Agents with exactly one assistant call,

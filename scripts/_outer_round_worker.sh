@@ -22,6 +22,7 @@ PROTOCOL_ROUND="${PROTOCOL_ROUND:-}"
 TOTAL_ROUNDS="${TOTAL_ROUNDS:-}"
 ROLLOUT_REPEATS="${ROLLOUT_REPEATS:-3}"
 PROMOTION_REPEATS="${PROMOTION_REPEATS:-$ROLLOUT_REPEATS}"
+ROLLOUT_SEED="${ROLLOUT_SEED:-104729}"
 PLATEAU_ROUNDS="${PLATEAU_ROUNDS:-3}"
 CONFIDENCE_Z="${CONFIDENCE_Z:-0}"
 
@@ -92,6 +93,7 @@ done
 
 cd "$REPO/src"
 export OPENAI_API_KEY=EMPTY
+export PYTHONDONTWRITEBYTECODE=1
 
 # --- propose (instance-wise: K candidates per task) --- #
 # With split serving, propose targets ONLY replica 0 (M_phi); otherwise all.
@@ -175,32 +177,61 @@ ROLL_IDX=0; rc=0
 if [ "$PROTOCOL" = "adaptive_v1" ]; then
   # Adaptive v1 uses matched repeated base/candidate outcomes and an isolated
   # promotion channel. Promotion scores never enter proposer rewards/context.
-  mapfile -t ADAPTIVE_RUNS < <(python3 - "$ROUND_DIR" "$ROLLOUT_REPEATS" "$PROMOTION_REPEATS" "$PROPOSER_SEED" <<'PY'
+  mapfile -t ADAPTIVE_RUNS < <(python3 - "$ROUND_DIR" "$ROLLOUT_REPEATS" "$PROMOTION_REPEATS" "$ROLLOUT_SEED" <<'PY'
 import json, sys
 rd, outcome_repeats, promotion_repeats, seed = sys.argv[1], int(sys.argv[2]), int(sys.argv[3]), int(sys.argv[4])
 meta = json.load(open(f"{rd}/round.json"))
+plan = []
+def add(tid, label, package, output, request_seed, channel, repeat, candidate=None):
+    plan.append({
+        "task_id": tid,
+        "label": label,
+        "package": package,
+        "output_dir": output,
+        "request_seed": request_seed,
+        "channel": channel,
+        "repeat": repeat,
+        "candidate": candidate,
+    })
 for ti, tid in enumerate(meta["tasks_order"]):
     pt = meta["per_task"][tid]
     for rep in range(outcome_repeats):
         s = seed + ti * 100000 + rep
-        print("|".join((tid, f"base-outcome-r{rep:02d}", pt["base_package"],
-                        f"{rd}/rollouts/{tid}/base/outcome/repeat{rep:02d}", str(s))))
+        add(tid, f"base-outcome-r{rep:02d}", pt["base_package"],
+            f"{rd}/rollouts/{tid}/base/outcome/repeat{rep:02d}",
+            s, "outcome_base", rep)
     for rep in range(promotion_repeats):
         s = seed + ti * 100000 + 50000 + rep
-        print("|".join((tid, f"champion-promotion-r{rep:02d}", pt["champion_package"],
-                        f"{rd}/rollouts/{tid}/champion/promotion/repeat{rep:02d}", str(s))))
+        add(tid, f"champion-promotion-r{rep:02d}", pt["champion_package"],
+            f"{rd}/rollouts/{tid}/champion/promotion/repeat{rep:02d}",
+            s, "promotion_champion", rep)
     for cand in pt["candidates"]:
         if not cand["valid"]:
             continue
         k, cdir = int(cand["k"]), cand["dir"]
         for rep in range(outcome_repeats):
             s = seed + ti * 100000 + rep
-            print("|".join((tid, f"cand{k:02d}-outcome-r{rep:02d}", cdir,
-                            f"{rd}/rollouts/{tid}/cand{k:02d}/outcome/repeat{rep:02d}", str(s))))
+            add(tid, f"cand{k:02d}-outcome-r{rep:02d}", cdir,
+                f"{rd}/rollouts/{tid}/cand{k:02d}/outcome/repeat{rep:02d}",
+                s, "outcome_candidate", rep, k)
         for rep in range(promotion_repeats):
             s = seed + ti * 100000 + 50000 + rep
-            print("|".join((tid, f"cand{k:02d}-promotion-r{rep:02d}", cdir,
-                            f"{rd}/rollouts/{tid}/cand{k:02d}/promotion/repeat{rep:02d}", str(s))))
+            add(tid, f"cand{k:02d}-promotion-r{rep:02d}", cdir,
+                f"{rd}/rollouts/{tid}/cand{k:02d}/promotion/repeat{rep:02d}",
+                s, "promotion_candidate", rep, k)
+with open(f"{rd}/adaptive_rollout_plan.json", "w") as handle:
+    json.dump({
+        "schema": "sah.adaptive-v1-rollout-plan/1",
+        "seed_base": seed,
+        "outcome_repeats": outcome_repeats,
+        "promotion_repeats": promotion_repeats,
+        "runs": plan,
+    }, handle, indent=2)
+for item in plan:
+    print("|".join((
+        item["task_id"], item["label"], item["package"],
+        item["output_dir"], str(item["request_seed"])
+    )))
 PY
 )
   run_adaptive_rollout(){ # tid label harness_dir output_dir request_seed
@@ -251,6 +282,9 @@ else
   while (( $(jobs -rp | wc -l) > 0 )); do wait -n || rc=1; done
 fi
 log "rollouts finished (rc=$rc)"
+if [ "$rc" -ne 0 ]; then
+  log "one or more rollouts failed; Adaptive collector will fail closed if a matched reference is missing"
+fi
 
 # --- collect --- #
 python3 -m outer.outer_round collect --round-dir "$ROUND_DIR" \

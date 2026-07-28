@@ -293,6 +293,13 @@ def cmd_collect(args) -> None:
         round_dir, getattr(args, "protocol_state", None) or meta.get("protocol_state")
     )
     state = load_state(state_path)
+    pending_training = state.get("pending_training")
+    if isinstance(pending_training, Mapping):
+        raise ValueError(
+            "Adaptive state has an uncommitted training batch at "
+            f"{pending_training.get('manifest_path')}; commit or resolve it "
+            "before collecting another round"
+        )
     trajectories = {
         (item["task_id"], item["k"]): item
         for item in json.loads((round_dir / "trajectories.json").read_text())
@@ -326,6 +333,7 @@ def cmd_collect(args) -> None:
             tid,
             base_package=pt["base_package"],
             base_score=float(pt["base_score"]),
+            seed_score=float(pt["seed_score"]),
         )
         if protocol_round in task_state["collected_rounds"]:
             raise ValueError(
@@ -339,14 +347,14 @@ def cmd_collect(args) -> None:
             round_dir / "rollouts" / tid / "base" / "outcome", tid
         )
         if not outcome_base.scores:
-            outcome_base = RolloutSamples((float(pt["base_score"]),), ())
+            raise ValueError(
+                f"missing matched base outcome rollout for {tid}; "
+                "Adaptive collection fails closed"
+            )
         champion_baseline = load_rollout_samples(
             round_dir / "rollouts" / tid / "champion" / "promotion", tid
         )
-        if not champion_baseline.scores:
-            champion_baseline = RolloutSamples(
-                (float(pt.get("champion_score", pt["base_score"])),), ()
-            )
+        champion_reference_available = bool(champion_baseline.scores)
 
         rows: List[Dict[str, Any]] = []
         for candidate in pt["candidates"]:
@@ -365,8 +373,6 @@ def cmd_collect(args) -> None:
             promotion = load_rollout_samples(
                 round_dir / "rollouts" / tid / f"cand{k:02d}" / "promotion", tid
             )
-            if not promotion.scores:
-                promotion = outcome
             score = outcome.mean
             valid = bool(candidate.get("valid") and score is not None)
             directional = (
@@ -461,18 +467,23 @@ def cmd_collect(args) -> None:
 
         # Champion uses only promotion feedback and never leaks that signal
         # into the proposer archive or training reward.
-        champion_base_score = float(champion_baseline.mean or pt["champion_score"])
+        champion_base_score = (
+            float(champion_baseline.mean)
+            if champion_baseline.mean is not None
+            else None
+        )
         champion_eligible = []
-        for row in rows:
-            if not row["valid"] or row["promotion_score"] is None:
-                continue
-            gain = float(row["promotion_score"]) - champion_base_score
-            margin = confidence_z * math.sqrt(
-                float(row["promotion_sem"] or 0.0) ** 2
-                + float(champion_baseline.sem or 0.0) ** 2
-            )
-            if gain > 0.0 and gain >= margin:
-                champion_eligible.append(row)
+        if champion_reference_available and champion_base_score is not None:
+            for row in rows:
+                if not row["valid"] or row["promotion_score"] is None:
+                    continue
+                gain = float(row["promotion_score"]) - champion_base_score
+                margin = confidence_z * math.sqrt(
+                    float(row["promotion_sem"] or 0.0) ** 2
+                    + float(champion_baseline.sem or 0.0) ** 2
+                )
+                if gain > 0.0 and gain >= margin:
+                    champion_eligible.append(row)
         champion = (
             max(champion_eligible, key=lambda row: float(row["promotion_score"]))
             if champion_eligible else None
@@ -634,6 +645,7 @@ def cmd_collect(args) -> None:
             "working_score": working["score"] if working else None,
             "champion_k": champion["k"] if champion else None,
             "champion_score": champion["promotion_score"] if champion else None,
+            "champion_reference_available": champion_reference_available,
             "new_confirmed_record": new_record,
             "confirmed_record": confirmed_record,
             "plateau_streak": streak,
@@ -728,6 +740,13 @@ def cmd_collect(args) -> None:
         (round_dir / "adaptive_train_manifest.json").write_text(
             json.dumps(manifest, indent=2)
         )
+        state["pending_training"] = {
+            "manifest_path": str(round_dir / "adaptive_train_manifest.json"),
+            "batch_sha256": batch_digest,
+            "round": int(meta["round"]),
+            "protocol_round": protocol_round,
+            "tasks": triggered_tasks,
+        }
     _atomic_write_json(state_path, state)
     print(
         f"[adaptive_v1:collect] {len(current_round_rows)} current rows | "
@@ -755,6 +774,8 @@ def commit_update(
         raise ValueError("Adaptive training batch digest mismatch")
     committed = list(state.get("committed_batches") or [])
     if actual in committed:
+        state["pending_training"] = None
+        _atomic_write_json(Path(state_path), state)
         if manifest.get("status") != "committed":
             manifest["status"] = "committed"
             manifest["adapter_path"] = (state.get("active_adapter") or {}).get(
@@ -807,6 +828,7 @@ def commit_update(
         "batch_sha256": actual,
         "round": manifest["round"],
     }
+    state["pending_training"] = None
     state["committed_batches"] = [*committed, actual]
     _atomic_write_json(Path(state_path), state)
     manifest["status"] = "committed"
@@ -814,6 +836,31 @@ def commit_update(
     manifest["checkpoint_path"] = checkpoint_path
     _atomic_write_json(Path(manifest_path), manifest)
     return state
+
+
+def campaign_status(*, state_path: Path, task_id: str) -> Dict[str, Any]:
+    """Return the authoritative resume inputs for one Adaptive campaign."""
+    state = load_state(state_path)
+    task = dict((state.get("tasks") or {}).get(task_id) or {})
+    collected = sorted({int(item) for item in task.get("collected_rounds", [])})
+    if collected and collected != list(range(collected[-1] + 1)):
+        raise ValueError(
+            f"non-contiguous collected rounds for {task_id}: {collected}"
+        )
+    working = dict(task.get("working") or {})
+    active = dict(state.get("active_adapter") or {})
+    controller = dict(task.get("controller") or {})
+    return {
+        "schema": "sah.adaptive-v1-campaign-status/1",
+        "state_path": str(Path(state_path)),
+        "task_id": task_id,
+        "next_protocol_round": collected[-1] + 1 if collected else 0,
+        "collected_rounds": collected,
+        "working": working or None,
+        "active_adapter": active or None,
+        "pending_training": state.get("pending_training"),
+        "policy_updates": int(controller.get("policy_updates", 0)),
+    }
 
 
 def main() -> None:
@@ -826,6 +873,9 @@ def main() -> None:
     commit.add_argument("--manifest", required=True)
     commit.add_argument("--adapter", required=True)
     commit.add_argument("--checkpoint", default=None)
+    status = sub.add_parser("campaign-status")
+    status.add_argument("--state", required=True)
+    status.add_argument("--task", required=True)
     args = parser.parse_args()
     if args.command == "commit-update":
         state = commit_update(
@@ -840,6 +890,15 @@ def main() -> None:
                     "status": "committed",
                     "active_adapter": state.get("active_adapter"),
                 }
+            )
+        )
+    elif args.command == "campaign-status":
+        print(
+            json.dumps(
+                campaign_status(
+                    state_path=Path(args.state),
+                    task_id=args.task,
+                )
             )
         )
 

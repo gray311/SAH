@@ -16,6 +16,7 @@ from protocols.adaptive_v1_controller import (
     main,
 )
 from protocols.adaptive_v1_proposal import (
+    ADAPTIVE_H1_PACKAGE,
     ALIASES,
     MUTABLE_POINTERS,
     OBJECTIVE,
@@ -30,14 +31,14 @@ from protocols.adaptive_v1_proposal import (
     compile_action,
     default_state,
     load_state,
-    make_openai_generator,
-    patch_materialized_package,
+    make_nexau_generator,
     propose_group,
     read_adaptive_base,
     resolve_state_path,
 )
 
 __all__ = [
+    "ADAPTIVE_H1_PACKAGE",
     "ALIASES",
     "MUTABLE_POINTERS",
     "OBJECTIVE",
@@ -56,8 +57,7 @@ __all__ = [
     "load_best_program",
     "load_rollout_samples",
     "load_state",
-    "make_openai_generator",
-    "patch_materialized_package",
+    "make_nexau_generator",
     "propose_group",
     "read_adaptive_base",
     "resolve_state_path",

@@ -4,20 +4,54 @@
 - Result: PASS
 - SAH substrate: `f9868c3ea06e1323d67e3817065035287662108e`
 
-This validation used an ignored local fixture and did not add model weights,
-datasets, adapters, or runtime traces to the repository. It exercised real
-Qwen3.5-9B inference, NexAU inner execution, a real LoRA backward/update/save,
-adapter-backed proposal, and five consecutive Adaptive protocol rounds.
+This validation used ignored local fixtures and did not add model weights,
+datasets, adapters, or runtime traces to the repository. It contains two
+complementary checks:
 
-## Role isolation
+1. an earlier five-round controller/training loop with real Qwen3.5-9B
+   inference, NexAU inner execution, and one real LoRA
+   backward/update/save; and
+2. a final two-round format revalidation after moving the Adaptive outer
+   proposer into a declarative NexAU H1 package and removing the
+   Adaptive-only H2 overlay.
 
-- GPU 0 served the active proposer adapter for outer proposals only.
-- GPU 1 served the unchanged base checkpoint for inner execution only.
-- The real LoRA update used a separate GPU.
+The five-round run validates the controller, replay, update, adapter serving,
+and long-loop behavior. Its outer proposals used the earlier direct
+OpenAI-compatible endpoint adapter, so it is not used as evidence for the
+final NexAU H1 format. The final two-round run is the format/runtime evidence
+for the code on this branch.
+
+## Final NexAU-format revalidation
+
+Both rounds used real Qwen3.5-9B vLLM inference for:
+
+- Adaptive outer H1 via `nexau.AgentConfig.from_yaml` and a fresh `Agent` per
+  sequential sample;
+- every accepted inner H2 via the unchanged SAH NexAU runner.
+
+| protocol round | NexAU outer traces | one assistant call each | valid native SAH H2 | NexAU inner traces | inner errors | controller decision |
+|---:|---:|---|---:|---:|---:|---|
+| 0 | 4 | yes | 3 | 8 / 8 non-empty | 0 | `waiting_for_plateau` |
+| 1 | 4 | yes | 3 | 8 / 8 non-empty | 0 | `skipped_no_future_round` |
+
+All six generated candidate `spec.yaml` files passed the unmodified SAH
+`h2spec/1.0` validator, and all six packages loaded through NexAU
+`AgentConfig.from_yaml`. Round 1 reused the same atomic protocol state and its
+outer context included round 0's archive/evidence. The final state recorded
+`rounds_seen=2` and collected rounds `[0,1]`.
+
+## GPU/service isolation
+
+- In the final two-round format check, one isolated GPU 0 vLLM service backed
+  both the sequential H1 and H2 calls; no other user's service or GPU was
+  reused.
+- In the earlier five-round training check, GPU 0 served the active proposer
+  adapter for outer proposals, GPU 1 served the unchanged base checkpoint for
+  inner execution, and the real LoRA update used a separate GPU.
 - All services were stopped after the loop; the final audit showed all four
   GPUs at 0 MiB with no remaining compute process.
 
-## Five-round result
+## Earlier five-round controller/training result
 
 | protocol round | proposer | valid candidates | outer traces | inner results | controller decision |
 |---:|---|---:|---:|---:|---|
@@ -27,10 +61,11 @@ adapter-backed proposal, and five consecutive Adaptive protocol rounds.
 | 3 | same committed adapter | 3 / 4 | 4 | 8 | `skipped_no_signed_contrast` |
 | 4 | same committed adapter | 3 / 4 | 4 | 8 | `skipped_no_future_round` |
 
-All 24 outer trajectories were non-empty. All 38 inner results retained
+All 24 earlier outer trajectories were non-empty. All 38 inner results retained
 non-empty trajectories, and none reported an inner error. Controller state
 finished with `rounds_seen=5`, collected rounds `[0,1,2,3,4]`,
-`policy_updates=1`, and the committed adapter still active.
+`policy_updates=1`, and the committed adapter still active. As noted above,
+these outer traces predate the final NexAU H1 normalization.
 
 Round 1 was originally collected as the final round of the initial two-round
 smoke. The extension resumed the same atomic state for rounds 2–4 with a
@@ -54,9 +89,12 @@ then completed on the same Qwen3.5-9B weights:
 - peak allocated CUDA memory: `29,647,298,560` bytes.
 
 The update manifest was committed only after save success. The next four
-rounds all used that committed adapter for proposal. The local replay
+earlier rounds all used that committed adapter for proposal. The local replay
 conversion preserved all 6/6 signed rows and emitted `tools=[]`, matching the
-Adaptive plain-text policy format.
+Adaptive plain-text action contract. The final two-round format revalidation
+did not trigger another optimizer step: its small fixture reached the score
+ceiling and the declared second round had no future round that could consume a
+new adapter.
 
 ## What the later rounds establish
 
@@ -67,9 +105,17 @@ without manufacturing positive credit or repeatedly training on negative-only
 data. This is the expected Adaptive v1 safety behavior: the loop continued,
 while optimizer work was skipped when no signed causal contrast existed.
 
-Consequently, this run proves one real policy update followed by four
+Consequently, the earlier run proves one real policy update followed by four
 adapter-backed protocol rounds and correct no-op gating; it does not claim
-multiple useful weight updates on a saturated task.
+multiple useful weight updates on a saturated task. The final two-round run
+separately proves the outer NexAU H1 → native SAH H2 → inner NexAU execution
+path and cross-round archive carryover.
+
+## Cleanup record
+
+Every vLLM service used by these checks was stopped at experiment exit. The
+final audit on 2026-07-28 reported all four GPUs at 0 MiB, no compute
+processes, and no remaining experiment process.
 
 ## Remaining environment-specific check
 

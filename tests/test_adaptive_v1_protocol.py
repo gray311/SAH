@@ -15,6 +15,7 @@ import yaml
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "src"))
 
+from outer import harness_spec as hs  # noqa: E402
 from outer.materialize import materialize  # noqa: E402
 from outer import outer_round  # noqa: E402
 from protocols import adaptive_v1 as adaptive  # noqa: E402
@@ -34,6 +35,23 @@ class AdaptiveProposalTests(unittest.TestCase):
         )
         self.assertIn("Produce exactly one sparse", adaptive.PROPOSER_SYSTEM_PROMPT)
         self.assertIn("mean_learning_reward", adaptive.PROPOSER_SYSTEM_PROMPT)
+
+    def test_outer_proposer_is_a_declarative_nexau_package(self) -> None:
+        package = adaptive.ADAPTIVE_H1_PACKAGE
+        config = yaml.safe_load((package / "agent.yaml").read_text())
+        self.assertEqual(config["type"], "agent")
+        self.assertEqual(config["name"], "adaptive_v1_outer_proposer")
+        self.assertEqual(config["max_iterations"], 2)
+        self.assertEqual(config["tools"], [])
+        self.assertEqual(config["tracers"][0]["import"],
+                         "nexau.archs.tracer.adapters.in_memory:InMemoryTracer")
+        self.assertEqual(
+            (package / config["system_prompt"]).resolve().read_text(),
+            adaptive.PROPOSER_SYSTEM_PROMPT,
+        )
+        source = (REPO / "src/protocols/adaptive_v1_proposal.py").read_text()
+        self.assertNotIn("from openai import OpenAI", source)
+        self.assertIn("def make_nexau_generator(", source)
 
     def test_sequential_samples_see_prior_valid_actions(self) -> None:
         responses = iter(
@@ -132,9 +150,9 @@ class AdaptiveProposalTests(unittest.TestCase):
             [message["role"] for message in record.trajectory],
             ["system", "user", "assistant"],
         )
-        self.assertIn("expected number in [0.5, 0.9]", record.errors[0])
+        self.assertIn("unknown or non-mutable HarnessOpt field", record.errors[0])
 
-    def test_compiler_preserves_sah_genome_and_adds_only_overlay(self) -> None:
+    def test_compiler_produces_only_native_sah_h2spec_fields(self) -> None:
         base = json.loads(json.dumps(self.base))
         base["new_skills"] = [
             {"name": "kept-skill", "description": "kept", "body": "Keep this."}
@@ -143,13 +161,13 @@ class AdaptiveProposalTests(unittest.TestCase):
         action = adaptive.HarnessAction.from_dict(
             {
                 "proposal_id": "candidate",
-                "axis": "context",
-                "hypothesis": "compact earlier while retaining four iterations",
+                "axis": "inference",
+                "hypothesis": "reduce sampling noise while preserving the SAH genome",
                 "edit_atoms": [
                     {
                         "kind": "set",
-                        "field": "compaction.threshold",
-                        "value": 0.7,
+                        "field": "temperature",
+                        "value": 0.2,
                     }
                 ],
             }
@@ -157,27 +175,24 @@ class AdaptiveProposalTests(unittest.TestCase):
         effective, changed = adaptive.compile_action(
             action, base_spec=base, base_view=self.view
         )
-        self.assertEqual(changed, ["/context_compaction/threshold"])
+        self.assertEqual(changed, ["/llm/temperature"])
         self.assertEqual(effective["new_skills"], base["new_skills"])
-        self.assertEqual(
-            effective["adaptive_runtime"]["context_compaction"]["threshold"], 0.7
-        )
-        self.assertTrue(
-            effective["adaptive_runtime"]["context_compaction"]["enabled"]
-        )
+        self.assertEqual(effective["sampling"]["temperature"], 0.2)
+        self.assertNotIn("adaptive_runtime", effective)
+        rendered = yaml.safe_dump(effective, sort_keys=False)
+        validation = hs.parse_and_validate(rendered)
+        self.assertTrue(validation.valid, validation.errors)
         self.assertEqual(base, base_before)
 
-    def test_adaptive_overlay_does_not_change_plain_sah_materialization(self) -> None:
+    def test_adaptive_candidate_is_native_sah_nexau_package(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             plain = Path(temp) / "plain"
-            materialize(self.base, plain)
-            plain_agent = yaml.safe_load((plain / "agent.yaml").read_text())
-            self.assertFalse(
-                any(
-                    "context_compaction" in item["import"]
-                    for item in plain_agent["middlewares"]
-                )
+            materialize(
+                self.base,
+                plain,
+                raw_spec_text=yaml.safe_dump(self.base, sort_keys=False),
             )
+            plain_agent = yaml.safe_load((plain / "agent.yaml").read_text())
 
             adaptive_dir = Path(temp) / "adaptive"
             action = adaptive.HarnessAction.from_dict(
@@ -197,50 +212,79 @@ class AdaptiveProposalTests(unittest.TestCase):
             effective, _ = adaptive.compile_action(
                 action, base_spec=self.base, base_view=self.view
             )
-            materialize(effective, adaptive_dir)
-            adaptive.patch_materialized_package(adaptive_dir, effective)
+            materialize(
+                effective,
+                adaptive_dir,
+                raw_spec_text=yaml.safe_dump(effective, sort_keys=False),
+            )
             adaptive_agent = yaml.safe_load(
                 (adaptive_dir / "agent.yaml").read_text()
             )
-            self.assertFalse(
-                any(
-                    "context_compaction" in item["import"]
-                    for item in adaptive_agent["middlewares"]
-                )
+            self.assertEqual(set(adaptive_agent), set(plain_agent))
+            self.assertEqual(adaptive_agent["type"], "agent")
+            self.assertEqual(adaptive_agent["tool_call_mode"], "structured")
+            self.assertEqual(adaptive_agent["tools"], plain_agent["tools"])
+            self.assertEqual(adaptive_agent["skills"], plain_agent["skills"])
+            self.assertEqual(
+                [item["import"] for item in adaptive_agent["middlewares"]],
+                [item["import"] for item in plain_agent["middlewares"]],
             )
+            expected_files = {
+                path.relative_to(plain)
+                for path in plain.rglob("*")
+                if path.is_file()
+            }
+            actual_files = {
+                path.relative_to(adaptive_dir)
+                for path in adaptive_dir.rglob("*")
+                if path.is_file()
+            }
+            self.assertEqual(actual_files, expected_files)
+            validation = hs.parse_and_validate(
+                (adaptive_dir / "spec.yaml").read_text()
+            )
+            self.assertTrue(validation.valid, validation.errors)
             self.assertIn(
                 "<!-- HARNESSOPT:recovery -->",
                 (adaptive_dir / "prompt.md").read_text(),
             )
 
-            compaction_dir = Path(temp) / "adaptive-compaction"
-            compaction_action = adaptive.HarnessAction.from_dict(
+    def test_nexau_history_is_preserved_as_outer_trajectory(self) -> None:
+        response = json.dumps(
+            {
+                "axis": "inference",
+                "hypothesis": "reduce sampling variance",
+                "edit_atoms": [
+                    {"kind": "set", "field": "temperature", "value": 0.3}
+                ],
+            }
+        )
+        nexau_trace = [
+            {"role": "system", "content": "nexau-system"},
+            {"role": "user", "content": "nexau-user"},
+            {"role": "assistant", "content": response},
+        ]
+        records = adaptive.propose_group(
+            count=1,
+            round_index=0,
+            base_seed=1,
+            base_spec=self.base,
+            base_view=self.view,
+            base_user_context="{}",
+            known_evidence_ids=[],
+            generate=lambda *_args: (
+                response,
                 {
-                    "proposal_id": "compaction",
-                    "axis": "context",
-                    "hypothesis": "compact tool results earlier",
-                    "edit_atoms": [
-                        {
-                            "kind": "set",
-                            "field": "compaction.threshold",
-                            "value": 0.7,
-                        }
-                    ],
-                }
-            )
-            compaction_effective, _ = adaptive.compile_action(
-                compaction_action, base_spec=self.base, base_view=self.view
-            )
-            materialize(compaction_effective, compaction_dir)
-            adaptive.patch_materialized_package(
-                compaction_dir, compaction_effective
-            )
-            compaction_agent = yaml.safe_load(
-                (compaction_dir / "agent.yaml").read_text()
-            )
-            self.assertIn(
-                "context_compaction", compaction_agent["middlewares"][0]["import"]
-            )
+                    "runtime": "nexau",
+                    "trajectory": nexau_trace,
+                    "usage": {"total_tokens": 9},
+                },
+            ),
+        )
+        self.assertTrue(records[0].valid)
+        self.assertEqual(records[0].trajectory, nexau_trace)
+        self.assertEqual(records[0].llm_calls, 1)
+        self.assertEqual(records[0].review_log[0]["runtime"], "nexau")
 
     def test_context_fallback_matches_v1_shape(self) -> None:
         task_state = {

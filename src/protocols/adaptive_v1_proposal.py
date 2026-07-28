@@ -2,9 +2,9 @@
 
 This half of the protocol owns:
 
-* one outer LLM proposer, sampled sequentially K times;
+* one fixed NexAU H1 proposer, sampled sequentially K times;
 * deterministic context/analyzer, action compiler, validation, and dedup;
-* SAH's existing H2 package materializer and Adaptive-only package overlay.
+* SAH's existing H2 package materializer and native NexAU package layout.
 
 It intentionally does not introduce Analyzer/Builder/Reviewer LLM agents.
 Those names belonged to an earlier Codex pipeline.  The v1 reviewer was
@@ -52,55 +52,10 @@ ATOM_KINDS = {
 ATOM_FIELDS = {"kind", "field", "value"}
 PROMPT_SECTION_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 EPS = 1e-12
+ADAPTIVE_H1_PACKAGE = Path(__file__).resolve().parent / "adaptive_v1_harness"
 
 # Frozen verbatim from ModelHarnessActionPolicy.SYSTEM_PROMPT in Adaptive v1.
-PROPOSER_SYSTEM_PROMPT = """\
-You are the proposal policy inside HarnessOpt. Produce exactly one sparse,
-evidence-grounded intervention on the mutable agent harness.
-
-One response maps to one executable candidate and one reward. Do not combine
-unrelated experiments. Prefer one edit atom; use at most two when a cross-field
-invariant requires it. Never modify the model, evaluator, tasks, tools,
-credentials, budgets, or protected implementation.
-
-Treat optimizer_memory.recent_attempts as tested interventions, including
-zero-credit and negative results. Do not retry the same target and causal
-mechanism by changing wording, thresholds, or examples. Move to a different
-field, axis, or genuinely different mechanism when an archived direction lacks
-statistically positive reward.
-
-In optimizer_memory.operator_statistics, raw_mean_reward describes observed
-score direction while mean_learning_reward is confidence-adjusted credit.
-Never treat a positive raw mean with zero confidence-adjusted credit as a
-proven improvement.
-
-Allowed edit atoms:
-- {"kind":"set","field":"<exact mutable_set_fields JSON Pointer or declared logical alias>","value":<typed value>}
-- {"kind":"prompt_upsert_section","field":"<stable-section-id>","value":"<instructions>"}
-- {"kind":"prompt_delete_section","field":"<stable-section-id>"}
-- {"kind":"profile_add","value":"<registered profile id>"}
-- {"kind":"profile_remove","value":"<registered profile id>"}
-- {"kind":"profile_swap","field":"<old id>","value":"<new id>"}
-
-For a managed prompt section, field is a short stable section ID and value is
-only the new instruction delta (at most 4000 characters). Never copy or restate
-the full current prompt inside a managed section.
-
-For evidence_ids, copy IDs only from known_evidence_ids (equivalently,
-evidence[*].evidence_id). Never cite state_id, checkpoint IDs, component
-digests, or any other identifier. Use an empty list when no listed evidence
-supports the action.
-
-Return only one JSON object:
-{
-  "axis": "prompt|search|inference|context|profiles",
-  "hypothesis": "causal, falsifiable explanation",
-  "expected_effect": "measurable expected outcome",
-  "evidence_ids": ["only IDs present in the context"],
-  "edit_atoms": [{"kind":"...", "field":"...", "value":"..."}],
-  "preserve": ["important successful behavior to retain"]
-}
-"""
+PROPOSER_SYSTEM_PROMPT = (ADAPTIVE_H1_PACKAGE / "system.md").read_text()
 
 OBJECTIVE = (
     "Maximize expected verifier-valid score at fixed inner rollout budget. "
@@ -114,29 +69,17 @@ OBJECTIVE = (
 
 ALIASES = {
     "system_prompt": "/system_prompt",
-    "max_context_tokens": "/max_context_tokens",
     "max_iterations": "/max_iterations",
-    "tool_call_mode": "/tool_call_mode",
     "temperature": "/llm/temperature",
     "max_tokens": "/llm/max_tokens",
-    "compaction.threshold": "/context_compaction/threshold",
-    "compaction.max_context_tokens": "/context_compaction/max_context_tokens",
-    "compaction.keep_iterations": "/context_compaction/keep_iterations",
-    "compaction.compaction_strategy": "/context_compaction/compaction_strategy",
     "skills": "/skills",
 }
 
 MUTABLE_POINTERS = (
     "/system_prompt",
-    "/max_context_tokens",
     "/max_iterations",
-    "/tool_call_mode",
     "/llm/temperature",
     "/llm/max_tokens",
-    "/context_compaction/max_context_tokens",
-    "/context_compaction/threshold",
-    "/context_compaction/keep_iterations",
-    "/context_compaction/compaction_strategy",
 )
 
 
@@ -275,52 +218,19 @@ class CandidateRecord:
     dropped_unknown_edit_atom_fields: Dict[str, List[str]] = field(default_factory=dict)
 
 
-def _compaction_params(agent: Mapping[str, Any]) -> Dict[str, Any]:
-    for middleware in agent.get("middlewares", []) or []:
-        if "context_compaction" in str(middleware.get("import", "")):
-            return dict(middleware.get("params") or {})
-    return {}
-
-
 def read_adaptive_base(package_dir: Path) -> tuple[Dict[str, Any], Dict[str, Any]]:
-    """Read SAH's full H2 spec plus Adaptive-only runtime pointers."""
+    """Read the native SAH H2 spec and expose only its supported mutable fields."""
     package_dir = Path(package_dir)
     base = hs.read_base_spec(package_dir)
     agent = yaml.safe_load((package_dir / "agent.yaml").read_text()) or {}
-    compaction = _compaction_params(agent)
-    compaction_enabled = bool(compaction)
-    max_context = int(agent.get("max_context_tokens", 131072))
     view = {
         "/system_prompt": base["system_prompt"],
-        "/max_context_tokens": max_context,
         "/max_iterations": int(base["agent"]["max_iterations"]),
-        "/tool_call_mode": str(agent.get("tool_call_mode", "structured")),
         "/llm/temperature": float(base["sampling"]["temperature"]),
         "/llm/max_tokens": int(base["sampling"]["max_tokens"]),
-        "/context_compaction/max_context_tokens": int(
-            compaction.get("max_context_tokens", max_context)
-        ),
-        "/context_compaction/threshold": float(compaction.get("threshold", 0.8)),
-        "/context_compaction/keep_iterations": int(compaction.get("keep_iterations", 4)),
-        "/context_compaction/compaction_strategy": str(
-            compaction.get("compaction_strategy", "tool_result_compaction")
-        ),
         # Visible for honest capability reporting, but not in mutable_set_fields:
         # SAH has no stable profile registry, so profile edits fail closed.
         "/skills": [str(item) for item in agent.get("skills", []) or []],
-    }
-    base["adaptive_runtime"] = {
-        "max_context_tokens": view["/max_context_tokens"],
-        "tool_call_mode": view["/tool_call_mode"],
-        "context_compaction": {
-            "enabled": compaction_enabled,
-            "max_context_tokens": view["/context_compaction/max_context_tokens"],
-            "threshold": view["/context_compaction/threshold"],
-            "keep_iterations": view["/context_compaction/keep_iterations"],
-            "compaction_strategy": view[
-                "/context_compaction/compaction_strategy"
-            ],
-        },
     }
     return base, view
 
@@ -340,31 +250,15 @@ def _validate_pointer(pointer: str, value: Any) -> Any:
         return out
 
     if pointer == "/system_prompt":
-        if not isinstance(value, str) or not 40 <= len(value.strip()) <= 16000:
-            raise ValueError("/system_prompt: expected 40..16000 characters")
+        if not isinstance(value, str) or not 40 <= len(value.strip()) <= 8000:
+            raise ValueError("/system_prompt: expected 40..8000 characters")
         return value.strip()
-    if pointer in {"/max_context_tokens", "/context_compaction/max_context_tokens"}:
-        return integer(8192, 200000)
     if pointer == "/max_iterations":
         return integer(8, 80)
-    if pointer == "/tool_call_mode":
-        if value not in {"structured", "xml"}:
-            raise ValueError("/tool_call_mode: expected structured or xml")
-        return value
     if pointer == "/llm/temperature":
         return number(0.0, 1.5)
     if pointer == "/llm/max_tokens":
         return integer(1024, 16384)
-    if pointer == "/context_compaction/threshold":
-        return number(0.5, 0.9)
-    if pointer == "/context_compaction/keep_iterations":
-        return integer(1, 8)
-    if pointer == "/context_compaction/compaction_strategy":
-        if value not in {"tool_result_compaction", "llm_summary"}:
-            raise ValueError(
-                "/context_compaction/compaction_strategy: unsupported strategy"
-            )
-        return value
     raise ValueError(f"unknown or non-mutable HarnessOpt field: {pointer!r}")
 
 
@@ -409,7 +303,7 @@ def compile_action(
     base_spec: Mapping[str, Any],
     base_view: Mapping[str, Any],
 ) -> tuple[Dict[str, Any], List[str]]:
-    """Compile one semantic action into a full SAH H2 spec plus runtime overlay."""
+    """Compile one semantic action into a native, full SAH H2 spec."""
     working = _json_clone(base_view)
     for atom in action.edit_atoms:
         if atom.kind == "set":
@@ -433,14 +327,6 @@ def compile_action(
                 f"{atom.kind} fails closed"
             )
 
-    if (
-        working["/max_context_tokens"]
-        != working["/context_compaction/max_context_tokens"]
-    ):
-        raise ValueError(
-            "max_context_tokens must match context_compaction.max_context_tokens; "
-            "use two edit atoms for this cross-field invariant"
-        )
     changed = [
         pointer for pointer in MUTABLE_POINTERS
         if working.get(pointer) != base_view.get(pointer)
@@ -453,75 +339,7 @@ def compile_action(
     effective.setdefault("agent", {})["max_iterations"] = working["/max_iterations"]
     effective.setdefault("sampling", {})["temperature"] = working["/llm/temperature"]
     effective.setdefault("sampling", {})["max_tokens"] = working["/llm/max_tokens"]
-    effective["adaptive_runtime"] = {
-        "max_context_tokens": working["/max_context_tokens"],
-        "tool_call_mode": working["/tool_call_mode"],
-        "context_compaction": {
-            "enabled": bool(
-                (base_spec.get("adaptive_runtime") or {})
-                .get("context_compaction", {})
-                .get("enabled", False)
-                or any(
-                    pointer.startswith("/context_compaction/")
-                    for pointer in changed
-                )
-            ),
-            "max_context_tokens": working[
-                "/context_compaction/max_context_tokens"
-            ],
-            "threshold": working["/context_compaction/threshold"],
-            "keep_iterations": working["/context_compaction/keep_iterations"],
-            "compaction_strategy": working[
-                "/context_compaction/compaction_strategy"
-            ],
-        },
-    }
     return effective, changed
-
-
-def patch_materialized_package(candidate_dir: Path, effective: Mapping[str, Any]) -> None:
-    """Apply Adaptive-only runtime fields after SAH's materializer has run."""
-    runtime = dict(effective.get("adaptive_runtime") or {})
-    if not runtime:
-        return
-    candidate_dir = Path(candidate_dir)
-    agent_file = candidate_dir / "agent.yaml"
-    agent = yaml.safe_load(agent_file.read_text()) or {}
-    max_context = int(runtime.get("max_context_tokens", 131072))
-    agent["max_context_tokens"] = max_context
-    agent["tool_call_mode"] = str(runtime.get("tool_call_mode", "structured"))
-
-    compaction = dict(runtime.get("context_compaction") or {})
-    middlewares = [
-        item for item in agent.get("middlewares", []) or []
-        if "context_compaction" not in str(item.get("import", ""))
-    ]
-    if compaction.get("enabled", False):
-        compaction_entry = {
-            "import": (
-                "nexau.archs.main_sub.execution.middleware.context_compaction:"
-                "ContextCompactionMiddleware"
-            ),
-            "params": {
-                "max_context_tokens": int(
-                    compaction.get("max_context_tokens", max_context)
-                ),
-                "auto_compact": True,
-                "threshold": float(compaction.get("threshold", 0.8)),
-                "compaction_strategy": str(
-                    compaction.get("compaction_strategy", "tool_result_compaction")
-                ),
-                "keep_iterations": int(compaction.get("keep_iterations", 4)),
-            },
-        }
-        middlewares = [compaction_entry, *middlewares]
-    agent["middlewares"] = middlewares
-    for item in agent["middlewares"]:
-        if "round_and_token_reminder" in str(item.get("import", "")):
-            item.setdefault("params", {})["max_context_tokens"] = max_context
-    agent_file.write_text(
-        yaml.safe_dump(agent, sort_keys=False, allow_unicode=True, width=100)
-    )
 
 
 def default_state() -> Dict[str, Any]:
@@ -606,7 +424,9 @@ def _task_state(
 def _capability_contract() -> Dict[str, Any]:
     return {
         "protocol": PROTOCOL,
-        "shared_runtime": "SAH h2spec/1.0 materializer + frozen inner executor",
+        "shared_runtime": (
+            "NexAU Adaptive H1 + SAH h2spec/1.0 materializer + NexAU frozen H2"
+        ),
         "mutable_set_fields": list(MUTABLE_POINTERS),
         "declared_aliases": dict(ALIASES),
         "registered_profiles": [],
@@ -615,20 +435,10 @@ def _capability_contract() -> Dict[str, Any]:
             "are therefore rejected by the deterministic compiler."
         ),
         "constraints": {
-            "/system_prompt": {"type": "string", "min_length": 40, "max_length": 16000},
-            "/max_context_tokens": {"type": "integer", "min": 8192, "max": 200000},
+            "/system_prompt": {"type": "string", "min_length": 40, "max_length": 8000},
             "/max_iterations": {"type": "integer", "min": 8, "max": 80},
-            "/tool_call_mode": {"enum": ["structured", "xml"]},
             "/llm/temperature": {"type": "number", "min": 0.0, "max": 1.5},
             "/llm/max_tokens": {"type": "integer", "min": 1024, "max": 16384},
-            "/context_compaction/max_context_tokens": {
-                "type": "integer", "min": 8192, "max": 200000
-            },
-            "/context_compaction/threshold": {"type": "number", "min": 0.5, "max": 0.9},
-            "/context_compaction/keep_iterations": {"type": "integer", "min": 1, "max": 8},
-            "/context_compaction/compaction_strategy": {
-                "enum": ["tool_result_compaction", "llm_summary"]
-            },
         },
         "always_protected": [
             "budgets", "evaluator", "ledger", "model", "policy", "splits",
@@ -753,31 +563,68 @@ def build_user_context(
 GenerationFn = Callable[[str, str, Mapping[str, Any]], tuple[str, Mapping[str, Any]]]
 
 
-def make_openai_generator(
+def _dump_nexau_history(agent: Any) -> List[Dict[str, Any]]:
+    trajectory: List[Dict[str, Any]] = []
+    try:
+        for message in agent.history:
+            try:
+                trajectory.append(message.model_dump(mode="json"))
+            except Exception:
+                trajectory.append(
+                    {
+                        "role": str(getattr(message, "role", "?")),
+                        "content": str(getattr(message, "content", ""))[:4000],
+                    }
+                )
+    except Exception:
+        pass
+    return trajectory
+
+
+def make_nexau_generator(
     *, base_url: str, model: str, api_key: str = "EMPTY", timeout: float = 600.0
 ) -> GenerationFn:
-    from openai import OpenAI
-
-    client = OpenAI(base_url=base_url, api_key=api_key or "EMPTY", timeout=timeout)
+    """Build one fresh NexAU H1 Agent per Adaptive proposal sample."""
+    from nexau import Agent, AgentConfig
 
     def generate(
         system: str, user: str, generation: Mapping[str, Any]
     ) -> tuple[str, Mapping[str, Any]]:
-        response = client.chat.completions.create(
-            model=model,
-            messages=[
-                {"role": "system", "content": system},
-                {"role": "user", "content": user},
-            ],
-            temperature=float(generation["temperature"]),
-            max_tokens=int(generation["max_tokens"]),
-            extra_body={
-                "seed": int(generation["seed"]),
-                "chat_template_kwargs": {"enable_thinking": False},
-            },
-        )
-        usage = response.usage.model_dump() if response.usage is not None else {}
-        return response.choices[0].message.content or "", usage
+        if system != PROPOSER_SYSTEM_PROMPT:
+            raise ValueError("Adaptive NexAU H1 system prompt drift detected")
+        config = AgentConfig.from_yaml(ADAPTIVE_H1_PACKAGE / "agent.yaml")
+        llm = config.llm_config
+        llm.model = model
+        llm.base_url = base_url
+        llm.api_key = api_key or "EMPTY"
+        llm.timeout = timeout
+        llm.temperature = float(generation["temperature"])
+        llm.max_tokens = int(generation["max_tokens"])
+        extra = getattr(llm, "extra_params", None)
+        if not isinstance(extra, dict):
+            extra = {}
+            try:
+                llm.extra_params = extra
+            except Exception:
+                pass
+        extra_body = extra.setdefault("extra_body", {})
+        extra_body["seed"] = int(generation["seed"])
+        extra_body.setdefault("chat_template_kwargs", {})[
+            "enable_thinking"
+        ] = False
+
+        agent = Agent(config=config)
+        response = agent.run(message=user)
+        if isinstance(response, tuple):
+            response = response[0]
+        trajectory = _dump_nexau_history(agent)
+        return str(response or ""), {
+            "runtime": "nexau",
+            "agent_name": config.name,
+            "agent_package": str(ADAPTIVE_H1_PACKAGE),
+            "trajectory": trajectory,
+            "usage": {},
+        }
 
     return generate
 
@@ -798,7 +645,7 @@ def propose_group(
     """Sequential K sampling so later samples see prior valid actions."""
     records: List[CandidateRecord] = []
     valid_actions: List[HarnessAction] = []
-    seen_hashes = {_digest(base_spec)}
+    seen_hashes = {hs.spec_hash(dict(base_spec))}
     known_evidence = set(known_evidence_ids)
     for sample_index in range(count):
         proposal_id = f"hopt-r{round_index:03d}-s{sample_index:02d}"
@@ -836,7 +683,9 @@ def propose_group(
             "seed": base_seed + round_index * 1000 + sample_index,
         }
         try:
-            response, usage = generate(PROPOSER_SYSTEM_PROMPT, user, generation)
+            response, generation_meta = generate(
+                PROPOSER_SYSTEM_PROMPT, user, generation
+            )
         except Exception as exc:
             records.append(
                 CandidateRecord(
@@ -848,18 +697,35 @@ def propose_group(
                 )
             )
             continue
+        meta = dict(generation_meta or {})
+        nexau_trajectory = meta.pop("trajectory", None)
+        usage = meta.pop("usage", None)
+        if usage is None:
+            usage = {
+                key: value
+                for key, value in meta.items()
+                if key not in {"runtime", "agent_name", "agent_package"}
+            }
+        trajectory = (
+            list(nexau_trajectory)
+            if isinstance(nexau_trajectory, list) and nexau_trajectory
+            else [
+                {"role": "system", "content": PROPOSER_SYSTEM_PROMPT},
+                {"role": "user", "content": user},
+                {"role": "assistant", "content": response},
+            ]
+        )
         record = CandidateRecord(
             k=sample_index,
             valid=False,
             raw_submission=response,
             stop_reason="invalid",
             user_message=user,
-            trajectory=[
-                {"role": "system", "content": PROPOSER_SYSTEM_PROMPT},
-                {"role": "user", "content": user},
-                {"role": "assistant", "content": response},
-            ],
-            llm_calls=1,
+            trajectory=trajectory,
+            llm_calls=sum(
+                str(message.get("role", "")).lower().endswith("assistant")
+                for message in trajectory
+            ),
         )
         try:
             parsed = dict(_extract_json_object(response))
@@ -910,7 +776,7 @@ def propose_group(
             effective, changed = compile_action(
                 action, base_spec=base_spec, base_view=base_view
             )
-            candidate_hash = _digest(effective)
+            candidate_hash = hs.spec_hash(effective)
             if candidate_hash in seen_hashes:
                 raise ValueError("duplicate of another candidate (or of the base)")
             seen_hashes.add(candidate_hash)
@@ -926,6 +792,7 @@ def propose_group(
                     "ok": True,
                     "rounds": 0,
                     "error": None,
+                    "runtime": meta.get("runtime", "injected_test_generator"),
                 }
             ]
             if usage:
@@ -998,7 +865,7 @@ def cmd_propose(args, *, load_bases: Callable[..., Dict[str, Dict[str, Any]]]) -
             task_state=task_state,
         )
         prompts[tid] = base_context
-        generator = make_openai_generator(
+        generator = make_nexau_generator(
             base_url=base_urls[task_index % len(base_urls)],
             model=args.model,
             api_key="EMPTY",
@@ -1037,7 +904,12 @@ def cmd_propose(args, *, load_bases: Callable[..., Dict[str, Dict[str, Any]]]) -
                 materialize(
                     record.effective,
                     candidate_dir,
-                    raw_spec_text=record.raw_submission,
+                    raw_spec_text=yaml.safe_dump(
+                        record.effective,
+                        sort_keys=False,
+                        allow_unicode=True,
+                        width=100,
+                    ),
                     meta={
                         "protocol": PROTOCOL,
                         "round": args.round,
@@ -1049,10 +921,10 @@ def cmd_propose(args, *, load_bases: Callable[..., Dict[str, Dict[str, Any]]]) -
                         "changed_fields": record.changed_fields,
                         "base_package": base_package,
                         "semantic_action": record.action,
+                        "semantic_action_raw": record.raw_submission,
                         "effective": record.effective,
                     },
                 )
-                patch_materialized_package(candidate_dir, record.effective)
                 candidate["dir"] = str(candidate_dir)
                 total_valid += 1
             candidates.append(candidate)
@@ -1075,7 +947,7 @@ def cmd_propose(args, *, load_bases: Callable[..., Dict[str, Dict[str, Any]]]) -
             "base_package": base_package,
             "base_score": base_score,
             "seed_score": bases[tid]["seed_score"],
-            "base_spec_hash": _digest(base_spec),
+            "base_spec_hash": hs.spec_hash(base_spec),
             "champion_package": champion["package"],
             "champion_score": champion["score"],
             "candidates": candidates,
@@ -1094,7 +966,9 @@ def cmd_propose(args, *, load_bases: Callable[..., Dict[str, Dict[str, Any]]]) -
         "protocol_state": str(state_path),
         "proposer_topology": {
             "llm_agents": 1,
-            "proposer": "ModelHarnessActionPolicy-compatible plain JSON",
+            "proposer": "NexAU Agent with ModelHarnessActionPolicy-compatible JSON",
+            "runtime": "nexau.AgentConfig.from_yaml",
+            "package": str(ADAPTIVE_H1_PACKAGE),
             "samples": args.k,
             "analyzer": "deterministic_context_builder",
             "builder": "deterministic_action_compiler",

@@ -1,9 +1,8 @@
 # Adaptive v1 × SAH unification
 
 This branch keeps current SAH as the substrate and adds Adaptive v1 as an
-optional outer-loop protocol. Nothing is pushed automatically. The default
-`sah` protocol continues through the existing H1 YAML proposer, reward, and
-every-round training path.
+optional outer-loop protocol. The default `sah` protocol continues through the
+existing H1 YAML proposer, reward, and every-round training path.
 
 Port provenance:
 
@@ -21,12 +20,12 @@ The final Adaptive v1 runtime does **not** have an LLM
 
 | role | Adaptive v1 implementation |
 |---|---|
-| proposer | one outer LLM policy, sampled sequentially K times |
+| proposer | one fixed NexAU H1 Agent, sampled sequentially K times |
 | analyzer | deterministic trace/archive/context builder, not an LLM agent |
 | builder | deterministic typed action compiler, not an LLM agent |
 | validator/dedup | deterministic and fail-closed |
 | reviewer | excluded and disabled in v1 |
-| inner executor | a separate frozen inner Agent (`M0 + H2`) |
+| inner executor | a separate frozen NexAU Agent (`M0 + H2`) |
 
 The older four-role wording describes a previous Codex pipeline, not the final
 Adaptive v1 experiment. The port preserves the final runtime topology and the
@@ -39,12 +38,25 @@ Adaptive reuses these SAH components directly:
 - the current `h2spec/1.0` full candidate genome;
 - generated tools, skills, and middleware already inherited by SAH;
 - `outer.materialize` and the NexAU candidate package layout;
+- NexAU `AgentConfig.from_yaml` and `Agent` for both outer and inner execution;
 - the frozen `inner.harness_runner` and evaluator budget;
 - split proposer/executor serving and vLLM lifecycle cleanup;
 - the Weave/slime LoRA trainer, merger, and replay encoding.
 
 Adaptive adds no duplicate task registry, evaluator, inner runner, model
 service, or candidate filesystem.
+
+Adaptive's fixed H1 is also a normal declarative NexAU package:
+
+```text
+src/protocols/adaptive_v1_harness/
+├── agent.yaml
+└── system.md
+```
+
+`system.md` is byte-for-byte the final Adaptive v1 proposal prompt. A fresh
+NexAU Agent is constructed for each sequential sample, and its actual message
+history is recorded as the outer trajectory.
 
 The adapter itself is split along the same boundary:
 
@@ -56,7 +68,7 @@ The adapter itself is split along the same boundary:
 
 | concern | `sah` | `adaptive_v1` |
 |---|---|---|
-| proposal | existing H1 NexAU agent emits YAML | one plain-JSON policy, sequential K sampling |
+| proposal | existing H1 NexAU Agent emits YAML | dedicated H1 NexAU Agent emits one sparse JSON action, sequential K sampling |
 | per-batch diversity | independent threaded H1 runs | later samples see all prior valid actions |
 | action | full/partial H2 YAML | sparse semantic edit atoms compiled into H2 |
 | context | SAH task prompt + feedback | bounded archive/evidence/context with exact v1 fallback |
@@ -75,13 +87,18 @@ into Adaptive proposer context, archive rewards, or training rows.
 branch in `outer.outer_round`; the Adaptive module is imported only after
 selecting `adaptive_v1`.
 
-Adaptive does not extend or relax `outer/harness_spec.py`. It reads SAH's full
-base spec, changes only shared safe fields, calls the existing materializer,
-then applies an Adaptive-only runtime overlay to that candidate package. Plain
-SAH materialization therefore does not gain context compaction or other
-Adaptive fields. A prompt-only Adaptive action also does not silently enable
-compaction; the middleware appears only after a context-compaction edit (and
-is then inherited by that Adaptive working state).
+Adaptive does not extend or relax `outer/harness_spec.py`. Its deterministic
+compiler accepts only fields already represented by native `h2spec/1.0`:
+`system_prompt`, `agent.max_iterations`, `sampling.temperature`, and
+`sampling.max_tokens`. Unsupported context/profile operations fail closed.
+
+Every accepted action is compiled into a complete native SAH spec, validated
+by the unmodified SAH schema, and passed directly to the existing
+`outer.materialize`. The resulting candidate has exactly the SAH NexAU package
+shape (`agent.yaml`, `prompt.md`, `spec.yaml`, `tools/`, `skills/`,
+`middlewares/`). `spec.yaml` contains the full native H2 spec and uses SAH's
+own `spec_hash`; there is no Adaptive runtime overlay or post-materialization
+patch.
 
 The shared additions are backward-compatible:
 
@@ -159,15 +176,20 @@ python -m compileall -q src tests
 git diff --check
 ```
 
-The tests exercise exact prompt provenance, sequential diversity, compilation
-and SAH package preservation, overlay isolation, dual-frontier selection,
+The tests exercise exact prompt provenance, the declarative Adaptive NexAU H1
+package, actual NexAU trace preservation, sequential diversity, native SAH
+schema compilation/package parity, dual-frontier selection,
 plateau-triggered signed batches, explicit commit/recovery, final-round skip,
 Adaptive plain-text replay, and the unchanged default SAH collector.
 
-Local result on 2026-07-28: all 11 offline tests passed, as did Python
-compilation, shell syntax checks, and `git diff --check`. A separate local GPU
-smoke also completed five protocol rounds using a real Qwen3.5-9B vLLM
-executor and a real LoRA optimizer step; see
+Local result on 2026-07-28: all 13 Adaptive protocol tests passed, as did Python
+compilation, shell syntax checks, and `git diff --check`. Final-format GPU
+revalidation completed two consecutive rounds with real Qwen3.5-9B inference:
+8/8 outer traces came from NexAU H1 Agents with exactly one assistant call,
+6 candidates were valid native SAH H2 packages, and all 16 NexAU inner traces
+were non-empty with no inner errors. The second round inherited the first
+round's archive/context. An earlier five-round loop additionally completed a
+real LoRA optimizer step; see
 [`ADAPTIVE_V1_GPU_SMOKE.md`](ADAPTIVE_V1_GPU_SMOKE.md). The production
 Slime/Slurm job was not run because its external Lustre, Weave, and scheduler
 environment is not available in this workspace.

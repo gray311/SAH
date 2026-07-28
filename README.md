@@ -27,9 +27,11 @@ full spec.
 | `scripts/` | Slurm sbatch + in-container workers for one outer step (propose → rollouts → collect → train → merge) |
 | `results/` | `maintable.md` (vs official Qwen3.5-9B / Finch-9B), campaign targets, baselines |
 
-**Harness rule:** every harness — the initial `H2`, every candidate `H2`, and the
-proposer `H1` — is a declarative **NexAU package** (`agent.yaml` + `tools/` + `skills/`
-+ `middlewares/`), never a bare `.py` script.
+**Harness rule:** every harness — the initial `H2`, every candidate `H2`, and
+each protocol's proposer `H1` — is a declarative **NexAU package**
+(`agent.yaml` plus its referenced prompt/tool/skill/middleware assets), never a
+bare `.py` script. Packages may intentionally declare empty tool, skill, and
+middleware lists.
 
 ## Dependencies (external, not vendored)
 
@@ -44,10 +46,12 @@ Slurm + pyxis/enroot environment.
 
 ## Training modes
 
-The current SAH path remains the default. A local optional `adaptive_v1`
-protocol reuses SAH's H2 materializer, frozen inner executor, rollout service,
-and proposer trainer while changing only proposal/context, dual-frontier
-selection, and the plateau-gated update cadence:
+The current SAH path remains the default. Both modes now use declarative NexAU
+packages for the outer H1 proposer and every inner H2 executor. The optional
+`adaptive_v1` protocol reuses SAH's native `h2spec/1.0` materializer, frozen
+inner executor, rollout service, and proposer trainer; it changes only the H1
+action contract/context, dual-frontier selection, and plateau-gated update
+cadence:
 
 ```bash
 bash scripts/unified_campaign.sh sah <existing fresh_campaign args...>

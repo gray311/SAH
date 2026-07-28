@@ -69,7 +69,9 @@ from nexau.archs.main_sub.execution.hooks import (
     BeforeModelHookInput, HookResult, Middleware)
 from nexau.core.messages import Message, Role, TextBlock
 
+# --USER-HOOK-START--
 {user_code}
+# --USER-HOOK-END--
 
 class GeneratedMiddleware(Middleware):
     def {hook}(self, hook_input):

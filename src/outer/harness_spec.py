@@ -365,7 +365,83 @@ def read_base_spec(package_dir: Path) -> Dict[str, Any]:
         "agent": {"max_iterations": int(agent.get("max_iterations", 36))},
         "middleware": mw_params or {"budget_reminder_from_left": 3,
                                     "long_tool_output_max_chars": 8000},
+        **_read_generated(package_dir, agent),
     }
+
+
+def _read_generated(package_dir: Path, agent: Dict[str, Any]) -> Dict[str, Any]:
+    """Recover generated tools/skills/middlewares from a materialized package so
+    the harness ratchet carries them forward — without this, every candidate's
+    invented tools/skills/hooks vanish and M_phi must reinvent them each round.
+    Reconstructs the h2spec/1.0 new_* fields from the package's own files."""
+    out: Dict[str, Any] = {}
+    reserved = {"discovery-optimization"}
+
+    # generated tools: custom_tools/<name>.py bound via custom_runtime dispatcher
+    ct_dir = package_dir / "custom_tools"
+    if ct_dir.is_dir():
+        by_name = {}
+        for t in agent.get("tools", []):
+            if "custom_runtime" in str(t.get("binding", "")):
+                ty = package_dir / str(t["yaml_path"]).lstrip("./")
+                desc, isch = "", {"type": "object", "properties": {}}
+                if ty.exists():
+                    doc = yaml.safe_load(ty.read_text()) or {}
+                    desc = str(doc.get("description", "")).strip()
+                    isch = doc.get("input_schema", isch)
+                by_name[t["name"]] = (desc, isch)
+        tools = []
+        for py in sorted(ct_dir.glob("*.py")):
+            name = py.stem
+            desc, isch = by_name.get(name, ("", {"type": "object", "properties": {}}))
+            tools.append({"name": name, "description": desc or f"generated tool {name}",
+                          "input_schema": isch, "implementation_py": py.read_text()})
+        if tools:
+            out["new_tools"] = tools
+
+    # generated skills: skills/<name>/SKILL.md beyond the base skill
+    sk_root = package_dir / "skills"
+    if sk_root.is_dir():
+        skills = []
+        for d in sorted(sk_root.iterdir()):
+            if not d.is_dir() or d.name in reserved:
+                continue
+            md = d / "SKILL.md"
+            if not md.exists():
+                continue
+            text = md.read_text()
+            fm = re.match(r"---\n(.*?)\n---\n(.*)", text, re.DOTALL)
+            if fm:
+                meta = yaml.safe_load(fm.group(1)) or {}
+                skills.append({"name": d.name,
+                               "description": str(meta.get("description", "")).strip(),
+                               "body": fm.group(2).strip()})
+        if skills:
+            out["new_skills"] = skills
+
+    # generated middlewares: middlewares/<name>.py bound as GeneratedMiddleware
+    gen_mw = [m for m in agent.get("middlewares", [])
+              if str(m.get("import", "")).endswith(":GeneratedMiddleware")]
+    mws = []
+    for m in gen_mw:
+        name = str(m["import"]).split(".")[1].split(":")[0]
+        py = package_dir / "middlewares" / f"{name}.py"
+        if not py.exists():
+            continue
+        src = py.read_text()
+        # recover the ORIGINAL user hook body (between sentinels), not the
+        # nexau-importing wrapper — re-gating the wrapper would fail the import
+        # whitelist and drop the inherited middleware.
+        seg = re.search(r"# --USER-HOOK-START--\n(.*?)\n# --USER-HOOK-END--", src, re.DOTALL)
+        user_code = seg.group(1) if seg else src
+        hook = next((h for h in _MW_HOOKS if f"def {h}(hook_input)" in user_code),
+                    "before_model")
+        mws.append({"name": name, "hook": hook,
+                    "description": f"generated middleware {name}",
+                    "implementation_py": user_code})
+    if mws:
+        out["new_middlewares"] = mws
+    return out
 
 
 def merge_with_base(spec: Dict[str, Any], base: Dict[str, Any]) -> Dict[str, Any]:

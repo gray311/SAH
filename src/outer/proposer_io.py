@@ -112,3 +112,28 @@ def render_feedback(fb: dict) -> str:
         "that overcomes that specific failure mode. Do not resubmit a near-copy of a design "
         "that already stalled.")
     return "\n".join(lines)
+
+
+def render_prior_actions(actions: list) -> str:
+    """Sequential-sampling context: the VALID actions already proposed for THIS
+    task in THIS batch, so this sample proposes something genuinely different
+    (Adaptive within-batch diversity). Only the changed axes + a compact spec
+    outline are shown — no scores, no rollout outcomes (those aren't available
+    yet mid-batch, and withholding them keeps the channel leak-free)."""
+    if not actions:
+        return ""
+    lines = ["\n\n## Already proposed this batch (do NOT paraphrase these)"]
+    for a in actions:
+        fields = ", ".join(a.get("changed_fields") or []) or "(no changes)"
+        spec = a.get("spec") or {}
+        tools = [t.get("name") for t in (spec.get("new_tools") or []) if isinstance(t, dict)]
+        skills = [s.get("name") for s in (spec.get("new_skills") or []) if isinstance(s, dict)]
+        extra = ""
+        if tools:
+            extra += " new_tools=[%s]" % ", ".join(filter(None, tools))
+        if skills:
+            extra += " new_skills=[%s]" % ", ".join(filter(None, skills))
+        lines.append("  - k%s changed: %s%s" % (a.get("k"), fields, extra))
+    lines.append("Propose a design that explores a DIFFERENT axis or strategy "
+                 "than every entry above.")
+    return "\n".join(lines)

@@ -127,19 +127,52 @@ def cmd_propose(args) -> None:
                   "example exactly for the YAML block-scalar format. A candidate "
                   "with no new_tools is not acceptable here.")
 
+    def _msg_for(tid, k):
+        msg = ctx[tid]["user_message"]
+        return msg + _FORCE_MSG if k in force_ks else msg
+
     def run(idx_job):
         idx, (tid, k) = idx_job
         seed = (args.seed * 1000 + idx) if args.seed is not None else None
-        msg = ctx[tid]["user_message"]
-        if k in force_ks:
-            msg = msg + _FORCE_MSG
         return tid, pp.run_once(
-            k, base_spec=ctx[tid]["base_spec"], user_message=msg,
+            k, base_spec=ctx[tid]["base_spec"], user_message=_msg_for(tid, k),
             base_url=base_urls[idx % len(base_urls)], model=args.model,
             api_key="EMPTY", seed=seed, timeout=600.0)
 
-    with ThreadPoolExecutor(max_workers=args.parallel) as ex:
-        results = list(ex.map(run, enumerate(jobs)))
+    # -- optional sequential sampling (campaign_config: sampling.mode) -------- #
+    # In parallel mode (default) the K samples of a task are independent. In
+    # sequential mode, later samples see prior VALID actions from the same task
+    # so they don't re-propose a paraphrase — Adaptive's within-batch diversity
+    # policy. Tasks still run concurrently across the pool; only the K samples
+    # WITHIN a task serialize. Zero change to the parallel path.
+    seq = os.environ.get("SAH_SEQUENTIAL", "0") == "1"
+    max_shared = int(os.environ.get("SAH_SEQ_MAX_SHARED", "6") or "6")
+
+    def run_task_sequential(tid):
+        recs, shared = [], []
+        for k in range(args.k):
+            seed = (args.seed * 1000 + k) if args.seed is not None else None
+            msg = _msg_for(tid, k)
+            if shared:
+                msg = msg + pio.render_prior_actions(shared[-max_shared:])
+            rec = pp.run_once(
+                k, base_spec=ctx[tid]["base_spec"], user_message=msg,
+                base_url=base_urls[k % len(base_urls)], model=args.model,
+                api_key="EMPTY", seed=seed, timeout=600.0)
+            recs.append((tid, rec))
+            if rec.valid and rec.effective is not None:
+                shared.append({"k": k, "changed_fields": rec.changed_fields,
+                               "spec": rec.spec})
+        return recs
+
+    if seq:
+        print(f"[propose] sequential sampling ON (share <= {max_shared} prior valid actions)")
+        with ThreadPoolExecutor(max_workers=min(args.parallel, len(args.tasks))) as ex:
+            results = [r for task_recs in ex.map(run_task_sequential, args.tasks)
+                       for r in task_recs]
+    else:
+        with ThreadPoolExecutor(max_workers=args.parallel) as ex:
+            results = list(ex.map(run, enumerate(jobs)))
 
     per_task: Dict[str, Any] = {}
     trajectories = []
@@ -297,7 +330,15 @@ def cmd_collect(args) -> None:
                          "best_score": g["best_score"], "best_k": g["best_k"],
                          "n_stuck_at_base": n_stuck, "candidates": cands}
         if prev_note:  # analyst notes are curated externally — never wipe them
-            feedback[tid]["analyst_note"] = prev_note
+            # anti-leak (campaign_config: leakage_guard): the analyst_note is the
+            # only free-form text reaching the proposer; drop it if it carries a
+            # leak marker, else neutralize unproven result-claim words so they
+            # can't survive as facts. Default-on; a no-op on clean structured notes.
+            if os.environ.get("SAH_LEAK_NEUTRALIZE", "1") == "1":
+                from outer.leak_guard import sanitize
+                prev_note = sanitize(prev_note, neutralize=True)
+            if prev_note:
+                feedback[tid]["analyst_note"] = prev_note
     fb_path.write_text(json.dumps(feedback, indent=1))
 
     # global best-program inheritance: merge this round's winners into

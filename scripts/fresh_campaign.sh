@@ -84,12 +84,25 @@ print(dict(cnt))")
 
   # ---- GRPO train next phi ----
   V=$(python3 -c "import json;d=json.load(open('$RD/round.json'));print(sum(1 for c in d['per_task']['$TASK']['candidates'] if c['valid']))")
-  if [ "$V" -ge 4 ]; then
+  # plateau-gated commit cadence (campaign_config: training.plateau_rounds):
+  # PR=1 (default) trains every round. PR>1 skips training on non-improving
+  # rounds until PR consecutive stalls accumulate, then commits one update —
+  # Adaptive's confirmed-plateau update schedule. Improving rounds always train
+  # and reset the stall counter.
+  PR="${PLATEAU_ROUNDS:-1}"
+  IMPROVED=$(python3 -c "import json;print(1 if json.load(open('$RD/round_summary.json'))['groups']['$TASK'].get('improved') else 0)" 2>/dev/null || echo 0)
+  if [ "$IMPROVED" = "1" ]; then stall=0; else stall=$((${stall:-0} + 1)); fi
+  do_train=1
+  if [ "$PR" -gt 1 ] && [ "$IMPROVED" != "1" ] && [ "$stall" -lt "$PR" ]; then
+    do_train=0; log "  plateau-gate: stall $stall/$PR, deferring training"
+  fi
+  if [ "$V" -ge 4 ] && [ "$do_train" = "1" ]; then
+    stall=0
     cd "$SAH"
     if [ -z "$prev_ckpt" ]; then
-      KL_COEF=0.05 NUM_EPOCH=3 bash scripts/train_mphi_step.sh "$RD" "$STAG" > /tmp/fcp_train.txt 2>&1
+      KL_COEF="${KL_COEF:-0.05}" NUM_EPOCH="${NUM_EPOCH:-3}" bash scripts/train_mphi_step.sh "$RD" "$STAG" > /tmp/fcp_train.txt 2>&1
     else
-      KL_COEF=0.05 NUM_EPOCH=3 bash scripts/train_mphi_step.sh "$RD" "$STAG" "$prev_ckpt" > /tmp/fcp_train.txt 2>&1
+      KL_COEF="${KL_COEF:-0.05}" NUM_EPOCH="${NUM_EPOCH:-3}" bash scripts/train_mphi_step.sh "$RD" "$STAG" "$prev_ckpt" > /tmp/fcp_train.txt 2>&1
     fi
     T=$(grep -oP 'train job: \K[0-9]+' /tmp/fcp_train.txt); M=$(grep -oP 'merge job: \K[0-9]+' /tmp/fcp_train.txt)
     if [ -n "$T" ]; then
@@ -103,7 +116,7 @@ print(dict(cnt))")
         fi
       fi
     fi
-  else
+  elif [ "$do_train" = "1" ]; then
     log "  degenerate group (V=$V) — skip training, keep phi"
   fi
 done

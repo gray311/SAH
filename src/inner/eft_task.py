@@ -16,7 +16,6 @@ Two on-disk formats are unified:
 from __future__ import annotations
 
 import json
-import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -24,12 +23,19 @@ from typing import Dict, List, Optional
 import yaml
 
 # Prepared dataset root (see datasets/self_adapt_harness/README.md).
-DATASET_ROOT = Path(os.environ.get(
-    "SAH_DATASET_ROOT",
-    "/lustre/fsw/portfolios/av/users/yingzim/datasets/self_adapt_harness",
-))
+DATASET_ROOT = Path(
+    "/lustre/fsw/portfolios/av/users/yingzim/datasets/self_adapt_harness"
+)
 EFT_SHIM = DATASET_ROOT / "runtime" / "skydiscover_min"
 SIMPLETES_SHIM = DATASET_ROOT / "runtime" / "simpletes_min"
+
+
+def configure_dataset_root(path: str | Path) -> None:
+    """Explicitly configure a non-default task root for an opt-in caller."""
+    global DATASET_ROOT, EFT_SHIM, SIMPLETES_SHIM
+    DATASET_ROOT = Path(path)
+    EFT_SHIM = DATASET_ROOT / "runtime" / "skydiscover_min"
+    SIMPLETES_SHIM = DATASET_ROOT / "runtime" / "simpletes_min"
 
 
 @dataclass

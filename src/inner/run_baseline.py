@@ -32,7 +32,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # put `src/` on path -> import inner.*
 
-from inner.eft_task import load_tasks, get_task, EFTTask  # noqa: E402
+from inner.eft_task import (  # noqa: E402
+    EFTTask,
+    configure_dataset_root,
+    get_task,
+    load_tasks,
+)
 from inner.eval_runner import evaluate_program  # noqa: E402
 
 
@@ -112,8 +117,12 @@ def main() -> None:
     ap.add_argument("--no-trajectory", action="store_true")
     ap.add_argument("--seed-programs-file", default=None,
                     help="JSON {task_id: program_text | {program: text}}; overrides the task's initial program (best-program inheritance across outer rounds)")
+    ap.add_argument("--dataset-root", default=None,
+                    help="explicit prepared-task root; omitted preserves SAH's built-in path")
     ap.add_argument("--out", default=None, help="output dir (default runs/inner_baseline/<ts>)")
     args = ap.parse_args()
+    if args.dataset_root:
+        configure_dataset_root(args.dataset_root)
 
     ts = time.strftime("%Y%m%d-%H%M%S")
     default_root = Path(__file__).resolve().parents[2] / "runs" / "inner_baseline"
@@ -142,9 +151,10 @@ def main() -> None:
         "n_tasks": len(tasks), "task_ids": [t.task_id for t in tasks],
         "base_url": args.base_url, "model": args.model, "temperature": args.temperature,
         "top_p": args.top_p, "max_tokens": args.max_tokens, "max_evals": args.max_evals,
-        "request_seed": args.request_seed,
         "eval_python": args.eval_python, "argv": sys.argv,
     }
+    if args.request_seed is not None:
+        provenance["request_seed"] = args.request_seed
     (out_dir / "provenance.json").write_text(json.dumps(provenance, indent=2))
     print(f"[run] {provenance['mode']} | {len(tasks)} tasks | out={out_dir}")
 

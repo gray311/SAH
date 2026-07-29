@@ -39,7 +39,7 @@ def load_rollout_score(rollout_dir: Path, task_id: str) -> Optional[float]:
     """Best score for ``task_id`` from a candidate's run_baseline output
     (final summary preferred; wall-safe checkpoint as fallback)."""
     best: Optional[float] = None
-    for summ in rollout_dir.rglob("summary.json"):
+    for summ in rollout_dir.glob("*/summary.json"):
         try:
             for row in json.loads(summ.read_text()):
                 if row.get("task_id") == task_id and row.get("best_score") is not None:
@@ -48,7 +48,7 @@ def load_rollout_score(rollout_dir: Path, task_id: str) -> Optional[float]:
         except Exception:
             pass
     if best is None:
-        for ck in rollout_dir.rglob(f"checkpoints/{task_id}.json"):
+        for ck in rollout_dir.glob(f"*/checkpoints/{task_id}.json"):
             try:
                 s = float(json.loads(ck.read_text()).get("best_score", 0.0))
                 best = s if best is None else max(best, s)

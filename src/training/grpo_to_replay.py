@@ -70,7 +70,13 @@ def _sanitize_roles(msgs: list) -> list:
     return out
 
 
-def convert_row(row: dict, tools: list, normalize) -> dict:
+def convert_row(
+    row: dict,
+    tools: list,
+    normalize,
+    *,
+    use_row_tools: bool = False,
+) -> dict:
     traj = row.get("trajectory") or []
     if traj and normalize is not None:
         msgs = normalize(traj)
@@ -84,7 +90,10 @@ def convert_row(row: dict, tools: list, normalize) -> dict:
     msgs = _sanitize_roles(msgs)
     if msgs[-1].get("role") == "assistant":
         msgs = msgs + [CLOSE_TURN]  # close the trailing turn for the loss mask
-    row_tools = row.get("tools", tools)
+    # Ordinary SAH rounds always use the shared H1 schemas, exactly as before.
+    # Adaptive V1 owns a separate NeXAU H1 and therefore opts into the schemas
+    # recorded with the trajectory that actually ran.
+    row_tools = row.get("tools", tools) if use_row_tools else tools
     return {
         "messages": msgs,
         "tools": row_tools,
@@ -100,17 +109,16 @@ def convert_row(row: dict, tools: list, normalize) -> dict:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--rounds", nargs="+", default=None,
-                    help="round dirs containing grpo_batch.jsonl")
-    ap.add_argument("--batch-files", nargs="+", default=None,
-                    help="explicit proposer batch JSONL files (Adaptive v1)")
+    sources = ap.add_mutually_exclusive_group(required=True)
+    sources.add_argument("--rounds", nargs="+",
+                         help="round dirs containing grpo_batch.jsonl")
+    sources.add_argument("--batch-files", nargs="+",
+                         help="explicit proposer batch JSONL files (Adaptive v1)")
     ap.add_argument("--out", required=True)
     ap.add_argument("--keep-zero", action="store_true",
                     help="keep |advantage| < eps rows (default: drop, matching Weave)")
     ap.add_argument("--eps", type=float, default=1e-6)
     args = ap.parse_args()
-    if bool(args.rounds) == bool(args.batch_files):
-        ap.error("provide exactly one of --rounds or --batch-files")
 
     tools = _h1_tool_schemas()
     try:
@@ -138,7 +146,12 @@ def main() -> None:
                     continue  # nothing to train on
                 if not args.keep_zero and abs(row["advantage"]) < args.eps:
                     continue
-                f.write(json.dumps(convert_row(row, tools, normalize),
+                f.write(json.dumps(convert_row(
+                    row,
+                    tools,
+                    normalize,
+                    use_row_tools=bool(args.batch_files),
+                ),
                                    ensure_ascii=False) + "\n")
                 n_out += 1
     print(f"[grpo_to_replay] {n_in} rows in -> {n_out} trainable rows -> {out}")

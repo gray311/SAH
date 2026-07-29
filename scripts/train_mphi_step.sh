@@ -31,11 +31,15 @@ BASE_HF="$MODEL_ROOT/base/Qwen3.5-9B/c202236235762e1c871ad0ccb60c8ee5ba337b9a"
 SAVE_CKPT="$MODEL_ROOT/checkpoints/self_adapt_harness/mphi_$STEP"
 MERGED="$MODEL_ROOT/exports/self_adapt_harness/mphi_$STEP"
 REPLAY="$ROUND_DIR/replay.jsonl"
-BATCH_FILE="${BATCH_FILE:-}"
+ADAPTIVE_V1_BATCH_FILE="${ADAPTIVE_V1_BATCH_FILE:-}"
+if [ -n "$ADAPTIVE_V1_BATCH_FILE" ]; then
+  SAH="${ADAPTIVE_V1_SAH_ROOT:-$SAH}"
+fi
 
 echo "[1/3] convert grpo_batch -> slime replay"
-if [ -n "$BATCH_FILE" ]; then
-  python3 "$SAH/src/training/grpo_to_replay.py" --batch-files "$BATCH_FILE" --out "$REPLAY"
+if [ -n "$ADAPTIVE_V1_BATCH_FILE" ]; then
+  python3 "$SAH/src/training/grpo_to_replay.py" \
+    --batch-files "$ADAPTIVE_V1_BATCH_FILE" --out "$REPLAY"
 else
   python3 "$SAH/src/training/grpo_to_replay.py" --rounds "$ROUND_DIR" --out "$REPLAY"
 fi

@@ -15,6 +15,7 @@ With a k: dumps that candidate's full chain —
 """
 import json
 import sys
+from collections import Counter
 from pathlib import Path
 
 
@@ -22,6 +23,27 @@ def _text(content):
     if isinstance(content, list):
         return " ".join(b.get("text", "") for b in content if isinstance(b, dict))
     return content or ""
+
+
+def _custom_tool_calls(result):
+    builtins = {
+        "LoadSkill",
+        "edit_solution",
+        "evaluate_solution",
+        "probe_solution",
+        "finish",
+    }
+    calls = Counter()
+    for message in result.get("trajectory") or []:
+        if not isinstance(message, dict):
+            continue
+        for block in message.get("content") or []:
+            if not isinstance(block, dict) or block.get("type") != "tool_use":
+                continue
+            name = str(block.get("name") or "")
+            if name and name not in builtins:
+                calls[name] += 1
+    return calls
 
 
 def main() -> None:
@@ -94,17 +116,62 @@ def main() -> None:
             print(f"  {t['name']:22s} -> {t['binding']}")
 
     print("\n===== 6. INNER ROLLOUT OUTCOME =====")
-    hits = list((rd / "rollouts" / tid / f"cand{k:02d}").rglob("results/*.json"))
+    rollout_root = rd / "rollouts" / tid / f"cand{k:02d}"
+    adaptive = meta.get("protocol") == "adaptive_v1"
+    hits = list(
+        rollout_root.rglob("results/*.json")
+        if adaptive
+        else rollout_root.glob("*/results/*.json")
+    )
     if not hits:
-        hits = list((rd / "rollouts" / tid / f"cand{k:02d}").rglob("checkpoints/*.json"))
+        hits = list(
+            rollout_root.rglob("checkpoints/*.json")
+            if adaptive
+            else rollout_root.glob("*/checkpoints/*.json")
+        )
     if hits:
-        d = json.loads(sorted(hits)[-1].read_text())
+        hits = sorted(hits)
+        if adaptive:
+            channel_scores = {}
+            channel_complete = Counter()
+            channel_errors = Counter()
+            custom_calls = Counter()
+            for result_path in hits:
+                result = json.loads(result_path.read_text())
+                channel = next(
+                    (
+                        name
+                        for name in ("outcome", "promotion")
+                        if name in result_path.parts
+                    ),
+                    "unknown",
+                )
+                channel_scores.setdefault(channel, []).append(
+                    result.get("best_score")
+                )
+                if result.get("stop_reason") == "completed" and not result.get(
+                    "error"
+                ):
+                    channel_complete[channel] += 1
+                else:
+                    channel_errors[channel] += 1
+                custom_calls.update(_custom_tool_calls(result))
+            print(f"  rollout_results={len(hits)}")
+            for channel in sorted(channel_scores):
+                print(
+                    f"  {channel}: scores={channel_scores[channel]} "
+                    f"completed={channel_complete[channel]} "
+                    f"errors={channel_errors[channel]}"
+                )
+            print(f"  custom_tool_calls={dict(custom_calls)}")
+        d = json.loads(hits[-1].read_text())
         led = d.get("ledger") or {}
         print(f"  best_score={d.get('best_score')} evals={led.get('evaluator_calls')} "
               f"probes={led.get('probe_calls')} stop={d.get('stop_reason')}")
-        inner_trace = d.get("trajectory") or []
-        print(f"  inner_trajectory_messages={len(inner_trace)} "
-              f"roles={[str(m.get('role', '?')) for m in inner_trace]}")
+        if adaptive:
+            inner_trace = d.get("trajectory") or []
+            print(f"  inner_trajectory_messages={len(inner_trace)} "
+                  f"roles={[str(m.get('role', '?')) for m in inner_trace]}")
         notes = [s for s in (d.get("steps") or [])
                  if isinstance(s, dict) and s.get("kind") == "note"]
         if notes:

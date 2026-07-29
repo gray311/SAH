@@ -9,8 +9,7 @@
 #   source /lustre/fsw/portfolios/av/users/yingzim/config/workspace_env.sh
 #   mkdir -p "$LOG_ROOT/slurm"
 #   ROUND_ID=1 TASKS=eft__math__circle_packing sbatch scripts/outer_round.sbatch
-# Env knobs: ROUND_ID TASKS K MAX_EVALS EVAL_TIMEOUT BASES_FILE MODEL_PATH
-#   PROPOSER_SEED OUT_TAG ROLLOUT_PAR PROPOSE_PAR PROTOCOL
+# Env knobs: ROUND_ID TASKS K MAX_EVALS EVAL_TIMEOUT BASES_FILE MODEL_PATH PROPOSER_SEED OUT_TAG ROLLOUT_PAR PROPOSE_PAR
 #   TASKS:        the task for this step (space-separated list allowed, default CP).
 #   BASES_FILE:   per-task current-best-H2 registry (default: initial H2 + static
 #                 baseline). For round r>1 use the previous round's next_bases.json.
@@ -50,15 +49,6 @@ export MPHI_PATH="${MPHI_PATH:-}"   # merged M_phi ckpt (step>=2): replica 0 = p
 export ROLLOUT_PAR="${ROLLOUT_PAR:-8}"
 export PROPOSE_PAR="${PROPOSE_PAR:-8}"
 export PROPOSER_SEED="${PROPOSER_SEED:-$((1000 + ROUND_ID))}"
-export PROTOCOL="${PROTOCOL:-sah}"  # sah (unchanged default) | adaptive_v1
-export PROTOCOL_STATE="${PROTOCOL_STATE:-}"
-export PROTOCOL_ROUND="${PROTOCOL_ROUND:-}"
-export TOTAL_ROUNDS="${TOTAL_ROUNDS:-}"
-export ROLLOUT_REPEATS="${ROLLOUT_REPEATS:-3}"
-export PROMOTION_REPEATS="${PROMOTION_REPEATS:-$ROLLOUT_REPEATS}"
-export ROLLOUT_SEED="${ROLLOUT_SEED:-104729}"
-export PLATEAU_ROUNDS="${PLATEAU_ROUNDS:-3}"
-export CONFIDENCE_Z="${CONFIDENCE_Z:-0}"
 
 export OUT_DIR="$RUN_ROOT/self_adapt_harness/outer${OUT_TAG:+-$OUT_TAG}"
 mkdir -p "$OUT_DIR"

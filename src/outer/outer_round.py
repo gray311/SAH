@@ -393,7 +393,7 @@ def main() -> None:
     c.add_argument("--protocol", choices=("sah", "adaptive_v1"), default=None,
                    help="normally inferred from round.json")
     c.add_argument("--protocol-state", default=None)
-    c.add_argument("--confidence-z", type=float, default=0.0,
+    c.add_argument("--confidence-z", type=float, default=1.96,
                    help="Adaptive confirmed-record/promotion confidence multiplier")
     c.add_argument("--plateau-rounds", type=int, default=3)
     c.set_defaults(fn=cmd_collect)

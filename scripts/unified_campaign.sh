@@ -20,6 +20,18 @@ if [ "$MODE" != "adaptive_v1" ]; then
   echo "unknown mode: $MODE (expected sah or adaptive_v1)" >&2
   exit 2
 fi
+export PYTHONDONTWRITEBYTECODE=1
+ADAPTIVE_MAX_EVALS=30
+ADAPTIVE_EVAL_TIMEOUT=120
+if [ -n "${MAX_EVALS:-}" ] && [ "$MAX_EVALS" != "$ADAPTIVE_MAX_EVALS" ]; then
+  echo "adaptive_v1 requires MAX_EVALS=30 for matched comparable runs" >&2
+  exit 2
+fi
+if [ -n "${EVAL_TIMEOUT:-}" ] && \
+   [ "$EVAL_TIMEOUT" != "$ADAPTIVE_EVAL_TIMEOUT" ]; then
+  echo "adaptive_v1 requires EVAL_TIMEOUT=120 for bounded comparable runs" >&2
+  exit 2
+fi
 
 source /lustre/fsw/portfolios/av/users/yingzim/config/workspace_env.sh
 TASK="${1:?adaptive_v1 requires task_id}"
@@ -63,11 +75,13 @@ PY
   else
     log "submitting proposer update $step_tag"
     if [ -n "$previous_ckpt" ]; then
-      BATCH_FILE="$batch" ARCHIVE_MIX=0 \
+      ADAPTIVE_V1_SAH_ROOT="$SAH" \
+      ADAPTIVE_V1_BATCH_FILE="$batch" ARCHIVE_MIX=0 \
         bash "$SCRIPT_DIR/train_mphi_step.sh" \
         "$round_dir" "$step_tag" "$previous_ckpt" | tee "$train_log"
     else
-      BATCH_FILE="$batch" ARCHIVE_MIX=0 \
+      ADAPTIVE_V1_SAH_ROOT="$SAH" \
+      ADAPTIVE_V1_BATCH_FILE="$batch" ARCHIVE_MIX=0 \
         bash "$SCRIPT_DIR/train_mphi_step.sh" \
         "$round_dir" "$step_tag" | tee "$train_log"
     fi
@@ -152,7 +166,15 @@ PY
   pending_manifest="${resume_fields[4]}"
 }
 
+verify_collected_audits(){
+  local status_file="$WORKSPACE/campaign_status.json"
+  PYTHONPATH="$SAH/src" python3 "$SCRIPT_DIR/audit_adaptive_round.py" \
+    --verify-campaign-status "$status_file" \
+    --out-dir "$OUT" --round-base "$ROUND_BASE"
+}
+
 load_resume_state
+verify_collected_audits
 if [ -n "$merged_phi" ]; then
   find "$merged_phi" -maxdepth 1 -name '*.safetensors' -print -quit \
     | grep -q . || { log "state adapter missing: $merged_phi"; exit 1; }
@@ -179,6 +201,7 @@ if [ -n "$pending_manifest" ]; then
   }
   run_training_update "$(dirname "$pending_manifest")" "$pending_manifest"
   load_resume_state
+  verify_collected_audits
 fi
 log "resume: next_protocol_round=$start_index proposer=${merged_phi:-base}"
 
@@ -201,12 +224,14 @@ for index in $(seq "$start_index" $((NROUNDS - 1))); do
     "ROUND_ID=$round"
     "TASKS=$TASK"
     "K=${K:-4}"
-    "MAX_EVALS=${MAX_EVALS:-20}"
+    "FORCE_TOOL_FRAC=${FORCE_TOOL_FRAC:-0.25}"
+    "MAX_EVALS=$ADAPTIVE_MAX_EVALS"
+    "EVAL_TIMEOUT=$ADAPTIVE_EVAL_TIMEOUT"
     "ROLLOUT_REPEATS=${ROLLOUT_REPEATS:-3}"
     "PROMOTION_REPEATS=${PROMOTION_REPEATS:-3}"
     "ROLLOUT_SEED=${ROLLOUT_SEED:-104729}"
     "PLATEAU_ROUNDS=${PLATEAU_ROUNDS:-3}"
-    "CONFIDENCE_Z=${CONFIDENCE_Z:-0}"
+    "CONFIDENCE_Z=${CONFIDENCE_Z:-1.96}"
     "OUT_TAG=$OUT_TAG"
     "PROPOSER_SEED=${PROPOSER_SEED:-23}"
   )
@@ -227,6 +252,10 @@ for index in $(seq "$start_index" $((NROUNDS - 1))); do
     log "round $round has no summary; stopping"
     exit 1
   }
+  log "auditing native NeXAU packages, traces, rollout budgets, and artifacts"
+  python3 "$SCRIPT_DIR/audit_adaptive_round.py" "$round_dir" \
+    --expected-max-evals "$ADAPTIVE_MAX_EVALS" --verify-current-hash \
+    | tee "$round_dir/final_audit.log"
   bases="$round_dir/next_bases.json"
 
   manifest="$round_dir/adaptive_train_manifest.json"

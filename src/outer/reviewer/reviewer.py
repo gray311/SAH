@@ -41,15 +41,13 @@ _LEAK_MARKERS = ("combined_score", "best_score", "evaluator", "answer",
                  "sota", "target score")
 
 
-def _assert_prompt_clean(text: str) -> None:
+def _prompt_leak_markers(text: str) -> List[str]:
+    """Markers that would signal task/eval CONTENT leaked into the repair prompt.
+    Non-fatal: a hit means we refuse to send this to the reviewer and drop the
+    tool (fail-closed), rather than crashing the whole propose round."""
     low = text.lower()
-    hit = [m for m in _LEAK_MARKERS if m in low]
-    # markers may legitimately appear as short substrings in code var names;
-    # only block the ones that signal task/eval content was pasted in.
-    hard = [m for m in ("evaluator", "ground truth", "expected output",
+    return [m for m in ("evaluator", "ground truth", "expected output",
                         "finch", "sota", "target score") if m in low]
-    if hard:
-        raise ValueError(f"repair prompt leak guard tripped: {hard}")
 
 
 REPAIR_SYSTEM = (
@@ -113,7 +111,11 @@ def review_tool_code(
 
         user = (f"The tool code below failed review.\n\nERRORS:\n{problems}\n\n"
                 f"CODE:\n```python\n{current}\n```\n\nReturn only the fixed code.")
-        _assert_prompt_clean(user)  # never ship task/eval content to the reviewer
+        leak = _prompt_leak_markers(user)
+        if leak:  # never ship flagged content to the reviewer — drop, don't crash
+            history.append(f"round {r}: repair skipped (leak-marker {leak} in prompt)")
+            return ReviewOutcome(False, current, r, history,
+                                 final_error=f"leak markers in code, not repaired: {leak}")
         try:
             fixed = _extract_code(repair_fn(REPAIR_SYSTEM, user))
         except Exception as e:  # repairer unavailable -> give up cleanly

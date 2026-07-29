@@ -102,13 +102,19 @@ def run_once(k: int, *, base_spec: Dict[str, Any], user_message: str,
             err = f"{type(e).__name__}: {e}"
 
     # h2spec/1.0: gate + reviewer-repair every generated tool BEFORE the
-    # candidate is accepted. The repairer is the SAME frozen served model
-    # (capability parity — the reviewer cannot inject knowledge the executor
-    # lacks). Tools that never pass are dropped; if that leaves the spec with
-    # no real mutation, the candidate is invalid (fail-closed).
+    # candidate is accepted. The repairer MUST be the FROZEN M0 — under split
+    # serving `base_url` is the trained proposer M_phi, so a repair on it would
+    # break capability parity (the reviewer could then "fix" tool code using the
+    # trained policy, not the frozen executor that actually runs it). The worker
+    # exports SAH_ANALYSIS_BASE_URL = a frozen replica; use it, falling back to
+    # base_url only when every replica is the frozen base (step 1). Tools that
+    # never pass are dropped; if that leaves no real mutation the candidate is
+    # invalid (fail-closed).
+    import os as _os
+    repair_url = _os.environ.get("SAH_ANALYSIS_BASE_URL") or base_url
     review_log: List[Dict[str, Any]] = []
     if session.submitted and session.effective and session.effective.get("new_tools"):
-        repair_fn = _make_repair_fn(base_url, model, api_key, timeout)
+        repair_fn = _make_repair_fn(repair_url, model, api_key, timeout)
         kept = []
         for tool in session.effective["new_tools"]:
             try:

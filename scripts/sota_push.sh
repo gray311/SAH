@@ -55,14 +55,19 @@ else:
     print("[sota_push] no prior next_bases found — keeping existing bases file")
 PYEOF
 
+# width-vs-depth knobs (measured 2026-07-29: erdos/AC1/AC2 winners' eval walls
+# sit at 84-95% of the timeout cap -> DEPTH-limited; trade K for EVAL_TIMEOUT
+# there. ahc039 is eval-noise-dominated -> keep WIDE. hadamard is
+# exploration-limited -> neither helps, needs elite diversity.)
+PUSH_K="${PUSH_K:-16}"; PUSH_EVALS="${PUSH_EVALS:-30}"; PUSH_TIMEOUT="${PUSH_TIMEOUT:-180}"
 setsid bash -c '
   source /lustre/fsw/portfolios/av/users/yingzim/config/workspace_env.sh
   d="'"$d"'"
-  SAH_ADV=v3 SAH_HIST_LAMBDA=0.3 K=16 MAX_EVALS=30 \
+  SAH_ADV=v3 SAH_HIST_LAMBDA=0.3 K='"$PUSH_K"' MAX_EVALS='"$PUSH_EVALS"' EVAL_TIMEOUT='"$PUSH_TIMEOUT"' \
     bash "'"$SAH"'/scripts/fresh_campaign.sh" "'"$TASK"'" "'"$NST"'" "'"$RBASE"'" 0.25 "$d" \
     > "$d/driver.log" 2>&1
   rm -f "$d/RUNNING"
 ' </dev/null >/dev/null 2>&1 &
 sleep 3
-echo "[sota_push] launched $TASK: SAH_ADV=v3 K=16 MAX_EVALS=30, $NST steps @ round$RBASE+"
+echo "[sota_push] launched $TASK: SAH_ADV=v3 K=$PUSH_K MAX_EVALS=$PUSH_EVALS EVAL_TIMEOUT=$PUSH_TIMEOUT, $NST steps @ round$RBASE+"
 echo "[sota_push] RUNNING now: $(ls "$FRESH"/*/RUNNING 2>/dev/null | wc -l) = $(( $(ls "$FRESH"/*/RUNNING 2>/dev/null | wc -l) * 4 )) GPU"

@@ -14,6 +14,23 @@ BASE_PHI="$MODEL_ROOT/base/Qwen3.5-9B/c202236235762e1c871ad0ccb60c8ee5ba337b9a"
 TAG=$(echo "$TASK" | sed 's/.*__//; s/_//g' | cut -c1-8)   # short per-task checkpoint tag
 log(){ echo "[$(date -Is)] [fresh:${TASK##*__}] $*"; }
 
+# Robust job wait: a transient squeue/slurmctld blip returns empty output and
+# must NOT look like completion (observed: hadamard round742 — driver "finished"
+# waiting while the job was mid-rollout, collected an empty round as best=None
+# and moved on). When squeue says inactive, confirm via sacct; if sacct is also
+# blank/blipped, keep waiting — the safe direction.
+wait_job(){
+  local J="$1" ST
+  [ -n "$J" ] || return 0
+  while :; do
+    if squeue -j "$J" -h -o '%T' 2>/dev/null | grep -qE 'PENDING|RUNNING|CONFIGURING|COMPLETING'; then
+      sleep 150; continue
+    fi
+    ST=$(sacct -j "$J" -X -n -o State 2>/dev/null | head -1 | xargs)
+    case "$ST" in PENDING|RUNNING|COMPLETING|"") sleep 60 ;; *) return 0 ;; esac
+  done
+}
+
 bases="$WS/round000_bases.json"
 prev_ckpt=""                       # empty => train from base on step 1
 phi="$BASE_PHI"                    # step 1 proposer = base
@@ -37,7 +54,7 @@ for i in $(seq 0 $((NSTEPS - 1))); do
   done
   [ -n "$JOB" ] || { log "submit failed: $(echo "$RAW" | tail -2 | tr '\n' ' ')"; break; }
   log "  job $JOB"
-  while squeue -j "$JOB" -h -o '%T' 2>/dev/null | grep -qE 'PENDING|RUNNING|CONFIGURING|COMPLETING'; do sleep 150; done
+  wait_job "$JOB"
 
   if [ ! -f "$RD/grpo_batch.jsonl" ] && [ -f "$RD/round.json" ]; then
     (cd "$SAH/src" && python3 -m outer.outer_round collect --round-dir "$RD") >/dev/null 2>&1
@@ -74,9 +91,9 @@ print(dict(cnt))")
     fi
     T=$(grep -oP 'train job: \K[0-9]+' /tmp/fcp_train.txt); M=$(grep -oP 'merge job: \K[0-9]+' /tmp/fcp_train.txt)
     if [ -n "$T" ]; then
-      while squeue -j "$T" -h -o '%T' 2>/dev/null | grep -qE 'PENDING|RUNNING|CONFIGURING|COMPLETING'; do sleep 120; done
+      wait_job "$T"
       if [ "$(sacct -j "$T" -X -n -o State|head -1|xargs)" = "COMPLETED" ]; then
-        while squeue -j "$M" -h -o '%T' 2>/dev/null | grep -qE 'PENDING|RUNNING|CONFIGURING|COMPLETING'; do sleep 60; done
+        wait_job "$M"
         MERGED="$MODEL_ROOT/exports/self_adapt_harness/mphi_$STAG"
         if ls "$MERGED"/*.safetensors >/dev/null 2>&1; then
           phi="$MERGED"; prev_ckpt="$MODEL_ROOT/checkpoints/self_adapt_harness/mphi_$STAG"

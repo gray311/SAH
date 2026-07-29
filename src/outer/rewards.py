@@ -229,3 +229,74 @@ def compute_task_group_v3(
         r["advantage"] = nudge if r["valid"] else INVALID_REWARD
     g["adv_mode"] = f"hist_rescue(vm={vm:+.3f},lam={hist_lambda})"
     return g
+
+
+def _rms_normalize(values: List[float]) -> List[float]:
+    if not values:
+        return values
+    rms = math.sqrt(sum(v * v for v in values) / len(values))
+    return [v / rms for v in values] if rms > EPS else list(values)
+
+
+def compute_task_group_anchored(
+    *, task_id: str, candidates: List[Dict[str, Any]], rollout_root: Path,
+    base_score: float, ceiling: Optional[float] = None, **_ignored: Any,
+) -> Dict[str, Any]:
+    """Adaptive-ported anchored signed credit (reward.impl=anchored).
+
+    Per candidate the raw advantage is a bounded blend
+        0.70*tanh(delta/0.25) + 0.20*rank_term + 0.30*record_bonus
+    where delta = gap-normalized gain vs base, rank_term is the within-group
+    rank in [-1,1], and record_bonus fires only on a genuine new record. Signs
+    are locked (valid positive delta >= +0.05, negative <= -0.05, invalid <=
+    -1, behavior-equivalent = 0) so a high raw score that regressed against its
+    matched parent can never read as a gain. Advantages are RMS-normalized
+    across the group. Validity-gated best selection is inherited from the same
+    load_rollout_score path the other impls use.
+    """
+    rows: List[Dict[str, Any]] = []
+    for cand in candidates:
+        k = cand["k"]
+        valid = bool(cand.get("valid"))
+        score = (load_rollout_score(rollout_root / task_id / f"cand{k:02d}", task_id)
+                 if valid else None)
+        rows.append({"k": k, "valid": valid, "score": score,
+                     "spec_hash": cand.get("spec_hash", ""),
+                     "changed_fields": cand.get("changed_fields", [])})
+
+    denom = (ceiling - base_score) if (ceiling is not None and ceiling > base_score + EPS) \
+        else (abs(base_score) + EPS)
+    valid_scores = [r["score"] for r in rows if r["valid"] and r["score"] is not None]
+    ranked = sorted(valid_scores)
+    raw: List[float] = []
+    for r in rows:
+        if not r["valid"] or r["score"] is None:
+            raw.append(-1.0)
+            r["reward"] = INVALID_REWARD
+            continue
+        delta = (r["score"] - base_score) / denom
+        hard_zero = abs(delta) <= EPS
+        anchor = math.tanh(delta / 0.25)
+        rank = (ranked.index(r["score"]) / max(1, len(ranked) - 1)) * 2 - 1 if len(ranked) > 1 else 0.0
+        is_record = r["score"] > base_score + EPS and r["score"] >= max(valid_scores)
+        record_bonus = math.tanh(max(0.0, delta) / 0.05) if is_record else 0.0
+        value = 0.70 * anchor + 0.20 * rank + 0.30 * record_bonus
+        if hard_zero:
+            value = 0.0
+        elif delta > 0.0:
+            value = max(value, 0.05)
+        elif delta < 0.0:
+            value = min(value, -0.05)
+        raw.append(value)
+        r["reward"] = delta
+    for r, adv in zip(rows, _rms_normalize(raw)):
+        r["advantage"] = adv
+
+    valid = [r for r in rows if r["valid"] and r["score"] is not None]
+    best = max(valid, key=lambda r: r["score"]) if valid else None
+    return {"task_id": task_id, "base_score": base_score, "ceiling": ceiling,
+            "reward_mean": sum(r["reward"] for r in rows) / len(rows),
+            "reward_std": 0.0, "rows": rows, "adv_mode": "anchored",
+            "best_k": best["k"] if best else None,
+            "best_score": best["score"] if best else None,
+            "improved": bool(best and best["score"] > base_score)}

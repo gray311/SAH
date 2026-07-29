@@ -272,6 +272,12 @@ def cmd_collect(args) -> None:
             g = rw.compute_task_group(
                 task_id=tid, candidates=pt["candidates"],
                 rollout_root=round_dir / "rollouts", base_score=float(pt["base_score"]))
+        elif adv_mode == "anchored":
+            g = rw.compute_task_group_anchored(
+                task_id=tid, candidates=pt["candidates"],
+                rollout_root=round_dir / "rollouts", base_score=float(pt["base_score"]),
+                ceiling=ceilings.get(tid))
+            print(f"  [{tid}] advantages: {g['adv_mode']} ceiling={g.get('ceiling')}")
         elif adv_mode == "v3":
             g = rw.compute_task_group_v3(
                 task_id=tid, candidates=pt["candidates"],

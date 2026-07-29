@@ -163,8 +163,8 @@ def load(path: str | Path) -> CampaignConfig:
         raise ValueError(f"config missing required key(s): {missing}")
     if data["sampling"]["mode"] not in ("parallel", "sequential"):
         raise ValueError(f"sampling.mode must be parallel|sequential, got {data['sampling']['mode']!r}")
-    if data["reward"]["impl"] not in ("v2", "v3", "legacy"):
-        raise ValueError(f"reward.impl must be v2|v3|legacy, got {data['reward']['impl']!r}")
+    if data["reward"]["impl"] not in ("v2", "v3", "legacy", "anchored"):
+        raise ValueError(f"reward.impl must be v2|v3|legacy|anchored, got {data['reward']['impl']!r}")
     # sequential mode implies sequential sampling feature (convenience)
     if data["sampling"]["mode"] == "sequential":
         data["sequential"]["enabled"] = True

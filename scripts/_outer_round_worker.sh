@@ -70,6 +70,13 @@ export OPENAI_API_KEY=EMPTY
 # With split serving, propose targets ONLY replica 0 (M_phi); otherwise all.
 PROPOSE_REPLICAS="$N_REPLICAS"
 [ -n "${MPHI_PATH:-}" ] && PROPOSE_REPLICAS=1
+# LEAK GUARD: the optional analysis sub-agents must run on the FROZEN M0, never
+# on the trained proposer M_phi. Under split serving replica 0 = M_phi, so point
+# analysis at a frozen replica (8801). Without split serving every replica is
+# the frozen base, so analysis falls back to the propose endpoint (also frozen).
+if [ -n "${MPHI_PATH:-}" ] && [ "$N_REPLICAS" -gt 1 ]; then
+  export SAH_ANALYSIS_BASE_URL="http://127.0.0.1:8801/v1"   # replica 1 = frozen M0
+fi
 log "propose: task(s) [$TASKS], K=$K, H1-agent runs across $PROPOSE_REPLICAS replica(s)"
 python3 -m outer.outer_round propose \
   --round-dir "$ROUND_DIR" --round "$ROUND_ID" --k "$K" \

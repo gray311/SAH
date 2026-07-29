@@ -109,7 +109,13 @@ def cmd_propose(args) -> None:
         if os.environ.get("SAH_ANALYSIS", "0") == "1" and fb:
             try:
                 from outer import analysis as an
-                chat = an.make_chat_fn(base_urls[0], args.model)
+                # LEAK GUARD: analysis MUST run on the frozen M0, never the
+                # trained proposer M_phi. Under split serving base_urls[0] is
+                # M_phi; the worker exports SAH_ANALYSIS_BASE_URL pointing at a
+                # frozen replica. Without split serving base_urls[0] is already
+                # the frozen base, so that fallback is also frozen M0.
+                an_url = os.environ.get("SAH_ANALYSIS_BASE_URL") or base_urls[0]
+                chat = an.make_chat_fn(an_url, args.model)
                 brief = an.run_analysis(
                     fb, chat=chat,
                     want_perf=os.environ.get("SAH_ANALYSIS_PERF", "1") == "1",

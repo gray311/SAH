@@ -46,7 +46,11 @@ for i in $(seq 0 $((NSTEPS - 1))); do
   JOB=""
   for _ in $(seq 1 30); do
     RAW=$(cd "$SAH" && env ROUND_ID="$R" TASKS="$TASK" K="${K:-8}" MAX_EVALS="${MAX_EVALS:-20}" \
-      FORCE_TOOL_FRAC="$FTF" \
+      FORCE_TOOL_FRAC="$FTF" EVAL_TIMEOUT="${EVAL_TIMEOUT:-180}" \
+      SAH_ADV="${SAH_ADV:-v3}" SAH_HIST_LAMBDA="${SAH_HIST_LAMBDA:-0.3}" SAH_ALPHA="${SAH_ALPHA:-0.3}" \
+      SAH_SEQUENTIAL="${SAH_SEQUENTIAL:-0}" SAH_SEQ_MAX_SHARED="${SAH_SEQ_MAX_SHARED:-6}" \
+      SAH_ANALYSIS="${SAH_ANALYSIS:-0}" SAH_LEAK_NEUTRALIZE="${SAH_LEAK_NEUTRALIZE:-1}" \
+      SAH_CHAMPION_ISOLATION="${SAH_CHAMPION_ISOLATION:-1}" \
       BASES_FILE="$bases" MPHI_PATH="$phi" \
       SEED_PROGRAMS_FILE="$WS/best_programs.json" \
       FEEDBACK_FILE="$WS/task_feedback.json" \

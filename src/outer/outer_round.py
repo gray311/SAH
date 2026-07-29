@@ -93,6 +93,7 @@ def cmd_propose(args) -> None:
         else:
             seed_prog, seed_sc = task.initial_program, float(bases[tid]["seed_score"])
         fb_text = ""
+        fb = None
         if getattr(args, "feedback_file", None):
             try:
                 fb = json.loads(Path(args.feedback_file).read_text()).get(tid)
@@ -100,6 +101,23 @@ def cmd_propose(args) -> None:
                     fb_text = pio.render_feedback(fb)
             except Exception as e:
                 print(f"[propose] WARNING: feedback-file unreadable ({e})")
+        # optional analysis brief (campaign_config: analysis.enabled). Two
+        # read-only specialists on the SAME frozen M0 distill the feedback into a
+        # bounded, leak-guarded brief appended to the proposer message. Default
+        # off; fail-open on any error so a flaky analyzer never blocks a round.
+        if os.environ.get("SAH_ANALYSIS", "0") == "1" and fb:
+            try:
+                from outer import analysis as an
+                chat = an.make_chat_fn(base_urls[0], args.model)
+                brief = an.run_analysis(
+                    fb, chat=chat,
+                    want_perf=os.environ.get("SAH_ANALYSIS_PERF", "1") == "1",
+                    want_design=os.environ.get("SAH_ANALYSIS_DESIGN", "1") == "1")
+                if brief:
+                    fb_text += brief
+                    print(f"[propose] {tid}: analysis brief attached ({len(brief)} chars)")
+            except Exception as e:
+                print(f"[propose] WARNING: analysis stage skipped ({e})")
         ctx[tid] = {
             "base_spec": base_spec,
             "user_message": pio.build_user_message(

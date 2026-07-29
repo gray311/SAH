@@ -51,8 +51,8 @@ packages for the outer H1 proposer and every inner H2 executor. The optional
 `adaptive_v1` protocol reuses SAH's native `h2spec/1.0` materializer, frozen
 inner executor, rollout service, and proposer trainer; it changes only the H1
 proposal policy/context, matched-repeat controller, dual-frontier selection,
-and plateau-gated update cadence. Its Adaptive-only entry point defaults to
-`max_eval=30`; the original SAH defaults are unchanged:
+and plateau-gated update cadence. Its Adaptive-only entry point fixes
+`max_eval=20` to match the original SAH evaluator budget:
 
 ```bash
 bash scripts/unified_campaign.sh sah <existing fresh_campaign args...>

@@ -278,6 +278,70 @@ context, proposal IDs, generation seeds, plateau timing, and final-round logic
 use a separate zero-based protocol round, so a campaign stored in
 `round300..round309` still behaves exactly like Adaptive rounds `0..9`.
 
+### Production launch
+
+Run the campaign driver from a login node inside `tmux` (or another persistent
+shell). Do not submit `unified_campaign.sh` with `sbatch`: the driver submits
+and monitors the outer, trainer, and merge Slurm jobs itself.
+
+The checkout must be available at `$CODE_ROOT/self_adapt_harness`, with the
+shared `$CODE_ROOT/Weave_v2` trainer and the model, dataset, run, log, and
+environment roots provided by `workspace_env.sh`. A complete launch is:
+
+```bash
+tmux new -s adaptive-v1
+
+source /lustre/fsw/portfolios/av/users/yingzim/config/workspace_env.sh
+cd "$CODE_ROOT/self_adapt_harness"
+
+TASK=eft__math__circle_packing
+NROUNDS=10
+ROUND_BASE=300
+WORKSPACE="$RUN_ROOT/self_adapt_harness/adaptive_v1_cp_seed23"
+
+OUT_TAG=adaptive-v1-cp-seed23 \
+K=4 \
+FORCE_TOOL_FRAC=0.25 \
+ROLLOUT_REPEATS=3 \
+PROMOTION_REPEATS=3 \
+ROLLOUT_SEED=104729 \
+PROPOSER_SEED=23 \
+PLATEAU_ROUNDS=3 \
+CONFIDENCE_Z=1.96 \
+LR=3e-5 \
+KL_COEF=0.05 \
+NUM_EPOCH=3 \
+bash scripts/unified_campaign.sh \
+  adaptive_v1 "$TASK" "$NROUNDS" "$ROUND_BASE" "$WORKSPACE"
+```
+
+Choose a collision-free `ROUND_BASE`, `OUT_TAG`, and `WORKSPACE` for a new
+experiment. Artifacts are written under
+`$RUN_ROOT/self_adapt_harness/outer-$OUT_TAG/roundNNN`, while campaign state
+and the resumable training transaction live in `$WORKSPACE`. To resume an
+interrupted campaign, rerun the exact same command with the same task, round
+count, round base, output tag, workspace, seeds, and controller settings. The
+driver restores the working harness, active proposer adapter, completed
+protocol round, and any pending train/merge jobs; it refuses to overwrite an
+untracked partial round.
+
+Do not resume a historical `MAX_EVALS=30` Adaptive workspace with this
+`MAX_EVALS=20` version. Its evaluator ledger, artifact audit, and source
+provenance intentionally fail closed. Start the 20-budget campaign with a new
+round range, output tag, and workspace.
+
+The positional arguments differ deliberately:
+
+- SAH: `sah <task> <steps> <round_base> [force_tool_frac] [workspace]`;
+- Adaptive: `adaptive_v1 <task> <rounds> <round_base> [workspace]`.
+
+For Adaptive, pass `FORCE_TOOL_FRAC` as an environment variable, not as the
+fourth positional argument. `LR`, `KL_COEF`, and `NUM_EPOCH` are inherited by
+the shared SAH trainer when a plateau-gated update is required. The trainer
+currently fixes LoRA rank/alpha to 64/128, uses four GPUs, global batch size
+8, and micro batch size 1. `N_REPLICAS=4`, `PROPOSE_PAR=8`, and
+`ROLLOUT_PAR=8` are optional capacity/concurrency overrides.
+
 Useful Adaptive environment knobs:
 
 ```text
@@ -293,12 +357,13 @@ ADAPTIVE_TOKENIZER_PATH=/path/to/local/qwen3.5
 ADAPTIVE_V1_DATASET_ROOT=/optional/local/dataset
 ```
 
-Adaptive production fixes `MAX_EVALS=30` as a comparability invariant and
-`EVAL_TIMEOUT=120` as a wall-time and cleanup invariant, and rejects a
-conflicting override before launch. The rollout plan records both contracts
-and the round auditor verifies them. Each evaluator worker also starts in a
-fresh process group; the group is terminated after normal completion as well
-as timeout so an evaluator cannot leave candidate subprocesses behind. The
+Adaptive production fixes `MAX_EVALS=20` to match the original SAH evaluator
+budget and fixes `EVAL_TIMEOUT=120` as a wall-time and cleanup invariant. Do
+not pass either variable in the normal launch command; a conflicting override
+is rejected before launch. The rollout plan records both contracts and the
+round auditor verifies them. Each evaluator worker also starts in a fresh
+process group; the group is terminated after normal completion as well as
+timeout so an evaluator cannot leave candidate subprocesses behind. The
 delegated default SAH campaign keeps its existing evaluator-budget behavior.
 
 The default `CONFIDENCE_Z=1.96` uses matched-repeat delta uncertainty for
@@ -335,7 +400,7 @@ LoRA checkpoint. Existing pending train/merge job IDs are resumed rather than
 submitted twice, and partial/untracked artifact rounds fail closed instead of
 being overwritten. Before any resumed round or pending training update, the
 campaign also requires every collected protocol round to have a successful
-`max_eval=30` audit whose H1, analyzer, controller, integration-runtime, and
+`max_eval=20` audit whose H1, analyzer, controller, integration-runtime, and
 auditor hashes match the current source, then re-runs the non-mutating round
 audit against the live artifacts. A failed, missing, stale, or subsequently
 corrupted post-collect artifact therefore cannot be bypassed by restarting
@@ -375,7 +440,7 @@ missing/failed/duplicate rollout is never converted into a policy loss,
 allowed to mutate controller state, or replaced with checkpoint/seed evidence.
 Champion confidence uses paired promotion deltas because the repeat seeds are
 matched. The rollout plan records every channel, package, repeat, and request
-seed. Plan generation itself verifies `max_eval=30`, unique output paths, and
+seed. Plan generation itself verifies `max_eval=20`, unique output paths, and
 positive repeat counts; a planner or rollout process failure terminates the
 worker before collection.
 
@@ -384,7 +449,7 @@ After each Adaptive Slurm round, `unified_campaign.sh` runs
 submitting proposer training. The audit reloads every valid native package via
 `AgentConfig`, checks the analyzer/outer traces, requires one completed inner
 trace per planned rollout, verifies the evaluator ledger stayed at
-`max_eval=30`, validates native tool-call training rows, proves each valid
+`max_eval=20`, validates native tool-call training rows, proves each valid
 training spec merges to the exact effective harness hash that was rolled, and
 cross-checks channel counts, harness paths, paired request seeds, unique output
 directories, exact SAH round-directory placement, nonnegative evaluator-call
@@ -415,7 +480,7 @@ for script in scripts/unified_campaign.sh scripts/_outer_round_worker.sh \
 done
 python -m compileall -q src tests
 python scripts/audit_adaptive_round.py <completed-adaptive-round> \
-  --expected-max-evals 30
+  --expected-max-evals 20
 git diff --check
 ```
 

@@ -284,7 +284,7 @@ def verify_collected_audits(
             and report.get("ok") is True
             and int(report.get("protocol_round", -1)) == protocol_round
             and int(report.get("artifact_round", -1)) == artifact_round
-            and int(report.get("max_evals", -1)) == 30,
+            and int(report.get("max_evals", -1)) == 20,
             f"invalid/stale Adaptive round audit: {path}",
         )
         for field, value in expected.items():
@@ -294,7 +294,7 @@ def verify_collected_audits(
             )
         live = audit_round(
             path.parent,
-            expected_max_evals=30,
+            expected_max_evals=20,
             verify_current_hash=True,
         )
         _require(

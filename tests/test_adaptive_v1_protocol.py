@@ -136,10 +136,10 @@ class NativeAdaptiveProposalTests(unittest.TestCase):
         self.assertNotIn("tools", contract["always_protected"])
         self.assertIn('"new_middlewares"', rendered)
 
-    def test_adaptive_proposal_rejects_non_30_eval_budget(self) -> None:
-        with self.assertRaisesRegex(ValueError, "max_evals=30"):
+    def test_adaptive_proposal_rejects_non_20_eval_budget(self) -> None:
+        with self.assertRaisesRegex(ValueError, "max_evals=20"):
             adaptive.cmd_propose(
-                SimpleNamespace(max_evals=20),
+                SimpleNamespace(max_evals=30),
                 load_bases=lambda *_args, **_kwargs: self.fail(
                     "budget gate must run before loading task state"
                 ),
@@ -869,7 +869,7 @@ def _write_rollouts(root: Path, task_id: str, scores, program_prefix: str) -> No
                         }
                     ],
                     "ledger": {
-                        "max_evaluator_calls": 30,
+                        "max_evaluator_calls": 20,
                         "evaluator_calls": 1,
                     },
                 }
@@ -885,7 +885,7 @@ class AdaptiveRolloutPlanTests(unittest.TestCase):
                 json.dumps(
                     {
                         "protocol": "adaptive_v1",
-                        "max_evals": 30,
+                        "max_evals": 20,
                         "tasks_order": ["task_a", "task_b"],
                         "per_task": {
                             "task_a": {
@@ -963,13 +963,13 @@ class AdaptiveRolloutPlanTests(unittest.TestCase):
                 json.dumps(
                     {
                         "protocol": "adaptive_v1",
-                        "max_evals": 20,
+                        "max_evals": 30,
                         "tasks_order": [],
                         "per_task": {},
                     }
                 )
             )
-            with self.assertRaisesRegex(ValueError, "max_evals=30"):
+            with self.assertRaisesRegex(ValueError, "max_evals=20"):
                 adaptive.build_rollout_plan(
                     round_dir,
                     outcome_repeats=2,
@@ -984,7 +984,7 @@ class AdaptiveRolloutPlanTests(unittest.TestCase):
                 json.dumps(
                     {
                         "protocol": "adaptive_v1",
-                        "max_evals": 30,
+                        "max_evals": 20,
                         "tasks_order": [],
                         "per_task": {},
                     }
@@ -1128,7 +1128,7 @@ def _make_round(
         "protocol": adaptive.PROTOCOL,
         "protocol_state": str(state_path),
         "total_rounds": total_rounds,
-        "max_evals": 30,
+        "max_evals": 20,
         "tasks_order": [task_id],
         "bases_in": {
             task_id: {
@@ -1747,14 +1747,14 @@ class AdaptiveControllerTests(unittest.TestCase):
             )
             _write_rollouts(root, task_id, [1.0], "fixture")
             payload = json.loads(result.read_text())
-            payload["ledger"]["max_evaluator_calls"] = 20
+            payload["ledger"]["max_evaluator_calls"] = 30
             result.write_text(json.dumps(payload))
             self.assertEqual(
                 adaptive.load_rollout_samples(
                     root,
                     task_id,
                     require_completed=True,
-                    expected_max_evals=30,
+                    expected_max_evals=20,
                 ).scores,
                 (),
             )
@@ -1767,7 +1767,7 @@ class AdaptiveControllerTests(unittest.TestCase):
                     root,
                     task_id,
                     require_completed=True,
-                    expected_max_evals=30,
+                    expected_max_evals=20,
                 ).scores,
                 (),
             )
@@ -1788,7 +1788,7 @@ class AdaptiveControllerTests(unittest.TestCase):
                         "error": None,
                         "trajectory": [{"role": "assistant", "content": []}],
                         "ledger": {
-                            "max_evaluator_calls": 30,
+                            "max_evaluator_calls": 20,
                             "evaluator_calls": 1,
                         },
                     }
@@ -1798,7 +1798,7 @@ class AdaptiveControllerTests(unittest.TestCase):
                 root,
                 task_id,
                 expected_repeats=2,
-                expected_max_evals=30,
+                expected_max_evals=20,
             )
             self.assertEqual(program, "planned-1")
             self.assertEqual(score, 2.0)
@@ -1811,13 +1811,13 @@ class AdaptiveControllerTests(unittest.TestCase):
                 / f"{task_id}.json"
             )
             payload = json.loads(planned.read_text())
-            payload["ledger"]["max_evaluator_calls"] = 20
+            payload["ledger"]["max_evaluator_calls"] = 30
             planned.write_text(json.dumps(payload))
             program, score = adaptive.load_best_program(
                 root,
                 task_id,
                 expected_repeats=2,
-                expected_max_evals=30,
+                expected_max_evals=20,
             )
             self.assertEqual(program, "planned-0")
             self.assertEqual(score, 1.0)

@@ -1419,9 +1419,9 @@ def cmd_propose(
     if adaptive_dataset_root:
         eft_task.configure_dataset_root(adaptive_dataset_root)
 
-    if int(args.max_evals) != 30:
+    if int(args.max_evals) != 20:
         raise ValueError(
-            "Adaptive V1 requires max_evals=30 for matched comparable runs"
+            "Adaptive V1 requires max_evals=20 to match the SAH evaluator budget"
         )
     round_dir = Path(args.round_dir)
     round_dir.mkdir(parents=True, exist_ok=True)

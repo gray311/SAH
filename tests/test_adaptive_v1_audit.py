@@ -94,7 +94,7 @@ def test_campaign_resume_requires_source_matched_round_audits(
         "ok": True,
         "protocol_round": 0,
         "artifact_round": 100,
-        "max_evals": 30,
+        "max_evals": 20,
         "h1_package_hash": audit.adaptive_v1.h1_package_hash(),
         "analysis_package_hash": audit.analysis_package_hash(),
         "controller_package_hash": audit.controller_package_hash(),

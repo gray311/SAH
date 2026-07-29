@@ -25,8 +25,8 @@ PROMOTION_REPEATS="${PROMOTION_REPEATS:-$ROLLOUT_REPEATS}"
 ROLLOUT_SEED="${ROLLOUT_SEED:-104729}"
 PLATEAU_ROUNDS="${PLATEAU_ROUNDS:-3}"
 CONFIDENCE_Z="${CONFIDENCE_Z:-1.96}"
-if [ "$PROTOCOL" = "adaptive_v1" ] && [ "$MAX_EVALS" != "30" ]; then
-  log "adaptive_v1 requires MAX_EVALS=30, got $MAX_EVALS"
+if [ "$PROTOCOL" = "adaptive_v1" ] && [ "$MAX_EVALS" != "20" ]; then
+  log "adaptive_v1 requires MAX_EVALS=20 to match SAH, got $MAX_EVALS"
   exit 2
 fi
 if [ "$PROTOCOL" = "adaptive_v1" ] && [ "$EVAL_TIMEOUT" != "120" ]; then

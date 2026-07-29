@@ -64,7 +64,7 @@ def test_dossier_is_bounded_and_does_not_replay_generated_tool_code() -> None:
         seed_program="seed " * 4_000,
         seed_score=0.0,
         base_score=1.0,
-        max_evals=30,
+        max_evals=20,
         current_harness=base,
         adaptive_payload=_adaptive_payload(),
     )
@@ -108,7 +108,7 @@ def test_dossier_closes_every_retained_evidence_reference() -> None:
         seed_program="seed",
         seed_score=0.0,
         base_score=1.0,
-        max_evals=30,
+        max_evals=20,
         current_harness=_base(),
         adaptive_payload={
             "evidence": recent,
@@ -376,7 +376,7 @@ def test_analysis_failure_returns_a_parseable_deterministic_brief() -> None:
         seed_program="seed",
         seed_score=0.0,
         base_score=1.0,
-        max_evals=30,
+        max_evals=20,
         current_harness=_base(),
         adaptive_payload=_adaptive_payload(),
     )

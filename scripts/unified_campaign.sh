@@ -21,10 +21,10 @@ if [ "$MODE" != "adaptive_v1" ]; then
   exit 2
 fi
 export PYTHONDONTWRITEBYTECODE=1
-ADAPTIVE_MAX_EVALS=30
+ADAPTIVE_MAX_EVALS=20
 ADAPTIVE_EVAL_TIMEOUT=120
 if [ -n "${MAX_EVALS:-}" ] && [ "$MAX_EVALS" != "$ADAPTIVE_MAX_EVALS" ]; then
-  echo "adaptive_v1 requires MAX_EVALS=30 for matched comparable runs" >&2
+  echo "adaptive_v1 requires MAX_EVALS=20 to match the SAH evaluator budget" >&2
   exit 2
 fi
 if [ -n "${EVAL_TIMEOUT:-}" ] && \

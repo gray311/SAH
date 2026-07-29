@@ -72,8 +72,8 @@ def build_rollout_plan(
     meta = json.loads((round_dir / "round.json").read_text())
     if meta.get("protocol") != PROTOCOL:
         raise ValueError("rollout plan requires an Adaptive v1 round")
-    if int(meta.get("max_evals", 0)) != 30:
-        raise ValueError("Adaptive rollout plan requires max_evals=30")
+    if int(meta.get("max_evals", 0)) != 20:
+        raise ValueError("Adaptive rollout plan requires max_evals=20")
 
     runs: List[Dict[str, Any]] = []
 
@@ -720,9 +720,9 @@ def cmd_collect(args) -> None:
     meta = json.loads((round_dir / "round.json").read_text())
     if meta.get("protocol") != PROTOCOL:
         raise ValueError("Adaptive collector received a non-Adaptive round")
-    if int(meta.get("max_evals", 0)) != 30:
+    if int(meta.get("max_evals", 0)) != 20:
         raise ValueError(
-            "Adaptive V1 collector requires a max_evals=30 round"
+            "Adaptive V1 collector requires a max_evals=20 round"
         )
     state_path = resolve_state_path(
         round_dir, getattr(args, "protocol_state", None) or meta.get("protocol_state")

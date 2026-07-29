@@ -9,6 +9,7 @@ and accounted here, never self-reported by the harness).
 from __future__ import annotations
 
 import contextvars
+import textwrap
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, List, Optional
@@ -102,6 +103,15 @@ class InnerSession:
                 raw = extracted
         if pe.BLOCK_START in raw and pe.BLOCK_END in raw:
             raw = pe.split_program(raw).block
+        # M0 sometimes emits the whole block uniformly indented (copied from
+        # inside a class/function) — spliced verbatim that is an instant
+        # "IndentationError: unexpected indent (line 2)" (80 wasted evals
+        # across the K16 push rounds). dedent only strips indentation COMMON
+        # to every line, so correct blocks are untouched and mixed-indent
+        # garbage still fails exactly as before.
+        first = next((ln for ln in raw.splitlines() if ln.strip()), "")
+        if first[:1] in (" ", "\t"):
+            raw = textwrap.dedent(raw)
         self.current_program = pe.split_program(self.current_program).assemble(raw)
         self._pending_edit_mode, self._pending_edit_note = "full_rewrite", "spliced new EVOLVE-BLOCK"
         return "edit staged (full EVOLVE-BLOCK replaced). Call evaluate_solution to score it."
@@ -114,7 +124,19 @@ class InnerSession:
         )
         self.ledger.evaluator_calls += 1
         self.ledger.sandbox_seconds += out.wall_s
-        is_best = out.combined_score > self.best_score
+        # Anti-reward-hacking: an INVALID outcome can never become best, no
+        # matter how high combined_score is. Some task evaluators award a huge
+        # score to a solution that violates their own constraints (e.g. txn
+        # returning 32258 for an illegal schedule with validity=0.0); tracking
+        # best on combined_score alone would let M0 mine that defect and feed a
+        # bogus positive reward into GRPO. `out.valid` = (error is None and
+        # validity >= 1.0); every legitimate winner across all tasks satisfies
+        # it, so this rejects only the exploit.
+        is_best = out.valid and out.combined_score > self.best_score
+        if (not out.valid) and out.combined_score > self.best_score:
+            print(f"[session] rejected invalid high score "
+                  f"(combined={out.combined_score:g} validity={out.validity:g} "
+                  f"err={out.error}) — not counted as best", flush=True)
         if is_best:
             self.best_score = out.combined_score
             self.best_program = self.current_program

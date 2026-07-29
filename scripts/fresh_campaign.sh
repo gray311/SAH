@@ -26,7 +26,7 @@ for i in $(seq 0 $((NSTEPS - 1))); do
 
   JOB=""
   for _ in $(seq 1 30); do
-    RAW=$(cd "$SAH" && env ROUND_ID="$R" TASKS="$TASK" K=8 MAX_EVALS=20 \
+    RAW=$(cd "$SAH" && env ROUND_ID="$R" TASKS="$TASK" K="${K:-8}" MAX_EVALS="${MAX_EVALS:-20}" \
       FORCE_TOOL_FRAC="$FTF" \
       BASES_FILE="$bases" MPHI_PATH="$phi" \
       SEED_PROGRAMS_FILE="$WS/best_programs.json" \

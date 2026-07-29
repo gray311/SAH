@@ -25,7 +25,7 @@
 #SBATCH --gres=gpu:4
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=64
-#SBATCH --time=04:00:00
+#SBATCH --time=05:00:00
 #SBATCH --output=/lustre/fsw/portfolios/av/users/yingzim/logs/slurm/%x-%j.out
 #SBATCH --error=/lustre/fsw/portfolios/av/users/yingzim/logs/slurm/%x-%j.err
 
@@ -43,7 +43,7 @@ export ROUND_ID="${ROUND_ID:-1}"
 export TASKS="${TASKS:-eft__math__circle_packing}"
 export K="${K:-8}"
 export MAX_EVALS="${MAX_EVALS:-20}"
-export EVAL_TIMEOUT="${EVAL_TIMEOUT:-120}"
+export EVAL_TIMEOUT="${EVAL_TIMEOUT:-180}"
 export BASES_FILE="${BASES_FILE:-}"
 export MPHI_PATH="${MPHI_PATH:-}"   # merged M_phi ckpt (step>=2): replica 0 = proposer, rest = frozen M0
 export ROLLOUT_PAR="${ROLLOUT_PAR:-8}"

@@ -185,3 +185,47 @@ def compute_task_group_v2(
             "best_k": best["k"] if best else None,
             "best_score": best["score"] if best else None,
             "improved": bool(best and best["score"] > base_score)}
+
+
+def compute_task_group_v3(
+    *, task_id: str, candidates: List[Dict[str, Any]], rollout_root: Path,
+    base_score: float, ceiling: Optional[float] = None,
+    sharpen_alpha: float = 0.3, zero_range_eps: float = 1e-3,
+    hist_lambda: float = 0.3,
+) -> Dict[str, Any]:
+    """v2 + HISTORICAL-FRONTIER RESCUE (the '历史 trajectory reward 对比' idea).
+
+    v2 zeros a group whenever its K valid rewards are tied within
+    ``zero_range_eps`` (no within-group signal). But ``base_score`` IS the
+    historical frontier (the ratchet best), so a tied batch that sits UNIFORMLY
+    above/below the frontier still carries a real cross-round signal that v2
+    throws away. Empirically (AC1) that discards genuine gains — e.g. a round
+    where all 8 candidates beat base by 20%% of the gap was zeroed.
+
+    Rescue: for an off-frontier tied group, give a uniform directional advantage
+    ``hist_lambda * softcap(vm)`` where ``vm`` is the shared gap-normalized
+    reward vs base (>0 batch beat the frontier -> reinforce this phi; <0 ->
+    discourage). A truly-plateaued group (vm ~ 0, batch reproduced the frontier
+    program) still gets 0 — no signal can be manufactured from zero variance;
+    that regime needs exploration (higher K/temperature), not a baseline.
+
+    Only the previously-zeroed rounds change; groups with within-group signal are
+    byte-identical to v2. Still fully on-policy: the historical frontier only
+    sets the baseline/magnitude; we never backprop through past trajectories.
+    """
+    g = compute_task_group_v2(
+        task_id=task_id, candidates=candidates, rollout_root=rollout_root,
+        base_score=base_score, ceiling=ceiling, sharpen_alpha=sharpen_alpha,
+        zero_range_eps=zero_range_eps)
+    if g["adv_mode"] != "no_signal":
+        return g  # within-group signal present -> identical to v2
+    valid_rewards = [r["reward"] for r in g["rows"] if r["valid"]]
+    vm = sum(valid_rewards) / len(valid_rewards) if valid_rewards else 0.0
+    if abs(vm) < zero_range_eps:
+        g["adv_mode"] = "no_signal(true-plateau)"        # genuinely nothing to learn
+        return g
+    nudge = hist_lambda * (3.0 * math.tanh(vm / 3.0))    # bounded, monotonic in vm
+    for r in g["rows"]:
+        r["advantage"] = nudge if r["valid"] else INVALID_REWARD
+    g["adv_mode"] = f"hist_rescue(vm={vm:+.3f},lam={hist_lambda})"
+    return g

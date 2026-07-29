@@ -200,6 +200,10 @@ def cmd_collect(args) -> None:
 
     import os
     adv_mode = os.environ.get("SAH_ADV", "v2")
+    # v3 == v2 except on no_signal groups, so results alone can't tell you which
+    # impl ran — log it so collect.log is proof the env survived sbatch/srun.
+    print(f"[collect] advantage impl: SAH_ADV={adv_mode} "
+          f"(hist_lambda={os.environ.get('SAH_HIST_LAMBDA', '-')})")
     ceilings = {}
     try:
         ft = json.loads((Path(__file__).resolve().parents[2]
@@ -217,6 +221,13 @@ def cmd_collect(args) -> None:
             g = rw.compute_task_group(
                 task_id=tid, candidates=pt["candidates"],
                 rollout_root=round_dir / "rollouts", base_score=float(pt["base_score"]))
+        elif adv_mode == "v3":
+            g = rw.compute_task_group_v3(
+                task_id=tid, candidates=pt["candidates"],
+                rollout_root=round_dir / "rollouts", base_score=float(pt["base_score"]),
+                ceiling=ceilings.get(tid), sharpen_alpha=float(os.environ.get("SAH_ALPHA", "0.3")),
+                hist_lambda=float(os.environ.get("SAH_HIST_LAMBDA", "0.3")))
+            print(f"  [{tid}] advantages: {g['adv_mode']} ceiling={g.get('ceiling')}")
         else:
             g = rw.compute_task_group_v2(
                 task_id=tid, candidates=pt["candidates"],

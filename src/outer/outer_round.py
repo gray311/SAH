@@ -65,6 +65,12 @@ def _load_bases(bases_file: str | None, tasks: list) -> Dict[str, Dict[str, Any]
 
 
 def cmd_propose(args) -> None:
+    if getattr(args, "protocol", "sah") == "adaptive_v1":
+        from protocols import adaptive_v1
+
+        adaptive_v1.cmd_propose(args, load_bases=_load_bases)
+        return
+
     from inner.eft_task import get_task  # tasks registry (spec + seed program)
 
     round_dir = Path(args.round_dir)
@@ -193,6 +199,13 @@ def cmd_propose(args) -> None:
 def cmd_collect(args) -> None:
     round_dir = Path(args.round_dir)
     meta = json.loads((round_dir / "round.json").read_text())
+    protocol = getattr(args, "protocol", None) or meta.get("protocol", "sah")
+    if protocol == "adaptive_v1":
+        from protocols import adaptive_v1
+
+        adaptive_v1.cmd_collect(args)
+        return
+
     prompts = json.loads((round_dir / "prompts.json").read_text())
     trajs = {(t["task_id"], t["k"]): t
              for t in json.loads((round_dir / "trajectories.json").read_text())}
@@ -365,10 +378,24 @@ def main() -> None:
                    help="global best_programs.json; H1 sees the inherited program as the rollout starting point")
     p.add_argument("--feedback-file", default=None,
                    help="global task_feedback.json; H1 sees a telemetry digest of the previous visit's rollouts")
+    p.add_argument("--protocol", choices=("sah", "adaptive_v1"), default="sah",
+                   help="outer-loop protocol; default preserves current SAH behavior")
+    p.add_argument("--protocol-state", default=None,
+                   help="Adaptive v1 controller/archive state JSON")
+    p.add_argument("--protocol-round", type=int, default=None,
+                   help="zero-based Adaptive campaign round (artifact round may differ)")
+    p.add_argument("--total-rounds", type=int, default=None,
+                   help="Adaptive v1 campaign length (prevents an unused final update)")
     p.set_defaults(fn=cmd_propose)
 
     c = sub.add_parser("collect", help="per-task rewards + GRPO batch + next bases")
     c.add_argument("--round-dir", required=True)
+    c.add_argument("--protocol", choices=("sah", "adaptive_v1"), default=None,
+                   help="normally inferred from round.json")
+    c.add_argument("--protocol-state", default=None)
+    c.add_argument("--confidence-z", type=float, default=1.96,
+                   help="Adaptive confirmed-record/promotion confidence multiplier")
+    c.add_argument("--plateau-rounds", type=int, default=3)
     c.set_defaults(fn=cmd_collect)
 
     args = ap.parse_args()

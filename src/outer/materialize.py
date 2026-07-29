@@ -197,6 +197,16 @@ def materialize(effective: Dict[str, Any], cand_dir: Path, *,
     sampling = effective.get("sampling", {})
     agent_p = effective.get("agent", {})
     mw_p = effective.get("middleware", {})
+    long_output_max = int(mw_p.get("long_tool_output_max_chars", 8000))
+    if (meta or {}).get("protocol") == "adaptive_v1":
+        # NexAU requires head_chars + tail_chars <= max_output_chars. Adaptive
+        # exposes smaller caps, so scale its excerpts without changing SAH's
+        # default materialization semantics.
+        long_head_chars = min(4000, max(1, long_output_max // 2))
+        long_tail_chars = min(4000, max(0, long_output_max - long_head_chars))
+    else:
+        long_head_chars = 4000
+        long_tail_chars = 4000
     agent = {
         "type": "agent",
         "name": "inner_h2_candidate",
@@ -230,9 +240,10 @@ def materialize(effective: Dict[str, Any], cand_dir: Path, *,
              "params": {"stall_after": int(mw_p.get("stall_after", 8)),
                         "max_restarts": int(mw_p.get("max_restarts", 2))}},
             {"import": "nexau.archs.main_sub.execution.middleware.long_tool_output:LongToolOutputMiddleware",
-             "params": {"max_output_chars": int(mw_p.get("long_tool_output_max_chars", 8000)),
+             "params": {"max_output_chars": long_output_max,
                         "head_lines": 40, "tail_lines": 20,
-                        "head_chars": 4000, "tail_chars": 4000,
+                        "head_chars": long_head_chars,
+                        "tail_chars": long_tail_chars,
                         "bypass_tool_names": ["finish", "LoadSkill"]}},
             {"import": "nexau.archs.main_sub.execution.middleware.round_and_token_reminder:RoundAndTokenReminderMiddleware",
              "params": {"max_context_tokens": 131072,
@@ -240,6 +251,11 @@ def materialize(effective: Dict[str, Any], cand_dir: Path, *,
         ],
         "tracers": [{"import": "nexau.archs.tracer.adapters.in_memory:InMemoryTracer"}],
     }
+    if (meta or {}).get("protocol") == "adaptive_v1":
+        # NexAU 0.4.1 validates ``retry_attempts`` but has no public
+        # ``retry_backoff_max_seconds`` field. Keep SAH's historical output
+        # unchanged and omit the unsupported key only from Adaptive packages.
+        agent.pop("retry_backoff_max_seconds", None)
     (cand_dir / "agent.yaml").write_text(_yaml_str(agent))
 
     # --- provenance --- #

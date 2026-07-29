@@ -16,6 +16,23 @@ log(){ echo "[$(date -Is)] $*"; }
 
 ROUND_DIR="$OUT_DIR/round$(printf '%03d' "$ROUND_ID")"
 mkdir -p "$ROUND_DIR"
+PROTOCOL="${PROTOCOL:-sah}"
+PROTOCOL_STATE="${PROTOCOL_STATE:-}"
+PROTOCOL_ROUND="${PROTOCOL_ROUND:-}"
+TOTAL_ROUNDS="${TOTAL_ROUNDS:-}"
+ROLLOUT_REPEATS="${ROLLOUT_REPEATS:-3}"
+PROMOTION_REPEATS="${PROMOTION_REPEATS:-$ROLLOUT_REPEATS}"
+ROLLOUT_SEED="${ROLLOUT_SEED:-104729}"
+PLATEAU_ROUNDS="${PLATEAU_ROUNDS:-3}"
+CONFIDENCE_Z="${CONFIDENCE_Z:-1.96}"
+if [ "$PROTOCOL" = "adaptive_v1" ] && [ "$MAX_EVALS" != "20" ]; then
+  log "adaptive_v1 requires MAX_EVALS=20 to match SAH, got $MAX_EVALS"
+  exit 2
+fi
+if [ "$PROTOCOL" = "adaptive_v1" ] && [ "$EVAL_TIMEOUT" != "120" ]; then
+  log "adaptive_v1 requires EVAL_TIMEOUT=120, got $EVAL_TIMEOUT"
+  exit 2
+fi
 
 # --- deps --- #
 export UV_BREAK_SYSTEM_PACKAGES=1
@@ -51,7 +68,31 @@ for g in $(seq 0 $((N_REPLICAS - 1))); do
   log "replica $g serves: $ckpt"
   VPIDS+=("$(serve_replica "$g" "$port" "$ckpt" "$OUT_DIR/vllm-$g.log")")
 done
-trap 'for p in "${VPIDS[@]:-}"; do kill -9 -- "-$p" 2>/dev/null || kill -9 "$p" 2>/dev/null || true; done' EXIT
+cleanup_vllm(){
+  local exit_code=$?
+  trap - EXIT
+  log "shutdown: exit_code=$exit_code; stopping ${#VPIDS[@]} vLLM process group(s)"
+  for p in "${VPIDS[@]:-}"; do
+    kill -TERM -- "-$p" 2>/dev/null || kill -TERM "$p" 2>/dev/null || true
+  done
+  sleep 3
+  for p in "${VPIDS[@]:-}"; do
+    kill -9 -- "-$p" 2>/dev/null || kill -9 "$p" 2>/dev/null || true
+    ps -o pid,ppid,stat,etime,cmd -p "$p" 2>/dev/null || true
+  done
+  ps -eo user,pid,ppid,stat,etime,cmd | awk '/[v]llm/ {print}' || true
+  log "GPU cleanup snapshot follows (authorized job node only)"
+  nvidia-smi --query-compute-apps=pid,process_name,used_memory \
+    --format=csv,noheader 2>/dev/null || true
+  log "shutdown complete"
+  exit "$exit_code"
+}
+if [ "$PROTOCOL" = "adaptive_v1" ]; then
+  trap cleanup_vllm EXIT
+else
+  # Preserve the original SAH shutdown behavior byte-for-byte at runtime.
+  trap 'for p in "${VPIDS[@]:-}"; do kill -9 -- "-$p" 2>/dev/null || kill -9 "$p" 2>/dev/null || true; done' EXIT
+fi
 for g in $(seq 0 $((N_REPLICAS - 1))); do
   port=$((8800 + g)); ok=0
   for _ in $(seq 1 240); do
@@ -65,12 +106,37 @@ done
 
 cd "$REPO/src"
 export OPENAI_API_KEY=EMPTY
+if [ "$PROTOCOL" = "adaptive_v1" ]; then
+  # Exact chat-template preflight is Adaptive-only. MODEL_PATH is already the
+  # local Qwen checkpoint used by this job and contains its tokenizer assets.
+  export PYTHONDONTWRITEBYTECODE=1
+  export ADAPTIVE_TOKENIZER_PATH="${ADAPTIVE_TOKENIZER_PATH:-$MODEL_PATH}"
+fi
+ADAPTIVE_DATASET_ARGS=()
+if [ "$PROTOCOL" = "adaptive_v1" ] && \
+   [ -n "${ADAPTIVE_V1_DATASET_ROOT:-}" ]; then
+  ADAPTIVE_DATASET_ARGS+=(--dataset-root "$ADAPTIVE_V1_DATASET_ROOT")
+fi
 
 # --- propose (instance-wise: K candidates per task) --- #
 # With split serving, propose targets ONLY replica 0 (M_phi); otherwise all.
 PROPOSE_REPLICAS="$N_REPLICAS"
 [ -n "${MPHI_PATH:-}" ] && PROPOSE_REPLICAS=1
-log "propose: task(s) [$TASKS], K=$K, H1-agent runs across $PROPOSE_REPLICAS replica(s)"
+if [ "$PROTOCOL" = "adaptive_v1" ]; then
+  log "propose: protocol=$PROTOCOL task(s) [$TASKS], K=$K across $PROPOSE_REPLICAS replica(s)"
+else
+  log "propose: task(s) [$TASKS], K=$K, H1-agent runs across $PROPOSE_REPLICAS replica(s)"
+fi
+PROTOCOL_PROPOSE_ARGS=()
+if [ "$PROTOCOL" = "adaptive_v1" ]; then
+  PROTOCOL_PROPOSE_ARGS+=(--protocol adaptive_v1)
+  [ -n "$PROTOCOL_STATE" ] && \
+    PROTOCOL_PROPOSE_ARGS+=(--protocol-state "$PROTOCOL_STATE")
+  [ -n "$PROTOCOL_ROUND" ] && \
+    PROTOCOL_PROPOSE_ARGS+=(--protocol-round "$PROTOCOL_ROUND")
+  [ -n "$TOTAL_ROUNDS" ] && \
+    PROTOCOL_PROPOSE_ARGS+=(--total-rounds "$TOTAL_ROUNDS")
+fi
 python3 -m outer.outer_round propose \
   --round-dir "$ROUND_DIR" --round "$ROUND_ID" --k "$K" \
   --tasks $TASKS \
@@ -80,6 +146,7 @@ python3 -m outer.outer_round propose \
   ${SEED_PROGRAMS_FILE:+--seed-programs-file "$SEED_PROGRAMS_FILE"} \
   ${FORCE_TOOL_FRAC:+--force-tool-frac "$FORCE_TOOL_FRAC"} \
   ${FEEDBACK_FILE:+--feedback-file "$FEEDBACK_FILE"} \
+  "${PROTOCOL_PROPOSE_ARGS[@]}" \
   --parallel "${PROPOSE_PAR:-8}" \
   2>&1 | tee "$ROUND_DIR/propose.log"
 
@@ -94,6 +161,11 @@ for tid in meta["tasks_order"]:
 PY
 )
 MAX_PAR="${ROLLOUT_PAR:-8}"
+if [ "$PROTOCOL" = "adaptive_v1" ] && \
+   [[ ! "$MAX_PAR" =~ ^[1-9][0-9]*$ ]]; then
+  log "Adaptive ROLLOUT_PAR must be a positive integer, got $MAX_PAR"
+  exit 2
+fi
 log "rollouts: ${#PAIRS[@]} (task,cand) pairs, <= $MAX_PAR concurrent"
 mkdir -p "$ROUND_DIR/rollout_logs"
 # With split serving, M_phi (replica 0) is no longer needed after propose:
@@ -124,6 +196,10 @@ if [ -n "${MPHI_PATH:-}" ]; then
   else
     log "replica 0 restart FAILED — falling back to replicas 1..$((N_REPLICAS-1))"
     kill -9 -- "-${VPIDS[0]}" 2>/dev/null || true
+    if [ "$PROTOCOL" = "adaptive_v1" ] && [ "$N_REPLICAS" -le 1 ]; then
+      log "no frozen-base rollout replica remains"
+      exit 2
+    fi
     RB=8801; RN=$((N_REPLICAS - 1))
   fi
 fi
@@ -136,12 +212,49 @@ run_rollout(){ # tid k evals logsuffix
     --base-url "http://127.0.0.1:$port/v1" --model "$SERVED_MODEL" \
     --max-evals "$evals" ${EVAL_TIMEOUT:+--eval-timeout "$EVAL_TIMEOUT"} \
     ${SEED_PROGRAMS_FILE:+--seed-programs-file "$SEED_PROGRAMS_FILE"} \
+    "${ADAPTIVE_DATASET_ARGS[@]}" \
     --eval-python python3 --no-trajectory \
     --out "$ROUND_DIR/rollouts/$tid/cand$(printf '%02d' "$k")" \
     > "$ROUND_DIR/rollout_logs/${tid}-cand$(printf '%02d' "$k")${sfx}.log" 2>&1 &
 }
 ROLL_IDX=0; rc=0
-if [ -n "${SCREEN_EVALS:-}" ]; then
+if [ "$PROTOCOL" = "adaptive_v1" ]; then
+  # Adaptive v1 uses matched repeated base/candidate outcomes and an isolated
+  # promotion channel. Promotion scores never enter proposer rewards/context.
+  ADAPTIVE_RUN_ROWS="$ROUND_DIR/adaptive_rollout_rows.txt"
+  python3 -m protocols.adaptive_v1 rollout-plan \
+    --round-dir "$ROUND_DIR" \
+    --outcome-repeats "$ROLLOUT_REPEATS" \
+    --promotion-repeats "$PROMOTION_REPEATS" \
+    --seed-base "$ROLLOUT_SEED" \
+    --eval-timeout-seconds "$EVAL_TIMEOUT" > "$ADAPTIVE_RUN_ROWS"
+  mapfile -t ADAPTIVE_RUNS < "$ADAPTIVE_RUN_ROWS"
+  [ "${#ADAPTIVE_RUNS[@]}" -gt 0 ] || {
+    log "Adaptive rollout planner produced no runs"
+    exit 2
+  }
+  run_adaptive_rollout(){ # tid label harness_dir output_dir request_seed
+    local tid="$1" label="$2" harness_dir="$3" output_dir="$4" request_seed="$5"
+    local port=$((RB + ROLL_IDX % RN)); ROLL_IDX=$((ROLL_IDX + 1))
+    OPENAI_BASE_URL="http://127.0.0.1:$port/v1" python3 -m inner.run_baseline \
+      --harness-dir "$harness_dir" --ids "$tid" \
+      --base-url "http://127.0.0.1:$port/v1" --model "$SERVED_MODEL" \
+      --max-evals "$MAX_EVALS" ${EVAL_TIMEOUT:+--eval-timeout "$EVAL_TIMEOUT"} \
+      ${SEED_PROGRAMS_FILE:+--seed-programs-file "$SEED_PROGRAMS_FILE"} \
+      "${ADAPTIVE_DATASET_ARGS[@]}" \
+      --request-seed "$request_seed" --eval-python python3 \
+      --out "$output_dir" \
+      > "$ROUND_DIR/rollout_logs/${tid}-${label}.log" 2>&1 &
+  }
+  log "adaptive rollouts: ${#ADAPTIVE_RUNS[@]} matched outcome/promotion runs"
+  for spec in "${ADAPTIVE_RUNS[@]:-}"; do
+    [ -n "$spec" ] || continue
+    IFS='|' read -r tid label harness_dir output_dir request_seed <<< "$spec"
+    while (( $(jobs -rp | wc -l) >= MAX_PAR )); do wait -n || rc=1; done
+    run_adaptive_rollout "$tid" "$label" "$harness_dir" "$output_dir" "$request_seed"
+  done
+  while (( $(jobs -rp | wc -l) > 0 )); do wait -n || rc=1; done
+elif [ -n "${SCREEN_EVALS:-}" ]; then
   # Successive halving: every candidate gets a cheap SCREEN_EVALS rollout,
   # only the top PROMOTE go on to a full MAX_EVALS rollout. load_rollout_score
   # takes the max over run subdirs, so collect automatically sees the best.
@@ -169,7 +282,22 @@ else
   while (( $(jobs -rp | wc -l) > 0 )); do wait -n || rc=1; done
 fi
 log "rollouts finished (rc=$rc)"
+if [ "$PROTOCOL" = "adaptive_v1" ] && [ "$rc" -ne 0 ]; then
+  log "one or more Adaptive rollouts failed; refusing collection/state advance"
+  exit "$rc"
+fi
 
 # --- collect --- #
-python3 -m outer.outer_round collect --round-dir "$ROUND_DIR" 2>&1 | tee "$ROUND_DIR/collect.log"
+PROTOCOL_COLLECT_ARGS=()
+if [ "$PROTOCOL" = "adaptive_v1" ]; then
+  PROTOCOL_COLLECT_ARGS=(
+    --protocol adaptive_v1
+    --confidence-z "$CONFIDENCE_Z"
+    --plateau-rounds "$PLATEAU_ROUNDS"
+  )
+  [ -n "$PROTOCOL_STATE" ] && \
+    PROTOCOL_COLLECT_ARGS+=(--protocol-state "$PROTOCOL_STATE")
+fi
+python3 -m outer.outer_round collect --round-dir "$ROUND_DIR" \
+  "${PROTOCOL_COLLECT_ARGS[@]}" 2>&1 | tee "$ROUND_DIR/collect.log"
 log "round $ROUND_ID done -> $ROUND_DIR"

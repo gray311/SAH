@@ -23,12 +23,15 @@ full spec.
 | `src/inner/` | inner loop: EFT task registry, program-edit (EVOLVE-BLOCK / SEARCH-REPLACE), subprocess-isolated evaluator, `run_baseline` CLI, the initial `H2` NexAU package (`harness/`) and candidate scaffold (`harness_candidate/`) |
 | `src/outer/` | outer loop: `HarnessSpec` typed genome + fail-closed validation, the fixed `H1` proposer NexAU package (`harness/`), `propose`/`materialize`/`rewards`/`outer_round` (per-task GRPO group) |
 | `src/training/` | `grpo_batch -> Weave slime replay` conversion + LoRA training driver |
+| `src/protocols/` | optional protocol adapters; Adaptive v1 is isolated here and imports only when selected |
 | `scripts/` | Slurm sbatch + in-container workers for one outer step (propose → rollouts → collect → train → merge) |
 | `results/` | `maintable.md` (vs official Qwen3.5-9B / Finch-9B), campaign targets, baselines |
 
-**Harness rule:** every harness — the initial `H2`, every candidate `H2`, and the
-proposer `H1` — is a declarative **NexAU package** (`agent.yaml` + `tools/` + `skills/`
-+ `middlewares/`), never a bare `.py` script.
+**Harness rule:** every harness — the initial `H2`, every candidate `H2`, and
+each protocol's proposer `H1` — is a declarative **NexAU package**
+(`agent.yaml` plus its referenced prompt/tool/skill/middleware assets), never a
+bare `.py` script. Packages may intentionally declare empty tool, skill, and
+middleware lists.
 
 ## Dependencies (external, not vendored)
 
@@ -40,6 +43,25 @@ proposer `H1` — is a declarative **NexAU package** (`agent.yaml` + `tools/` + 
 Cluster paths are read from `$CODE_ROOT / $DATASET_ROOT / $MODEL_ROOT / $RUN_ROOT`
 (see `config/workspace_env.sh` on the cluster); scripts assume a GB200 (aarch64) +
 Slurm + pyxis/enroot environment.
+
+## Training modes
+
+The current SAH path remains the default. Both modes now use declarative NexAU
+packages for the outer H1 proposer and every inner H2 executor. The optional
+`adaptive_v1` protocol reuses SAH's native `h2spec/1.0` materializer, frozen
+inner executor, rollout service, and proposer trainer; it changes only the H1
+proposal policy/context, matched-repeat controller, dual-frontier selection,
+and plateau-gated update cadence. Its Adaptive-only entry point fixes
+`max_eval=20` to match the original SAH evaluator budget:
+
+```bash
+bash scripts/unified_campaign.sh sah <existing fresh_campaign args...>
+bash scripts/unified_campaign.sh adaptive_v1 <task> <rounds> <round_base> [workspace]
+```
+
+See [`docs/ADAPTIVE_V1_UNIFICATION.md`](docs/ADAPTIVE_V1_UNIFICATION.md) for
+the exact shared boundary, Agent topology, state/recovery semantics, and local
+tests.
 
 ## Status
 

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import subprocess
 import sys
 import tempfile
@@ -19,6 +20,30 @@ from typing import Dict, Optional
 from inner.eft_task import EFTTask
 
 _WORKER = Path(__file__).with_name("_eval_worker.py")
+
+
+def _stop_process_group(pgid: int, *, grace_s: float = 1.0) -> None:
+    """Stop every evaluator descendant, even after the worker has exited.
+
+    Some third-party evaluators launch an additional candidate subprocess and
+    return after their own timeout without reaping it. The worker is always a
+    fresh session leader, so its process group is an exact cleanup boundary.
+    """
+    try:
+        os.killpg(pgid, signal.SIGTERM)
+    except (ProcessLookupError, PermissionError):
+        return
+    deadline = time.monotonic() + grace_s
+    while time.monotonic() < deadline:
+        try:
+            os.killpg(pgid, 0)
+        except (ProcessLookupError, PermissionError):
+            return
+        time.sleep(0.05)
+    try:
+        os.killpg(pgid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        pass
 
 
 @dataclass
@@ -68,14 +93,27 @@ def evaluate_program(
 
     t0 = time.time()
     timed_out = False
+    worker = subprocess.Popen(
+        [python_exe, str(_WORKER), str(req_path)],
+        env=env,
+        cwd=str(tmp),
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
     try:
-        subprocess.run(
-            [python_exe, str(_WORKER), str(req_path)],
-            timeout=hard_timeout, env=env, cwd=str(tmp),
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False,
-        )
+        worker.wait(timeout=hard_timeout)
     except subprocess.TimeoutExpired:
         timed_out = True
+    finally:
+        # Always close the isolated group. A worker may exit normally while a
+        # buggy evaluator leaves its candidate subprocess running.
+        _stop_process_group(worker.pid)
+        if worker.poll() is None:
+            try:
+                worker.wait(timeout=1.0)
+            except subprocess.TimeoutExpired:
+                pass
     dt = time.time() - t0
 
     if timed_out:

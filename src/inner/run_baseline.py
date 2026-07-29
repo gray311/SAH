@@ -32,7 +32,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # put `src/` on path -> import inner.*
 
-from inner.eft_task import load_tasks, get_task, EFTTask  # noqa: E402
+from inner.eft_task import (  # noqa: E402
+    EFTTask,
+    configure_dataset_root,
+    get_task,
+    load_tasks,
+)
 from inner.eval_runner import evaluate_program  # noqa: E402
 
 
@@ -62,7 +67,8 @@ def _agent_run(task: EFTTask, args, out_dir: Path) -> dict:
 
     ep = LLMEndpoint(model=args.model, base_url=args.base_url, api_key=args.api_key,
                      temperature=args.temperature, top_p=args.top_p, max_tokens=args.max_tokens,
-                     timeout=args.llm_timeout, enable_thinking=args.thinking)
+                     timeout=args.llm_timeout, enable_thinking=args.thinking,
+                     seed=args.request_seed)
     if args.max_iters > 0:
         max_iters = args.max_iters
     elif args.harness_dir:
@@ -98,6 +104,8 @@ def main() -> None:
     ap.add_argument("--max-tokens", type=int, default=8192)
     ap.add_argument("--llm-timeout", type=float, default=600.0)
     ap.add_argument("--thinking", action="store_true", help="enable Qwen thinking (default off)")
+    ap.add_argument("--request-seed", type=int, default=None,
+                    help="optional serving seed for matched repeated rollouts")
     # budget / eval
     ap.add_argument("--max-evals", type=int, default=10, help="evaluator-call budget per task")
     ap.add_argument("--max-iters", type=int, default=0, help="agent-loop cap; 0 = auto (3*max_evals+8; candidate packages keep their agent.yaml value)")
@@ -109,8 +117,12 @@ def main() -> None:
     ap.add_argument("--no-trajectory", action="store_true")
     ap.add_argument("--seed-programs-file", default=None,
                     help="JSON {task_id: program_text | {program: text}}; overrides the task's initial program (best-program inheritance across outer rounds)")
+    ap.add_argument("--dataset-root", default=None,
+                    help="explicit prepared-task root; omitted preserves SAH's built-in path")
     ap.add_argument("--out", default=None, help="output dir (default runs/inner_baseline/<ts>)")
     args = ap.parse_args()
+    if args.dataset_root:
+        configure_dataset_root(args.dataset_root)
 
     ts = time.strftime("%Y%m%d-%H%M%S")
     default_root = Path(__file__).resolve().parents[2] / "runs" / "inner_baseline"
@@ -141,6 +153,8 @@ def main() -> None:
         "top_p": args.top_p, "max_tokens": args.max_tokens, "max_evals": args.max_evals,
         "eval_python": args.eval_python, "argv": sys.argv,
     }
+    if args.request_seed is not None:
+        provenance["request_seed"] = args.request_seed
     (out_dir / "provenance.json").write_text(json.dumps(provenance, indent=2))
     print(f"[run] {provenance['mode']} | {len(tasks)} tasks | out={out_dir}")
 

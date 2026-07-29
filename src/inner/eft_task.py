@@ -30,6 +30,14 @@ EFT_SHIM = DATASET_ROOT / "runtime" / "skydiscover_min"
 SIMPLETES_SHIM = DATASET_ROOT / "runtime" / "simpletes_min"
 
 
+def configure_dataset_root(path: str | Path) -> None:
+    """Explicitly configure a non-default task root for an opt-in caller."""
+    global DATASET_ROOT, EFT_SHIM, SIMPLETES_SHIM
+    DATASET_ROOT = Path(path)
+    EFT_SHIM = DATASET_ROOT / "runtime" / "skydiscover_min"
+    SIMPLETES_SHIM = DATASET_ROOT / "runtime" / "simpletes_min"
+
+
 @dataclass
 class EFTTask:
     task_id: str

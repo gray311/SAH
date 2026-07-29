@@ -38,6 +38,7 @@ class LLMEndpoint:
     timeout: float = 600.0
     max_retries: int = 2
     enable_thinking: bool = False  # Qwen3.5: keep outputs clean/fast (matches Weave)
+    seed: Optional[int] = None      # matched Adaptive repeats; unset preserves SAH
 
 
 @dataclass
@@ -116,6 +117,8 @@ def _override_llm(config, ep: LLMEndpoint, *, preserve_sampling: bool = False,
     top_k = top_k_override if top_k_override is not None else ep.top_k
     if top_k is not None:
         extra_body["top_k"] = top_k
+    if ep.seed is not None:
+        extra_body["seed"] = int(ep.seed)
     extra_body.setdefault("chat_template_kwargs", {})["enable_thinking"] = ep.enable_thinking
 
 

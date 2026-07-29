@@ -61,12 +61,17 @@ DEFAULTS: Dict[str, Any] = {
         "dossier_rows": 8,
     },
 
-    # optional sequential-sampling policy (Adaptive port): later samples in a
-    # task's K batch see prior VALID actions to avoid paraphrase collisions.
+    # sequential sampling (Adaptive port) — DISABLED BY DEFAULT AND NOT
+    # RECOMMENDED. Conditioning sample k on samples 0..k-1 makes the group's K
+    # rollouts dependent and non-exchangeable, which BREAKS GRPO's group-relative
+    # advantage (A_k = (r_k - mean)/std assumes i.i.d. samples from one policy).
+    # It is also serial (sum-of-K wall time vs max-of-K for parallel). Diversity
+    # should come from temperature / force_tool_frac / dedup, not from making
+    # rollouts see each other. Kept only for ablation; do not enable for training.
     "sequential": {
         "enabled": False,
-        "share_valid_actions": True,       # feed prior valid specs into later msgs
-        "max_shared": 6,                   # cap prior actions shown
+        "share_valid_actions": True,
+        "max_shared": 6,
     },
 
     # optional anti-leak guards (Adaptive port). The sah base already has the
@@ -165,9 +170,14 @@ def load(path: str | Path) -> CampaignConfig:
         raise ValueError(f"sampling.mode must be parallel|sequential, got {data['sampling']['mode']!r}")
     if data["reward"]["impl"] not in ("v2", "v3", "legacy", "anchored"):
         raise ValueError(f"reward.impl must be v2|v3|legacy|anchored, got {data['reward']['impl']!r}")
-    # sequential mode implies sequential sampling feature (convenience)
-    if data["sampling"]["mode"] == "sequential":
+    # sequential mode implies the sequential feature (ablation only — see the
+    # DEFAULTS note: it breaks GRPO exchangeability and is serial). Warn loudly.
+    if data["sampling"]["mode"] == "sequential" or data["sequential"]["enabled"]:
         data["sequential"]["enabled"] = True
+        import sys
+        print("[campaign_config] WARNING: sequential sampling enabled — this "
+              "makes GRPO rollouts non-i.i.d. (breaks group-relative advantage) "
+              "and runs serially. Ablation only; not for training.", file=sys.stderr)
     return CampaignConfig(data)
 
 

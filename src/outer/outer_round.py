@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -249,7 +250,6 @@ def cmd_collect(args) -> None:
              for t in json.loads((round_dir / "trajectories.json").read_text())}
     system_text = (pio.H1_PACKAGE / "system.md").read_text()
 
-    import os
     adv_mode = os.environ.get("SAH_ADV", "v2")
     # v3 == v2 except on no_signal groups, so results alone can't tell you which
     # impl ran — log it so collect.log is proof the env survived sbatch/srun.

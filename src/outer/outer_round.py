@@ -337,6 +337,54 @@ def cmd_collect(args) -> None:
             print(f"  [inherit] {tid}: best_programs.json <- round{meta['round']:03d}/"
                   f"cand{g['best_k']:02d} ({g['best_score']:.6g}, "
                   f"{len(parents[:2])} parents)")
+    # Quality-diversity elite pool (MAP-Elites-lite): lineage parents are
+    # same-basin by construction — observed on hadamard, whose two crossover
+    # parents were both QR+SA descendants of the current best, giving
+    # crossover nothing structurally different to hybridize with. Here we
+    # pool high-scoring programs from OTHER basins (similarity < 0.7 vs the
+    # best AND vs each pooled elite), even from non-improving rounds — a
+    # 0.49-scoring random-construction attempt is exactly the material a
+    # 0.56-scoring QR basin needs. Pool rides best_programs.json as "elites"
+    # and replaces "parents" (the key harness_runner already feeds to M0).
+    import difflib
+
+    def _sim(a: str, b: str) -> float:
+        return difflib.SequenceMatcher(None, a[:4000], b[:4000]).ratio()
+
+    for tid in groups:
+        ent = best_programs.get(tid)
+        if not (isinstance(ent, dict) and ent.get("program")):
+            continue
+        best_prog = ent["program"]
+        best_sc = float(ent.get("score", 0.0))
+        floor = best_sc - 0.15 * abs(best_sc)
+        pool = [e for e in (ent.get("elites") or []) if e.get("program")]
+        seen = []
+        for res in (round_dir / "rollouts" / tid).glob("cand*/*/results/*.json"):
+            try:
+                d = json.loads(res.read_text())
+                p, s = d.get("best_program"), float(d.get("best_score", -1e18))
+            except Exception:
+                continue
+            if p and s >= floor and p != best_prog:
+                seen.append((s, p))
+        for s, p in sorted(seen, key=lambda x: -x[0]):
+            if _sim(p, best_prog) >= 0.7:
+                continue                      # same basin as the current best
+            twin = next((e for e in pool if _sim(p, e["program"]) >= 0.7), None)
+            if twin is not None:              # same basin as a pooled elite:
+                if s > float(twin.get("score", -1e18)):
+                    twin.update(score=s, program=p)   # keep the better one
+                continue
+            pool.append({"score": s, "program": p})
+        pool = sorted(pool, key=lambda e: -float(e.get("score", 0)))[:3]
+        if pool:
+            ent["elites"] = pool
+            ent["parents"] = [{"score": e["score"], "program": e["program"]}
+                              for e in pool]
+            print(f"  [elites] {tid}: {len(pool)} diverse basin(s), "
+                  f"scores {[round(float(e['score']), 4) for e in pool]}")
+
     bp_path.write_text(json.dumps(best_programs, indent=1))
 
     with open(round_dir / "grpo_batch.jsonl", "w") as f:

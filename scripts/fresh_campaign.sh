@@ -32,8 +32,10 @@ wait_job(){
 }
 
 bases="$WS/round000_bases.json"
-prev_ckpt=""                       # empty => train from base on step 1
-phi="$BASE_PHI"                    # step 1 proposer = base
+# RESUME_PHI/RESUME_CKPT: continue a phi lineage after a driver crash (e.g. the
+# round742/763 squeue-blip incidents) instead of retraining from base.
+prev_ckpt="${RESUME_CKPT:-}"       # empty => train from base on step 1
+phi="${RESUME_PHI:-$BASE_PHI}"     # step 1 proposer = base unless resuming
 
 for i in $(seq 0 $((NSTEPS - 1))); do
   [ -f "$WS/STOP" ] && { log "STOP flag — exiting"; break; }

@@ -35,7 +35,7 @@ for i in $(seq 0 $((NSTEPS - 1))); do
     JOB=$(echo "$RAW" | grep -oE '[0-9]{6,}' | tail -1)
     [ -n "$JOB" ] && break; sleep 60
   done
-  [ -n "$JOB" ] || { log "submit failed"; break; }
+  [ -n "$JOB" ] || { log "submit failed: $(echo "$RAW" | tail -2 | tr '\n' ' ')"; break; }
   log "  job $JOB"
   while squeue -j "$JOB" -h -o '%T' 2>/dev/null | grep -qE 'PENDING|RUNNING|CONFIGURING|COMPLETING'; do sleep 150; done
 

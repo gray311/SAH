@@ -205,7 +205,15 @@ def materialize(effective: Dict[str, Any], cand_dir: Path, *,
         "system_prompt": "./prompt.md",
         "system_prompt_type": "file",
         "tool_call_mode": "structured",
-        "max_iterations": int(agent_p.get("max_iterations", 36)),
+        # Longer solution trajectory (SAH_MIN_ITERS floor): the inner rollout is
+        # capped by agent iterations, not the eval budget — measured llm_calls
+        # p50=59 while only ~10 of 40 evals were used, so M0 runs out of turns
+        # before it finishes refining. Raising the floor lets the edit ->
+        # evaluate -> adjust-from-feedback loop run much longer (user insight:
+        # a longer trajectory that keeps writing code against feedback solves
+        # harder). floor=0 (default) keeps the proposer's chosen value.
+        "max_iterations": max(int(agent_p.get("max_iterations", 36)),
+                              int(__import__("os").environ.get("SAH_MIN_ITERS", "0") or "0")),
         "retry_attempts": 2,
         "retry_backoff_max_seconds": 30,
         "timeout": 600,

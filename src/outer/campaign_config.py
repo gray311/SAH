@@ -42,6 +42,7 @@ DEFAULTS: Dict[str, Any] = {
         "max_evals": 30,
         "eval_timeout": 180,
         "force_tool_frac": 0.25,
+        "eval_repeats": 1,                 # average R official evals/step (noisy tasks)
     },
 
     "reward": {
@@ -116,6 +117,7 @@ class CampaignConfig:
             "K": str(s["K"]),
             "MAX_EVALS": str(s["max_evals"]),
             "EVAL_TIMEOUT": str(s["eval_timeout"]),
+            "EVAL_REPEATS": str(s["eval_repeats"]),
             "FORCE_TOOL_FRAC": str(s["force_tool_frac"]),
             "SAH_ADV": str(r["impl"]),
             "SAH_HIST_LAMBDA": str(r["hist_lambda"]),

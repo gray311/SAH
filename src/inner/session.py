@@ -116,12 +116,33 @@ class InnerSession:
         self._pending_edit_mode, self._pending_edit_note = "full_rewrite", "spliced new EVOLVE-BLOCK"
         return "edit staged (full EVOLVE-BLOCK replaced). Call evaluate_solution to score it."
 
-    def evaluate(self) -> EvalOutcome:
-        out = evaluate_program(
+    def _eval_once(self) -> EvalOutcome:
+        return evaluate_program(
             self.task, self.current_program,
             timeout_s=self.eval_timeout_s,
             python_exe=self.python_exe or __import__("sys").executable,
         )
+
+    def evaluate(self) -> EvalOutcome:
+        # EVAL_REPEATS (noisy tasks, e.g. ahc039 whose randomized solver has
+        # eval std ~= the SOTA gap): average R runs of the UNCHANGED official
+        # evaluator and count as ONE budget eval. This de-noises the reward /
+        # best-tracking so a single lucky-high read can't win — the objective is
+        # untouched (still the official metric), we just estimate it with more
+        # samples. R=1 (default) is the original single-eval behavior.
+        import os as _os
+        reps = max(1, int(_os.environ.get("EVAL_REPEATS", "1") or "1"))
+        out = self._eval_once()
+        if reps > 1 and out.error is None:
+            runs = [out] + [self._eval_once() for _ in range(reps - 1)]
+            valid_runs = [r for r in runs if r.error is None]
+            if valid_runs:
+                mean_score = sum(r.combined_score for r in valid_runs) / len(valid_runs)
+                mean_val = sum(r.validity for r in valid_runs) / len(valid_runs)
+                wall = sum(r.wall_s for r in runs)
+                out = EvalOutcome(combined_score=mean_score, validity=mean_val,
+                                  error=None, wall_s=wall,
+                                  metrics=valid_runs[-1].metrics)
         self.ledger.evaluator_calls += 1
         self.ledger.sandbox_seconds += out.wall_s
         # Anti-reward-hacking: an INVALID outcome can never become best, no

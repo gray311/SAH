@@ -119,8 +119,17 @@ def main() -> None:
     (out_dir / "results").mkdir(exist_ok=True)
 
     tasks = _select(args)
-    if args.seed_programs_file:
-        inherited = json.loads(Path(args.seed_programs_file).read_text())
+    if args.seed_programs_file and Path(args.seed_programs_file).exists():
+        # A missing/empty seed-programs file means "no inheritance yet" (fresh
+        # workspace, e.g. a new adaptive A/B run) — fall back to each task's
+        # initial program instead of crashing the whole rollout (FileNotFound
+        # took down all 8 hadamard rollouts on adaptive round940).
+        try:
+            inherited = json.loads(Path(args.seed_programs_file).read_text() or "{}")
+        except Exception as e:
+            print(f"[inherit] WARNING: seed-programs-file unreadable ({e}); "
+                  f"starting from each task's initial program")
+            inherited = {}
         for task in tasks:
             ent = inherited.get(task.task_id)
             if not ent:

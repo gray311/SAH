@@ -55,6 +55,26 @@ if best:
     print("[run_campaign] warm-start base score=%s" % best.get("score"))
 PY
 
+# seed best_programs.json for a fresh workspace from the global inheritance so
+# rollouts start from the current best program (fair A/B) and don't crash on a
+# missing seed file. Only creates it if absent (never clobbers an evolving one).
+python3 - "$TASK" "$WS" <<'PY'
+import json, os, sys
+task, ws = sys.argv[1], sys.argv[2]
+dst = os.path.join(ws, "best_programs.json")
+if not os.path.exists(dst):
+    src = os.path.expandvars("$RUN_ROOT/self_adapt_harness/outer/best_programs.json")
+    ent = {}
+    try:
+        g = json.load(open(src)).get(task)
+        if g: ent = {task: g}
+    except Exception:
+        pass
+    json.dump(ent, open(dst, "w"), indent=1)
+    print("[run_campaign] seeded best_programs.json (%s)"
+          % ("from global best" if ent else "empty — will start from initial program"))
+PY
+
 rm -f "$WS/STOP" "$WS/RUNNING"; touch "$WS/RUNNING"
 FTF="${FORCE_TOOL_FRAC:-0.25}"
 setsid bash -c '

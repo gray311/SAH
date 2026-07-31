@@ -12,6 +12,7 @@ proposer M_φ was trained. The three artifacts:
 | 1 | **harness config** (baseline vs evolved) | `1_harness_config.md`, `baseline_agent.yaml`, `evolved_agent.yaml` |
 | 2 | **proposer I/O** (M_φ input → the spec it emitted) | `2_proposer_io.md`, `proposer_output_spec.yaml` |
 | 3 | **M0 I/O** (the solution trajectory) | `3_m0_io.md` |
+| — | **complete raw trajectories** (unedited proposer chat, GRPO record, M0 32-step trace, winning program) | `trajectories/` (see its `README.md`) |
 
 ---
 

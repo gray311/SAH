@@ -1,0 +1,178 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are an expert in circle packing and computational geometry. Your task is to improve a constructor that places 26 circles in a unit square to maximize the sum of their radii.
+
+  Key geometric strategies:
+  - Try hexagonal/lattice-based patterns for dense packing
+  - Consider layered arrangements (shells of circles)
+  - Break perfect symmetry - edge effects often prefer asymmetric arrangements
+  - Similar-radius circles form regular patterns; varied radii fill gaps better
+
+  Method — use probe_solution FIRST to rank variants:
+  1. Propose 2-3 distinct pattern classes (e.g., hexagonal, layered, spiral)
+  2. For each pattern, use edit_solution to write complete code
+  3. Call probe_solution to quickly score each variant (cheap, ~10s runtime)
+  4. Rank by probe score, then use evaluate_solution ONLY on top 1-2 candidates
+  5. Iterate on the best pattern class until out of budget
+
+  Tools:
+  - edit_solution: Write COMPLETE new EVOLVE-BLOCK code for a new pattern
+  - probe_solution: Fast approximate score on subsampled data (separate budget, ranks variants)
+  - evaluate_solution: Full official score (expensive, use sparingly)
+  - finish: End when budget exhausted or no improvement
+
+  Strategy: Spend probes freely to explore many patterns, confirm best with evals.
+skill_description: |
+  Optimize circle packing constructor by exploring distinct geometric patterns (hexagonal, layered, spiral), using probe_solution to rank many variants cheaply before full evaluation. Leverage task-specific geometry knowledge.
+skill_body: |
+  # Circle Packing Optimization
+
+  ## Strategy Overview
+  Circle packing in a square is a combinatorial geometry problem. Maximize sum of radii by:
+  1. Exploring distinct pattern FAMILIES, not small tweaks
+  2. Using probes to rank many candidates before full eval
+  3. Leverage known geometry: hexagonal lattices are densest, but edge effects break symmetry
+
+  ## Pattern Classes to Explore
+  - **Hexagonal lattice**: Pack circles in triangular grid pattern (densest infinite packing)
+  - **Layered shells**: Circles in concentric rings, optimizing ring radii and offsets
+  - **Spiral arrangement**: Circles placed along spiral paths from center outward
+  - **Asymmetric clusters**: Break symmetry by placing large circles off-center to use corner space
+
+  ## Method (one tool call per turn)
+  1. **Probe-first workflow**:
+     - If you have written a pattern but not evaluated: call probe_solution
+     - Compare probe scores of different patterns before using expensive evaluate_solution
+     - Probes use ~2000-row subsample, take ~10s, separate budget
+
+  2. **Writing complete patterns** (edit_solution):
+     - For bold changes, write COMPLETE EVOLVE-BLOCK as new code
+     - Specify explicit positions for all 26 circles
+     - Use compute_max_radii to get valid radii for your positions
+     - Return tuple (centers, radii, sum_radii)
+
+  3. **Geometry tips for each pattern**:
+     - Hexagonal: Use angle = 2π * i / sqrt(3) * n for triangular spacing
+     - Layered: Try rings with radii 0.3, 0.5, 0.7, 0.9 and optimize count per ring
+     - Spiral: Place circles along Archimedean spiral r = a + b*θ
+     - Asymmetric: Try placing largest circle off-center (e.g., 0.3, 0.5)
+
+  4. **Budget management**:
+     - You have ~20 full evaluations
+     - Use probes to explore 10-20 different pattern variants
+     - Confirm top 2-3 variants with evaluate_solution
+     - When evaluations_left is low, commit to one pattern family
+
+  5. **When to change direction**:
+     - If probe scores of a pattern class are consistently low, try a different family
+     - If one pattern class repeatedly wins probes, invest evaluations there
+     - Never make cosmetic edits — each edit must change the pattern fundamentally
+tool_descriptions:
+  edit_solution: |
+    Change the code inside # EVOLVE-BLOCK region. Write COMPLETE new code for a new circle packing pattern.
+    Format: full rewrite as plain code or Python fenced block. The fixed entry function remains outside.
+    After editing, call probe_solution to quickly rank your variant before full evaluation.
+  evaluate_solution: |
+    Run full official evaluation. Returns combined_score (higher is better), validity, errors, best_so_far, evaluations_left.
+    EXPENSIVE — budget ~20 calls total. Use only after probe_solution ranking.
+  probe_solution: |
+    Fast approximate score on SUBSAMPLED data (~10s runtime, separate ~30-probe budget).
+    CRITICAL: Use this to rank multiple pattern variants BEFORE using evaluate_solution.
+    Probes are cheap — explore many designs, then confirm best 1-2 with full eval.
+    Probe scores are approximate but sufficient to compare your own variants.
+  finish: |
+    End session when budget exhausted or no improvement. Best program submitted automatically.
+sampling:
+  temperature: 1.2
+  top_p: 0.95
+  top_k: 50
+  max_tokens: 12288
+agent:
+  max_iterations: 60
+middleware:
+  budget_reminder_from_left: 8
+  long_tool_output_max_chars: 8000
+new_tools:
+  - name: analyze_geometry
+    description: |
+      Analyze current packing structure and suggest geometric improvements.
+      Reports center distribution, overlap risks, and pattern type recommendations.
+      Call after initial patterns to guide next iteration direction.
+    input_schema: {type: object, properties: {}}
+    implementation_py: |
+      def run(ctx, args):
+          centers = ctx.get_program()
+          # Simple heuristic: check center distribution and suggest pattern type
+          lines = centers.split('\n')
+          pattern_hints = []
+          overlap_notes = []
+          # Look for hexagonal clues (angle references)
+          if 'hexagonal' in centers.lower() or 'triangular' in centers.lower():
+              pattern_hints.append("Consider hexagonal lattice with spacing ~0.557")
+          if 'ring' in centers.lower() or 'shell' in centers.lower():
+              pattern_hints.append("Adjust ring spacing; try 0.4, 0.6, 0.8, 1.0 for 16-circle outer ring")
+          if 'spiral' in centers.lower():
+              pattern_hints.append("Increase spiral density; use tighter parameter b")
+          # Check for symmetry (multiples of 8, 16)
+          if len(centers.split()) in [26, 8, 16, 9, 25]:
+              overlap_notes.append("Edge effects often break perfect symmetry")
+          # General recommendation
+          if not pattern_hints:
+              pattern_hints.append("Try hexagonal lattice or layered shells with asymmetric offsets")
+          return {"hints": pattern_hints, "notes": overlap_notes}
+new_skills:
+  - name: circle-packing-strategies
+    description: |
+      Task-specific strategies for circle packing: hexagonal patterns, layered shells,
+      spiral arrangements, and asymmetric clusterings. Use to guide pattern exploration.
+    body: |
+      # Circle Packing Strategies for n=26
+
+      ## Why This Task is Hard
+      - Seed score: 0.364; current best: 0.561; target: ~2.6+ (AlphaEvolve)
+      - 26 circles is small enough to reason about explicitly
+      - Square container has strong edge effects breaking infinite packing optima
+
+      ## Pattern 1: Hexagonal Lattice
+      Densest infinite packing is π/(2√3) ≈ 0.9069 density
+      - Place centers on triangular grid: angle = 2π * i / (sqrt(3) * ring)
+      - Rings have 1, 6, 12, 18, 25 circles for perfect hexagon
+      - For n=26: center + partial rings or irregular hexagon
+      - Scale ring radius to ~0.557 * ring_layer for optimal spacing
+
+      ## Pattern 2: Layered Concentric Rings
+      - Center circle (r ~ 0.5)
+      - Ring 1: 6-8 circles at radius ~0.4-0.5
+      - Ring 2: 12-16 circles at radius ~0.6-0.7
+      - Outer ring: place in corners to use edge space
+      - Vary radii between rings to fill gaps
+
+      ## Pattern 3: Spiral Arrangement
+      - Archimedean spiral: r(θ) = a + b*θ
+      - Place circles at θ = 2π*i/26 for i=0..25
+      - Tighten spiral (small b) for dense packing
+      - Can start off-center to use corners better
+
+      ## Pattern 4: Asymmetric Clusters
+      - Break perfect symmetry by placing largest circles off-center
+      - Use corners of square: (0.1, 0.1), (0.9, 0.1), etc.
+      - Fill gaps between large corner circles with smaller central circles
+      - Often outperforms symmetric arrangements due to edge effects
+
+      ## Implementation Tips
+      - Always clip centers to [0.01, 0.99] to stay in square
+      - Use compute_max_radii() to get valid non-overlapping radii
+      - Return (centers, radii, sum_radii) tuple
+      - For probe evaluations, keep computation under 10s
+      - Explicitly specify all 26 positions — no implicit generation
+new_middlewares:
+  - name: probe_reminder
+    hook: before_model
+    description: |
+      Remind solver to use probe_solution for ranking variants before full evaluation.
+      Critical for circle packing where pattern exploration needs cheap comparison.
+    implementation_py: |
+      def before_model(hook_input):
+          if hook_input.get("evaluations_left", 0) <= 5:
+              return "HIGH PRIORITY: You have few evals left. Call probe_solution to rank remaining variant ideas before spending evals."
+          return "REMEMBER: Use probe_solution to quickly compare 2-3 pattern variants before calling evaluate_solution. Probes are cheap and fast."

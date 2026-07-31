@@ -40,10 +40,15 @@ Appendix~\ref{app:infra}.
 three harness conditions that isolate where adaptation happens.
 \emph{\method~(initial)}: the fixed, hand-written initial harness---no
 adaptation, the effect of scaffolding alone.
-\emph{\method~(context)}: the harness evolved by a \emph{fixed}, untrained
-proposer (context/artifact evolution)---isolating the value of \emph{training}
-the proposer from that of harness search per se \emph{[results pending]}.
-\emph{\method~(weight)}: the trained proposer, our full method.  External bars:
+\emph{\method~(context)}: adaptation through the proposer's \emph{context}---an
+analyst pass summarizes past solution trajectories and diagnoses why the previous
+harness stalled, and that summary is written into the proposer's harness for the
+next round, with proposer weights untouched.  To respect the no-stronger-model
+setting, the analyst is the \emph{same frozen executor} and its output passes the
+leak guard of \S\ref{sec:method-safety} \emph{[results pending]}.
+\emph{\method~(weight)}: adaptation through the proposer's \emph{weights}---the
+trained proposer, our full method.  The pair isolates \emph{where} experience is
+stored: re-read from context each round, or internalized into the policy.  External bars:
 \emph{Finch-9B}~\citep{finch}, a discovery-finetuned model of the same scale
 (beating it on every task is the criterion for claiming harness synthesis
 substitutes for weight training), and the \emph{published $\le$10B SOTA},
@@ -189,13 +194,112 @@ context and validated offline; the transaction SOTA used an uncorrected
 evaluator).  Generated middleware is supported by the spec language but was
 not exercised in this campaign.
 
+\subsection{Case Study: How a Harness Evolves}
+\label{sec:exp-casestudy}
+
+Because $M_0$ never changes, a task's whole trajectory can be read as a sequence
+of harness edits.  Figure~\ref{fig:cp_evolution} plots every improving round of
+the circle-packing campaign, and Table~\ref{tab:cp_components} lists what the
+proposer added at each.  Three regimes are visible.  \emph{Generic search}
+(r312--r622): the proposer's first generated tools are task-agnostic search
+utilities---\texttt{run\_targeted\_search}, then \texttt{parameter\_expander}---
+paired with reminder middlewares that enforce cheap probing before a scarce
+evaluator call; these buy steady but small gains.  \emph{Geometric
+specialization} (r760--r761): the tools become task-specific, first diagnostic
+(\texttt{geometry\_validator} checks a candidate packing) and then constructive
+(\texttt{spacing\_optimizer}), and the skill names change from
+``search-strategy'' to ``hexagonal-packing-patterns''---the largest single jump
+of the campaign ($2.302 \to 2.450$) follows immediately.  \emph{Bug-directed
+repair} (r764--r765): the proposer ships \texttt{hexagonal\_construction}, a
+generator for the whole lattice, and---after reading in its experience digest
+that rollouts kept mis-indexing staggered rows---an \texttt{indexing\_reminder}
+middleware whose text targets exactly that failure (\emph{``use cumulative
+indexing, not \texttt{row\_idx*5+i}''}).
+
+The progression is the paper's mechanism claim in miniature: the proposer moves
+from generic scaffolding, to domain structure, to a named defect in the
+executor's own behavior, and each step is a legible artifact rather than a
+weight delta.  Declarative-only rounds (r620, r762, r763) show the complement:
+some gains come purely from re-tuning iteration caps and temperature, which the
+same policy also controls.
+
+\begin{figure}[t]
+\centering
+\begin{tikzpicture}
+\begin{axis}[
+  width=\linewidth, height=6.0cm,
+  xlabel={improving round (campaign order)}, ylabel={CP-26 score ($\sum r_i$)},
+  xtick={1,2,3,4,5,6,7,8,9,10,11,12},
+  xticklabels={r1,r8,r26,r312,r620,r622,r760,r761,r762,r763,r764,r765},
+  x tick label style={rotate=45,anchor=east,font=\scriptsize},
+  y tick label style={font=\scriptsize}, label style={font=\small},
+  ymin=0.9, ymax=2.75, grid=major, grid style={gray!20},
+  legend style={font=\scriptsize, at={(0.98,0.03)}, anchor=south east},
+  legend cell align=left,
+]
+\addplot[thick, mark=*, mark size=1.6pt, const plot mark right] coordinates {
+ (1,1.800) (2,1.939) (3,2.110) (4,2.114) (5,2.254) (6,2.261)
+ (7,2.302) (8,2.450) (9,2.466) (10,2.484) (11,2.498) (12,2.502)};
+\addlegendentry{\method{} (best-so-far)}
+\addplot[dashed, thick, gray] coordinates {(1,1.936) (12,1.936)};
+\addlegendentry{Finch-9B}
+\addplot[dotted, thick, gray] coordinates {(1,1.172702) (12,1.172702)};
+\addlegendentry{Qwen3.5-9B}
+\addplot[dashdotted, thick, black] coordinates {(1,2.635983) (12,2.635983)};
+\addlegendentry{Previous SOTA ($\le$10B)}
+\node[font=\scriptsize, anchor=west] at (axis cs:3.6,1.99) {\texttt{run\_targeted\_search}};
+\node[font=\scriptsize, anchor=west] at (axis cs:5.6,2.14) {\texttt{parameter\_expander}};
+\node[font=\scriptsize, anchor=east] at (axis cs:7.9,2.20) {\texttt{geometry\_validator}};
+\node[font=\scriptsize, anchor=east] at (axis cs:9.6,2.38) {\texttt{spacing\_optimizer}};
+\node[font=\scriptsize, anchor=east] at (axis cs:12.2,2.60) {\texttt{hexagonal\_construction}};
+\end{axis}
+\end{tikzpicture}
+\caption{\textbf{Harness evolution on circle packing.}  Each marker is a round
+that improved the incumbent; labels mark the generated tool shipped in the
+winning harness.  The proposer's tools progress from generic search utilities to
+geometric validators to a full lattice constructor, with the largest jump
+(r760$\to$r761) coinciding with the switch to task-specific geometry.  The
+executor is frozen throughout; only the harness changes.  Trace is the recorded
+campaign through r765; Table~\ref{tab:main_results} reports the completed
+campaign.}
+\label{fig:cp_evolution}
+\end{figure}
+
+\begin{table}[t]
+\centering
+\caption{\textbf{What the proposer added at each improving round} (circle
+packing).  ``---'' marks declarative-only rounds, which changed sampling and
+iteration caps but generated no new components.  Specs for the earliest rounds
+were not retained.}
+\label{tab:cp_components}
+\small
+\setlength{\tabcolsep}{3.5pt}
+\begin{tabular}{llllll}
+\toprule
+Round & $\sum r_i$ & New tool & New skill & New middleware & iters/temp \\
+\midrule
+r1--r26 & 1.800--2.110 & \multicolumn{4}{l}{\emph{(specs not retained)}} \\
+r312 & 2.114 & \texttt{run\_targeted\_search} & search-strategy & \texttt{search\_reminder}, \texttt{probe\_before\_eval} & 50 / 0.8 \\
+r620 & 2.254 & --- & --- & --- & 60 / 0.3 \\
+r622 & 2.261 & \texttt{parameter\_expander} & search-enhancement & \texttt{search\_progress\_reminder} & 80 / 0.5 \\
+r760 & 2.302 & \texttt{geometry\_validator} & hexagonal-packing & \texttt{construction\_reminder} & 60 / 0.3 \\
+r761 & 2.450 & \texttt{spacing\_optimizer} & grid-refinement & \texttt{probe\_first\_reminder} & 40 / 0.5 \\
+r762 & 2.466 & --- & --- & --- & 50 / 0.7 \\
+r763 & 2.484 & --- & --- & --- & 60 / 0.9 \\
+r764 & 2.498 & \texttt{hexagonal\_construction} & hexagonal-pack & \texttt{hexagonal\_reminder} & 70 / 1.1 \\
+r765 & 2.502 & \texttt{hexagonal\_construction} & hexagonal-pack & \texttt{indexing\_reminder}, \texttt{probe\_first} & 60 / 0.9 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
 \subsection{Cross-Task Proposer Transfer}
 \label{sec:exp-transfer}
 \emph{[Experiment in progress; table/figure and numbers to be inserted.]}
 \marginpar{\footnotesize\textbf{TODO}}
 A proposer is trained per task, yielding adapters $\phi_1,\dots,\phi_{11}$.  We
 probe whether a proposer's learned harness-construction strategy transfers by
-building an $11\times11$ matrix whose entry $S_{ij}$ is the direction-normalized
+building the $11\times11$ matrix of Table~\ref{tab:transfer_matrix}, whose entry
+$S_{ij}$ is the direction-normalized
 $\mathrm{Best@}8$ of $\phi_i$ applied \emph{zero-shot} to task $\tau_j$---frozen
 executor, no further updates on $\tau_j$, each cell repeated $5$ times, with the
 initial proposer $\phi_0$ as an added baseline row.  The diagonal measures
@@ -205,7 +309,36 @@ which target is most helpable, and domain blocks whether mathematical,
 algorithmic, and systems tasks cluster.  This is exploratory: weak off-diagonal
 transfer would refine, not overturn, the main result, indicating that the
 learned proposer is presently task-specific.
-% \input{tables/transfer_matrix}
+\begin{table}[t]
+\centering
+\caption{\textbf{Cross-task proposer transfer} \emph{(placeholder --- experiment
+in progress)}.  Entry $(i,j)$ is the direction-normalized improvement of
+proposer $\phi_i$ applied zero-shot to task $\tau_j$ over the initial proposer
+$\phi_0$, at $\mathrm{Best@}8$ with $5$ repeats.  Diagonal $=$ in-task learning;
+off-diagonal $=$ zero-shot transfer.}
+\label{tab:transfer_matrix}
+\scriptsize
+\setlength{\tabcolsep}{2.5pt}
+\begin{tabular}{l|ccccccccccc|c}
+\toprule
+$\phi_i \backslash \tau_j$ & Erd & AC1 & AC2 & CP & Had & a039 & a058 & EPLB & PRI & SQL & Txn & mean \\
+\midrule
+$\phi_{\mathrm{Erd}}$  & & & & & & & & & & & & \\
+$\phi_{\mathrm{AC1}}$  & & & & & & & & & & & & \\
+$\phi_{\mathrm{AC2}}$  & & & & & & & & & & & & \\
+$\phi_{\mathrm{CP}}$   & & & & & & & & & & & & \\
+$\phi_{\mathrm{Had}}$  & & & & & & & & & & & & \\
+$\phi_{\mathrm{a039}}$ & & & & & & & & & & & & \\
+$\phi_{\mathrm{a058}}$ & & & & & & & & & & & & \\
+$\phi_{\mathrm{EPLB}}$ & & & & & & & & & & & & \\
+$\phi_{\mathrm{PRI}}$  & & & & & & & & & & & & \\
+$\phi_{\mathrm{SQL}}$  & & & & & & & & & & & & \\
+$\phi_{\mathrm{Txn}}$  & & & & & & & & & & & & \\
+\midrule
+mean & & & & & & & & & & & & \\
+\bottomrule
+\end{tabular}
+\end{table}
 
 \subsection{Cross-Model Harness Transfer}
 \label{sec:exp-crossmodel}
@@ -220,7 +353,33 @@ are permitted.  For each executor $E$ (e.g.\ Qwen3.5-32B, GPT-OSS-120B) we
 compare $E{+}H_1$ (its own base harness), $E{+}H_{\phi_0}$ (initial proposer),
 $E{+}H_{\phi_j}$ (trained proposer), and $M_0{+}H_{\phi_j}$ (source executor),
 reporting absolute score, gain over $E{+}H_1$, tool-call success, and harness
-instruction adherence.  The contrast separates transferable
+instruction adherence (Table~\ref{tab:crossmodel}).  The contrast separates transferable
 algorithmic/search strategy from harness gains that merely exploit $M_0$'s
 model-specific behavior.
-% \input{tables/crossmodel_transfer}
+\begin{table}[t]
+\centering
+\caption{\textbf{Cross-model harness transfer} \emph{(placeholder --- experiment
+in progress)}.  Harnesses are frozen on $M_0$ and applied to a different frozen
+executor $E$ under the strict artifact-transfer protocol; only chat-template and
+tool-call syntax adapters are permitted.}
+\label{tab:crossmodel}
+\small
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{llcccc}
+\toprule
+Executor $E$ & Harness & Score & $\Delta$ vs $E{+}H_1$ & Tool-call succ. & Adherence \\
+\midrule
+\multirow{3}{*}{Qwen3.5-32B}
+ & $E{+}H_1$              & & --- & & \\
+ & $E{+}H_{\phi_0}$       & & & & \\
+ & $E{+}H_{\phi_j}$       & & & & \\
+\addlinespace[2pt]
+\multirow{3}{*}{GPT-OSS-120B}
+ & $E{+}H_1$              & & --- & & \\
+ & $E{+}H_{\phi_0}$       & & & & \\
+ & $E{+}H_{\phi_j}$       & & & & \\
+\addlinespace[2pt]
+Qwen3.5-9B ($M_0$) & $M_0{+}H_{\phi_j}$ & & & & \\
+\bottomrule
+\end{tabular}
+\end{table}

@@ -67,8 +67,17 @@ for i in $(seq 0 $((NSTEPS - 1))); do
   fi
   [ -f "$RD/round_summary.json" ] || { log "no summary — stop"; break; }
   python3 "$SAH/scripts/sanitize_grpo_batch.py" "$RD" >/dev/null 2>&1
-  # sync inheritance + feedback into the task-local workspace
-  [ -f "$OUT/best_programs.json" ] && cp "$OUT/best_programs.json" "$WS/best_programs.json" 2>/dev/null || true
+  # sync inheritance + feedback into the task-local workspace.
+  # NO_INHERIT=1 breaks the program ratchet on purpose: every round starts from
+  # the ORIGINAL seed instead of the incumbent. Use it to escape a basin that the
+  # ratchet has locked in — observed on circle packing, where all K candidates
+  # inherited the same 2.502 grid, scored identically to base, and produced a
+  # zero-variance group ("no_signal(true-plateau)"), so phi never trained.
+  if [ "${NO_INHERIT:-0}" = "1" ]; then
+    rm -f "$WS/best_programs.json"
+  else
+    [ -f "$OUT/best_programs.json" ] && cp "$OUT/best_programs.json" "$WS/best_programs.json" 2>/dev/null || true
+  fi
   [ -f "$OUT/task_feedback.json" ] && cp "$OUT/task_feedback.json" "$WS/task_feedback.json" 2>/dev/null || true
   SUM=$(python3 -c "
 import json

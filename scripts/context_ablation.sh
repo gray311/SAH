@@ -76,8 +76,29 @@ for i in $(seq 0 $((NSTEPS-1))); do
     (cd "$SAH/src" && python3 -m outer.outer_round collect --round-dir "$RD") >/dev/null 2>&1
   [ -f "$RD/round_summary.json" ] || { log "no summary — stop"; break; }
 
-  # carry the ratchet + feedback forward; NEVER carry a curated note
-  [ -f "$OUT/best_programs.json" ] && cp "$OUT/best_programs.json" "$WS/best_programs.json" 2>/dev/null
+  # Carry a TASK-LOCAL ratchet forward: merge only THIS campaign's own results.
+  # Copying $OUT/best_programs.json (as the other drivers do) would import the
+  # main campaign's incumbents and the ablation would just reproduce them.
+  python3 - "$RD" "$WS/best_programs.json" <<'PYR'
+import json,os,sys,glob
+rd,dst=sys.argv[1],sys.argv[2]
+local=json.load(open(dst)) if os.path.exists(dst) else {}
+LOWER={"eft__math__erdos_min_overlap","eft__math__first_autocorr_ineq"}
+n=0
+for f in glob.glob(os.path.join(rd,"rollouts","*","*","*","summary.json")):
+    try: e=json.load(open(f))
+    except Exception: continue
+    e=e[0] if isinstance(e,list) else e
+    t=e.get("task_id"); s=e.get("best_score"); prog=e.get("best_program")
+    if not t or s is None or not prog: continue
+    cur=local.get(t,{}).get("score")
+    better = cur is None or (s<cur if t in LOWER else s>cur)
+    if better:
+        local[t]={"score":s,"program":prog,"round":os.path.basename(rd)}; n+=1
+json.dump(local,open(dst,"w"),indent=1)
+print(f"  local ratchet: {n} task(s) advanced (campaign-local only)")
+PYR
+  # feedback must accumulate too — it is what turns the analyst on from round 2
   [ -f "$OUT/task_feedback.json" ] && cp "$OUT/task_feedback.json" "$WS/task_feedback.json" 2>/dev/null
   python3 - "$WS/task_feedback.json" <<'PY'
 import json,sys,os

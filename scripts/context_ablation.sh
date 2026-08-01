@@ -24,7 +24,11 @@ WS="${3:-$RUN_ROOT/self_adapt_harness/context_ablation}"
 mkdir -p "$WS"
 log(){ echo "[$(date -Is)] [ctx] $*"; }
 
-TASKS_ALL="eft__math__erdos_min_overlap eft__math__first_autocorr_ineq eft__math__second_autocorr_ineq eft__math__circle_packing eft__math__hadamard_maximal_det eft__ahc_simpletes__ahc039 eft__ahc_simpletes__ahc058 adrs__eplb adrs__prism adrs__llm_sql adrs__txn_scheduling"
+# AHC tasks score 0 unless the natively-rebuilt aarch64 testers are used (the
+# stock x86 binaries fail silently under qemu). Harmless for the other tasks.
+export AHC_NATIVE=1 AHC_CXX=g++ AHC_CASE_WORKERS=12 AHC_CACHE_DIR="$SAH/ahc_work/cache"
+
+TASKS_ALL="${CTX_TASKS:-eft__math__erdos_min_overlap eft__math__first_autocorr_ineq eft__math__second_autocorr_ineq eft__math__circle_packing eft__math__hadamard_maximal_det eft__ahc_simpletes__ahc039 eft__ahc_simpletes__ahc058 adrs__eplb adrs__prism adrs__llm_sql adrs__txn_scheduling}"
 
 # seed the harness base from the fixed initial harness (same start as the other rows)
 bases="$WS/round000_bases.json"
@@ -55,7 +59,7 @@ for i in $(seq 0 $((NSTEPS-1))); do
   JOB=""
   for _ in $(seq 1 20); do
     RAW=$(cd "$SAH" && env ROUND_ID="$R" TASKS="$TASKS_ALL" \
-      K="${K:-8}" MAX_EVALS="${MAX_EVALS:-20}" EVAL_TIMEOUT="${EVAL_TIMEOUT:-240}" \
+      K="${K:-8}" MAX_EVALS="${MAX_EVALS:-20}" EVAL_TIMEOUT="${EVAL_TIMEOUT:-420}" \
       FORCE_TOOL_FRAC="${FTF:-0.25}" SAH_MIN_ITERS="${SAH_MIN_ITERS:-0}" \
       SAH_ADV=v3 SAH_ANALYSIS=1 SAH_LEAK_NEUTRALIZE=1 \
       BASES_FILE="$bases" MPHI_PATH="" \

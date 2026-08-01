@@ -109,6 +109,14 @@ print(dict(cnt))")
   if [ "$PR" -gt 1 ] && [ "$IMPROVED" != "1" ] && [ "$stall" -lt "$PR" ]; then
     do_train=0; log "  plateau-gate: stall $stall/$PR, deferring training"
   fi
+  # NO_TRAIN=1 freezes the proposer's weights for the whole campaign. This is the
+  # \method (context) ablation: the harness still evolves round to round, but only
+  # through what the proposer READS (incumbent + experience digest + analyst
+  # brief), never through a gradient. Isolates context adaptation from weight
+  # adaptation.
+  if [ "${NO_TRAIN:-0}" = "1" ]; then
+    do_train=0; log "  NO_TRAIN=1: phi frozen (context-only ablation)"
+  fi
   if [ "$V" -ge 4 ] && [ "$do_train" = "1" ]; then
     stall=0
     cd "$SAH"

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Extract the \method (context) row from a context-ablation run.
+r"""Extract the \method (context) row from a context-ablation run.
 
 Only counts rounds where the analyst actually fired: the analyst needs
 prior-round feedback, so round 1 never has it, and a round without a brief is
@@ -8,7 +8,8 @@ round is verified against its Slurm log for "analysis brief attached".
 """
 import json, os, re, subprocess, sys, glob
 
-R   = os.path.expandvars("$RUN_ROOT/self_adapt_harness")
+RUN = os.environ.get("RUN_ROOT") or "/lustre/fsw/portfolios/av/users/yingzim/runs"
+R   = f"{RUN}/self_adapt_harness"
 LOG = "/lustre/fsw/portfolios/av/users/yingzim/logs/slurm"
 WS  = sys.argv[1] if len(sys.argv) > 1 else f"{R}/context_v2"
 LOWER = {"eft__math__erdos_min_overlap", "eft__math__first_autocorr_ineq"}

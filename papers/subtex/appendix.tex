@@ -21,7 +21,8 @@ Field & Type & Semantics \\
 \midrule
 \texttt{new\_tools}          & list & $\le 3$; name, description, JSON schema, \\
                              &      & \emph{Python implementation} \\
-\texttt{new\_skills}         & list & additional skill packages \\
+\texttt{new\_skills}         & list & $\le 2$; additional skill packages \\
+\texttt{new\_middlewares}   & list & $\le 2$; name, hook, Python implementation \\
 \texttt{remove\_tools}       & list & removable optional tools only \\
 \bottomrule
 \end{tabular}
@@ -38,7 +39,7 @@ group.
 
 Generated tools receive a \texttt{ctx} object exposing:
 \texttt{get\_program()}, \texttt{get\_best\_program()}, \texttt{best\_score()},
-\texttt{stage\_edit(code)}, \texttt{probe()} (subsampled, budget-free,
+\texttt{stage\_edit(code)}, \texttt{probe()} (subsampled; free of the evaluator budget but separately capped,
 $\sim$8$\times$ cheaper), \texttt{evaluate()} (budgeted),
 \texttt{budget\_left()}, \texttt{list\_task\_inputs()},
 \texttt{read\_input\_sample(name, n)}, \texttt{read\_input\_df(name, n)},
@@ -95,18 +96,20 @@ machinery.
 \paragraph{Serving and training.}  Executor and proposer are served with
 vLLM on aarch64 nodes (4-GPU allocations); proposer episodes for a round run
 against replicated endpoints.  Proposer training uses LoRA adapters with an
-offline replay format; each outer round contributes one training batch of
-per-episode advantages.  A KL penalty (coefficient 0.05--0.1) anchors the
-policy to the frozen base; checkpoints sit behind a symlink for zero-cost
-rollback.
+offline replay format; each eligible round contributes at most one
+training batch of per-episode advantages; plateau gating and the degenerate-group
+filters mean most rounds contribute search rather than a gradient step.  A KL penalty (coefficient 0.05--0.1) anchors the
+policy to the frozen base; every step's checkpoint is retained, so a collapse is
+reverted by resuming from the previous step.
 
 \paragraph{Round configuration.}  $K{=}8$ (cascade: 16 screened at 5
 evaluator calls, top 4 promoted); rollout budgets 20--25 evaluator calls
-(task-dependent, up to 40 for promoted cascade runs); evaluation timeout
-420\,s (raised from 120\,s after the diagnosis of \S\ref{sec:exp-results} (Obs.~3));
+(task-dependent, up to 40 for promoted cascade runs); evaluation timeout task-dependent
+(default 180\,s; raised from 120\,s to 420\,s on LLM-SQL after the diagnosis of
+\S\ref{sec:exp-results}, Obs.~3);
 proposer sampling temperature 1.0 with per-episode seeds; proposer episode
 cap 12 agent iterations.  Groups with all-tied rewards, sub-noise score
-differences, or fewer than $K/2$ valid candidates are excluded from training.
+differences are excluded from training.
 
 \paragraph{AHC protocol.}  The official x86 tester binaries fail silently
 under qemu-user emulation on aarch64 hosts (empty outputs score as 1 point).

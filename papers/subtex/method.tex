@@ -49,8 +49,11 @@ description, a seed program with an editable region, a black-box evaluator
 returning a scalar score, and a hard budget of $B$ evaluator calls.  Running
 $(M_0, H)$ on $\tau$ produces an edit$\to$evaluate trajectory whose outcome is
 the best score reached within budget,
-$s(\tau, H) = \max_{t \le B}\, \mu_\tau(x_t)$.  The executor $M_0$ is frozen:
-its weights never change, by finetuning or test-time
+$s(\tau, H, x_0) = \max_{t \le B}\, \mu_\tau(x_t)$, where $x_t$ is the program
+after $t$ edits.  Rounds inherit the incumbent rather than the seed
+(\S\ref{sec:method-search}), so a valid candidate's score is floored at the
+incumbent's and the reward below is non-negative except for invalid candidates.  The executor $M_0$ is frozen:
+its weights never change, whether by fine-tuning or by test-time
 training~\citep{ttt,ttrl}.  Improvement is delegated to a proposer
 $\pi_\phi(z \mid c_\tau)$ that emits a harness spec $z$---compiled to $H_z$ by a
 deterministic materializer---conditioned on a context $c_\tau$ holding
@@ -63,10 +66,12 @@ earlier rounds.  The learning problem is
 \label{eq:objective}
 \end{equation}
 optimized with group-relative RL over $K$ proposer episodes per task per round.
-Two properties separate Eq.~\eqref{eq:objective} from per-task scaffold
-search~\citep{adas,gepa,aflow}: the trained object is the \emph{proposer}, so
-design knowledge amortizes across tasks and rounds; and because $z$ carries
-executable code, the reachable harness family is not enumerable in advance.
+What separates this formulation from per-task scaffold
+search~\citep{adas,gepa,aflow,dgm} is the trained object: the \emph{proposer}
+itself, so design knowledge amortizes across tasks and rounds instead of being
+re-derived per task.  Like ADAS and the Darwin G\"odel Machine, and unlike
+prompt- or graph-level search~\citep{gepa,aflow}, our search space carries
+executable code, so the reachable harness family is not enumerable in advance.
 Two more separate it from executor RL~\citep{grpo,agenticrl}: no gradient
 touches $M_0$, and the reward is an \emph{outer} quantity---the best score of an
 entire inner trajectory, not a per-token signal.
@@ -81,7 +86,7 @@ legible (\S\ref{sec:method-genome}), a review chain that keeps generated code
 from corrupting the measurement (\S\ref{sec:method-safety}), and a group
 objective shaped for best-of-$K$ discovery (\S\ref{sec:method-rl}).
 
-\paragraph{The harness genome.}
+\subsection{The harness genome}
 \label{sec:method-genome}
 Candidates are expressed in a typed, fail-closed spec language rather than
 free-form code: every submission either validates---and compiles into a
@@ -92,8 +97,9 @@ playbook, the descriptions of the fixed tools, sampling parameters, the
 iteration cap, and middleware thresholds (budget reminders, stall-triggered
 restarts, output truncation).  \emph{Generative} fields extend the machinery
 itself: up to three \texttt{new\_tools}---each a name, description, JSON
-input schema, and Python implementation---plus new skills and the removal of
-designated optional tools.  Unlike tool-\emph{use}
+input schema, and Python implementation---plus new skills, up to two
+\texttt{new\_middlewares} (a hook and a Python implementation each), and the
+removal of designated optional tools.  Unlike tool-\emph{use}
 pipelines~\citep{toolformer,toolllm} and library-induction methods that
 abstract tools from solution traces~\citep{latm,creator,craft,trove,
 voyager}, tools here are authored by the \emph{proposer} policy as part of a
@@ -101,7 +107,7 @@ harness, before the executor ever runs, and become first-class members of
 the compiled agent.  A deterministic materializer turns a validated spec
 into a complete package---prompt, skill files, tool schemas,
 \texttt{custom\_tools/*.py} bound to a runtime dispatcher---so identical
-specs yield byte-identical agents and a spec hash de-duplicates candidates
+specs yield byte-identical agents (modulo provenance metadata) and a spec hash de-duplicates candidates
 within a group.
 
 \paragraph{An experience-conditioned proposer.}
@@ -114,7 +120,7 @@ candidate of the previous visit, its score, evaluator calls, stop reason,
 changed fields, validation errors, and per-tool review outcomes, plus an
 optional curated analyst note about the scoring rule
 (\S\ref{sec:method-search}).  The $K$ episodes for a task share $c_\tau$ and
-differ only in sampling seed, forming one group-relative group.  Feeding outcomes back
+differ only in sampling seed, forming a single group for the group-relative update.  Feeding outcomes back
 as language---rather than only as scalars---echoes reflective
 optimization~\citep{reflexion,gepa,trace}; the difference is that here the
 reflection loop trains a persistent policy, so design knowledge accumulates
@@ -123,7 +129,7 @@ in weights rather than in a per-task search state.
 \subsection{Leakage-controlled tool generation}
 \label{sec:method-safety}
 
-Letting the optimizer write code that runs inside the evaluation loop
+Letting the proposer write code that runs inside the evaluation loop
 invites the classic failure modes of specification
 gaming~\citep{skalse2022,specgaming}: a tool that reads the evaluator or
 answer files hacks the reward outright~\citep{denison2024,baker2025,
@@ -134,10 +140,10 @@ channels by construction, in four layers.
 \textbf{(1) Capability surface:} a generated tool implements a single
 \texttt{run(ctx, args)} entry point and touches the world only through
 \texttt{ctx}---staged edits, cheap subsampled probes, budgeted evaluation,
-task-input samples, scratch space.  The evaluator implementation, ground
-truth, network, and filesystem are unreachable by construction, not by
-policy (the full capability surface is listed in
-Appendix~\ref{app:sdk}).
+task-input samples, scratch space.  The evaluator's implementation, the ground
+truth, and the network are unreachable through this surface, and the static gates
+below enforce the same boundary independently (the full capability surface is
+listed in Appendix~\ref{app:sdk}).
 \textbf{(2) Static gates:} a fail-closed AST pass enforces an import
 whitelist, forbids \texttt{os}/\texttt{subprocess}/\texttt{open}/%
 \texttt{exec}/dunder access, and requires the exact entry signature;
@@ -166,9 +172,13 @@ headroom}, and the outer loop banks only the group's best rollout.  Per task
 group of $K$ scores $\{s_k\}$, \method{} uses three modifications, each
 motivated by an observed failure of the standard recipe
 (\S\ref{sec:exp-results}, Obs.~4).
-\textbf{Gap-normalized reward:} $g_k = (s_k - b_\tau)/(c_\tau - b_\tau)$,
+\textbf{Gap-normalized reward:} $g_k = (s_k - b_\tau)/(u_\tau - b_\tau)$,
 the fraction of the remaining gap closed, where $b_\tau$ is the incumbent
-best and $c_\tau$ a task ceiling; positive rewards are soft-capped as
+best and $u_\tau$ a task ceiling.  We set $u_\tau$ to the published target score
+for the task, which normalizes credit across heterogeneous scales; it enters the
+\emph{reward} only, never the executor's context or the harness, and when no
+target is available the reward falls back to relative gain over $b_\tau$.
+Positive rewards are soft-capped as
 $r_k = 3\tanh(g_k/3)$, which preserves the ranking among large gains where a
 symmetric clip erases it.  Invalid candidates receive a fixed negative
 reward.
@@ -191,11 +201,10 @@ reward range; the softmax term is a Monte-Carlo surrogate for the gradient
 of the expected group maximum, while the RLOO term retains dense signal.
 Degenerate groups are excluded outright: all-tied groups (which would teach
 ``any valid spec suffices''), sub-noise score differences (collapsed to
-ties), and groups with fewer than $K/2$ valid candidates---a guard family in
-the spirit of DAPO's dynamic filtering of uninformative
+ties)---a guard family in the spirit of DAPO's dynamic filtering of uninformative
 groups~\citep{dapo}.  Training is anchored by a KL penalty to the frozen
-base policy, and proposer checkpoints sit behind a symlink so that a
-validity collapse is rolled back at zero cost rather than trained through.
+base policy, and every step's checkpoint is retained, so a validity collapse is
+reverted by resuming from the previous step rather than trained through.
 
 \subsection{Coupling RL to search}
 \label{sec:method-search}
@@ -237,9 +246,10 @@ search found (Obs.~3).
   \State materialize valid specs into packages $H_k$; de-duplicate by spec hash
   \State roll out $(M_0, H_k)$ from $x^\star_\tau$; obtain scores $s_k$
          \COMMENT{cascade: screen, then promote}
+  \State compute advantages by Eq.~\eqref{eq:advantage} against the pre-round
+         incumbent; skip degenerate groups
   \State update $(H_\tau, x^\star_\tau)$ on strict improvement; archive parent
-  \State compute advantages by Eq.~\eqref{eq:advantage}; skip degenerate groups
 \EndFor
-\State update $\phi$ with the KL-anchored RLOO objective (Eq.~\eqref{eq:advantage}); roll back on validity collapse
+\State update $\phi$ with the KL-anchored objective of Eq.~\eqref{eq:objective}; revert on validity collapse
 \end{algorithmic}
 \end{algorithm}

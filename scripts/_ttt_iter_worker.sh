@@ -35,6 +35,7 @@ for r in $(seq 1 "$ROUNDS"); do
 
   log "  generating $K solutions with the current executor"
   cd "$SAH/src"
+  RPIDS=()
   for k in $(seq 0 $((K-1))); do
     OPENAI_BASE_URL="http://127.0.0.1:8800/v1" python3 -m inner.run_baseline \
       --harness-dir "$SAH/src/inner/harness" --ids "$TASK" \
@@ -42,9 +43,17 @@ for r in $(seq 1 "$ROUNDS"); do
       --max-evals "$MAX_EVALS" --eval-timeout "$EVAL_TIMEOUT" \
       --temperature "$TTT_TEMP" \
       --eval-python python3 --no-trajectory --out "$RD/k$k" > "$RD/k$k.log" 2>&1 &
-    while [ "$(jobs -rp | wc -l)" -ge 24 ]; do sleep 10; done
+    RPIDS+=($!)
+    # throttle on the ROLLOUT pids only -- counting all jobs would include the
+    # vllm server and stall the loop
+    while :; do
+      run=0; for q in "${RPIDS[@]}"; do kill -0 "$q" 2>/dev/null && run=$((run+1)); done
+      [ "$run" -lt 24 ] && break; sleep 10
+    done
   done
-  wait
+  # bare `wait` also waits on the vllm server, which never exits -- that hung the
+  # previous runs for hours after the rollouts had already finished
+  for q in "${RPIDS[@]}"; do wait "$q" 2>/dev/null; done
   kill -9 -- "-$VP" 2>/dev/null || kill -9 "$VP" 2>/dev/null || true
   sleep 20
 

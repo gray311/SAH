@@ -1,0 +1,146 @@
+#!/usr/bin/env bash
+#SBATCH --account=av_alpamayo_reasoning
+#SBATCH --partition=batch
+#SBATCH --qos=normal
+#SBATCH --nodes=1
+#SBATCH --gres=gpu:4
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=64
+#SBATCH --mem=900G
+#SBATCH --time=04:00:00
+#SBATCH --job-name=ttt-iter
+#SBATCH --output=/lustre/fsw/portfolios/av/users/yingzim/logs/slurm/%x-%j.out
+#SBATCH --error=/lustre/fsw/portfolios/av/users/yingzim/logs/slurm/%x-%j.err
+#
+# Iterative test-time training on the EXECUTOR -- the real TTT-Discover loop:
+#
+#   for each round:  generate K solutions with the current executor
+#                    -> score them -> train the executor on its own best
+#                    -> serve the updated executor -> repeat
+#
+# The harness is the FIXED initial harness and no proposer ever runs, so the only
+# thing that changes across rounds is the executor's weights. Every training row
+# is a program this same model produced: no external solution, no stronger model.
+#
+# A checkpoint of (cumulative rollouts, best score) is appended each round, which
+# is exactly the score-vs-compute curve for this arm.
+#
+# Env: TASK  OUT_DIR  [ROUNDS=4] [K=32] [MAX_EVALS=20] [EVAL_TIMEOUT=240]
+set -uo pipefail
+source /lustre/fsw/portfolios/av/users/yingzim/config/workspace_env.sh
+SAH="$CODE_ROOT/self_adapt_harness"; W="$CODE_ROOT/Weave_v2"
+export VLLM_ENV="${VLLM_ENV:-$ENV_ROOT/weave-qwen35-vllm/0.17.1}"
+BASE_HF="$MODEL_ROOT/base/Qwen3.5-9B/c202236235762e1c871ad0ccb60c8ee5ba337b9a"
+: "${TASK:?}"; : "${OUT_DIR:?}"
+ROUNDS="${ROUNDS:-4}"; K="${K:-32}"; MAX_EVALS="${MAX_EVALS:-20}"; EVAL_TIMEOUT="${EVAL_TIMEOUT:-240}"
+SERVED_MODEL="qwen3.5-9b"; mkdir -p "$OUT_DIR"
+log(){ echo "[$(date -Is)] [ttt-iter] $*"; }
+case "$TASK" in *ahc*) export AHC_NATIVE=1 AHC_CXX=g++ AHC_CASE_WORKERS=12 \
+  AHC_CACHE_DIR="$SAH/ahc_work/cache";; esac
+export VLLM_USE_FLASHINFER_SAMPLER=0
+
+CKPT="$BASE_HF"; CUM=0
+: > "$OUT_DIR/curve.jsonl"
+
+for r in $(seq 1 "$ROUNDS"); do
+  RD="$OUT_DIR/r$r"; mkdir -p "$RD"
+  log "round $r/$ROUNDS: serving $(basename "$CKPT")"
+  CUDA_VISIBLE_DEVICES=0,1,2,3 setsid "$VLLM_ENV/bin/python" "$VLLM_ENV/bin/vllm" serve "$CKPT" \
+    --host 0.0.0.0 --port 8800 --served-model-name "$SERVED_MODEL" --tensor-parallel-size 4 \
+    --max-model-len 131072 --max-num-seqs 16 --max-num-batched-tokens 16384 \
+    --gpu-memory-utilization 0.90 --enforce-eager --language-model-only \
+    --enable-auto-tool-choice --tool-call-parser qwen3_xml > "$RD/vllm.log" 2>&1 &
+  VP=$!
+  ok=0; for _ in $(seq 1 240); do
+    curl -sf http://127.0.0.1:8800/v1/models >/dev/null 2>&1 && { ok=1; break; }
+    kill -0 "$VP" 2>/dev/null || break; sleep 5; done
+  [ "$ok" = 1 ] || { log "vllm failed"; tail -30 "$RD/vllm.log"; exit 1; }
+
+  log "  generating $K solutions with the current executor"
+  cd "$SAH/src"
+  for k in $(seq 0 $((K-1))); do
+    OPENAI_BASE_URL="http://127.0.0.1:8800/v1" python3 -m inner.run_baseline \
+      --harness-dir "$SAH/src/inner/harness" --ids "$TASK" \
+      --base-url "http://127.0.0.1:8800/v1" --model "$SERVED_MODEL" \
+      --max-evals "$MAX_EVALS" --eval-timeout "$EVAL_TIMEOUT" \
+      --eval-python python3 --no-trajectory --out "$RD/k$k" > "$RD/k$k.log" 2>&1 &
+    while [ "$(jobs -rp | wc -l)" -ge 16 ]; do sleep 10; done
+  done
+  wait
+  kill -9 -- "-$VP" 2>/dev/null || kill -9 "$VP" 2>/dev/null || true
+  sleep 20
+
+  CUM=$((CUM + K))
+  python3 - "$OUT_DIR" "$RD" "$TASK" "$CUM" "$r" <<'PY'
+import json, glob, os, sys
+out, rd, task, cum, r = sys.argv[1], sys.argv[2], sys.argv[3], int(sys.argv[4]), int(sys.argv[5])
+pool = os.path.join(out, "pool.jsonl")
+new = 0
+with open(pool, "a") as ph:
+    for f in glob.glob(os.path.join(rd, "k*", "**", "summary.json"), recursive=True):
+        try: e = json.load(open(f))
+        except Exception: continue
+        e = e[0] if isinstance(e, list) else e
+        s, p = e.get("best_score"), e.get("best_program")
+        if s is None or not p or s <= 0: continue
+        ph.write(json.dumps({"score": s, "program": p, "round": r}) + "\n"); new += 1
+rows = [json.loads(l) for l in open(pool)] if os.path.exists(pool) else []
+best = max((x["score"] for x in rows), default=None)
+with open(os.path.join(out, "curve.jsonl"), "a") as ch:
+    ch.write(json.dumps({"round": r, "cum_rollouts": cum, "best": best, "n_pool": len(rows)}) + "\n")
+print(f"  round {r}: +{new} solutions, pool={len(rows)}, best={best}, cum_rollouts={cum}")
+PY
+
+  [ "$r" -lt "$ROUNDS" ] || break
+  log "  training the executor on its own best solutions"
+  DAT="$RD/train.jsonl"
+  python3 - "$OUT_DIR/pool.jsonl" "$DAT" "$SAH" "$TASK" <<'PY'
+import json, sys
+pool, dst, sah, task = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+rows = [json.loads(l) for l in open(pool)]
+system = open(f"{sah}/src/inner/harness/system.md").read()
+TOOLS = [{"type": "function", "function": {"name": "edit_solution",
+  "description": "Change the code inside the # EVOLVE-BLOCK region, then call evaluate_solution to score it.",
+  "parameters": {"type": "object", "properties": {"code": {"type": "string",
+    "description": "SEARCH/REPLACE diff block(s), or the full replacement body."}}, "required": ["code"]}}},
+ {"type": "function", "function": {"name": "evaluate_solution",
+  "description": "Score the current program against the task evaluator.",
+  "parameters": {"type": "object", "properties": {}, "required": []}}}]
+n = len(rows); tot = sum(x["score"] for x in rows)
+with open(dst, "w") as fh:
+    for x in rows:
+        loo = (tot - x["score"]) / (n - 1) if n > 1 else x["score"]
+        call = ("<tool_call>\n<function=edit_solution>\n<parameter=code>\n"
+                f"{x['program']}\n</parameter>\n</function>\n</tool_call>")
+        fh.write(json.dumps({"messages": [
+            {"role": "system", "content": system},
+            {"role": "user", "content": f"Task: {task}\n\nImprove the EVOLVE-BLOCK. "
+                                        "Call edit_solution with the new block, then evaluate_solution."},
+            {"role": "assistant", "content": call},
+            {"role": "tool", "content": f"Edit applied. evaluate_solution -> combined_score {x['score']:.6f}."}],
+            "tools": TOOLS,
+            "metadata": {"advantage": x["score"] - loo, "reward": x["score"],
+                         "task_id": task, "valid": True, "tools": TOOLS}}) + "\n")
+print(f"  built {n} training rows")
+PY
+  N=$(wc -l < "$DAT"); [ "$N" -ge 2 ] || { log "  too few rows, stopping"; break; }
+  SAVE="$MODEL_ROOT/checkpoints/self_adapt_harness/ttt_iter_$(basename "$OUT_DIR")_r$r"
+  MERGED="$MODEL_ROOT/exports/self_adapt_harness/ttt_iter_$(basename "$OUT_DIR")_r$r"
+  mkdir -p "$SAVE"
+  TJ=$(cd "$W" && env RUN_SCRIPT="$W/scripts/train/run_qwen35_grpo_offline_lora.sh" \
+    PROMPT_DATA="$DAT" SAVE_CKPT="$SAVE" HF_CKPT="$BASE_HF" LR=3e-5 KL_COEF=0.05 \
+    LORA_RANK=64 LORA_ALPHA=128 NUM_GPUS=4 NUM_EPOCH=2 ROLLOUT_BATCH_SIZE="$N" \
+    GLOBAL_BATCH_SIZE=8 MICRO_BATCH_SIZE=1 LOG_PROBS_CHUNK_SIZE=2048 \
+    sbatch --parsable scripts/train/train_qwen35_lora.slurm 2>&1 | grep -oE '[0-9]{6,}' | tail -1)
+  MJ=$(cd "$W" && env MERGE_SCRIPT="$W/scripts/merge/merge_in_container.sh" \
+    HF_CKPT="$BASE_HF" CKPT_DIR="$SAVE" OUT="$MERGED" \
+    sbatch --parsable --dependency=afterok:"$TJ" scripts/merge/merge.slurm 2>&1 | grep -oE '[0-9]{6,}' | tail -1)
+  log "  train $TJ / merge $MJ -> waiting"
+  for _ in $(seq 1 180); do
+    st=$(sacct -j "$MJ" -X -n -o State 2>/dev/null | head -1 | xargs)
+    case "$st" in COMPLETED) break;; FAILED|CANCELLED*|TIMEOUT) log "  train/merge failed ($st)"; break 2;; esac
+    sleep 60
+  done
+  [ -f "$MERGED/config.json" ] && CKPT="$MERGED" || { log "  merge missing, keeping previous ckpt"; }
+done
+log "done; curve at $OUT_DIR/curve.jsonl"

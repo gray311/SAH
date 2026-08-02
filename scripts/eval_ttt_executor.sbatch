@@ -22,6 +22,7 @@
 set -uo pipefail
 source /lustre/fsw/portfolios/av/users/yingzim/config/workspace_env.sh
 SAH="$CODE_ROOT/self_adapt_harness"
+export VLLM_ENV="${VLLM_ENV:-$ENV_ROOT/weave-qwen35-vllm/0.17.1}"
 : "${TTT_CKPT:?set TTT_CKPT}"; : "${TASK:?set TASK}"; : "${OUT_DIR:?set OUT_DIR}"
 K="${K:-8}"; MAX_EVALS="${MAX_EVALS:-20}"; EVAL_TIMEOUT="${EVAL_TIMEOUT:-240}"
 SERVED_MODEL="qwen3.5-9b"

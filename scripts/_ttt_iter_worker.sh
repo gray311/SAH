@@ -7,7 +7,14 @@ export VLLM_ENV="${VLLM_ENV:-$ENV_ROOT/weave-qwen35-vllm/0.17.1}"
 BASE_HF="$MODEL_ROOT/base/Qwen3.5-9B/c202236235762e1c871ad0ccb60c8ee5ba337b9a"
 log(){ echo "[$(date -Is)] [ttt-iter] $*"; }
 export VLLM_USE_FLASHINFER_SAMPLER=0
-python3 -c "from nexau import Agent; import openai; print('  deps OK inside container')" || exit 1
+mkdir -p "$OUT_DIR"
+# the image ships the runtime but not the agent package -- install it the same
+# way the outer-round worker does, then fail loudly if anything is missing.
+export UV_BREAK_SYSTEM_PACKAGES=1
+log "installing deps"
+uv pip install --system -e "$CODE_ROOT/NexAU" jax optax orjson cvxpy \
+  > "$OUT_DIR/pip.log" 2>&1 || { tail -30 "$OUT_DIR/pip.log"; exit 1; }
+python3 -c "from nexau import Agent; import jax, optax, orjson, cvxpy, openai; print('  deps OK')" || exit 1
 
 CKPT="$BASE_HF"; CUM=0
 : > "$OUT_DIR/curve.jsonl"

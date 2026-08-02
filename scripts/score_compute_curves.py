@@ -80,9 +80,17 @@ def round_phi_map():
 
 
 def series(task, lower, phi_map):
-    """(cumulative rollouts, best-so-far) for trained-phi and fixed-phi rounds."""
-    out = {"trained": [], "fixed": []}
-    per = {"trained": [], "fixed": []}
+    """Best-so-far over the FULL shared campaign timeline for this task.
+
+    The campaign's rounds share one program ratchet: a round driven by the base
+    proposer can inherit an incumbent that trained-proposer rounds built. Giving
+    each proposer kind its own cumulative-rollout axis therefore credits the base
+    rounds with compute they never spent -- which is what made the context-only
+    curve look faster than it is. So we plot a single campaign curve on the real
+    shared budget, and take the controlled arms (context_v2, TTT) from runs that
+    each start from the fixed initial harness with their own ratchet.
+    """
+    items = []
     for f in glob.glob(f"{R}/outer/round*/round_summary.json"):
         rd = int(re.search(r"round(\d+)", f).group(1))
         if rd not in phi_map:
@@ -90,21 +98,91 @@ def series(task, lower, phi_map):
         try: g = json.load(open(f))["groups"].get(task)
         except Exception: continue
         if not g: continue
-        kind = "fixed" if phi_map[rd].startswith(BASE_PHI[:12]) else "trained"
         rows = g.get("rows") or []
-        scores = [r["score"] for r in rows if r.get("valid") and r.get("score") is not None]
-        per[kind].append((rd, len(rows), scores))
-    for kind, items in per.items():
-        items.sort()
-        cum, best = 0, None
-        for rd, n, scores in items:
-            cum += n
-            for s in scores:
-                if s <= 0: continue
-                best = s if best is None else (min(best, s) if lower else max(best, s))
-            if best is not None:
-                out[kind].append((cum, best))
-    return out
+        sc = [r["score"] for r in rows if r.get("valid") and r.get("score") is not None]
+        items.append((rd, len(rows), sc))
+    items.sort()
+    out, cum, best = [], 0, None
+    for rd, n, sc in items:
+        cum += n
+        for s in sc:
+            if s <= 0: continue
+            best = s if best is None else max(best, s)
+        if best is not None:
+            out.append((cum, best))
+    return {"campaign": out, "fixed": []}
+
+
+def arm_curve(task, ws, need_analyst):
+    """Controlled arm from context_ablation.sh: same start, own ratchet, own budget."""
+    log = f"{R}/{ws}/driver.log"
+    if not os.path.exists(log):
+        return []
+    txt = open(log, errors="ignore").read()
+    rounds = [int(x) for x in re.findall(r"round(\d+) over", txt)]
+    jobs = re.findall(r"job (\d+)", txt)
+    L = "/lustre/fsw/portfolios/av/users/yingzim/logs/slurm"
+    pts, cum, best = [], 0, None
+    for idx, rd in enumerate(rounds):
+        f = f"{R}/outer/round{rd}/round_summary.json"
+        if not os.path.exists(f):
+            continue
+        try: g = json.load(open(f))["groups"].get(task)
+        except Exception: continue
+        if not g: continue
+        rows = g.get("rows") or []
+        cum += len(rows)
+        if need_analyst:
+            job = jobs[idx] if idx < len(jobs) else None
+            lf = f"{L}/sah-outer-{job}.out" if job else None
+            nb = sum(1 for l in open(lf, errors="ignore") if "analysis brief attached" in l) \
+                 if lf and os.path.exists(lf) else 0
+            if nb == 0:
+                continue
+        for r in rows:
+            s = r.get("score")
+            if r.get("valid") and s and s > 0:
+                best = s if best is None else max(best, s)
+        if best is not None:
+            pts.append((cum, best))
+    return pts
+
+
+def context_curve(task):
+    """Controlled context-only arm: fixed proposer weights, analyst on, campaign-local
+    ratchet, started from the fixed initial harness (context_v2)."""
+    ws = f"{R}/context_v2"
+    log = f"{ws}/driver.log"
+    if not os.path.exists(log):
+        return []
+    txt = open(log, errors="ignore").read()
+    rounds = [int(x) for x in re.findall(r"round(\d+) over", txt)]
+    jobs = re.findall(r"job (\d+)", txt)
+    L = "/lustre/fsw/portfolios/av/users/yingzim/logs/slurm"
+    pts, cum, best = [], 0, None
+    for idx, rd in enumerate(rounds):
+        job = jobs[idx] if idx < len(jobs) else None
+        lf = f"{L}/sah-outer-{job}.out" if job else None
+        briefs = 0
+        if lf and os.path.exists(lf):
+            briefs = sum(1 for l in open(lf, errors="ignore") if "analysis brief attached" in l)
+        f = f"{R}/outer/round{rd}/round_summary.json"
+        if not os.path.exists(f):
+            continue
+        try: g = json.load(open(f))["groups"].get(task)
+        except Exception: continue
+        if not g: continue
+        rows = g.get("rows") or []
+        cum += len(rows)
+        if briefs == 0:      # round 1 has no analyst -> not the context condition
+            continue
+        for r in rows:
+            s = r.get("score")
+            if r.get("valid") and s and s > 0:
+                best = s if best is None else max(best, s)
+        if best is not None:
+            pts.append((cum, best))
+    return pts
 
 
 TAGS = {"eft__math__erdos_min_overlap": "erdos_min", "eft__math__circle_packing": "circle_pa",
@@ -150,18 +228,16 @@ def main():
     fig, axes = plt.subplots(2, 3, figsize=(16.5, 9.0), constrained_layout=True)
     fig.suptitle("Where should the reward go?  Updating the proposer vs. the executor vs. context alone",
                  fontsize=15)
-    fig.text(0.5, 0.005,
-             "x = executor rollouts actually spent by that arm (log). Ours and context-only are observed campaign "
-             "trajectories and are NOT budget-matched to each other; the TTT arm is a controlled rerun "
-             "(fixed harness, no proposer, TTT-Discover's hyperparameters) and the star is their published "
-             "Qwen3-8B result at its 25,600-rollout budget.",
+    fig.text(0.5, -0.015,
+             "x = executor rollouts spent by that arm (log).  Matched arms (green/grey) share start, budget and "
+             "ratchet and differ only in what is updated;\nthe blue curve is the full observed campaign and is not "
+             "budget-matched; the star is TTT-Discover's published Qwen3-8B result at its 25,600-rollout budget.",
              ha="center", fontsize=8.5, style="italic")
 
     for ax, (task, title, lower) in zip(axes.ravel(), TASKS):
         s = series(task, lower, phi_map)
         for kind, color, style, marker, label in [
-            ("trained", "#1f4e79", "-",  "o", "Update proposer (ours)"),
-            ("fixed",   "#7f7f7f", "-.", "^", "Fixed proposer (context only)"),
+            ("campaign", "#1f4e79", "-", "o", "Update proposer (ours, full campaign)"),
         ]:
             pts = s[kind]
             if not pts: continue
@@ -171,6 +247,17 @@ def main():
             xs = [p[0] for p in xy]; ys = [p[1] for p in xy]
             ax.plot(xs, ys, style, color=color, marker=marker, ms=4.5, lw=2.2,
                     mfc="white" if kind == "fixed" else color, label=label)
+
+        pa = arm_curve(task, "arm_proposer", False)
+        if pa:
+            ax.plot([p[0] for p in pa], [normalize(task, p[1], lower) for p in pa],
+                    "-", color="#2e9e5b", marker="D", ms=5.5, lw=2.4,
+                    label="Update proposer (matched arm)")
+        cc = arm_curve(task, "arm_context_long", True) or context_curve(task)
+        if cc:
+            ax.plot([p[0] for p in cc], [normalize(task, p[1], lower) for p in cc],
+                    "-.", color="#7f7f7f", marker="^", ms=5.5, lw=2.2, mfc="white",
+                    label="Context only (matched arm)")
 
         tc = ttt_curve(task)
         if tc:
@@ -202,11 +289,13 @@ def main():
     print("wrote", out)
 
     for task, title, lower in TASKS:
-        s = series(task, lower, phi_map)
-        t = s["trained"][-1] if s["trained"] else None
-        f = s["fixed"][-1] if s["fixed"] else None
-        print(f"  {title:24s} trained: {('%d rollouts -> %.3f' % (t[0], normalize(task,t[1],lower))) if t else 'n/a':32s}"
-              f" fixed: {('%d rollouts -> %.3f' % (f[0], normalize(task,f[1],lower))) if f else 'n/a'}")
+        s = series(task, lower, phi_map)["campaign"]
+        c = context_curve(task)
+        tt = ttt_curve(task)
+        def fmt(p):
+            return f"{p[0]:5d} rollouts -> {normalize(task, p[1], lower):.3f}" if p else "n/a"
+        print(f"  {title:22s} campaign: {fmt(s[-1] if s else None):28s}"
+              f" context: {fmt(c[-1] if c else None):28s} TTT: {fmt(tt[-1] if tt else None)}")
 
 
 if __name__ == "__main__":

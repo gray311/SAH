@@ -32,7 +32,13 @@ SAH="$CODE_ROOT/self_adapt_harness"; W="$CODE_ROOT/Weave_v2"
 export VLLM_ENV="${VLLM_ENV:-$ENV_ROOT/weave-qwen35-vllm/0.17.1}"
 BASE_HF="$MODEL_ROOT/base/Qwen3.5-9B/c202236235762e1c871ad0ccb60c8ee5ba337b9a"
 : "${TASK:?}"; : "${OUT_DIR:?}"
-ROUNDS="${ROUNDS:-4}"; K="${K:-32}"; MAX_EVALS="${MAX_EVALS:-20}"; EVAL_TIMEOUT="${EVAL_TIMEOUT:-240}"
+ROUNDS="${ROUNDS:-4}"; K="${K:-64}"; MAX_EVALS="${MAX_EVALS:-20}"; EVAL_TIMEOUT="${EVAL_TIMEOUT:-240}"
+# TTT-Discover Table 9: 512 rollouts/step as 8 groups x 64, 50 steps, LoRA r32,
+# Adam lr 4e-5, KL 0.1, sampling temperature 1.0, entropic-utility objective.
+# We keep their per-group size (64), rank, lr, KL and temperature; we cannot
+# afford 8 groups x 50 steps on our GPU share, so the budget is smaller and the
+# figure states both budgets explicitly.
+TTT_TEMP="${TTT_TEMP:-1.0}"
 SERVED_MODEL="qwen3.5-9b"; mkdir -p "$OUT_DIR"
 log(){ echo "[$(date -Is)] [ttt-iter] $*"; }
 case "$TASK" in *ahc*) export AHC_NATIVE=1 AHC_CXX=g++ AHC_CASE_WORKERS=12 \
@@ -63,6 +69,7 @@ for r in $(seq 1 "$ROUNDS"); do
       --harness-dir "$SAH/src/inner/harness" --ids "$TASK" \
       --base-url "http://127.0.0.1:8800/v1" --model "$SERVED_MODEL" \
       --max-evals "$MAX_EVALS" --eval-timeout "$EVAL_TIMEOUT" \
+      --temperature "$TTT_TEMP" \
       --eval-python python3 --no-trajectory --out "$RD/k$k" > "$RD/k$k.log" 2>&1 &
     while [ "$(jobs -rp | wc -l)" -ge 16 ]; do sleep 10; done
   done
@@ -128,8 +135,8 @@ PY
   MERGED="$MODEL_ROOT/exports/self_adapt_harness/ttt_iter_$(basename "$OUT_DIR")_r$r"
   mkdir -p "$SAVE"
   TJ=$(cd "$W" && env RUN_SCRIPT="$W/scripts/train/run_qwen35_grpo_offline_lora.sh" \
-    PROMPT_DATA="$DAT" SAVE_CKPT="$SAVE" HF_CKPT="$BASE_HF" LR=3e-5 KL_COEF=0.05 \
-    LORA_RANK=64 LORA_ALPHA=128 NUM_GPUS=4 NUM_EPOCH=2 ROLLOUT_BATCH_SIZE="$N" \
+    PROMPT_DATA="$DAT" SAVE_CKPT="$SAVE" HF_CKPT="$BASE_HF" LR=4e-5 KL_COEF=0.1 \
+    LORA_RANK=32 LORA_ALPHA=64 NUM_GPUS=4 NUM_EPOCH=2 ROLLOUT_BATCH_SIZE="$N" \
     GLOBAL_BATCH_SIZE=8 MICRO_BATCH_SIZE=1 LOG_PROBS_CHUNK_SIZE=2048 \
     sbatch --parsable scripts/train/train_qwen35_lora.slurm 2>&1 | grep -oE '[0-9]{6,}' | tail -1)
   MJ=$(cd "$W" && env MERGE_SCRIPT="$W/scripts/merge/merge_in_container.sh" \

@@ -149,6 +149,12 @@ def main():
     fig, axes = plt.subplots(2, 3, figsize=(16.5, 9.0), constrained_layout=True)
     fig.suptitle("Where should the reward go?  Updating the proposer vs. the executor vs. context alone",
                  fontsize=15)
+    fig.text(0.5, 0.005,
+             "x = executor rollouts actually spent by that arm (log). Ours and context-only are observed campaign "
+             "trajectories and are NOT budget-matched to each other; the TTT arm is a controlled rerun "
+             "(fixed harness, no proposer, TTT-Discover's hyperparameters) and the star is their published "
+             "Qwen3-8B result at its 25,600-rollout budget.",
+             ha="center", fontsize=8.5, style="italic")
 
     for ax, (task, title, lower) in zip(axes.ravel(), TASKS):
         s = series(task, lower, phi_map)
@@ -158,8 +164,10 @@ def main():
         ]:
             pts = s[kind]
             if not pts: continue
-            xs = [p[0] for p in pts]
-            ys = [normalize(task, p[1], lower) for p in pts]
+            xy = [(p[0], normalize(task, p[1], lower)) for p in pts]
+            xy = [(x, y) for x, y in xy if y > -0.05]     # drop degenerate rollouts
+            if not xy: continue
+            xs = [p[0] for p in xy]; ys = [p[1] for p in xy]
             ax.plot(xs, ys, style, color=color, marker=marker, ms=4.5, lw=2.2,
                     mfc="white" if kind == "fixed" else color, label=label)
 

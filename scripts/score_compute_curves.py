@@ -51,7 +51,14 @@ ANCHOR = {   # (initial program, published <=10B best) in combined units
 # the number of executor rollouts whose programs went into its training set,
 # plus the K rollouts spent evaluating it.
 TTT_DIR = f"{R}/ttt_arm"
-TTT_BUDGET = 25600   # TTT-Discover's own reported budget, for reference only
+# TTT-Discover's own Qwen3-8B run (arXiv:2601.16175, Table 2) -- the like-for-like
+# ~10B comparison -- at their reported budget of 512 rollouts/step x 50 steps.
+TTT_BUDGET = 25600
+TTT_PUBLISHED = {
+    "eft__math__erdos_min_overlap":    0.380922 / 0.380932,   # 0.380932 raw
+    "eft__math__first_autocorr_ineq":  1.505293 / 1.50525,    # 1.50525 raw
+    "eft__math__second_autocorr_ineq": 0.9472 / 0.896280,     # 0.9472 raw
+}
 TTT_FINAL = {
     "eft__math__erdos_min_overlap":    0.999974,   # holds the <=10B best
     "eft__math__second_autocorr_ineq": 1.056813,   # holds the <=10B best
@@ -154,6 +161,12 @@ def main():
             ax.plot([p[0] for p in tc], [normalize(task, p[1], lower) for p in tc],
                     "--", color="#d67c1c", marker="s", ms=5.5, lw=2.2, mfc="white",
                     label="Update executor (TTT, reproduced)")
+
+        pub = TTT_PUBLISHED.get(task)
+        if pub is not None:
+            ax.plot([TTT_BUDGET], [normalize(task, pub, lower)], marker="*", ms=16,
+                    color="#b03a2e", ls="none",
+                    label="TTT-Discover Qwen3-8B (published, 25.6k rollouts)")
 
         ax.axhline(1.0, color="black", ls=":", lw=1.2, alpha=.7)
         ax.text(0.015, 1.005, "published ≤10B best", transform=ax.get_yaxis_transform(),

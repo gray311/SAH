@@ -100,17 +100,23 @@ def series(task, lower, phi_map):
     return out
 
 
-def ttt_point(task):
-    """(executor rollouts consumed, best score) for our reproduced TTT arm."""
-    import glob as _g
-    for f in _g.glob(f"{TTT_DIR}/eval_*/ttt_result.json"):
-        try: d = json.load(open(f))
+TAGS = {"eft__math__erdos_min_overlap": "erdos_min", "eft__math__circle_packing": "circle_pa",
+        "eft__math__hadamard_maximal_det": "hadamard_", "eft__math__first_autocorr_ineq": "first_aut",
+        "eft__math__second_autocorr_ineq": "second_au", "eft__ahc_simpletes__ahc039": "ahc039"}
+
+
+def ttt_curve(task):
+    """[(cumulative rollouts, best-so-far)] from the iterative TTT run."""
+    f = f"{TTT_DIR}/iter_{TAGS.get(task,'')}/curve.jsonl"
+    if not os.path.exists(f):
+        return []
+    pts = []
+    for line in open(f):
+        try: d = json.loads(line)
         except Exception: continue
-        if d.get("task") != task or d.get("best") is None: continue
-        src = f"{TTT_DIR}/{task}.jsonl"
-        n_train = sum(1 for _ in open(src)) if os.path.exists(src) else 0
-        return n_train + int(d.get("k") or 0), float(d["best"])
-    return None
+        if d.get("best") is not None:
+            pts.append((int(d["cum_rollouts"]), float(d["best"])))
+    return sorted(pts)
 
 
 def normalize(task, v, lower):
@@ -143,13 +149,11 @@ def main():
             ax.plot(xs, ys, style, color=color, marker=marker, ms=4.5, lw=2.2,
                     mfc="white" if kind == "fixed" else color, label=label)
 
-        m = ttt_point(task)
-        if m:
-            x, y = m
-            ax.plot([x], [normalize(task, y, lower)], marker="s", ms=10,
-                    mfc="white", mec="#d67c1c", mew=2.2, ls="none",
-                    label="Update executor (TTT, ours)")
-            ax.axhline(normalize(task, y, lower), color="#d67c1c", ls="--", lw=1.2, alpha=.55)
+        tc = ttt_curve(task)
+        if tc:
+            ax.plot([p[0] for p in tc], [normalize(task, p[1], lower) for p in tc],
+                    "--", color="#d67c1c", marker="s", ms=5.5, lw=2.2, mfc="white",
+                    label="Update executor (TTT, reproduced)")
 
         ax.axhline(1.0, color="black", ls=":", lw=1.2, alpha=.7)
         ax.text(0.015, 1.005, "published ≤10B best", transform=ax.get_yaxis_transform(),

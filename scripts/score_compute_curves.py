@@ -116,7 +116,8 @@ def ttt_curve(task):
     """[(cumulative rollouts, best-so-far)] from the iterative TTT run."""
     tag = TAGS.get(task, "")
     pts = []
-    for f in (f"{TTT_DIR}/iter_{tag}/curve.jsonl", f"{TTT_DIR}/iter2_{tag}/curve.jsonl"):
+    for f in (f"{TTT_DIR}/iter_{tag}/curve.jsonl", f"{TTT_DIR}/iter2_{tag}/curve.jsonl",
+              f"{TTT_DIR}/iter3_{tag}/curve.jsonl"):
         if not os.path.exists(f):
             continue
         for line in open(f):

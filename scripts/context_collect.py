@@ -48,8 +48,9 @@ for idx, rd in enumerate(rounds):
     for t, v in json.load(open(s))["groups"].items():
         sc = v.get("best_score")
         if sc is None or sc == 0: continue
-        if t not in best: best[t] = sc
-        else: best[t] = min(best[t], sc) if t in LOWER else max(best[t], sc)
+        # combined scores are higher-is-better on EVERY task (the display-scale
+        # conversion below re-applies each metric's direction), so always take max
+        best[t] = sc if t not in best else max(best[t], sc)
     print(f"  round{rd}: {briefs} analyst briefs -> USED")
 
 print(f"\nrounds used: {used}   tasks covered: {len(best)}/11")

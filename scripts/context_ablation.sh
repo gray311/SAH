@@ -61,8 +61,8 @@ for i in $(seq 0 $((NSTEPS-1))); do
     RAW=$(cd "$SAH" && env ROUND_ID="$R" TASKS="$TASKS_ALL" \
       K="${K:-8}" MAX_EVALS="${MAX_EVALS:-20}" EVAL_TIMEOUT="${EVAL_TIMEOUT:-420}" \
       FORCE_TOOL_FRAC="${FTF:-0.25}" SAH_MIN_ITERS="${SAH_MIN_ITERS:-0}" \
-      SAH_ADV=v3 SAH_ANALYSIS=1 SAH_LEAK_NEUTRALIZE=1 \
-      BASES_FILE="$bases" MPHI_PATH="" \
+      SAH_ADV=v3 SAH_ANALYSIS="${USE_ANALYST:-1}" SAH_LEAK_NEUTRALIZE=1 \
+      BASES_FILE="$bases" MPHI_PATH="${MPHI:-}" \
       SEED_PROGRAMS_FILE="$WS/best_programs.json" \
       FEEDBACK_FILE="$WS/task_feedback.json" \
       sbatch --parsable scripts/outer_round.sbatch 2>&1)
@@ -109,6 +109,30 @@ if os.path.exists(f):
         if isinstance(e,dict) and e.pop("analyst_note",None) is not None: n+=1
     if n: json.dump(d,open(f,"w"),indent=1); print(f"  stripped {n} curated note(s)")
 PY
+  # TRAIN_PHI=1 turns this driver into the matched PROPOSER arm: identical start,
+  # identical rollout budget, identical ratchet policy -- the only difference is
+  # that phi is updated from the round's own group instead of being left frozen.
+  if [ "${TRAIN_PHI:-0}" = "1" ]; then
+    V=$(python3 -c "
+import json,sys
+g=json.load(open('$RD/round_summary.json'))['groups']
+print(sum(1 for t in g for r in g[t].get('rows',[]) if r.get('valid')))" 2>/dev/null || echo 0)
+    if [ "${V:-0}" -ge 4 ]; then
+      STAG="ctxp_$(printf '%02d' "$i")"
+      KL_COEF="${KL_COEF:-0.05}" NUM_EPOCH="${NUM_EPOCH:-2}" \
+        bash "$SAH/scripts/train_mphi_step.sh" "$RD" "$STAG" ${PREV_CKPT:+"$PREV_CKPT"} > /tmp/ctxp_train.txt 2>&1
+      TJ=$(grep -oP 'train job: \K[0-9]+' /tmp/ctxp_train.txt); MJ=$(grep -oP 'merge job: \K[0-9]+' /tmp/ctxp_train.txt)
+      if [ -n "$TJ" ]; then
+        wait_job "$TJ"; [ -n "$MJ" ] && wait_job "$MJ"
+        MERGED="$MODEL_ROOT/exports/self_adapt_harness/mphi_$STAG"
+        if [ -f "$MERGED/config.json" ]; then
+          MPHI="$MERGED"; PREV_CKPT="$MODEL_ROOT/checkpoints/self_adapt_harness/mphi_$STAG"
+          log "  trained -> mphi_$STAG (proposer arm)"
+        else log "  merge missing, keeping previous phi"; fi
+      else log "  train submit failed: $(tail -2 /tmp/ctxp_train.txt|tr '\n' ' ')"; fi
+    else log "  only $V valid rows, skipping the update"; fi
+  fi
+
   bases="$RD/next_bases.json"
   python3 - "$RD/round_summary.json" <<'PY'
 import json,sys
@@ -116,6 +140,6 @@ g=json.load(open(sys.argv[1]))["groups"]
 for t,v in sorted(g.items()):
     print(f"  {t:38s} best={v.get('best_score')} improved={v.get('improved')}")
 PY
-  log "  phi UNCHANGED (context-only ablation)"
+  [ "${TRAIN_PHI:-0}" = "1" ] || log "  phi UNCHANGED (context-only ablation)"
 done
 log "context ablation done"

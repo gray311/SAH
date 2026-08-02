@@ -114,16 +114,23 @@ TAGS = {"eft__math__erdos_min_overlap": "erdos_min", "eft__math__circle_packing"
 
 def ttt_curve(task):
     """[(cumulative rollouts, best-so-far)] from the iterative TTT run."""
-    f = f"{TTT_DIR}/iter_{TAGS.get(task,'')}/curve.jsonl"
-    if not os.path.exists(f):
-        return []
+    tag = TAGS.get(task, "")
     pts = []
-    for line in open(f):
-        try: d = json.loads(line)
-        except Exception: continue
-        if d.get("best") is not None:
-            pts.append((int(d["cum_rollouts"]), float(d["best"])))
-    return sorted(pts)
+    for f in (f"{TTT_DIR}/iter_{tag}/curve.jsonl", f"{TTT_DIR}/iter2_{tag}/curve.jsonl"):
+        if not os.path.exists(f):
+            continue
+        for line in open(f):
+            try: d = json.loads(line)
+            except Exception: continue
+            if d.get("best") is not None:
+                pts.append((int(d["cum_rollouts"]), float(d["best"])))
+    # best-so-far envelope over whatever budget we actually spent
+    pts.sort()
+    out, run = [], None
+    for x, y in pts:
+        run = y if run is None else max(run, y)
+        out.append((x, run))
+    return out
 
 
 def normalize(task, v, lower):

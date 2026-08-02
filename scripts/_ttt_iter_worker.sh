@@ -24,7 +24,7 @@ for r in $(seq 1 "$ROUNDS"); do
   log "round $r/$ROUNDS: serving $(basename "$CKPT")"
   CUDA_VISIBLE_DEVICES=0,1,2,3 setsid "$VLLM_ENV/bin/python" "$VLLM_ENV/bin/vllm" serve "$CKPT" \
     --host 0.0.0.0 --port 8800 --served-model-name "$SERVED_MODEL" --tensor-parallel-size 4 \
-    --max-model-len 131072 --max-num-seqs 16 --max-num-batched-tokens 16384 \
+    --max-model-len 131072 --max-num-seqs 24 --max-num-batched-tokens 16384 \
     --gpu-memory-utilization 0.90 --enforce-eager --language-model-only \
     --enable-auto-tool-choice --tool-call-parser qwen3_xml > "$RD/vllm.log" 2>&1 &
   VP=$!
@@ -42,7 +42,7 @@ for r in $(seq 1 "$ROUNDS"); do
       --max-evals "$MAX_EVALS" --eval-timeout "$EVAL_TIMEOUT" \
       --temperature "$TTT_TEMP" \
       --eval-python python3 --no-trajectory --out "$RD/k$k" > "$RD/k$k.log" 2>&1 &
-    while [ "$(jobs -rp | wc -l)" -ge 16 ]; do sleep 10; done
+    while [ "$(jobs -rp | wc -l)" -ge 24 ]; do sleep 10; done
   done
   wait
   kill -9 -- "-$VP" 2>/dev/null || kill -9 "$VP" 2>/dev/null || true

@@ -54,7 +54,10 @@ for src, sc in rows:
     cells, out = [], []
     for t in tasks:
         v, b = sc.get(t), base.get(t)
-        if v is None or b is None or b == 0:
+        # a zero score means the rollout could not run at all (e.g. the AHC rows
+        # submitted before the native-tester env was set); that is an
+        # infrastructure failure, not a transfer result, so leave the cell blank
+        if v is None or b is None or b == 0 or v == 0:
             out.append("   --"); continue
         d = (v - b) / abs(b)   # combined scores: higher is better on every task
         cells.append(d); out.append(f"{100*d:+7.1f}")

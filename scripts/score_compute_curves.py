@@ -46,10 +46,12 @@ ANCHOR = {   # (initial program, published <=10B best) in combined units
     "eft__ahc_simpletes__ahc039":      (2.377111, 2.476302),
 }
 
-# TTT-Discover: 512 solutions/step x 50 steps = 25,600 executor rollouts per
-# problem (their reported configuration). Final scores as published; None where
-# they do not report the task.
-TTT_BUDGET = 25600
+# TTT arm: we reproduce the setting ourselves (update the EXECUTOR on its own
+# high-scoring rollouts, fixed harness, no proposer). Each task's point sits at
+# the number of executor rollouts whose programs went into its training set,
+# plus the K rollouts spent evaluating it.
+TTT_DIR = f"{R}/ttt_arm"
+TTT_BUDGET = 25600   # TTT-Discover's own reported budget, for reference only
 TTT_FINAL = {
     "eft__math__erdos_min_overlap":    0.999974,   # holds the <=10B best
     "eft__math__second_autocorr_ineq": 1.056813,   # holds the <=10B best
@@ -98,6 +100,19 @@ def series(task, lower, phi_map):
     return out
 
 
+def ttt_point(task):
+    """(executor rollouts consumed, best score) for our reproduced TTT arm."""
+    import glob as _g
+    for f in _g.glob(f"{TTT_DIR}/eval_*/ttt_result.json"):
+        try: d = json.load(open(f))
+        except Exception: continue
+        if d.get("task") != task or d.get("best") is None: continue
+        src = f"{TTT_DIR}/{task}.jsonl"
+        n_train = sum(1 for _ in open(src)) if os.path.exists(src) else 0
+        return n_train + int(d.get("k") or 0), float(d["best"])
+    return None
+
+
 def normalize(task, v, lower):
     seed, ref = ANCHOR[task]
     if lower:                      # smaller is better -> flip
@@ -128,12 +143,13 @@ def main():
             ax.plot(xs, ys, style, color=color, marker=marker, ms=4.5, lw=2.2,
                     mfc="white" if kind == "fixed" else color, label=label)
 
-        tf = TTT_FINAL.get(task)
-        if tf is not None:
-            ax.plot([TTT_BUDGET], [normalize(task, tf, lower)], marker="s", ms=9,
-                    mfc="white", mec="#d67c1c", mew=2, ls="none",
-                    label=f"TTT-Discover (published, {TTT_BUDGET:,} rollouts)")
-            ax.axhline(normalize(task, tf, lower), color="#d67c1c", ls="--", lw=1.2, alpha=.6)
+        m = ttt_point(task)
+        if m:
+            x, y = m
+            ax.plot([x], [normalize(task, y, lower)], marker="s", ms=10,
+                    mfc="white", mec="#d67c1c", mew=2.2, ls="none",
+                    label="Update executor (TTT, ours)")
+            ax.axhline(normalize(task, y, lower), color="#d67c1c", ls="--", lw=1.2, alpha=.55)
 
         ax.axhline(1.0, color="black", ls=":", lw=1.2, alpha=.7)
         ax.text(0.015, 1.005, "published ≤10B best", transform=ax.get_yaxis_transform(),

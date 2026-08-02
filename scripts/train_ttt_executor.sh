@@ -33,5 +33,9 @@ J=$(cd "$W" && env RUN_SCRIPT="$W/scripts/train/run_qwen35_grpo_offline_lora.sh"
   NUM_EPOCH="${NUM_EPOCH:-2}" ROLLOUT_BATCH_SIZE="$N" GLOBAL_BATCH_SIZE=8 MICRO_BATCH_SIZE=1 \
   LOG_PROBS_CHUNK_SIZE=2048 \
   sbatch --parsable scripts/train/train_qwen35_lora.slurm 2>&1 | grep -oE '[0-9]{6,}' | tail -1)
-echo "  ttt_$TAG: $N rows, train job $J"
-echo "$TASK $TAG $FRAC $N $J" >> "$RUN_ROOT/self_adapt_harness/ttt_arm/trainings.txt"
+MERGED="$MODEL_ROOT/exports/self_adapt_harness/ttt_$TAG"
+M=$(cd "$W" && env MERGE_SCRIPT="$W/scripts/merge/merge_in_container.sh" \
+  HF_CKPT="$BASE_HF" CKPT_DIR="$SAVE" OUT="$MERGED" \
+  sbatch --parsable --dependency=afterok:"$J" scripts/merge/merge.slurm 2>&1 | grep -oE '[0-9]{6,}' | tail -1)
+echo "  ttt_$TAG: $N rows, train job $J, merge job $M -> $MERGED"
+echo "$TASK $TAG $FRAC $N $J $M $MERGED" >> "$RUN_ROOT/self_adapt_harness/ttt_arm/trainings.txt"

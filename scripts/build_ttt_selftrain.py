@@ -40,6 +40,22 @@ TASK_BLURB = {
 }
 
 
+TOOLS = [{
+  "type": "function",
+  "function": {
+    "name": "edit_solution",
+    "description": "Change the code inside the # EVOLVE-BLOCK region, then call evaluate_solution to score it.",
+    "parameters": {"type": "object",
+      "properties": {"code": {"type": "string",
+        "description": "SEARCH/REPLACE diff block(s), or the full replacement body for the EVOLVE-BLOCK region."}},
+      "required": ["code"]}}},
+ {"type": "function",
+  "function": {
+    "name": "evaluate_solution",
+    "description": "Score the current program against the task evaluator. Consumes one unit of the evaluation budget.",
+    "parameters": {"type": "object", "properties": {}, "required": []}}}]
+
+
 def collect(task):
     """chronological (score, program) for this task, from our own rollouts only."""
     rows = []
@@ -75,18 +91,26 @@ def main():
             # leave-one-out baseline over this task's own rollouts
             loo = (total - s) / (n - 1) if n > 1 else s
             adv = s - loo
+            # Qwen3.5 inline tool-call form -- the loss-mask generator only
+            # finds trainable assistant tokens in this shape, and it is also what
+            # the executor actually emits (edit_solution with the new block).
+            call = ("<tool_call>\n<function=edit_solution>\n<parameter=code>\n"
+                    f"{prog}\n</parameter>\n</function>\n</tool_call>")
             rec = {
                 "messages": [
                     {"role": "system", "content": system},
                     {"role": "user", "content":
                         f"Task: {TASK_BLURB.get(task, task)}\n\n"
-                        "Write the best program you can for the EVOLVE-BLOCK. "
-                        "Return the complete block."},
-                    {"role": "assistant", "content": prog},
+                        "Improve the EVOLVE-BLOCK. Call edit_solution with the "
+                        "new block, then evaluate_solution."},
+                    {"role": "assistant", "content": call},
+                    {"role": "tool", "content":
+                        f"Edit applied. evaluate_solution -> combined_score {s:.6f}."},
                 ],
-                "tools": [],
+                "tools": TOOLS,
                 "metadata": {"advantage": adv, "reward": s, "task_id": task,
-                             "round": rnd, "valid": True, "arm": "ttt_executor"},
+                             "round": rnd, "valid": True, "arm": "ttt_executor",
+                             "tools": TOOLS},
             }
             fh.write(json.dumps(rec) + "\n")
             written += 1

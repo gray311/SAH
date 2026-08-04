@@ -37,7 +37,7 @@ SERIES = {
    ([0.380932, 1.5031, 0.9472, 2.635983, 0.576400, 557168, 525286896,
      0.1270, 24.70, 0.7341, 4761.90],
     dict(color="#c0392b", ls="--", lw=2.0, zorder=7)),
- "HarnessRL (weight)":
+ "HarnessRL (ours)":
    ([0.380919, 1.5098, 0.9339, 2.502000, 0.573283, 559534, 713552303,
      0.1272, 26.26, 0.7415, 4255.32],
     dict(color="#084594", ls="-",  lw=2.6, zorder=9, fill=True)),
@@ -56,7 +56,7 @@ N = len(TASKS)
 ang = np.linspace(0, 2 * np.pi, N, endpoint=False)
 ang_c = np.concatenate([ang, ang[:1]])
 
-fig, ax = plt.subplots(figsize=(9.2, 6.6), subplot_kw=dict(polar=True))
+fig, ax = plt.subplots(figsize=(7.4, 7.4), subplot_kw=dict(polar=True))
 ax.set_theta_offset(np.pi / 2); ax.set_theta_direction(-1)
 ax.set_ylim(0, 1.06)
 ax.set_yticks([0.35, 0.5675, 0.785, 1.0]); ax.set_yticklabels([])
@@ -73,10 +73,10 @@ for (name, (v, st)), row in zip(SERIES.items(), norm):
     if st.get("fill"):
         ax.fill(ang_c, r, color=st["color"], alpha=0.12, zorder=st["zorder"]-1)
 
-fig.legend(*ax.get_legend_handles_labels(), loc="center left",
-           bbox_to_anchor=(0.015, 0.5), fontsize=10, frameon=False,
-           handlelength=2.2)
-fig.subplots_adjust(left=0.36, right=0.94, top=0.92, bottom=0.08)
+fig.legend(*ax.get_legend_handles_labels(), loc="lower center",
+           bbox_to_anchor=(0.5, 0.005), fontsize=9.8, frameon=False,
+           handlelength=2.2, ncols=3, columnspacing=1.4)
+fig.subplots_adjust(left=0.07, right=0.93, top=0.93, bottom=0.14)
 for out in ("papers/figures/radar_method_ablation.pdf",
             "papers/figures/radar_method_ablation.png"):
     fig.savefig(out, dpi=200)

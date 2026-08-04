@@ -57,26 +57,20 @@ earlier rounds.  The learning problem is
 \big[\, s(\tau, H_z) \,\big],
 \label{eq:objective}
 \end{equation}
-optimized with group-relative RL over $K$ proposer episodes per task per round.
-What separates this formulation from per-task scaffold
-search~\citep{adas,gepa,aflow,dgm} is the trained object: the \emph{proposer}
-itself, so design knowledge amortizes across tasks and rounds instead of being
-re-derived per task.  Like ADAS and the Darwin G\"odel Machine, and unlike
-prompt- or graph-level search~\citep{gepa,aflow}, our search space carries
-executable code, so the reachable harness family is not enumerable in advance.
-Two more separate it from executor RL~\citep{grpo,agenticrl}: no gradient
-touches $M_0$, and the reward is an \emph{outer} quantity---the best score of an
+optimized with group-relative RL over $K$ proposer episodes per task per
+round.  Unlike per-task scaffold search~\citep{adas,gepa,aflow,dgm}, the
+trained object is the \emph{proposer} itself, and the search space carries
+executable code, so the reachable harness family is not enumerable in
+advance; unlike executor RL~\citep{grpo,agenticrl}, no gradient touches
+$M_0$ and the reward is an \emph{outer} quantity---the best score of an
 entire inner trajectory, not a per-token signal.
 
 \emph{The core difficulty is credit assignment through two nested loops: a
 scalar summarizing an entire frozen-executor rollout must teach the proposer
 which of its design decisions---a prompt clause, a control parameter, a
 generated tool---mattered, under evaluator noise and a rollout budget too small
-to average it away.}  The rest of this section follows one round through the
-system (Algorithm~\ref{alg:outer}): a typed spec space that makes decisions
-legible (\S\ref{sec:method-genome}), a review chain that keeps generated code
-from corrupting the measurement (\S\ref{sec:method-safety}), and a group
-objective shaped for best-of-$K$ discovery (\S\ref{sec:method-rl}).
+to average it away.}  The rest of this section follows one round through
+Algorithm~\ref{alg:outer}.
 
 \subsection{The harness genome}
 \label{sec:method-genome}
@@ -91,16 +85,12 @@ restarts, output truncation).  \emph{Generative} fields extend the machinery
 itself: up to three \texttt{new\_tools}---each a name, description, JSON
 input schema, and Python implementation---plus up to two new skills, up to two
 \texttt{new\_middlewares} (a hook and a Python implementation each), and the
-removal of designated optional tools.  Unlike tool-\emph{use}
-pipelines~\citep{toolformer,toolllm} and library-induction methods that
-abstract tools from solution traces~\citep{latm,creator,craft,trove,
-voyager}, tools here are authored by the \emph{proposer} policy as part of a
-harness, before the executor ever runs, and become first-class members of
-the compiled agent.  A deterministic materializer turns a validated spec
-into a complete package---prompt, skill files, tool schemas,
-\texttt{custom\_tools/*.py} bound to a runtime dispatcher---so identical
-specs yield byte-identical agents (modulo provenance metadata) and a spec hash de-duplicates candidates
-within a group.
+removal of designated optional tools.  Unlike tool-use pipelines and library-induction
+methods~\citep{toolformer,toolllm,latm,creator,craft,trove}, tools here are
+authored by the \emph{proposer} policy before the executor ever runs.  A
+deterministic materializer compiles a validated spec into a complete agent
+package, so identical specs yield identical agents and a spec hash
+de-duplicates candidates within a group.
 
 \paragraph{An experience-conditioned proposer.}
 The proposer is itself a small agent: $\pi_\phi$ (frozen base plus LoRA)
@@ -111,12 +101,12 @@ incumbent spec and score, and an \emph{experience digest}: for every
 candidate of the previous visit, its score, evaluator calls, stop reason,
 changed fields, validation errors, and per-tool review outcomes, plus an
 optional curated analyst note about the scoring rule
-(\S\ref{sec:method-search}).  The $K$ episodes for a task share $c_\tau$ and
-differ only in sampling seed, forming a single group for the group-relative update.  Feeding outcomes back
-as language---rather than only as scalars---echoes reflective
-optimization~\citep{reflexion,gepa,trace}; the difference is that here the
-reflection loop trains a persistent policy, so design knowledge accumulates
-in weights rather than in a per-task search state.
+(\S\ref{sec:method-search}).  The $K$ episodes for a task share $c_\tau$ and differ only in
+sampling seed, forming one group for the group-relative update.  Feeding
+outcomes back as language echoes reflective
+optimization~\citep{reflexion,gepa,trace}; here the reflection loop trains
+a persistent policy, so design knowledge accumulates in weights rather than
+in a per-task search state.
 
 \subsection{Leakage-controlled tool generation}
 \label{sec:method-safety}
@@ -131,11 +121,9 @@ claim that the frozen executor did the discovering.  \method{} closes both
 channels by construction, in four layers.
 \textbf{(1) Capability surface:} a generated tool implements a single
 \texttt{run(ctx, args)} entry point and touches the world only through
-\texttt{ctx}---staged edits, cheap subsampled probes, budgeted evaluation,
-task-input samples, scratch space.  The evaluator's implementation, the ground
-truth, and the network are unreachable through this surface, and the static gates
-below enforce the same boundary independently (the full capability surface is
-listed in Appendix~\ref{app:sdk}).
+\texttt{ctx}; the evaluator's implementation, the ground truth, and the
+network are unreachable through this surface
+(Appendix~\ref{app:sdk}).
 \textbf{(2) Static gates:} a fail-closed AST pass enforces an import
 whitelist, forbids \texttt{os}/\texttt{subprocess}/\texttt{open}/%
 \texttt{exec}/dunder access, and requires the exact entry signature;
@@ -213,15 +201,11 @@ bandit-based configuration search, and empirically our primary engine of new
 program-family discovery.  \textbf{Telemetry and analyst notes:} the
 experience digest upgrades the proposer from blind mutation to debugging.
 Automated analyst briefs pass the same fail-closed leak guard as the repair
-chain (claim-neutralizing and marker-dropping text transforms); a
-\emph{curated} note may additionally expose structural facts about the
-scoring rule, but it is a human channel the guard does not cover---a
-protocol we audit rather than a mechanism we enforce.  The one violation we
-found is disclosed and its result excluded (\S\ref{sec:exp-results},
-Obs.~1).  Freezing the executor makes this ecosystem
-analyzable: since $M_0$ never changes, every improvement decomposes into
-what the proposer learned (\S\ref{sec:exp-results}, Obs.~2) and what the
-search found (Obs.~3).
+chain; a \emph{curated} note is a human channel the guard does not
+cover---a protocol we audit, not a mechanism we enforce---and the one
+violation we found is disclosed and its result excluded
+(\S\ref{sec:exp-results}).  Since $M_0$ never changes, every improvement decomposes into what the
+proposer learned and what the search found (\S\ref{sec:exp-results}).
 
 \begin{algorithm}[t]
 \caption{One outer round of \method{}}

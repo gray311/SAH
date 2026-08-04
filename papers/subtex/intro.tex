@@ -38,97 +38,64 @@ from execution and routed through an explicit, inspectable artifact.}
 \end{figure*}
 
 Both routes stop short of a reusable \emph{proposer}, in complementary ways.
-Weight updates commonly use large executor-rollout batches---hundreds per step
-in reported test-time-RL configurations~\citep{tttdiscover,
-thetaevolve}---and add optimizer compute beyond sampling; their benefit is
-\emph{not directly traceable}: an improvement
-registers only as a diffuse change in the weights, never as a nameable tool,
-skill, verification step, or search parameter, and it is simply unavailable when
-the executor is frozen by policy, safety review, or an API boundary.  Harness
-editing keeps its \emph{proposer} fixed: the same prompt-optimizer,
-textual-gradient, or agent-design procedure~\citep{ape,opro,promptbreeder,
-evoprompt,mipro,metaprompting,dspy,textgrad,trace,gepa,adas,aflow,agentsquare,
-agentsymbolic} re-derives design knowledge from scratch on every run, and as
-archives and contexts grow, history selection---what to keep, what to compress,
-how to trade exploitation against diversity---becomes a second hard problem
-solved anew each time, with nothing amortized into the proposer itself.  History
-suggests a resolution: hand-designed pipelines gave way to searched ones, and
-searched ones to \emph{learned} components~\citep{learn2learn,hypernetworks,
-adas}.
+Weight updates train on hundreds of rollouts per
+step~\citep{tttdiscover,thetaevolve}, register their gains only as diffuse
+weight changes---never as a nameable tool, skill, or procedure---and are
+unavailable when the executor is frozen by policy, safety review, or an API
+boundary.  Harness editing keeps its \emph{proposer} fixed: the same
+prompt-optimizer, textual-gradient, or agent-design
+procedure~\citep{ape,opro,promptbreeder,evoprompt,mipro,metaprompting,dspy,
+textgrad,trace,gepa,adas,aflow,agentsquare,agentsymbolic} re-derives design
+knowledge from scratch on every run, with nothing amortized into the
+proposer itself.  History suggests the resolution: hand-designed pipelines
+gave way to searched ones, and searched ones to \emph{learned}
+components~\citep{learn2learn,hypernetworks,adas}.
 
-We propose to learn the proposer itself (Figure~\ref{fig:taxonomy}c).  \method{}
-keeps the executor $M_0$
-\textbf{permanently frozen} and trains a harness \emph{proposer}
-$\pi_\phi$---the same base model with a LoRA adapter~\citep{lora}---by
-group-relative RL with a leave-one-out (RLOO) baseline~\citep{rloo}, adapted
-for discovery with a gap-normalized reward and best-of-$K$ sharpening
-to emit, per task, a complete harness specification: system prompt, skill
-playbook, tool descriptions, sampling and control parameters, and, through a
-generative channel, \emph{new executable tools} as Python
+We propose to learn the proposer itself (Figure~\ref{fig:taxonomy}c).
+\method{} keeps the executor $M_0$ \textbf{permanently frozen} and trains a
+harness \emph{proposer} $\pi_\phi$ by group-relative RL adapted for
+discovery (\S\ref{sec:method}) to emit, per task, a complete harness:
+system prompt, skill playbook, tool descriptions, control parameters, and,
+through a generative channel, \emph{new executable tools} as Python
 source~\citep{latm,creator,craft,voyager,trove}.  Each spec compiles
-deterministically into a runnable agent package; the frozen executor rolls it
-out under a hard evaluator budget; and a group's relative outcomes are the
-proposer's only task-level signal (Figure~\ref{fig:overview}).  Conditioned on the
-incumbent best program and a digest of what every prior candidate did, scored,
-and died of, the proposer internalizes a task's reward history into its
-weights, so the digest it must read each round stays bounded instead of growing
-without limit.  Because single-solution rollouts make harness quality a high-variance
-target, we re-evaluate top harnesses with multiple executor samples, so that
-reported gains reflect the harness rather than a lucky draw
-(\S\ref{sec:method}).
+deterministically into a runnable agent; the frozen executor rolls it out
+under a hard evaluator budget; and a group's relative outcomes are the
+proposer's only task-level signal (Figure~\ref{fig:overview}).  Round over
+round, the proposer internalizes the task's reward history into its weights
+rather than into an ever-growing context.
 
-Three properties motivate this design.  \emph{Amortization}: search cost is paid
-at training time, so producing a harness for a new round costs a handful of
-proposer episodes rather than a fresh scaffold search---the argument behind
-learned optimizers and
-hypernetworks~\citep{learn2learn,hypernetworks}.  \emph{Expressiveness}: because
-the generative channel carries executable code, the reachable harness space
-exceeds prompt variation~\citep{adas,latm,voyager}---a proposed agent can differ
-from its siblings in what machinery exists, not only in how it is described.
-\emph{Attribution and safety}: freezing $M_0$ makes each improvement
-attributable to an inspectable harness, but letting an optimizer write code that
-runs inside an evaluation loop invites reward hacking and specification
-gaming~\citep{skalse2022,specgaming,denison2024,baker2025,metr2025,
-impossiblebench}.  We therefore make evaluation integrity a design invariant:
-generated tools act only through a capability-bounded SDK that can request a
-budgeted evaluation but cannot read the evaluator's implementation or ground
-truth, pass fail-closed static gates and sandboxed self-tests, and are
-repaired---when broken---by \emph{the same frozen model} under a localization
-guard, so the repair channel can fix bugs but cannot inject knowledge
+Three properties motivate this design.  \emph{Amortization}: search cost
+is paid at training time, so a new round costs a handful of proposer
+episodes rather than a fresh scaffold search---the argument behind learned
+optimizers and hypernetworks~\citep{learn2learn,hypernetworks}.
+\emph{Expressiveness}: the generative channel carries executable code, so a
+proposed agent can differ from its siblings in what machinery exists, not
+only in how it is described~\citep{adas,latm,voyager}.  \emph{Attribution
+and safety}: freezing $M_0$ makes each improvement attributable to an
+inspectable harness---but machine-written code inside an evaluation loop
+invites reward hacking~\citep{skalse2022,specgaming,denison2024,baker2025,
+metr2025,impossiblebench}, so generated tools cannot read the evaluator or
+ground truth, pass fail-closed gates and sandboxed self-tests, and are
+repaired only by \emph{the same frozen model} under a localization guard
 (\S\ref{sec:method-safety}).
 
-We evaluate on eleven hard problems spanning AlphaEvolve-style mathematical
-construction~\citep{alphaevolve,alphaevolvemath}---the Erd\H{o}s minimum-overlap
-problem, two autocorrelation inequalities, circle packing, and maximal Hadamard
-determinants---four systems-algorithm benchmarks from the ADRS
-suite~\citep{barbarians}, and two AtCoder Heuristic Contest
-problems~\citep{ahc,alebench}, all drawn from the evaluation suite whose
-discovery-finetuned Finch models we take as the matched-scale
-baseline~\citep{finch}.  Under a budget of at most 30 RL steps fixed in
-advance, the learned proposer's harnesses carry a frozen 9B
-executor~\citep{qwen3} past Finch-9B on \textbf{all eleven} tasks and set the
-published $\le$10B state of the art on \textbf{five}: the Erd\H{o}s
-minimum-overlap problem, ahc039, ahc058, EPLB, and PRISM.  (A sixth entry,
-LLM-SQL, exceeds the prior best but traces to a curated note rather than to
-executor discovery; we disclose it and exclude it from every claim,
-\S\ref{sec:exp-results}.)  The Erd\H{o}s record was previously held by
-test-time-RL methods that adapt the executor
-directly~\citep{tttdiscover,thetaevolve}; a frozen executor under a learned
-harness now passes it and reaches $95\%$ of their circle-packing record,
-whereas the same executor under the fixed initial harness beats Finch-9B on
-only two (Table~\ref{tab:conditions}).  On Erd\H{o}s the frozen executor also surpasses
-the best known human construction ($0.380919$ vs.\ $0.380927$): it wrote its own
-step-function optimizer under a harness that named no such method.  A
-breakthrough ledger (Table~\ref{tab:ledger}) attributes every logged jump to one
-of four mechanisms---sampling breadth striking a new program family, the
-inheritance ratchet compounding it, new information entering the system, or a
-long trajectory in which the executor writes its own optimizer.  Two of the
-hardest cases yielded not to more iteration but to \emph{diagnosis}, and we are
-explicit about who did the diagnosing: campaign telemetry revealed an evaluation
-timeout that structurally favored no-op programs, which \emph{we} then raised; and on one
-task a curated note went beyond structure and carried a known program---a
-protocol violation we disclose, and whose result we exclude
-(\S\ref{sec:exp-results}).  This sharpens the picture behind our main result: much of what
-reads as a small model's capability ceiling is a harness that has not told the
-executor what game it is playing, and the remedy is a change of harness rather
-than a larger model.
+We evaluate on eleven hard problems---AlphaEvolve-style mathematical
+constructions~\citep{alphaevolve,alphaevolvemath}, four systems benchmarks
+from the ADRS suite~\citep{barbarians}, and two AtCoder Heuristic Contest
+problems~\citep{ahc,alebench}---the suite whose discovery-finetuned Finch
+models we take as the matched-scale baseline~\citep{finch}.  Under a budget
+of at most 30 RL steps fixed in advance, the learned proposer's harnesses
+carry a frozen 9B executor~\citep{qwen3} past Finch-9B on \textbf{all
+eleven} tasks and set the published $\le$10B state of the art on
+\textbf{five}: Erd\H{o}s minimum overlap, ahc039, ahc058, EPLB, and PRISM
+(a sixth, LLM-SQL, exceeds the prior best but traces to a curated note and
+is excluded from every claim, \S\ref{sec:exp-results}); the same executor
+under the fixed initial harness beats Finch-9B on only two
+(Table~\ref{tab:conditions}).  The Erd\H{o}s record---previously held by
+test-time RL that adapts the executor
+directly~\citep{tttdiscover,thetaevolve}---now falls to a frozen executor,
+which also surpasses the best known human construction ($0.380919$ vs.\
+$0.380927$) with a step-function optimizer it wrote itself, under a harness
+that named no such method.  Much of what reads as a small model's
+capability ceiling is a harness that has not told the executor what game it
+is playing; the remedy is a change of harness, not a larger model.

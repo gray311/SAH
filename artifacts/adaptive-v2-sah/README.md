@@ -1,33 +1,26 @@
-# Adaptive V2 / NexAU artifact bundle
+# Adaptive V2 task bundles
 
-This directory is prepared for the `adaptive-v2-artifacts-20260804` branch of
-`https://github.com/gray311/SAH`.
+This directory contains exactly one archive per Adaptive V2 task. Each archive
+contains the task's campaign rounds, generated NexAU agent harnesses, prompts,
+tools, skills, middleware, candidate programs, trajectories, population
+records, rollout logs, and task-local traces. Evaluation result directories are
+removed.
 
-The bundle contains the two Adaptive V2 campaigns, generated NexAU agent
-harnesses, round-by-round proposals and decisions, agent/tool trajectories,
-candidate/evaluation outputs, lifecycle and health records, vLLM/worker logs,
-GPU monitoring snapshots, and the reporting figures.
+Tasks:
 
-## Archives
+- `adaptive-v2-task-cp26.tar.gz` — `eft__math__circle_packing`
+- `adaptive-v2-task-prism.tar.gz` — `adrs__prism`
+- `adaptive-v2-task-adrs-eplb.tar.gz` — `adrs__eplb`
+- `adaptive-v2-task-adrs-llm-sql.tar.gz` — `adrs__llm_sql`
+- `adaptive-v2-task-adrs-txn-scheduling.tar.gz` — `adrs__txn_scheduling`
+- `adaptive-v2-task-ahc039.tar.gz` — `eft__ahc_simpletes__ahc039`
+- `adaptive-v2-task-ahc058.tar.gz` — `eft__ahc_simpletes__ahc058`
+- `adaptive-v2-task-erdos-min-overlap.tar.gz` — `eft__math__erdos_min_overlap`
+- `adaptive-v2-task-first-autocorr-ineq.tar.gz` — `eft__math__first_autocorr_ineq`
+- `adaptive-v2-task-hadamard-maximal-det.tar.gz` — `eft__math__hadamard_maximal_det`
+- `adaptive-v2-task-second-autocorr-ineq.tar.gz` — `eft__math__second_autocorr_ineq`
 
-- `adaptive-v2-cp26-prism-20260731T123059.tar.gz`: CP26 and Prism campaign,
-  including round artifacts, harnesses, trajectories, and logs.
-- `adaptive-v2-remaining9-run-root.tar.gz`: remaining-9 campaign root-level
-  scripts, lifecycle, monitoring, recovery, and model-service logs.
-- `adaptive-v2-remaining9-<task>.tar.gz`: one archive per remaining task,
-  containing all task rounds, generated harnesses, trajectories, rollout logs,
-  population dossiers, evaluations, and task-local traces.
-- `adaptive-v2-eval-temp-20260804.tar.gz`: temporary candidate/request/result
-  evaluation artifacts from `.tmp_adaptive_v2`.
-- `adaptive-v2-reporting-20260804.tar.gz`: reports, figures, deliverables, and
-  Adaptive V2 research notes.
-- `adaptive-v2-source-nexau-20260804.tar.gz`: the relevant Adaptive V2,
-  NexAU, EvoGate, and packaging source/configuration snapshot from the working
-  tree.
-
-The archives intentionally omit Python bytecode and tool caches. Unix sockets
-in `.tmp_adaptive_v2` are runtime IPC objects and cannot be meaningfully
-archived; all regular files in that directory are included. No model weights,
-API keys, or private credentials are included.
-
-`SHA256SUMS` records the checksum of every archive in this directory.
+The CP26 campaign preserves its failed round-002 analysis snapshot because it
+is part of the execution history. Python bytecode and tool caches are omitted.
+Evaluation temporary workspaces, reports, figures, and source-code bundles are
+intentionally not included.

@@ -4,79 +4,53 @@
 \subsection{Experimental Setup}
 \label{sec:exp-setup}
 
-\paragraph{Tasks.}  We evaluate on eleven discovery problems in three
-families, drawn from the evaluation suite of the discovery-finetuned Finch
+\paragraph{Evaluation Tasks.}  Eleven discovery problems in three families,
+drawn from the evaluation suite of the discovery-finetuned Finch
 models~\citep{finch} so that a matched-scale finetuned baseline exists for
-every column.  (i)~\emph{Mathematical construction} (five tasks),
-popularized by AlphaEvolve and its
-replications~\citep{alphaevolve,alphaevolvemath,openevolve}:
-\textbf{Erd\H{o}s} minimizes the Erd\H{o}s minimum-overlap constant;
-\textbf{AC1} and \textbf{AC2} sharpen the first and second autocorrelation
-inequalities; \textbf{CP} packs 26 circles into a unit square, maximizing
-the radius sum; \textbf{Hadamard} searches for maximal-determinant
-Hadamard-type matrices.  (ii)~\emph{Heuristic-contest programming} (two
-tasks; \emph{Algorithm Engineering} in Table~\ref{tab:main_results}):
-AtCoder Heuristic Contest problems \textbf{ahc039} and
-\textbf{ahc058}~\citep{ahc,alebench}, scored under the official 150-case
-protocol on tester binaries we rebuilt natively for aarch64
-(Appendix~\ref{app:infra}).  (iii)~\emph{Systems algorithm design} (four
-tasks; \emph{System Performance} in Table~\ref{tab:main_results}), from the
-ADRS suite~\citep{barbarians}: \textbf{EPLB} balances expert-parallel load
-across GPUs, \textbf{PRISM} schedules model placements, \textbf{LLM-SQL}
-reorders table columns for prefix caching, and \textbf{Txn} schedules
-transactions.  Every task ships a natural-language description, a seed
-program with an editable region, a black-box evaluator returning a scalar
-score, and a hard per-rollout budget of evaluator calls; the executor never
-sees the evaluator's implementation or ground truth
-(\S\ref{sec:method-safety}).
+every task: \emph{mathematical construction} (\textbf{Erd\H{o}s},
+\textbf{AC1}, \textbf{AC2}, \textbf{CP}, \textbf{Hadamard}), popularized by
+AlphaEvolve and its
+replications~\citep{alphaevolve,alphaevolvemath,openevolve};
+\emph{heuristic-contest programming} (\textbf{ahc039}, \textbf{ahc058};
+\emph{Algorithm Engineering} in Table~\ref{tab:main_results}), scored under
+the official AtCoder 150-case protocol~\citep{ahc,alebench}; and
+\emph{systems algorithm design} (\textbf{EPLB}, \textbf{PRISM},
+\textbf{LLM-SQL}, \textbf{Txn}; \emph{System Performance}) from the ADRS
+suite~\citep{barbarians}.  Every task ships a task description, a seed
+program with an editable region, a black-box evaluator, and a hard
+per-rollout budget of evaluator calls; scores are reported in each task's
+native units, and the executor never sees the evaluator's implementation or
+ground truth (\S\ref{sec:method-safety}).
 
-\paragraph{System.}  The executor is Qwen3.5-9B~\citep{qwen3}, served frozen
-with vLLM~\citep{vllm} for the entire campaign; no gradient, adapter, or
-test-time update ever touches it.  The proposer is the same base model with a
-LoRA adapter~\citep{lora}, trained by offline-replay group-relative RL with
-the RLOO objective of Eq.~\eqref{eq:advantage}.  Unless noted, a round
-samples $K{=}8$ harness specs per task and each rollout spends 20--25
-evaluator calls; wide (cascade) rounds screen $K{=}16$ candidates at 5 calls
-each and promote the top four to full budget (\S\ref{sec:method-search}).
+\paragraph{Baselines.}  \emph{Finch-9B}~\citep{finch}, a 9B model
+discovery-finetuned on evolution-trajectory corpora, is the matched-scale
+external bar: beating it is the evidence that a learned harness substitutes
+for discovery finetuning.  \emph{Published $\le$10B SOTA} aggregates the
+best previously reported score per task across systems at or below 10B
+parameters (sources in the notes of Table~\ref{tab:main_results}); because
+it pools many specialized systems against one frozen executor, we read it as
+calibration.  Our own system appears under three conditions that share the
+executor, evaluator, seed program, initial harness, and per-rollout budget,
+and differ only in what the reward updates: \emph{\method~(initial)}, a
+fixed hand-written harness---no adaptation; \emph{\method~(context)},
+proposer weights frozen, adaptation only through what the proposer
+reads---the incumbent, the experience digest, and a leak-guarded analyst
+brief distilled by the same frozen executor; and \emph{\method~(weight)},
+the trained proposer---our full method.
 
-\paragraph{Budgets.}  The main campaign comprises $235$ completed outer
-rounds.  The surviving proposer lineage holds \textbf{27 RL steps} under a
-cap of 30 retained steps fixed in advance: training is plateau-gated, so most
-rounds contribute search rather than a gradient step, and two validity
-collapses were rolled back, discarding 6 further steps.  Round identifiers
-are global counters shared by every run on the cluster, so they are sparse
-and exceed the round count: the main campaign occupies ids up to $969$, and
-later single-task pushes carry four-digit ids.  Full hyperparameters and
-per-round costs are listed in Appendix~\ref{app:infra}.
-
-\paragraph{Conditions.}  The same frozen executor appears under three
-harness conditions that isolate \emph{where} adaptation happens.
-\emph{\method~(initial)}: a single fixed, hand-written harness reused across
-the suite---scaffolding with no adaptation.
-\emph{\method~(context)}: proposer weights stay frozen; adaptation flows
-only through what the proposer \emph{reads}---the incumbent, the experience
-digest, and an analyst brief that a second pass over the same frozen
-executor distills from the previous round's rollouts, filtered by the leak
-guard of \S\ref{sec:method-safety}.
-\emph{\method~(weight)}: the trained proposer---our full method.  All
-three conditions share the same frozen executor, evaluator, seed program,
-initial harness, and per-rollout evaluator budget; they differ only in what
-the reward is allowed to update.  The context/weight pair thus isolates
-where experience is stored: re-read from context every round, or
-internalized into the policy.
-
-\paragraph{Baselines and protocol.}  \emph{Finch-9B}~\citep{finch}, a 9B
-model discovery-finetuned on evolution-trajectory corpora, is the
-matched-scale external bar: beating it on a column is the evidence that a
-learned harness substitutes for discovery finetuning there.
-\emph{Published $\le$10B SOTA} aggregates the best previously reported score
-per task across systems at or below 10B parameters (per-task sources in the
-notes of Table~\ref{tab:main_results}); because it pools many specialized
-systems against one frozen executor, we read it as calibration rather than
-as a head-to-head baseline.  Scores are reported in each task's native
-units.  Winning programs were re-evaluated five times for stability, and
-validity guards are applied uniformly to our own results: schedule legality
-for transaction scheduling, official-tester parity for the AHC tasks, and
-the corrected $420$\,s evaluation timeout for LLM-SQL.
+\paragraph{Implementation Details.}  The executor is
+Qwen3.5-9B~\citep{qwen3}, served frozen with vLLM~\citep{vllm}; no gradient
+or test-time update ever touches it.  The proposer is the same base model
+with a LoRA adapter~\citep{lora}, trained by offline-replay RLOO
+(Eq.~\eqref{eq:advantage}).  A round samples $K{=}8$ harness specs per task
+at 20--25 evaluator calls per rollout; cascade rounds screen $K{=}16$
+candidates at 5 calls and promote the top four.  The main campaign spans
+$235$ completed rounds and \textbf{27 RL steps} under a cap of 30 fixed in
+advance (two validity collapses were rolled back).  Winning programs were
+re-evaluated five times for stability, and validity guards apply uniformly
+to our results: schedule legality for Txn, official-tester parity for the
+AHC tasks, and a corrected $420$\,s evaluation timeout for LLM-SQL.  Full
+hyperparameters, per-round costs, and the aarch64 evaluation protocol are
+in Appendix~\ref{app:infra}.
 
 \input{tables/proposer_update}

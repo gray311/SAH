@@ -30,7 +30,7 @@ parameters (per-task sources in Appendix~\ref{app:full-results}); because
 it pools many specialized systems against one frozen executor, we read it as
 calibration.  Our own system appears under three conditions that share the
 executor, evaluator, seed program, initial harness, and per-rollout budget,
-and differ only in what the reward updates: \emph{\method~(initial)}, a
+and operationalize the destination of adaptation as: \emph{\method~(initial)}, a
 fixed hand-written harness---no adaptation; \emph{\method~(context)},
 proposer weights frozen, adaptation only through what the proposer
 reads---the incumbent, the experience digest, and a leak-guarded analyst
@@ -39,7 +39,9 @@ the trained proposer---our full method.
 
 \paragraph{Implementation Details.}  The executor is
 Qwen3.5-9B~\citep{qwen3}, served frozen with vLLM~\citep{vllm}; no gradient
-or test-time update ever touches it.  For the outer search, we sample
+or test-time update touches it in our method or the context ablation (the
+isolated executor-update reference in \S\ref{sec:exp-routing} is the only
+exception).  For the outer search, we sample
 $K{=}8$ harness specs per task per round at 20--25 evaluator calls per
 rollout; cascade rounds screen $K{=}16$ candidates at 5 calls each and
 promote the top four to full budget.  For proposer training, we attach a
@@ -147,10 +149,16 @@ discovery~\citep{tttdiscover,thetaevolve}; the \emph{proposer's context},
 by distilling past rollouts into an analyst brief the proposer re-reads
 each round; or the \emph{proposer's weights}---our choice.  The routes are
 not equally available: executor updates are closed whenever the model is
-frozen by policy or served behind an API, and they are not attributable to
-any nameable mechanism after the fact.  We compare the three under a shared
-protocol---same frozen executor, same evaluator, same initial harness and
-seed program---so that the routes differ only in what the reward updates.
+frozen by policy or served behind an API, and their learned changes are less
+directly inspectable than an explicit harness.  All routes start from the
+same base checkpoint, evaluator, initial harness, seed program, and limit of
+20 evaluator calls per executor trajectory.  This is nevertheless a
+comparison of complete reward-routing systems, not a single-variable gradient
+ablation: the two H1 routes synthesize and ratchet harnesses, the executor
+reference keeps the initial harness fixed and has no H1, and their LoRA
+objectives and training cadence differ.  We therefore compare
+executor-trajectory sample efficiency at matched launched-trajectory budgets
+and report model calls and allocated GPU-hours separately.
 
 %% [FIGURE PENDING] score-vs-compute curves for the three routes.
 \begin{figure}[t]
@@ -158,30 +166,38 @@ seed program---so that the routes differ only in what the reward updates.
 \fbox{\parbox[c][5.2cm][c]{0.94\linewidth}{\centering\emph{[Reward-routing
 score--compute figure: best validated score vs.\ executor trajectories for
 the proposer-weight, context, and executor-weight arms.]}}}
-\caption{\textbf{Where should the reward go?} \emph{(figure pending)}}
+\caption{\textbf{Where should the reward go?} \emph{(figure pending).}
+Best validated score is divided by the task's frozen human-best reference;
+the dashed line is the largest complete-batch executor-trajectory budget
+shared by all three routes.  The compact task-level view is illustrative and
+was selected after interim inspection; aggregate statements use the full
+seven-task audit.}
 \label{fig:reward_route}
 \marginpar{\footnotesize\textbf{TODO}}
 \end{figure}
 
-Two facts anchor the comparison before any curve is drawn.  First, the
-routes differ sharply in trajectory budget: published test-time RL for
-discovery trains on $512$ rollouts per step for $50$ steps---$25{,}600$
-executor trajectories per problem~\citep{tttdiscover}---whereas the entire
-\method{} campaign spends fewer than two thousand executor trajectories per
-task and only 27 proposer updates, since every trajectory doubles as a
-group-relative training signal.  Second, the routes differ in what remains
-afterwards: an executor update leaves new weights; a context update leaves
-a brief the proposer must keep re-reading; a proposer update leaves a
-policy that writes better harnesses---and the harness itself stays an
-inspectable artifact either way.  Figure~\ref{fig:reward_route} plots the
-three routes on a common trajectory axis.
+Our local executor reference is a budget-scaled TTT-Discover-style setting,
+not an official reproduction: it retains PUCT state reuse, adaptive-$\beta$
+entropic leave-one-out credit, and executor self-training, but uses $K{=}8$
+final-edit trajectories per batch and a one-epoch rank-32 LoRA update.  The
+proposer arm also targets $K{=}8$ proposals per batch and trains a persistent
+rank-64 LoRA for three epochs; the context arm performs no gradient update and
+adds two frozen-model analyst calls after the cold round.  Every fresh arm
+starts from the task's initial program; the common fixed-H2 point at $x{=}1$
+is displayed once but its discovered program is not inherited.  Figure~
+\ref{fig:reward_route} reads the curves at each task's largest shared complete
+batch budget for efficiency, while differently budgeted finite endpoints are
+reported only as observed plateau/cap outcomes.  Published TTT-Discover uses
+$50\times512{=}25{,}600$ trajectories per problem~\citep{tttdiscover}; that
+point provides scale context, not a compute-matched local result.
 
 \vspace{2mm}
-\begin{takeawaybox}{Proposer Updates Buy the Most per Trajectory}
-Routing reward into the proposer is the only option that is always
-available (the executor may be frozen or behind an API), keeps every
-improvement attributable to an inspectable harness, and reaches its
-records on orders of magnitude fewer executor trajectories than published
-test-time RL for discovery.
+\begin{takeawaybox}{Reward Routing Determines What Test-Time Learning Leaves Behind}
+Updating the proposer remains available when the executor is frozen or behind
+an API and leaves an inspectable harness policy; updating context leaves a
+brief that must be re-read, while updating the executor leaves adapted model
+weights.  Efficiency claims are made only at the shared trajectory cutoffs in
+Figure~\ref{fig:reward_route}, with heterogeneous inference, training, and
+failed work retained in separate cost ledgers.
 \end{takeawaybox}
 \vspace{2mm}

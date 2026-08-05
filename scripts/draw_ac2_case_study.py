@@ -51,9 +51,9 @@ NODES = [
      "widening the search space",
      (2.0, 1.05)),
     (8, "context", "2",
-     "Context carries information, not behavior:\nboth arms see the same incumbent, but a\n"
-     "brief cannot reshape what the frozen\nproposer tends to propose -- its H2 stays\n"
-     "near the base prior, rebuilding the weak\n0.955 seed (20/20 evals, below the start)",
+     "A brief is evidence read through a frozen\npolicy: it can shift what the proposer\n"
+     "believes, not how it decides.  RL moves\nthe policy itself (node 1); here the frozen\n"
+     "policy rebuilds the weak 0.955 seed --\n20/20 evals, below the shared start",
      (8.2, -1.62)),
 ]
 ROUTE_STYLE = {k: st for k, _, st in ROUTES}

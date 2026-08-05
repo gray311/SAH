@@ -59,10 +59,10 @@ def _plot():
          "widening the search space",
          (2.0, 1.05)),
         (13, "proposer_full", "3",
-     "Machinery only this route can add:\nearlier rounds authored task skills\n"
-     "(C2 grid/restart tuning; forced-\ndiversity multi-start); this jump's\n"
-     "seed traces to them by hash.\nExecutor updates keep the harness\n"
-     "fixed -- they cannot author\nsuch components at all",
+     "Machinery only this route can add:\ninherited skills force diversity --\n"
+     "cycle 8-12 step-function families,\nreinitializing every 100-300 steps\n"
+     "instead of riding one basin; this\njump's seed traces to them by hash.\n"
+     "Executor updates keep the harness\nfixed and cannot author this",
      (14.6, 1.16)),
     (8, "context", "2",
          "A brief is evidence read through a frozen\npolicy: it can shift what the proposer\n"

@@ -51,10 +51,10 @@ NODES = [
      "widening the search space",
      (2.0, 1.05)),
     (8, "context", "2",
-     "Context drop: the analyst summary sees\nonly 6 trajectories (none at this cold\n"
-     "round), so its picture of past harnesses\nis unreliable -- the executor rebuilds a\n"
-     "weak 0.955 seed; 20/20 evals end below\nthe shared 0.9998 start",
-     (9.0, -1.62)),
+     "Why this H2 is worse: the frozen\nproposer knows only what a 6-trajectory\n"
+     "brief carries -- scores and axis names,\nnot working machinery.  Its H2 discards\n"
+     "the stronger search state; it rebuilds a\nweak 0.955 seed (20/20 evals, below start)",
+     (8.2, -1.62)),
 ]
 ROUTE_STYLE = {k: st for k, _, st in ROUTES}
 for x, route, num, text, txy in NODES:

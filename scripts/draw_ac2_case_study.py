@@ -73,7 +73,7 @@ for x, route, num, text, txy in NODES:
                 bbox=dict(boxstyle="round,pad=0.35", fc="white", ec=c,
                           lw=0.9, alpha=0.95))
 
-ax.set_xlabel("Executor trajectories (incl. shared fixed-harness start)")
+ax.set_xlabel("Iteration")
 ax.set_ylabel("Gap to human best (%)")
 ax.set_xlim(0.5, B + 1.5)
 ax.grid(color="#e8e8e8", lw=0.7)

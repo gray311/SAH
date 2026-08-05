@@ -30,57 +30,70 @@ ROUTES = [
      dict(color="#e07b28", ls="--", lw=2.0, marker="s", ms=5, zorder=8)),
 ]
 
-fig, ax = plt.subplots(figsize=(7.6, 4.4))
-for key, label, st in ROUTES:
-    pts = S[key]
-    xs = [p["x"] for p in pts]
-    ys = [gap(p["score"]) for p in pts]
-    ax.step(xs, ys, where="post", label=label, **st)
 
-ax.axhline(0.0, color="#555555", lw=1.0, ls=":", zorder=2)
-ax.text(1.2, 0.06, "human best", fontsize=9, color="#555555", va="bottom")
-ax.axvline(B, color="#bbbbbb", lw=1.0, ls="--", zorder=1)
-ax.text(B - 0.6, ax.get_ylim()[0] + 0.1, f"common budget $B{{=}}{B}$",
-        fontsize=8.5, color="#888888", rotation=90, ha="right", va="bottom")
+def render(node_numbers, outputs):
+    global NODES_ACTIVE, OUTPUTS
+    NODES_ACTIVE = node_numbers
+    OUTPUTS = outputs
+    _plot()
 
-# ---- audited event nodes (added step by step) ------------------------------
-# Each: (x, route_key, circled number, short mechanism text, text_xy)
-NODES = [
-    (6, "proposer_full", "1",
-     "Multi-start initialization:\nproposer edits system prompt + skill,\n"
-     "widening the search space",
-     (2.0, 1.05)),
-    (8, "context", "2",
-     "A brief is evidence read through a frozen\npolicy: it can shift what the proposer\n"
-     "believes, not how it decides.  RL moves\nthe policy itself (node 1); here the frozen\n"
-     "policy rebuilds the weak 0.955 seed --\n20/20 evals, below the shared start",
-     (8.2, -1.62)),
-]
-ROUTE_STYLE = {k: st for k, _, st in ROUTES}
-for x, route, num, text, txy in NODES:
-    pts = S[route]
-    exact = [p for p in pts if p["x"] == x]
-    y = gap(exact[0]["score"]) if exact else gap(max(p["score"] for p in pts if p["x"] <= x))
-    c = ROUTE_STYLE[route]["color"]
-    ax.plot(x, y, marker="o", ms=13, mfc="white", mec=c, mew=1.8, zorder=11)
-    ax.text(x, y, num, ha="center", va="center", fontsize=8.5, color=c,
-            weight="bold", zorder=12)
-    ax.annotate(text, xy=(x, y), xytext=txy, fontsize=8.2, color="#333333",
-                ha="left", va="center", zorder=10,
-                arrowprops=dict(arrowstyle="-", color=c, lw=1.0,
-                                shrinkA=2, shrinkB=8,
-                                connectionstyle="arc3,rad=0.15"),
-                bbox=dict(boxstyle="round,pad=0.35", fc="white", ec=c,
-                          lw=0.9, alpha=0.95))
+def _plot():
+    fig, ax = plt.subplots(figsize=(7.6, 4.4))
+    for key, label, st in ROUTES:
+        pts = S[key]
+        xs = [p["x"] for p in pts]
+        ys = [gap(p["score"]) for p in pts]
+        ax.step(xs, ys, where="post", label=label, **st)
 
-ax.set_xlabel("Iteration")
-ax.set_ylabel("Gap to human best (%)")
-ax.set_xlim(0.5, B + 1.5)
-ax.grid(color="#e8e8e8", lw=0.7)
-for s in ("top", "right"):
-    ax.spines[s].set_visible(False)
-ax.legend(loc="lower right", bbox_to_anchor=(0.99, 0.06), fontsize=9.5, frameon=False)
-fig.tight_layout()
-for out in ("papers/figures/ac2_case_study.pdf", "papers/figures/ac2_case_study.png"):
-    fig.savefig(out, dpi=200)
-print("wrote ac2_case_study.{pdf,png}")
+    ax.axhline(0.0, color="#555555", lw=1.0, ls=":", zorder=2)
+    ax.text(1.2, 0.06, "human best", fontsize=9, color="#555555", va="bottom")
+    ax.axvline(B, color="#bbbbbb", lw=1.0, ls="--", zorder=1)
+    ax.text(B - 0.6, ax.get_ylim()[0] + 0.1, f"common budget $B{{=}}{B}$",
+            fontsize=8.5, color="#888888", rotation=90, ha="right", va="bottom")
+
+    # ---- audited event nodes (added step by step) ------------------------------
+    # Each: (x, route_key, circled number, short mechanism text, text_xy)
+    NODES = [
+        (6, "proposer_full", "1",
+         "Multi-start initialization:\nproposer edits system prompt + skill,\n"
+         "widening the search space",
+         (2.0, 1.05)),
+        (8, "context", "2",
+         "A brief is evidence read through a frozen\npolicy: it can shift what the proposer\n"
+         "believes, not how it decides.  RL moves\nthe policy itself (node 1); here the frozen\n"
+         "policy rebuilds the weak 0.955 seed --\n20/20 evals, below the shared start",
+         (8.2, -1.62)),
+    ]
+    ROUTE_STYLE = {k: st for k, _, st in ROUTES}
+    for x, route, num, text, txy in [n for n in NODES if n[2] in NODES_ACTIVE]:
+        pts = S[route]
+        exact = [p for p in pts if p["x"] == x]
+        y = gap(exact[0]["score"]) if exact else gap(max(p["score"] for p in pts if p["x"] <= x))
+        c = ROUTE_STYLE[route]["color"]
+        ax.plot(x, y, marker="o", ms=13, mfc="white", mec=c, mew=1.8, zorder=11)
+        ax.text(x, y, num, ha="center", va="center", fontsize=8.5, color=c,
+                weight="bold", zorder=12)
+        ax.annotate(text, xy=(x, y), xytext=txy, fontsize=8.2, color="#333333",
+                    ha="left", va="center", zorder=10,
+                    arrowprops=dict(arrowstyle="-", color=c, lw=1.0,
+                                    shrinkA=2, shrinkB=8,
+                                    connectionstyle="arc3,rad=0.15"),
+                    bbox=dict(boxstyle="round,pad=0.35", fc="white", ec=c,
+                              lw=0.9, alpha=0.95))
+
+    ax.set_xlabel("Iteration")
+    ax.set_ylabel("Gap to human best (%)")
+    ax.set_xlim(0.5, B + 1.5)
+    ax.grid(color="#e8e8e8", lw=0.7)
+    for s in ("top", "right"):
+        ax.spines[s].set_visible(False)
+    ax.legend(loc="lower right", bbox_to_anchor=(0.99, 0.06), fontsize=9.5, frameon=False)
+    fig.tight_layout()
+    for out in OUTPUTS:
+        fig.savefig(out, dpi=200)
+    print("wrote", OUTPUTS)
+
+render({"1"}, ("papers/figures/ac2_case_study_node1.pdf",
+               "papers/figures/ac2_case_study_node1.png"))
+render({"1", "2"}, ("papers/figures/ac2_case_study.pdf",
+                    "papers/figures/ac2_case_study.png"))

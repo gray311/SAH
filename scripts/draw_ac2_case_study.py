@@ -58,7 +58,13 @@ def _plot():
          "Multi-start initialization:\nproposer edits system prompt + skill,\n"
          "widening the search space",
          (2.0, 1.05)),
-        (8, "context", "2",
+        (13, "proposer_full", "3",
+     "Machinery only this route can add:\nearlier rounds authored task skills\n"
+     "(C2 grid/restart tuning; forced-\ndiversity multi-start); this jump's\n"
+     "seed traces to them by hash.\nExecutor updates keep the harness\n"
+     "fixed -- they cannot author\nsuch components at all",
+     (14.6, 1.16)),
+    (8, "context", "2",
          "A brief is evidence read through a frozen\npolicy: it can shift what the proposer\n"
          "believes, not how it decides.  RL moves\nthe policy itself (node 1); here the frozen\n"
          "policy rebuilds the weak 0.955 seed --\n20/20 evals, below the shared start",
@@ -95,5 +101,7 @@ def _plot():
 
 render({"1"}, ("papers/figures/ac2_case_study_node1.pdf",
                "papers/figures/ac2_case_study_node1.png"))
-render({"1", "2"}, ("papers/figures/ac2_case_study.pdf",
-                    "papers/figures/ac2_case_study.png"))
+render({"1", "2"}, ("papers/figures/ac2_case_study_node2.pdf",
+                    "papers/figures/ac2_case_study_node2.png"))
+render({"1", "2", "3"}, ("papers/figures/ac2_case_study.pdf",
+                         "papers/figures/ac2_case_study.png"))

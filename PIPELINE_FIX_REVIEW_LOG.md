@@ -1,19 +1,28 @@
 # Pipeline fix review log
 
-Reviewed: 2026-08-05. Scope: the uncommitted working-tree change set
+Reviewed: 2026-08-05. Scope: the then-uncommitted working-tree change set
 (~2,600 lines across 37 files) that implements PIPELINE_FIX_LOG.md §2–11 plus
 the file-native H1, on top of the committed §12–14 addendum
 (PIPELINE_FIX_SUMMARY.md). Review method: full diff read of every src/ file,
 targeted reads of the enforcement code paths, compile/syntax checks, and the
 combined test suite.
 
+Sync closure: 2026-08-06. The reviewed implementation and its clean-clone
+dependency closure were committed in `23cec0b` (`Fix file-native harness
+evolution and reward routing`). The larger 93-file commit also includes the
+previously untracked H1 tool schemas, canonical inference-16/TTT drivers,
+runtime provenance, frozen reference registries, audit helpers, and tests
+needed for a checkout to reproduce the verified tree without relying on the
+author's working directory. A `git archive` export of `23cec0b` passed the
+same 73/73 tests, confirming that no untracked author-local file is required.
+
 ## Verdict
 
 The implementation matches the documented design, the safety invariants hold
 in code (not just in prose), and it composes cleanly with the committed
-§12–14 fixes. **73/73 tests pass on the combined tree.** Main action item:
-the change set (including ~12 of its test files) is still uncommitted — see
-Risks.
+§12–14 fixes. **73/73 tests pass on the combined tree.** The original main
+action item—committing the implementation and its tests—was resolved by
+`23cec0b`.
 
 ## What was verified, area by area
 
@@ -93,11 +102,10 @@ None of the §12–14 files (`session.py`, `discovery.py`, `materialize.py`,
 
 ## Risks / follow-ups
 
-1. **Everything is uncommitted.** The §2–11 implementation and ~12 of its
-   test files exist only in the working tree (`git status` lists 286 paths;
-   only the §12–14 test files are tracked). A stray checkout or reset loses
-   it. Recommend committing the change set as one unit (or a small series)
-   before any further work.
+1. **Resolved (2026-08-06): source existed only in the working tree.** The
+   §2–11 implementation, its tests, and the runtime/config/reference closure
+   are now tracked by `23cec0b`; a fresh checkout no longer depends on those
+   author-local files.
 2. Inspect-tracking counts only exact `cat <file>` reads; `head`/`find`
    output does not mark a file as read. This is a deliberate discipline, but
    worth stating in the H1 contract if proposers plateau on it.

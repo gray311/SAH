@@ -6,8 +6,9 @@ already working on this cluster). Its replay row format
 
     {"messages": [...], "tools": [...], "metadata": {"advantage": A, ...}}
 
-Our proposer rows carry the FULL H1 agent trajectory (draft -> validate_spec ->
-submit_spec tool calls). We normalize it with Weave's
+Our proposer rows carry the FULL H1 agent trajectory (`cat agent.yaml` ->
+targeted file inspection/editing -> validate_harness -> submit_harness). We
+normalize it with Weave's
 common.qwen35_format.normalize_qwen35_messages — the same function Weave uses
 on its own NexAU trajectories — and pass the H1 tool schemas so the chat
 template renders tool definitions identically at train time.
@@ -32,14 +33,35 @@ from pathlib import Path
 WEAVE_ROOT = Path(os.environ.get(
     "WEAVE_ROOT", "/lustre/fsw/portfolios/av/users/yingzim/code/Weave_v2"))
 H1_TOOLS_DIR = Path(__file__).resolve().parents[1] / "outer" / "harness" / "tools"
+H1_AGENT_YAML = H1_TOOLS_DIR.parent / "agent.yaml"
 CLOSE_TURN = {"role": "user", "content": "ok"}
 
 
 def _h1_tool_schemas() -> list:
     import yaml
     schemas = []
-    for f in sorted(H1_TOOLS_DIR.glob("*.tool.yaml")):
+    agent = yaml.safe_load(H1_AGENT_YAML.read_text()) or {}
+    mounted = agent.get("tools") or []
+    seen = set()
+    for row in mounted:
+        if not isinstance(row, dict) or not row.get("name") or not row.get("yaml_path"):
+            raise ValueError("every mounted H1 tool needs name and yaml_path")
+        name = str(row["name"])
+        if name in seen:
+            raise ValueError(f"duplicate mounted H1 tool: {name}")
+        seen.add(name)
+        f = (H1_AGENT_YAML.parent / str(row["yaml_path"])).resolve()
+        try:
+            f.relative_to(H1_AGENT_YAML.parent.resolve())
+        except ValueError as exc:
+            raise ValueError(f"H1 tool schema escapes package: {f}") from exc
+        if not f.is_file():
+            raise FileNotFoundError(f"mounted H1 tool schema missing: {f}")
         doc = yaml.safe_load(f.read_text())
+        if doc.get("name") != name:
+            raise ValueError(
+                f"mounted H1 tool {name!r} does not match schema name {doc.get('name')!r}"
+            )
         schemas.append({"type": "function", "function": {
             "name": doc["name"], "description": doc.get("description", ""),
             "parameters": doc.get("input_schema", {})}})

@@ -42,7 +42,7 @@ for r in $(seq 1 "$ROUNDS"); do
       --base-url "http://127.0.0.1:8800/v1" --model "$SERVED_MODEL" \
       --max-evals "$MAX_EVALS" --eval-timeout "$EVAL_TIMEOUT" \
       --temperature "$TTT_TEMP" \
-      --eval-python python3 --no-trajectory --out "$RD/k$k" > "$RD/k$k.log" 2>&1 &
+      --eval-python python3 --require-trajectory --out "$RD/k$k" > "$RD/k$k.log" 2>&1 &
     RPIDS+=($!)
     # throttle on the ROLLOUT pids only -- counting all jobs would include the
     # vllm server and stall the loop
@@ -53,9 +53,13 @@ for r in $(seq 1 "$ROUNDS"); do
   done
   # bare `wait` also waits on the vllm server, which never exits -- that hung the
   # previous runs for hours after the rollouts had already finished
-  for q in "${RPIDS[@]}"; do wait "$q" 2>/dev/null; done
+  rollout_rc=0
+  for q in "${RPIDS[@]}"; do wait "$q" 2>/dev/null || rollout_rc=1; done
   kill -9 -- "-$VP" 2>/dev/null || kill -9 "$VP" 2>/dev/null || true
   sleep 20
+  [ "$rollout_rc" -eq 0 ] || { log "one or more executor trajectories failed"; exit 1; }
+  python3 "$SAH/scripts/audit_trajectories.py" "$RD" \
+    || { log "trajectory artifact audit failed"; exit 1; }
 
   CUM=$((CUM + K))
   python3 - "$OUT_DIR" "$RD" "$TASK" "$CUM" "$r" <<'PY'

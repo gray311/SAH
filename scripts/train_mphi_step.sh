@@ -31,11 +31,30 @@ BASE_HF="$MODEL_ROOT/base/Qwen3.5-9B/c202236235762e1c871ad0ccb60c8ee5ba337b9a"
 SAVE_CKPT="$MODEL_ROOT/checkpoints/self_adapt_harness/mphi_$STEP"
 MERGED="$MODEL_ROOT/exports/self_adapt_harness/mphi_$STEP"
 REPLAY="$ROUND_DIR/replay.jsonl"
+REPLAY_MANIFEST="$ROUND_DIR/replay_manifest.json"
 
 echo "[1/3] convert grpo_batch -> slime replay"
 python3 "$SAH/src/training/grpo_to_replay.py" --rounds "$ROUND_DIR" --out "$REPLAY"
 N_ROWS=$(wc -l < "$REPLAY")
-[ "$N_ROWS" -ge 2 ] || { echo "only $N_ROWS trainable rows — no gradient signal; aborting"; exit 1; }
+GENERATED_ROWS="$N_ROWS"
+MIN_TRAINABLE_ROWS="${MIN_TRAINABLE_ROWS:-4}"
+[ "$N_ROWS" -ge "$MIN_TRAINABLE_ROWS" ] || {
+  python3 - "$REPLAY_MANIFEST" "$GENERATED_ROWS" "$MIN_TRAINABLE_ROWS" <<'PY'
+import json, os, sys
+path, generated, minimum = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
+payload = {
+    "schema": "h1-replay/1.0", "status": "skipped_below_minimum",
+    "generated_trainable_rows": generated, "minimum_trainable_rows": minimum,
+    "archive_mixed_rows": 0, "zero_advantage_padding_rows": 0,
+    "optimizer_rows": generated,
+}
+tmp = path + ".tmp"
+open(tmp, "w").write(json.dumps(payload, indent=2) + "\n")
+os.replace(tmp, path)
+PY
+  echo "only $N_ROWS trainable rows (<$MIN_TRAINABLE_ROWS) — protocol skips this update"
+  exit 4
+}
 
 # Cross-step archive: bank this round's strongly-positive rows, and (opt-in
 # via ARCHIVE_MIX=n) mix n archived winner-trajectories from OTHER tasks into
@@ -68,6 +87,7 @@ if mix > 0 and arch:
 print(f"[archive] banked; archive={len(arch)} rows")
 PYEOF
 N_ROWS=$(wc -l < "$REPLAY")
+PREPAD_ROWS="$N_ROWS"
 
 # Pad short groups (e.g. after sanitize_grpo_batch drops poisoned rows) up to
 # GLOBAL_BATCH_SIZE with zero-advantage copies: zero advantage => zero policy-
@@ -92,7 +112,26 @@ PY
   N_ROWS="$GBS"
 fi
 
-echo "[2/3] submit GRPO training ($N_ROWS rows, LoRA r64/a128, lr 6e-5, 3 epochs)"
+python3 - "$REPLAY_MANIFEST" "$GENERATED_ROWS" "$PREPAD_ROWS" "$N_ROWS" \
+  "$MIN_TRAINABLE_ROWS" "${ARCHIVE_MIX:-0}" <<'PY'
+import json, os, sys
+path = sys.argv[1]
+generated, prepad, optimizer, minimum, requested_mix = map(int, sys.argv[2:])
+payload = {
+    "schema": "h1-replay/1.0", "status": "optimizer_input_ready",
+    "generated_trainable_rows": generated,
+    "minimum_trainable_rows": minimum,
+    "archive_mix_requested": requested_mix,
+    "archive_mixed_rows": max(0, prepad - generated),
+    "zero_advantage_padding_rows": max(0, optimizer - prepad),
+    "optimizer_rows": optimizer,
+}
+tmp = path + ".tmp"
+open(tmp, "w").write(json.dumps(payload, indent=2) + "\n")
+os.replace(tmp, path)
+PY
+
+echo "[2/3] submit GRPO training ($N_ROWS rows, LoRA r64/a128, lr ${LR:-3e-5}, ${NUM_EPOCH:-3} epochs)"
 mkdir -p "$SAVE_CKPT" "$LOG_ROOT/slurm"
 TRAIN_ENV=(RUN_SCRIPT="$W/scripts/train/run_qwen35_grpo_offline_lora.sh"
            PROMPT_DATA="$REPLAY" SAVE_CKPT="$SAVE_CKPT" HF_CKPT="$BASE_HF"

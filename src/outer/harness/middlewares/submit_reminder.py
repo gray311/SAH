@@ -1,4 +1,4 @@
-"""Submit-reminder middleware for H1.
+"""Submit-reminder middleware for H1's file-native H2 editing loop.
 
 From ``remind_from_iteration`` on, if the proposer has not yet submitted a
 spec, append a bounded framework message urging it to validate + submit before
@@ -31,9 +31,10 @@ class SubmitReminderMiddleware(Middleware):
         if session.submitted or iteration < self.remind_from_iteration:
             return HookResult.no_changes()
         left = max(0, self.max_iterations - iteration)
-        text = (f"Only ~{left} turn(s) left and no spec submitted yet. Finalize now: "
-                "validate_spec your best draft, then submit_spec it. An un-submitted "
-                "run scores the minimum reward.")
+        text = (f"Only ~{left} turn(s) left and no H2 submitted yet. Finalize "
+                "the files now: call validate_harness, repair any reported "
+                "inconsistency, then call submit_harness. An unsubmitted run "
+                "scores the minimum reward.")
         return HookResult.with_modifications(messages=[
             *hook_input.messages,
             Message(role=Role.FRAMEWORK, content=[TextBlock(text=text)]),

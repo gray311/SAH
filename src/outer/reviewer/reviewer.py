@@ -1,20 +1,14 @@
-"""Reviewer: repair M_phi-generated tool/middleware code until it passes.
+"""Generated-tool gate/self-test utility.
 
-M_phi (a 9B model) frequently proposes tool code that is close but broken —
-a bad import, a wrong signature, a runtime error on the mock context. Rejecting
-the whole candidate wastes the design. The reviewer runs a bounded fix loop:
+Canonical reward-route runs call :func:`review_tool_code` with
+``repair_fn=None, max_rounds=0`` *inside* ``validate_harness``.  That path is a
+deterministic static gate plus local mock-context self-test and never changes
+the bytes submitted by H1.
 
-    static gate + self-test ── pass ──> accept
-          │ fail (errors)
-          ▼
-    ask the SAME served model to repair, given the code + exact errors
-          │  (up to max_rounds)
-          ▼
-    re-gate / re-test ...
-
-The repairer only edits the generated code; it cannot widen the capability
-surface or the import whitelist. If it never passes, the tool is dropped from
-the spec (fail-closed) and the reason is recorded for the H1 feedback digest.
+The optional ``repair_fn`` loop remains only for explicitly noncanonical legacy
+experiments.  It returns a proposed repaired string to its caller; it never
+mutates a candidate package and is not called by ``outer.propose`` or
+``submit_harness``.
 """
 from __future__ import annotations
 
@@ -26,7 +20,7 @@ from typing import Callable, List, Optional
 from outer.static_gates import check_tool_code
 from outer.reviewer.selftest import selftest_tool_code
 
-# Anti-leak invariants (see review_tool_code docstring):
+# Legacy repair-path anti-leak invariants (canonical runs never enter it):
 #   1. repair_fn MUST be the SAME frozen served M0 endpoint the inner loop uses
 #      — never a stronger external model. Capability parity is what keeps the
 #      reviewer from injecting solution knowledge the executor doesn't have.

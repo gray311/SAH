@@ -46,8 +46,9 @@ ANCHOR = {   # (initial program, published <=10B best) in combined units
     "eft__ahc_simpletes__ahc039":      (2.377111, 2.476302),
 }
 
-# TTT arm: we reproduce the setting ourselves (update the EXECUTOR on its own
-# high-scoring rollouts, fixed harness, no proposer). Each task's point sits at
+# Local TTT-Discover-style arm: update the EXECUTOR on its own high-scoring
+# rollouts with a fixed harness and no proposer.  This is a budget-scaled
+# reference ablation, not an official reproduction. Each task's point sits at
 # the number of executor rollouts whose programs went into its training set,
 # plus the K rollouts spent evaluating it.
 TTT_DIR = f"{R}/ttt_arm"
@@ -263,7 +264,7 @@ def main():
         if tc:
             ax.plot([p[0] for p in tc], [normalize(task, p[1], lower) for p in tc],
                     "--", color="#d67c1c", marker="s", ms=5.5, lw=2.2, mfc="white",
-                    label="Update executor (TTT, reproduced)")
+                    label="Update executor (local TTT-Discover-style)")
 
         pub = TTT_PUBLISHED.get(task)
         if pub is not None:

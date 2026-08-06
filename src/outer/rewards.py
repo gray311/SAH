@@ -37,16 +37,34 @@ def task_reward(score: Optional[float], base_score: float) -> float:
 
 def load_rollout_score(rollout_dir: Path, task_id: str) -> Optional[float]:
     """Best score for ``task_id`` from a candidate's run_baseline output
-    (final summary preferred; wall-safe checkpoint as fallback)."""
+    (final summary authoritative; wall-safe checkpoint only if no terminal task
+    row exists).
+
+    ``run_baseline`` evaluates the seed before constructing the candidate
+    harness, so a harness ConfigError can leave a valid seed checkpoint next to
+    an explicit terminal row whose ``best_score`` is null.  Falling back in
+    that case falsely credits a broken harness with the incumbent score and
+    leaks it into analyzer feedback.  Checkpoints are therefore used only for
+    genuinely interrupted runs that never wrote a terminal row for this task.
+    """
     best: Optional[float] = None
+    saw_terminal_task_row = False
     for summ in rollout_dir.glob("*/summary.json"):
         try:
-            for row in json.loads(summ.read_text()):
-                if row.get("task_id") == task_id and row.get("best_score") is not None:
+            payload = json.loads(summ.read_text())
+            rows = payload if isinstance(payload, list) else [payload]
+            for row in rows:
+                if not isinstance(row, dict) or row.get("task_id") != task_id:
+                    continue
+                saw_terminal_task_row = True
+                if row.get("score_eligible") is not False \
+                        and row.get("best_score") is not None:
                     s = float(row["best_score"])
                     best = s if best is None else max(best, s)
         except Exception:
             pass
+    if saw_terminal_task_row:
+        return best
     if best is None:
         for ck in rollout_dir.glob(f"*/checkpoints/{task_id}.json"):
             try:
@@ -71,7 +89,8 @@ def compute_task_group(
             reward = task_reward(score, base_score)
         rows.append({"k": k, "valid": bool(cand.get("valid")), "score": score,
                      "reward": reward, "spec_hash": cand.get("spec_hash", ""),
-                     "changed_fields": cand.get("changed_fields", [])})
+                     "changed_fields": cand.get("changed_fields", []),
+                     "review_log": cand.get("review_log", [])})
 
     rewards = [r["reward"] for r in rows]
     mean = sum(rewards) / len(rewards)
@@ -149,7 +168,8 @@ def compute_task_group_v2(
             reward = task_reward_v2(score, base_score, ceiling)
         rows.append({"k": k, "valid": bool(cand.get("valid")), "score": score,
                      "reward": reward, "spec_hash": cand.get("spec_hash", ""),
-                     "changed_fields": cand.get("changed_fields", [])})
+                     "changed_fields": cand.get("changed_fields", []),
+                     "review_log": cand.get("review_log", [])})
 
     valid_rewards = [r["reward"] for r in rows if r["valid"]]
     rng = (max(valid_rewards) - min(valid_rewards)) if valid_rewards else 0.0
@@ -262,7 +282,8 @@ def compute_task_group_anchored(
                  if valid else None)
         rows.append({"k": k, "valid": valid, "score": score,
                      "spec_hash": cand.get("spec_hash", ""),
-                     "changed_fields": cand.get("changed_fields", [])})
+                     "changed_fields": cand.get("changed_fields", []),
+                     "review_log": cand.get("review_log", [])})
 
     denom = (ceiling - base_score) if (ceiling is not None and ceiling > base_score + EPS) \
         else (abs(base_score) + EPS)

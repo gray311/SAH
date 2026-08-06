@@ -76,13 +76,13 @@ DEFAULTS: Dict[str, Any] = {
         "max_shared": 6,
     },
 
-    # optional anti-leak guards (Adaptive port). The sah base already has the
-    # reviewer leak-markers + capability-parity repairer; these add the
-    # champion-isolation and claim-word neutralization from Adaptive.
+    # optional anti-leak guards (Adaptive port). Generated components already
+    # pass deterministic validation; these add champion isolation and
+    # claim-word neutralization for free-form cross-round text.
     "leakage_guard": {
         "champion_isolation": True,        # promotion signal never enters context
         "neutralize_claim_words": True,    # scrub "successful/gain/improvement"
-        "scrub_leak_markers": True,        # existing reviewer behavior (kept on)
+        "scrub_leak_markers": True,        # deterministic text/code guard
     },
 
     "training": {

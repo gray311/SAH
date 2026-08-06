@@ -17,7 +17,8 @@
 set -uo pipefail
 source /lustre/fsw/portfolios/av/users/yingzim/config/workspace_env.sh
 SAH="$CODE_ROOT/self_adapt_harness"
-OUT="$RUN_ROOT/self_adapt_harness/outer"
+OUT_TAG="${OUT_TAG:-}"
+OUT="$RUN_ROOT/self_adapt_harness/outer${OUT_TAG:+-$OUT_TAG}"
 NSTEPS="${1:?usage: context_ablation.sh <n_steps> <round_base> [ws]}"
 RBASE="${2:?}"
 WS="${3:-$RUN_ROOT/self_adapt_harness/context_ablation}"
@@ -30,6 +31,46 @@ export AHC_NATIVE=1 AHC_CXX=g++ AHC_CASE_WORKERS=12 AHC_CACHE_DIR="$SAH/ahc_work
 
 TASKS_ALL="${CTX_TASKS:-eft__math__erdos_min_overlap eft__math__first_autocorr_ineq eft__math__second_autocorr_ineq eft__math__circle_packing eft__math__hadamard_maximal_det eft__ahc_simpletes__ahc039 eft__ahc_simpletes__ahc058 adrs__eplb adrs__prism adrs__llm_sql adrs__txn_scheduling}"
 
+# Record the exact output namespace and knobs.  A non-empty OUT_TAG is required
+# for new paper ablations: collect writes feedback next to the round directory,
+# so a private outer-* root prevents concurrent campaigns from reading one
+# another's telemetry.
+python3 - "$WS/run_manifest.json" "$OUT" "$OUT_TAG" "$TASKS_ALL" "$RBASE" \
+  "$NSTEPS" "${K:-8}" "${MAX_EVALS:-20}" "${RESUME_BASES:-}" <<'PY'
+import json, sys, time
+path, outer_root, out_tag, tasks, round_base, nsteps, k, max_evals, resume = sys.argv[1:]
+try:
+    payload = json.load(open(path))
+except Exception:
+    payload = {
+        "schema": 2,
+        "method": "context-only analyzer; frozen proposer and executor weights",
+        "segments": [],
+    }
+payload.update({
+    "schema": 1,
+    "method": "context-only analyzer; frozen proposer and executor weights",
+    "outer_root": outer_root,
+    "out_tag": out_tag,
+    "isolated_feedback": bool(out_tag),
+    "tasks": tasks.split(),
+    "round_base": int(round_base),
+    "k_per_round": int(k),
+    "max_evals_per_trajectory": int(max_evals),
+    "written_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+})
+payload["schema"] = 2
+payload.setdefault("segments", []).append({
+    "round_base": int(round_base),
+    "n_steps": int(nsteps),
+    "resume_bases": resume or None,
+    "started_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+})
+with open(path, "w") as f:
+    json.dump(payload, f, indent=2)
+PY
+log "round root: $OUT (isolated_feedback=$([ -n "$OUT_TAG" ] && echo yes || echo no))"
+
 # seed the harness base from the fixed initial harness (same start as the other rows)
 bases="$WS/round000_bases.json"
 if [ ! -f "$bases" ]; then
@@ -37,31 +78,48 @@ if [ ! -f "$bases" ]; then
 import json,sys
 out,sah=sys.argv[1],sys.argv[2]
 tasks="eft__math__erdos_min_overlap eft__math__first_autocorr_ineq eft__math__second_autocorr_ineq eft__math__circle_packing eft__math__hadamard_maximal_det eft__ahc_simpletes__ahc039 eft__ahc_simpletes__ahc058 adrs__eplb adrs__prism adrs__llm_sql adrs__txn_scheduling".split()
-json.dump({t:{"package":f"{sah}/src/inner/harness","score":0.0} for t in tasks}, open(out,"w"), indent=1)
+baseline=json.load(open(f"{sah}/results/baseline_h2_20ev.json"))["baseline"]
+json.dump({t:{"package":f"{sah}/src/inner/harness",
+              "score":float(baseline[t]["h2_best"]),
+              "seed_score":float(baseline[t]["seed"])}
+           for t in tasks}, open(out,"w"), indent=1)
 print("seeded initial-harness bases for", len(tasks), "tasks")
 PY
+fi
+if [ -n "${RESUME_BASES:-}" ]; then
+  [ -s "$RESUME_BASES" ] || { log "RESUME_BASES missing: $RESUME_BASES"; exit 2; }
+  bases="$RESUME_BASES"
+  log "resuming bases from $bases"
 fi
 
 wait_job(){
   local J="$1"
   while :; do
-    local S; S=$(squeue -j "$J" -h -o %T 2>/dev/null | head -1)
+    local S; S=$(timeout 20s squeue -j "$J" -h -o %T 2>/dev/null | head -1 || true)
     case "$S" in PENDING|RUNNING|COMPLETING) sleep 60; continue ;; esac
-    local ST; ST=$(sacct -j "$J" -X -n -o State 2>/dev/null | head -1 | xargs)
+    local ST; ST=$(timeout 20s sacct -j "$J" -X -n -o State 2>/dev/null | head -1 | xargs || true)
     case "$ST" in PENDING|RUNNING|COMPLETING|"") sleep 60 ;; *) return 0 ;; esac
   done
 }
 
 for i in $(seq 0 $((NSTEPS-1))); do
   [ -f "$WS/STOP" ] && { log "STOP flag"; break; }
-  R=$((RBASE+i)); RD="$OUT/round$(printf '%03d' "$R")"
+  if [ -n "${RUNTIME_SOURCE_MANIFEST:-}" ]; then
+    python3 "$SAH/scripts/runtime_provenance.py" verify \
+      --manifest "$RUNTIME_SOURCE_MANIFEST" || exit 43
+  fi
+  R=$((RBASE+i)); RD="$OUT/round$(printf '%03d' "$R")"; prev_bases="$bases"
+  LOGICAL_PROPOSER_SEED=$(( ${LOGICAL_SEED_BASE:-1000} + i ))
   log "step $((i+1))/$NSTEPS: round$R over ${TASKS_ALL// /,}"
   JOB=""
   for _ in $(seq 1 20); do
-    RAW=$(cd "$SAH" && env ROUND_ID="$R" TASKS="$TASKS_ALL" \
+    RAW=$(cd "$SAH" && timeout 60s env ROUND_ID="$R" OUT_TAG="$OUT_TAG" TASKS="$TASKS_ALL" \
+      PROPOSER_SEED="$LOGICAL_PROPOSER_SEED" LOGICAL_ROUND_INDEX="$i" \
       K="${K:-8}" MAX_EVALS="${MAX_EVALS:-20}" EVAL_TIMEOUT="${EVAL_TIMEOUT:-420}" \
       FORCE_TOOL_FRAC="${FTF:-0.25}" SAH_MIN_ITERS="${SAH_MIN_ITERS:-0}" \
       SAH_ADV=v3 SAH_ANALYSIS="${USE_ANALYST:-1}" SAH_LEAK_NEUTRALIZE=1 \
+      SAH_ANALYSIS_REQUIRED="${SAH_ANALYSIS_REQUIRED:-0}" \
+      SAH_FIXED_INFERENCE_SLOTS="${SAH_FIXED_INFERENCE_SLOTS:-0}" \
       BASES_FILE="$bases" MPHI_PATH="${MPHI:-}" \
       SEED_PROGRAMS_FILE="$WS/best_programs.json" \
       FEEDBACK_FILE="$WS/task_feedback.json" \
@@ -76,28 +134,28 @@ for i in $(seq 0 $((NSTEPS-1))); do
     (cd "$SAH/src" && python3 -m outer.outer_round collect --round-dir "$RD") >/dev/null 2>&1
   [ -f "$RD/round_summary.json" ] || { log "no summary — stop"; break; }
 
-  # Carry a TASK-LOCAL ratchet forward: merge only THIS campaign's own results.
-  # Copying $OUT/best_programs.json (as the other drivers do) would import the
-  # main campaign's incumbents and the ablation would just reproduce them.
-  python3 - "$RD" "$WS/best_programs.json" <<'PYR'
-import json,os,sys,glob
-rd,dst=sys.argv[1],sys.argv[2]
-local=json.load(open(dst)) if os.path.exists(dst) else {}
-LOWER={"eft__math__erdos_min_overlap","eft__math__first_autocorr_ineq"}
-n=0
-for f in glob.glob(os.path.join(rd,"rollouts","*","*","*","summary.json")):
-    try: e=json.load(open(f))
-    except Exception: continue
-    e=e[0] if isinstance(e,list) else e
-    t=e.get("task_id"); s=e.get("best_score"); prog=e.get("best_program")
-    if not t or s is None or not prog: continue
-    cur=local.get(t,{}).get("score")
-    better = cur is None or (s<cur if t in LOWER else s>cur)
-    if better:
-        local[t]={"score":s,"program":prog,"round":os.path.basename(rd)}; n+=1
-json.dump(local,open(dst,"w"),indent=1)
-print(f"  local ratchet: {n} task(s) advanced (campaign-local only)")
-PYR
+  # Re-check the transition explicitly so a stale/zero seed can never make the
+  # context arm replace the fixed H2 with a worse candidate.
+  python3 - "$prev_bases" "$RD/next_bases.json" <<'PYB'
+import json, sys
+prev_path, next_path = sys.argv[1:]
+prev, nxt = json.load(open(prev_path)), json.load(open(next_path))
+restored = []
+for task, old in prev.items():
+    new = nxt.get(task)
+    if new is None or float(new.get("score", float("-inf"))) < float(old.get("score", float("-inf"))):
+        nxt[task] = old
+        restored.append(task)
+json.dump(nxt, open(next_path, "w"), indent=1)
+if restored:
+    print("  validity ratchet restored fixed-H2 base for", ",".join(restored))
+PYB
+
+  # The collector owns the program transition.  Canonical proposer/context
+  # arms use the exact same strict-single implementation; OUT_TAG makes this
+  # file campaign-local, so copying it cannot import another route's state.
+  [ -f "$OUT/best_programs.json" ] && \
+    cp "$OUT/best_programs.json" "$WS/best_programs.json"
   # feedback must accumulate too — it is what turns the analyst on from round 2
   [ -f "$OUT/task_feedback.json" ] && cp "$OUT/task_feedback.json" "$WS/task_feedback.json" 2>/dev/null
   python3 - "$WS/task_feedback.json" <<'PY'
@@ -109,30 +167,6 @@ if os.path.exists(f):
         if isinstance(e,dict) and e.pop("analyst_note",None) is not None: n+=1
     if n: json.dump(d,open(f,"w"),indent=1); print(f"  stripped {n} curated note(s)")
 PY
-  # TRAIN_PHI=1 turns this driver into the matched PROPOSER arm: identical start,
-  # identical rollout budget, identical ratchet policy -- the only difference is
-  # that phi is updated from the round's own group instead of being left frozen.
-  if [ "${TRAIN_PHI:-0}" = "1" ]; then
-    V=$(python3 -c "
-import json,sys
-g=json.load(open('$RD/round_summary.json'))['groups']
-print(sum(1 for t in g for r in g[t].get('rows',[]) if r.get('valid')))" 2>/dev/null || echo 0)
-    if [ "${V:-0}" -ge 4 ]; then
-      STAG="ctxp_$(printf '%02d' "$i")"
-      KL_COEF="${KL_COEF:-0.05}" NUM_EPOCH="${NUM_EPOCH:-2}" \
-        bash "$SAH/scripts/train_mphi_step.sh" "$RD" "$STAG" ${PREV_CKPT:+"$PREV_CKPT"} > /tmp/ctxp_train.txt 2>&1
-      TJ=$(grep -oP 'train job: \K[0-9]+' /tmp/ctxp_train.txt); MJ=$(grep -oP 'merge job: \K[0-9]+' /tmp/ctxp_train.txt)
-      if [ -n "$TJ" ]; then
-        wait_job "$TJ"; [ -n "$MJ" ] && wait_job "$MJ"
-        MERGED="$MODEL_ROOT/exports/self_adapt_harness/mphi_$STAG"
-        if [ -f "$MERGED/config.json" ]; then
-          MPHI="$MERGED"; PREV_CKPT="$MODEL_ROOT/checkpoints/self_adapt_harness/mphi_$STAG"
-          log "  trained -> mphi_$STAG (proposer arm)"
-        else log "  merge missing, keeping previous phi"; fi
-      else log "  train submit failed: $(tail -2 /tmp/ctxp_train.txt|tr '\n' ' ')"; fi
-    else log "  only $V valid rows, skipping the update"; fi
-  fi
-
   bases="$RD/next_bases.json"
   python3 - "$RD/round_summary.json" <<'PY'
 import json,sys
@@ -140,6 +174,10 @@ g=json.load(open(sys.argv[1]))["groups"]
 for t,v in sorted(g.items()):
     print(f"  {t:38s} best={v.get('best_score')} improved={v.get('improved')}")
 PY
-  [ "${TRAIN_PHI:-0}" = "1" ] || log "  phi UNCHANGED (context-only ablation)"
+  log "  phi UNCHANGED (context-only ablation)"
+  if [ -n "${POST_BATCH_HOOK:-}" ]; then
+    ROUND_DIR="$RD" BATCH_INDEX="$i" ROUTE=context \
+      bash "$POST_BATCH_HOOK" || log "  post-batch hook failed (non-fatal)"
+  fi
 done
 log "context ablation done"

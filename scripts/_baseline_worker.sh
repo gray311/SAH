@@ -56,13 +56,15 @@ for g in $(seq 0 $((N_REPLICAS - 1))); do
   OPENAI_BASE_URL="http://127.0.0.1:$port/v1" python3 -m inner.run_baseline \
     --ids "${shard[@]}" --base-url "http://127.0.0.1:$port/v1" --model "$SERVED_MODEL" \
     --max-evals "$MAX_EVALS" ${EVAL_TIMEOUT:+--eval-timeout "$EVAL_TIMEOUT"} \
-    --eval-python python3 --out "$OUT_DIR/shard-$g" \
+    --eval-python python3 --require-trajectory --out "$OUT_DIR/shard-$g" \
     > "$OUT_DIR/run-$g.log" 2>&1 &
   RPIDS+=($!)
 done
 rc=0
 for p in "${RPIDS[@]}"; do wait "$p" || rc=1; done
 log "all shards finished (rc=$rc)"
+[ "$rc" -eq 0 ] || { log "one or more shards failed; refusing to merge"; exit "$rc"; }
+python3 "$REPO/scripts/audit_trajectories.py" "$OUT_DIR"
 
 # --- merge per-shard summaries --- #
 python3 - "$OUT_DIR" <<'PY'

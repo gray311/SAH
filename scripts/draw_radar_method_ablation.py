@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Method-comparison radar over the 11 tasks.
 
-Values are transcribed from papers/tables/proposer_update.tex (campaign-best
-protocol). Each axis linearly rescales the plotted systems into the band
+Values are frozen campaign-result reporting values. Each axis linearly
+rescales the plotted systems into the band
 [R0, 1] (direction-corrected so outward is always better), so no system
 collapses to the center and shapes are comparable within an axis.
 """

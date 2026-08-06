@@ -9,7 +9,7 @@ With a k: dumps that candidate's full chain —
   1. the H1 user message (task context + inheritance + feedback + analyst notes)
   2. the H1 agent trajectory (M_phi designing the spec, tool call by tool call)
   3. the submitted spec (raw YAML)
-  4. generated tools + reviewer repair log
+  4. generated tools + deterministic validation audit
   5. the materialized agent.yaml tool set (proof of structural divergence)
   6. the inner rollout outcome (score, evals, whether custom tools were called)
 """
@@ -73,7 +73,7 @@ def main() -> None:
     print("\n===== 3. SUBMITTED SPEC (raw) =====")
     print((trajs.get((tid, k), {}).get("raw_submission") or "")[:4000])
 
-    print("\n===== 4. REVIEW LOG (gate + repair per tool) =====")
+    print("\n===== 4. COMPONENT VALIDATION LOG (no post-submit repair) =====")
     for r in (cand.get("review_log") or []):
         print(f"  {r['name']}: ok={r['ok']} rounds={r['rounds']} "
               f"error={r.get('error')}")

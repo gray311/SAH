@@ -1,15 +1,15 @@
-"""HarnessSpec v0.1 — the typed genome of an H2 candidate (plan.md §5).
+"""Typed semantic genome used to validate and canonicalize H2 packages.
 
-The proposer M_phi emits a YAML spec; this module validates it fail-closed,
-canonicalizes it, and hashes it. The spec controls only declarative surface:
-prompts, skill text, tool descriptions, sampling, and iteration/middleware
-parameters. Tool *code* (the executor contract) and the evaluation budget are
-NOT part of the spec — the budget is enforced externally (plan.md §8.4) and
-code changes are out of scope for the MVP action space.
+H1 now edits a private materialized H2 filesystem.  After validation, that
+directory is parsed into this representation for hashing, provenance, static
+gates, and deterministic recompilation.  The genome includes proposer-owned
+executor prompts, skills, generated tool/middleware code, mounts, sampling, and
+iteration settings.  Core runtime bindings and the evaluation budget remain
+externally fixed.
 
-A spec is *relative to a base package*: missing fields inherit the base value,
-so M_phi can express a targeted mutation without regenerating everything. A
-candidate identical to its base (canonical hash) is invalid.
+The legacy partial-YAML interface remains supported internally. Missing fields
+inherit the base; generated component removal is explicit. A candidate
+identical to its base is invalid.
 """
 from __future__ import annotations
 
@@ -59,16 +59,34 @@ _AGENT_FIELDS = {
 _MIDDLEWARE_FIELDS = {
     "budget_reminder_from_left": (0, 10, True),
     "long_tool_output_max_chars": (2000, 20000, True),
+    "stall_after": (2, 30, True),
+    "max_restarts": (0, 5, True),
 }
 _TOP_KEYS = {"schema", "system_prompt", "skill_description", "skill_body",
              "tool_descriptions", "sampling", "agent", "middleware",
-             "new_tools", "remove_tools", "new_skills", "new_middlewares"}
+             "new_tools", "remove_tools", "new_skills", "new_middlewares",
+             "remove_generated"}
 
 _SKILL_NAME_RE = re.compile(r"^[a-z][a-z0-9-]{2,39}$")
 _MW_NAME_RE = re.compile(r"^[a-z][a-z0-9_]{2,31}$")
-_MW_HOOKS = {"before_model", "after_model", "before_tool", "after_tool"}
+# Generated middleware currently injects framework messages into the model
+# context.  Other NexAU hook types have different input/output contracts and
+# are rejected until they receive their own audited adapters.
+_MW_HOOKS = {"before_model"}
 _MAX_NEW_SKILLS = 2
 _MAX_NEW_MIDDLEWARES = 2
+GENERATED_COMPONENT_FIELDS = ("new_tools", "new_skills", "new_middlewares")
+_REMOVE_GENERATED_KEYS = {
+    "tools": "new_tools",
+    "skills": "new_skills",
+    "middlewares": "new_middlewares",
+}
+_CORE_H2_TOOLS = ("edit_solution", "evaluate_solution", "probe_solution", "finish")
+_CORE_H2_SKILLS = ("discovery-optimization",)
+_CORE_H2_MIDDLEWARES = (
+    "BudgetReminderMiddleware", "StallRestartMiddleware",
+    "LongToolOutputMiddleware", "RoundAndTokenReminderMiddleware",
+)
 
 
 @dataclass
@@ -287,6 +305,43 @@ def parse_and_validate(text: str) -> SpecValidation:
             if good:
                 out["new_middlewares"] = good
 
+    # Explicit deletion is required because omission means inheritance.  The
+    # file-native H1 workflow derives this mapping when a component is removed
+    # from agent.yaml and its files are deleted.
+    if "remove_generated" in data:
+        rg = data["remove_generated"]
+        if not isinstance(rg, dict):
+            errors.append("remove_generated: must be a mapping")
+        else:
+            extra = set(rg) - set(_REMOVE_GENERATED_KEYS)
+            if extra:
+                errors.append(
+                    f"remove_generated: unknown component groups {sorted(extra)}"
+                )
+            good_removed: Dict[str, List[str]] = {}
+            for group, field_name in _REMOVE_GENERATED_KEYS.items():
+                if group not in rg:
+                    continue
+                names = rg[group]
+                if not isinstance(names, list) or not all(
+                    isinstance(name, str) for name in names
+                ):
+                    errors.append(
+                        f"remove_generated.{group}: must be a list of names"
+                    )
+                    continue
+                pattern = _SKILL_NAME_RE if field_name == "new_skills" else _TOOL_NAME_RE
+                bad = [name for name in names if not pattern.match(name)]
+                if bad:
+                    errors.append(
+                        f"remove_generated.{group}: invalid names {sorted(set(bad))}"
+                    )
+                    continue
+                if names:
+                    good_removed[group] = sorted(set(names))
+            if good_removed:
+                out["remove_generated"] = good_removed
+
     mutated = set(out) - {"schema"}
     if not mutated:
         errors.append("spec mutates nothing (all fields missing/invalid)")
@@ -304,11 +359,189 @@ def spec_hash(spec: Dict[str, Any]) -> str:
     return "sha256:" + hashlib.sha256(canonical_json(spec).encode()).hexdigest()[:16]
 
 
+def _rows_by_name(rows: Any) -> Dict[str, Dict[str, Any]]:
+    return {
+        str(row["name"]): row
+        for row in (rows or [])
+        if isinstance(row, dict) and row.get("name")
+    }
+
+
+def merge_named_components(
+    inherited: Any, proposed: Any,
+) -> List[Dict[str, Any]]:
+    """Return a stable, name-keyed union of generated components.
+
+    Components are part of the ratcheted harness genome.  A proposal with a
+    new name appends one component; a proposal reusing an inherited name
+    explicitly updates that component in place.  Omitting a name never removes
+    it.  Deep copies keep proposal review/repair from mutating the base spec.
+    """
+
+    out = json.loads(json.dumps(list(inherited or [])))
+    positions = {
+        str(row.get("name")): i
+        for i, row in enumerate(out)
+        if isinstance(row, dict) and row.get("name")
+    }
+    for row in proposed or []:
+        copied = json.loads(json.dumps(row))
+        name = str(copied["name"])
+        if name in positions:
+            out[positions[name]] = copied
+        else:
+            positions[name] = len(out)
+            out.append(copied)
+    return out
+
+
+def changed_generated_components(
+    effective: Dict[str, Any], base: Dict[str, Any], field: str,
+) -> List[Dict[str, Any]]:
+    """Generated components added or explicitly updated by this candidate."""
+
+    if field not in GENERATED_COMPONENT_FIELDS:
+        raise ValueError(f"not a generated component field: {field}")
+    base_by_name = _rows_by_name(base.get(field))
+    return [
+        row for row in effective.get(field, [])
+        if base_by_name.get(str(row.get("name"))) != row
+    ]
+
+
+def generated_component_inventory(spec: Dict[str, Any]) -> Dict[str, List[str]]:
+    """Compact ordered inventory used by package provenance and audits."""
+
+    return {
+        field: [str(row["name"]) for row in spec.get(field, [])]
+        for field in GENERATED_COMPONENT_FIELDS
+    }
+
+
+def h2_component_catalog(spec: Dict[str, Any]) -> Dict[str, List[str]]:
+    """Every component name the proposer-owned H2 prompt must expose."""
+
+    removed = set(spec.get("remove_tools", []))
+    tools = [name for name in _CORE_H2_TOOLS if name not in removed]
+    tools += generated_component_inventory(spec)["new_tools"]
+    return {
+        "tools": tools,
+        "skills": list(_CORE_H2_SKILLS)
+                  + generated_component_inventory(spec)["new_skills"],
+        "middlewares": generated_component_inventory(spec)["new_middlewares"]
+                       + list(_CORE_H2_MIDDLEWARES),
+    }
+
+
+def component_prompt_issues(spec: Dict[str, Any]) -> List[str]:
+    """Missing component names in the proposer-owned executor system prompt."""
+
+    prompt = str(spec.get("system_prompt", ""))
+    issues: List[str] = []
+    for group, names in h2_component_catalog(spec).items():
+        missing = []
+        for name in names:
+            pattern = r"(?<![A-Za-z0-9_-])" + re.escape(name) \
+                      + r"(?![A-Za-z0-9_-])"
+            if re.search(pattern, prompt) is None:
+                missing.append(name)
+        if missing:
+            issues.append(
+                f"system_prompt does not name current {group}: {missing}"
+            )
+    return issues
+
+
+def diff_to_partial(
+    effective: Dict[str, Any], base: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Encode a full effective H2 as a minimal, round-local mutation.
+
+    This is also the bridge from the file-native proposer workspace back to
+    h2spec provenance.  Unlike the legacy omission-only representation, it
+    records component deletions explicitly.
+    """
+
+    out: Dict[str, Any] = {"schema": SCHEMA_VERSION}
+    for key in _TEXT_FIELDS:
+        if effective.get(key, "").strip() != base.get(key, "").strip():
+            out[key] = effective.get(key, "")
+
+    changed_descs = {}
+    for name in _TOOL_DESC_FIELDS:
+        value = effective.get("tool_descriptions", {}).get(name, "")
+        if value.strip() != base.get("tool_descriptions", {}).get(name, "").strip():
+            changed_descs[name] = value
+    if changed_descs:
+        out["tool_descriptions"] = changed_descs
+
+    for group in ("sampling", "agent", "middleware"):
+        values = {
+            key: value
+            for key, value in effective.get(group, {}).items()
+            if value != base.get(group, {}).get(key)
+        }
+        if values:
+            out[group] = values
+
+    for field in GENERATED_COMPONENT_FIELDS:
+        changed = changed_generated_components(effective, base, field)
+        if changed:
+            out[field] = json.loads(json.dumps(changed))
+
+    removed: Dict[str, List[str]] = {}
+    reverse_groups = {field: group for group, field in _REMOVE_GENERATED_KEYS.items()}
+    for field in GENERATED_COMPONENT_FIELDS:
+        effective_names = set(_rows_by_name(effective.get(field)))
+        names = [
+            name for name in _rows_by_name(base.get(field))
+            if name not in effective_names
+        ]
+        if names:
+            removed[reverse_groups[field]] = names
+    if removed:
+        out["remove_generated"] = removed
+
+    if effective.get("remove_tools", []) != base.get("remove_tools", []):
+        out["remove_tools"] = list(effective.get("remove_tools", []))
+    return out
+
+
+def generated_component_lineage(
+    base: Dict[str, Any], effective: Dict[str, Any],
+) -> Dict[str, List[Dict[str, str]]]:
+    """Label every materialized component as inherited, added, or updated."""
+
+    lineage: Dict[str, List[Dict[str, str]]] = {}
+    for field in GENERATED_COMPONENT_FIELDS:
+        base_by_name = _rows_by_name(base.get(field))
+        rows = []
+        effective_names = set()
+        for row in effective.get(field, []):
+            name = str(row["name"])
+            effective_names.add(name)
+            if name not in base_by_name:
+                status = "added"
+            elif base_by_name[name] == row:
+                status = "inherited"
+            else:
+                status = "updated"
+            rows.append({"name": name, "status": status})
+        for row in base.get(field, []):
+            name = str(row["name"])
+            if name not in effective_names:
+                rows.append({"name": name, "status": "removed"})
+        lineage[field] = rows
+    return lineage
+
+
 # --------------------------------------------------------------------------- #
 # Base-spec extraction: read the current best H2 package into spec form so the
 # proposer sees the genome it is mutating and diffs are well-defined.
 # --------------------------------------------------------------------------- #
-def read_base_spec(package_dir: Path) -> Dict[str, Any]:
+def read_base_spec(
+    package_dir: Path, *, verify_provenance: bool = True,
+) -> Dict[str, Any]:
     """Extract the mutable surface of an existing H2 package as a full spec."""
     package_dir = Path(package_dir)
     agent = yaml.safe_load((package_dir / "agent.yaml").read_text())
@@ -320,7 +553,11 @@ def read_base_spec(package_dir: Path) -> Dict[str, Any]:
                 sys_file = package_dir / alt
                 break
     skill_dirs = [package_dir / str(s).lstrip("./") for s in agent.get("skills", [])]
-    skill_md = next((d / "SKILL.md" for d in skill_dirs if (d / "SKILL.md").exists()), None)
+    skill_md = next(
+        (d / "SKILL.md" for d in skill_dirs
+         if d.name == "discovery-optimization" and (d / "SKILL.md").exists()),
+        None,
+    )
 
     skill_desc, skill_body = "", ""
     if skill_md is not None:
@@ -334,14 +571,18 @@ def read_base_spec(package_dir: Path) -> Dict[str, Any]:
             skill_body = text.strip()
 
     tool_descs = {}
-    for t in agent.get("tools", []):
-        ty = package_dir / str(t["yaml_path"]).lstrip("./")
+    # Read core schemas whether mounted or not.  In particular, removing the
+    # optional probe tool from agent.yaml must not accidentally erase its
+    # inherited description from the H2 genome.
+    for name in _TOOL_DESC_FIELDS:
+        ty = package_dir / "tools" / f"{name}.tool.yaml"
         if ty.exists():
             tdoc = yaml.safe_load(ty.read_text())
             if tdoc.get("name") in _TOOL_DESC_FIELDS:
                 tool_descs[tdoc["name"]] = str(tdoc.get("description", "")).strip()
 
     llm = agent.get("llm_config", {}) or {}
+    extra_body = ((llm.get("extra_params") or {}).get("extra_body") or {})
     mw_params: Dict[str, int] = {}
     for mw in agent.get("middlewares", []):
         imp, params = str(mw.get("import", "")), mw.get("params", {}) or {}
@@ -349,6 +590,18 @@ def read_base_spec(package_dir: Path) -> Dict[str, Any]:
             mw_params["budget_reminder_from_left"] = int(params.get("remind_from_left", 3))
         if "long_tool_output" in imp:
             mw_params["long_tool_output_max_chars"] = int(params.get("max_output_chars", 8000))
+        if "stall_restart" in imp:
+            mw_params["stall_after"] = int(params.get("stall_after", 8))
+            mw_params["max_restarts"] = int(params.get("max_restarts", 2))
+
+    mounted_tool_names = {
+        str(row.get("name")) for row in agent.get("tools", [])
+        if isinstance(row, dict)
+    }
+    removed_optional = [
+        name for name in sorted({"probe_solution"})
+        if name not in mounted_tool_names
+    ]
 
     return {
         "schema": SCHEMA_VERSION,
@@ -359,88 +612,180 @@ def read_base_spec(package_dir: Path) -> Dict[str, Any]:
         "sampling": {
             "temperature": float(llm.get("temperature", 0.7)),
             "top_p": float(llm.get("top_p", 0.95)),
-            "top_k": 20,
+            "top_k": int(extra_body.get("top_k", 20)),
             "max_tokens": int(llm.get("max_tokens", 8192)),
         },
         "agent": {"max_iterations": int(agent.get("max_iterations", 36))},
         "middleware": mw_params or {"budget_reminder_from_left": 3,
-                                    "long_tool_output_max_chars": 8000},
-        **_read_generated(package_dir, agent),
+                                    "long_tool_output_max_chars": 8000,
+                                    "stall_after": 8,
+                                    "max_restarts": 2},
+        **({"remove_tools": removed_optional} if removed_optional else {}),
+        **_read_generated(
+            package_dir, agent, verify_provenance=verify_provenance
+        ),
     }
 
 
-def _read_generated(package_dir: Path, agent: Dict[str, Any]) -> Dict[str, Any]:
+def _read_generated(
+    package_dir: Path, agent: Dict[str, Any], *, verify_provenance: bool = True,
+) -> Dict[str, Any]:
     """Recover generated tools/skills/middlewares from a materialized package so
     the harness ratchet carries them forward — without this, every candidate's
     invented tools/skills/hooks vanish and M_phi must reinvent them each round.
-    Reconstructs the h2spec/1.0 new_* fields from the package's own files."""
+    Reconstructs the h2spec/1.0 new_* fields from the components ACTUALLY
+    mounted by ``agent.yaml``.  Declared-but-missing components fail closed;
+    silently omitting one would corrupt the cross-round harness lineage."""
     out: Dict[str, Any] = {}
     reserved = {"discovery-optimization"}
 
-    # generated tools: custom_tools/<name>.py bound via custom_runtime dispatcher
-    ct_dir = package_dir / "custom_tools"
-    if ct_dir.is_dir():
-        by_name = {}
-        for t in agent.get("tools", []):
-            if "custom_runtime" in str(t.get("binding", "")):
-                ty = package_dir / str(t["yaml_path"]).lstrip("./")
-                desc, isch = "", {"type": "object", "properties": {}}
-                if ty.exists():
-                    doc = yaml.safe_load(ty.read_text()) or {}
-                    desc = str(doc.get("description", "")).strip()
-                    isch = doc.get("input_schema", isch)
-                by_name[t["name"]] = (desc, isch)
-        tools = []
-        for py in sorted(ct_dir.glob("*.py")):
-            name = py.stem
-            desc, isch = by_name.get(name, ("", {"type": "object", "properties": {}}))
-            tools.append({"name": name, "description": desc or f"generated tool {name}",
-                          "input_schema": isch, "implementation_py": py.read_text()})
-        if tools:
-            out["new_tools"] = tools
+    meta_effective: Dict[str, Any] = {}
+    meta_path = package_dir / "meta.json"
+    if meta_path.exists():
+        try:
+            meta = json.loads(meta_path.read_text())
+            if isinstance(meta.get("effective"), dict):
+                meta_effective = meta["effective"]
+        except Exception as exc:
+            raise ValueError(f"invalid package meta.json: {exc}") from exc
+    meta_rows = {
+        field: _rows_by_name(meta_effective.get(field))
+        for field in GENERATED_COMPONENT_FIELDS
+    }
 
-    # generated skills: skills/<name>/SKILL.md beyond the base skill
-    sk_root = package_dir / "skills"
-    if sk_root.is_dir():
-        skills = []
-        for d in sorted(sk_root.iterdir()):
-            if not d.is_dir() or d.name in reserved:
-                continue
-            md = d / "SKILL.md"
-            if not md.exists():
-                continue
-            text = md.read_text()
-            fm = re.match(r"---\n(.*?)\n---\n(.*)", text, re.DOTALL)
-            if fm:
-                meta = yaml.safe_load(fm.group(1)) or {}
-                skills.append({"name": d.name,
-                               "description": str(meta.get("description", "")).strip(),
-                               "body": fm.group(2).strip()})
-        if skills:
-            out["new_skills"] = skills
+    def package_path(value: Any) -> Path:
+        path = Path(str(value))
+        return path if path.is_absolute() else package_dir / str(value).lstrip("./")
+
+    # Generated tools: agent.yaml is authoritative.  Do not inherit stale .py
+    # files that happen to remain in custom_tools/ but are not mounted.
+    tools = []
+    for tool in agent.get("tools", []):
+        if "custom_runtime" not in str(tool.get("binding", "")):
+            continue
+        name = str(tool.get("name", ""))
+        if not name:
+            raise ValueError("mounted generated tool has no name")
+        schema_path = package_path(tool.get("yaml_path", ""))
+        if not schema_path.is_file():
+            raise ValueError(f"mounted generated tool {name!r} is missing {schema_path}")
+        doc = yaml.safe_load(schema_path.read_text()) or {}
+        local_code = package_dir / "custom_tools" / f"{name}.py"
+        declared_code = package_path((tool.get("extra_kwargs") or {}).get("py_path", ""))
+        code_path = local_code if local_code.is_file() else declared_code
+        if not code_path.is_file():
+            raise ValueError(f"mounted generated tool {name!r} has no implementation")
+        prior = meta_rows["new_tools"].get(name, {})
+        tools.append({
+            "name": name,
+            "description": str(doc.get("description") or prior.get("description")
+                               or f"generated tool {name}").strip(),
+            "input_schema": doc.get("input_schema") or prior.get("input_schema")
+                            or {"type": "object", "properties": {}},
+            "implementation_py": code_path.read_text(),
+        })
+    if tools:
+        out["new_tools"] = tools
+
+    # Generated skills: inherit only skill directories listed in agent.yaml.
+    skills = []
+    for binding in agent.get("skills", []):
+        skill_dir = package_path(binding)
+        name = skill_dir.name
+        if name in reserved:
+            continue
+        skill_md = skill_dir if skill_dir.name == "SKILL.md" else skill_dir / "SKILL.md"
+        if not skill_md.is_file():
+            raise ValueError(f"mounted generated skill {name!r} is missing {skill_md}")
+        text = skill_md.read_text()
+        fm = re.match(r"---\n(.*?)\n---\n(.*)", text, re.DOTALL)
+        prior = meta_rows["new_skills"].get(name, {})
+        if fm:
+            frontmatter = yaml.safe_load(fm.group(1)) or {}
+            if frontmatter.get("name") not in (None, name):
+                raise ValueError(
+                    f"generated skill frontmatter name mismatch for {name!r}"
+                )
+            body = fm.group(2).strip()
+            desc = str(frontmatter.get("description") or prior.get("description") or "")
+        else:
+            body = text.strip()
+            desc = str(prior.get("description") or "")
+        skills.append({"name": name, "description": desc.strip(), "body": body})
+    if skills:
+        out["new_skills"] = skills
 
     # generated middlewares: middlewares/<name>.py bound as GeneratedMiddleware
     gen_mw = [m for m in agent.get("middlewares", [])
               if str(m.get("import", "")).endswith(":GeneratedMiddleware")]
     mws = []
     for m in gen_mw:
-        name = str(m["import"]).split(".")[1].split(":")[0]
+        module = str(m["import"]).split(":", 1)[0]
+        name = module.rsplit(".", 1)[-1]
         py = package_dir / "middlewares" / f"{name}.py"
-        if not py.exists():
-            continue
+        if not py.is_file():
+            raise ValueError(f"mounted generated middleware {name!r} is missing {py}")
         src = py.read_text()
         # recover the ORIGINAL user hook body (between sentinels), not the
         # nexau-importing wrapper — re-gating the wrapper would fail the import
         # whitelist and drop the inherited middleware.
         seg = re.search(r"# --USER-HOOK-START--\n(.*?)\n# --USER-HOOK-END--", src, re.DOTALL)
-        user_code = seg.group(1) if seg else src
-        hook = next((h for h in _MW_HOOKS if f"def {h}(hook_input)" in user_code),
-                    "before_model")
+        prior = meta_rows["new_middlewares"].get(name, {})
+        descriptor_path = package_dir / "middlewares" / f"{name}.middleware.yaml"
+        descriptor: Dict[str, Any] = {}
+        if descriptor_path.is_file():
+            descriptor = yaml.safe_load(descriptor_path.read_text()) or {}
+            if descriptor.get("name") not in (None, name):
+                raise ValueError(
+                    f"middleware descriptor name mismatch for {name!r}"
+                )
+        if seg:
+            user_code = seg.group(1)
+        elif isinstance(prior.get("implementation_py"), str):
+            user_code = prior["implementation_py"]
+        elif re.search(
+            r"def\s+before_model\s*\(\s*hook_input", src
+        ):
+            # A newly authored draft may contain the raw user hook.  The final
+            # materializer wraps it in GeneratedMiddleware after validation.
+            user_code = src
+        else:
+            raise ValueError(
+                f"cannot recover user hook body for generated middleware {name!r}"
+            )
+        hook_match = re.search(r"def\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*\(\s*hook_input", user_code)
+        hook = str(descriptor.get("hook") or prior.get("hook")
+                   or (hook_match.group(1) if hook_match else ""))
+        if hook not in _MW_HOOKS:
+            raise ValueError(f"generated middleware {name!r} uses unsupported hook {hook!r}")
         mws.append({"name": name, "hook": hook,
-                    "description": f"generated middleware {name}",
+                    "description": str(descriptor.get("description")
+                                       or prior.get("description")
+                                       or f"generated middleware {name}"),
                     "implementation_py": user_code})
     if mws:
         out["new_middlewares"] = mws
+
+    # If provenance says a component was effective but agent.yaml does not
+    # mount it, stop here.  Continuing would silently sever the ratchet.
+    actual = generated_component_inventory(out)
+    if verify_provenance:
+        for field in GENERATED_COMPONENT_FIELDS:
+            recorded = list(meta_rows[field])
+            if recorded and recorded != actual[field]:
+                raise ValueError(
+                    f"package component mismatch for {field}: "
+                    f"meta={recorded}, mounted={actual[field]}"
+                )
+    manifest_path = package_dir / "component_manifest.json"
+    if verify_provenance and manifest_path.exists():
+        manifest = json.loads(manifest_path.read_text())
+        recorded_inventory = manifest.get("inventory") or {}
+        if recorded_inventory != actual:
+            raise ValueError(
+                "component_manifest.json does not match mounted package: "
+                f"manifest={recorded_inventory}, mounted={actual}"
+            )
     return out
 
 
@@ -455,16 +800,27 @@ def merge_with_base(spec: Dict[str, Any], base: Dict[str, Any]) -> Dict[str, Any
     for group in ("sampling", "agent", "middleware"):
         if group in spec:
             eff.setdefault(group, {}).update(spec[group])
-    # generative surface (h2spec/1.0): tools are additive per candidate; the
-    # base never carries new_tools, so a plain copy is the effective set.
-    if "new_tools" in spec:
-        eff["new_tools"] = spec["new_tools"]
+    # Generated components are a ratcheted, name-keyed genome.  New names are
+    # appended; reusing a name explicitly updates it; omission inherits it.
+    for field in GENERATED_COMPONENT_FIELDS:
+        if field in spec:
+            merged = merge_named_components(base.get(field), spec[field])
+            if merged:
+                eff[field] = merged
+    for group, field in _REMOVE_GENERATED_KEYS.items():
+        removed = set((spec.get("remove_generated") or {}).get(group, []))
+        if not removed:
+            continue
+        kept = [
+            row for row in eff.get(field, [])
+            if str(row.get("name")) not in removed
+        ]
+        if kept:
+            eff[field] = kept
+        else:
+            eff.pop(field, None)
     if "remove_tools" in spec:
         eff["remove_tools"] = spec["remove_tools"]
-    if "new_skills" in spec:
-        eff["new_skills"] = spec["new_skills"]
-    if "new_middlewares" in spec:
-        eff["new_middlewares"] = spec["new_middlewares"]
     eff["schema"] = SCHEMA_VERSION
     return eff
 
@@ -483,14 +839,13 @@ def differs_from_base(effective: Dict[str, Any], base: Dict[str, Any]) -> Tuple[
         for key, val in effective.get(group, {}).items():
             if val != base.get(group, {}).get(key):
                 changed.append(f"{group}.{key}")
-    # generative surface (h2spec/1.0): the base never carries these, so their
-    # presence in the effective spec is itself a change
-    for t in effective.get("new_tools", []):
-        changed.append(f"new_tools.{t.get('name', '?')}")
-    for sk in effective.get("new_skills", []):
-        changed.append(f"new_skills.{sk.get('name', '?')}")
-    for mw in effective.get("new_middlewares", []):
-        changed.append(f"new_middlewares.{mw.get('name', '?')}")
-    if effective.get("remove_tools"):
+    for field in GENERATED_COMPONENT_FIELDS:
+        for row in changed_generated_components(effective, base, field):
+            changed.append(f"{field}.{row.get('name', '?')}")
+        effective_names = set(_rows_by_name(effective.get(field)))
+        for name in _rows_by_name(base.get(field)):
+            if name not in effective_names:
+                changed.append(f"{field}.{name}.removed")
+    if effective.get("remove_tools", []) != base.get("remove_tools", []):
         changed.append("remove_tools")
     return (len(changed) > 0, changed)

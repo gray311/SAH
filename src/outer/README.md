@@ -8,10 +8,11 @@ frozen forever (plan.md §0).
 
 ```
 1. propose   M_phi (Qwen3.5-9B ⊕ LoRA phi) + fixed H1 prompt
-             --K samples--> K=8 HarnessSpec YAMLs
+             --K samples--> K=8 private H2 filesystem edits
+             (cat agent.yaml → inspect mounted files → edit → validate → submit)
              → fail-closed validation (must differ from current best H2;
                duplicates/invalid kept as records with fixed reward -1)
-             → materialize each valid spec into a FULL NexAU package:
+             → recompile each valid workspace into a FULL NexAU package:
                candNN/{agent.yaml, prompt.md, tools/, skills/, middlewares/}
 2. rollouts  frozen M0 + each candidate H2 → 8 tasks × ≤20 evals
              (one process per candidate; replicas sharded over 4 GPUs)
@@ -24,27 +25,26 @@ frozen forever (plan.md §0).
              round's proposer
 ```
 
-## The genome (HarnessSpec v0.1)
+## The H2 genome
 
-M_phi does not write arbitrary code (plan.md §5 MVP): it emits a typed YAML
-spec — `system_prompt`, `skill_description`, `skill_body`,
-`tool_descriptions.{edit_solution,evaluate_solution,finish}`,
-`sampling.{temperature,top_p,top_k,max_tokens}`, `agent.max_iterations`,
-`middleware.{budget_reminder_from_left,long_tool_output_max_chars}`.
-Missing fields inherit the base harness; unknown fields fail closed; the
-evaluation budget is NOT in the spec (enforced externally, plan.md §8.4).
-`materialize.py` compiles a spec deterministically into the full package
-(tool/middleware *code* is the fixed executor contract, shared; candidate
-`middlewares/` carries the imported per-candidate copy).
+M_phi edits a complete private copy of H2. `agent.yaml` is the mount graph;
+`prompt.md` is the proposer-owned executor system prompt; generated tool,
+skill, and middleware files are inherited and editable in place. Adding or
+deleting a component requires a consistent file, mount, and prompt change.
+The workspace validator parses these files back into a typed semantic spec,
+checks safety and inheritance, then `materialize.py` deterministically rebuilds
+the runnable package. Core runtime bindings and the evaluation budget remain
+externally fixed.
 
 ## Files
 
 | File | Role |
 |---|---|
-| **`harness/`** | **H1 — the FIXED proposer harness, a full NexAU package**: `agent.yaml` + `system.md` + `tools/{validate_spec,submit_spec}` + `skills/harness-design/` + `middlewares/submit_reminder.py`. The proposer drafts a spec, `validate_spec`s it (free), then `submit_spec`s (stop tool). Never mutated; hashed for provenance. |
+| **`harness/`** | **H1 — the FIXED proposer harness**: read-only shell-shaped inspection plus H2 file edit/delete/validate/submit tools. Never mutated during training; hashed for provenance. |
+| `h2_workspace.py` | candidate-isolated H2 filesystem, safe path handling, mount/file/prompt checks, semantic extraction, canonical compile validation |
 | `harness_spec.py` | spec schema, fail-closed validation, canonical hash, base-spec extraction, diff-vs-base |
 | `h1.py` | round-context builder (user message = base spec + per-task baseline) + H1 package hash |
-| `propose_session.py` | ProposeSession state + contextvar bridge behind H1's tools |
+| `propose_session.py` | ProposeSession state + contextvar bridge behind H1's filesystem tools |
 | `propose.py` | run the H1 agent K times (threaded across replicas) → CandidateRecords (+ full trajectories for GRPO) |
 | `materialize.py` | effective spec → full candidate package (matches `src/inner/harness_candidate/candNN` scaffold) |
 | `rewards.py` | per-task normalized rewards vs `results/baseline_h2_20ev.json`, GRPO group advantages |
@@ -53,7 +53,7 @@ evaluation budget is NOT in the spec (enforced externally, plan.md §8.4).
 Both loops' harnesses are declarative NexAU packages: H1 = `src/outer/harness/`
 (fixed), H2 = `src/inner/harness/` (round-1 base) and `round00r/candNN/`
 (generated candidates). GRPO trains on the proposer's full H1 trajectories
-(draft→validate→submit tool calls), which is exactly the multi-turn format
+(inspect→edit→validate→submit tool calls), which is exactly the multi-turn format
 Weave's slime stack masks and trains on.
 
 Round artifacts land in `$RUN_ROOT/self_adapt_harness/outer/round00r/`:

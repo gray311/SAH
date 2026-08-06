@@ -53,15 +53,21 @@ done
 log "vllm ready"
 
 cd "$SAH/src"
+pids=()
 for k in $(seq 0 $((K-1))); do
   OPENAI_BASE_URL="http://127.0.0.1:8800/v1" python3 -m inner.run_baseline \
     --harness-dir "$SAH/src/inner/harness" --ids "$TASK" \
     --base-url "http://127.0.0.1:8800/v1" --model "$SERVED_MODEL" \
     --max-evals "$MAX_EVALS" --eval-timeout "$EVAL_TIMEOUT" \
-    --eval-python python3 --no-trajectory \
+    --eval-python python3 --require-trajectory \
     --out "$OUT_DIR/k$k" > "$OUT_DIR/k$k.log" 2>&1 &
+  pids+=("$!")
 done
-wait
+rc=0
+for pid in "${pids[@]}"; do wait "$pid" || rc=1; done
+[ "$rc" -eq 0 ] || { log "one or more executor trajectories failed"; exit 1; }
+python3 "$SAH/scripts/audit_trajectories.py" "$OUT_DIR" \
+  || { log "trajectory artifact audit failed"; exit 1; }
 log "rollouts done"
 
 python3 - "$OUT_DIR" "$TASK" <<'PY'

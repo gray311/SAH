@@ -16,9 +16,7 @@ import hashlib
 from pathlib import Path
 from typing import Any, Dict
 
-import yaml
-
-H1_VERSION = "h1/1.0-generative"
+H1_VERSION = "h1/2.0-file-native"
 H1_PACKAGE = Path(__file__).resolve().parent / "harness"
 
 _SEED_PROGRAM_CAP = 5000  # chars of the seed program shown to the proposer
@@ -37,15 +35,17 @@ USER_TEMPLATE = """# Task instance: {task_id}
 - seed program alone: {seed_score:.6g}
 - current harness best: {base_score:.6g}{stuck_tag}
 
-# Current harness for this task (the spec you are mutating; omitted fields inherit from it)
-```yaml
-{base_spec_yaml}
-```
+# Current H2 harness
+A complete private filesystem copy of the current H2 is available through the
+harness file tools. Do not assume its contents from prior rounds. Your FIRST
+action must be `harness_shell(command="cat agent.yaml")`. Follow mounts only as
+needed. Next read `prompt.md`. For example, if you may change tools, run
+`ls tools/`, then `cat` the specific schema and implementation before editing.
 
 # Task
-Design ONE harness spec tailored to THIS task. Load the harness-design skill,
-analyze why the current harness reaches only {base_score:.6g} here, draft your
-spec, validate_spec it, then submit_spec it."""
+Design ONE H2 tailored to THIS task by inspecting and editing that filesystem.
+Diagnose why the current H2 reaches only {base_score:.6g}, make one coherent
+file-level change, call validate_harness, then submit_harness."""
 
 
 def build_user_message(*, task_id: str, task_spec: str, seed_program: str,
@@ -66,8 +66,6 @@ def build_user_message(*, task_id: str, task_spec: str, seed_program: str,
         seed_score=seed_score,
         base_score=base_score,
         stuck_tag=stuck,
-        base_spec_yaml=yaml.safe_dump(base_spec, sort_keys=False, allow_unicode=True,
-                                      width=100).strip(),
         max_evals=max_evals,
     )
 
@@ -89,9 +87,22 @@ def render_feedback(fb: dict) -> str:
     ]
     if fb.get("analyst_note"):
         lines.append("ANALYST NOTE: " + fb["analyst_note"])
+    best = fb.get("best_score") or fb.get("base_score", 0.0)
+    accepted = fb.get("accepted_improvement")
+    accepted_score = fb.get("outgoing_base_score", fb.get("base_score", 0.0))
+    if accepted is False and best > fb.get("base_score", 0.0):
+        score_line = (
+            "The raw candidate maximum was %.6g, but it was not accepted "
+            "(%s); the incumbent remains %.6g."
+            % (best, fb.get("program_ratchet_reason", "attribution failed"), accepted_score)
+        )
+    else:
+        score_line = (
+            "The starting score was %.6g; the best of 8 candidate harnesses reached %.6g."
+            % (fb.get("base_score", 0.0), best)
+        )
     lines += [
-        "The starting score was %.6g; the best of 8 candidate harnesses reached %.6g."
-        % (fb.get("base_score", 0.0), (fb.get("best_score") or fb.get("base_score", 0.0))),
+        score_line,
         "%s of the candidates made NO progress past the starting program." % fb.get("n_stuck_at_base", "?"),
         "Per-candidate outcomes (k: score, evals used, stop reason, changed fields):",
     ]

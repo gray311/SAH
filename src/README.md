@@ -31,15 +31,16 @@ to see who pulls a module in.
 
 | file | role |
 |---|---|
-| `harness/` | **the H1 harness itself** (the proposer): `agent.yaml`, `system.md` (harness-engineer role + h2spec schema + tool-writing guide), `tools/{validate_spec,submit_spec}`, `skills/harness-design/`, `middlewares/submit_reminder.py`. Fixed forever |
+| `harness/` | **the H1 harness itself**: a complete file-native system prompt plus inspect/edit/delete/validate/submit tools over one private H2 filesystem. Fixed during training |
 | `proposer_io.py` | glue around that harness (NOT H1 itself): builds the round's USER message per task, `render_feedback`, `H1_PACKAGE`/`H1_VERSION`/`h1_hash`. Renamed from `h1.py` |
-| `harness_spec.py` | **the genome**: h2spec/1.0 typed spec — fail-closed validate, merge over base, hash. Declarative fields (prompt/skill/tool-descriptions/sampling/agent/middleware) **plus** generative `new_tools[]`/`remove_tools[]` |
-| `propose_session.py` | `ProposeSession` + contextvar; backs H1's `validate_spec`/`submit_spec` |
-| `propose.py` | `run_once`: one H1 agent run -> `CandidateRecord`; **runs the reviewer on every generated tool** (repairer = same frozen M0) before accepting |
+| `harness_spec.py` | typed semantic H2 genome — extraction, fail-closed validation, explicit generated-component deletion, parent diff, and hash |
+| `h2_workspace.py` | candidate-isolated filesystem tools and validation; `agent.yaml`/files/`prompt.md` must agree before canonical compilation |
+| `propose_session.py` | `ProposeSession` + contextvar; backs H1's filesystem and submit tools |
+| `propose.py` | `run_once`: one H1 agent run -> `CandidateRecord`; accepted bytes are exactly the H1-validated/submitted bytes—there is no post-submit model repair |
 | `static_gates.py` | fail-closed AST gate for generated tool code (single `run(ctx,args)`, import whitelist, no os/open/exec) |
-| `reviewer/reviewer.py` | repair loop for generated tools + anti-leak defenses (same-model repairer, prompt scrubbing, localization guard, re-gate) |
+| `reviewer/reviewer.py` | static-gate + self-test helper used with repair disabled by canonical `validate_harness`; optional repair API is legacy-only |
 | `reviewer/selftest.py` | subprocess self-test of a tool against `MockContext` under rlimits |
-| `materialize.py` | spec -> a full candidate H2 package on disk (`agent.yaml` + `prompt.md` + `skills/` + `tools/` + `custom_tools/<name>.py` + `middlewares/`) |
+| `materialize.py` | validated semantic genome -> full canonical candidate H2; verifies but never rewrites the proposer-owned executor prompt |
 | `rewards.py` | task reward + GRPO advantages: gap-normalized reward, RLOO baseline, max-weighted sharpening, zero-signal/tie guards |
 | `outer_round.py` | the round orchestrator CLI: `propose` (K H1 runs -> materialize) and `collect` (rollouts -> rewards -> `grpo_batch.jsonl` + `next_bases.json`). `--force-tool-frac` for structured tool exploration |
 
@@ -54,7 +55,7 @@ to see who pulls a module in.
 ```
 proposer_io.build_user_message ─┐
                                 ▼
-  outer/harness (H1) × K ── propose.run_once ── reviewer(tools) ── materialize
+  outer/harness (H1) × K ── validate_harness ── submit_harness ── materialize
                                                                        │
                                           round/tasks/<task>/candNN/   ▼
                                           (agent.yaml + custom_tools/)  │

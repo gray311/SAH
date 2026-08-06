@@ -16,6 +16,10 @@ log(){ echo "[$(date -Is)] $*"; }
 
 ROUND_DIR="$OUT_DIR/round$(printf '%03d' "$ROUND_ID")"
 mkdir -p "$ROUND_DIR"
+if [ -n "${RUNTIME_SOURCE_MANIFEST:-}" ]; then
+  python3 "$REPO/scripts/runtime_provenance.py" verify \
+    --manifest "$RUNTIME_SOURCE_MANIFEST"
+fi
 
 # --- deps --- #
 export UV_BREAK_SYSTEM_PACKAGES=1
@@ -90,18 +94,62 @@ python3 -m outer.outer_round propose \
   --parallel "${PROPOSE_PAR:-8}" \
   2>&1 | tee "$ROUND_DIR/propose.log"
 
-# --- rollouts: one process per (task, valid candidate), bounded pool --- #
-mapfile -t PAIRS < <(python3 - "$ROUND_DIR" <<'PY'
+# The proposer and executor must see the same exact program parent.  propose
+# snapshots the mutable cross-round registry before any H1 call; every H2 slot
+# below consumes only that round-local snapshot.
+ROUND_SEED_PROGRAMS_FILE="$ROUND_DIR/seed_programs_in.json"
+[ -s "$ROUND_SEED_PROGRAMS_FILE" ] || {
+  echo "missing immutable seed-program snapshot: $ROUND_SEED_PROGRAMS_FILE" >&2
+  exit 2
+}
+python3 - "$ROUND_DIR/round.json" "$ROUND_SEED_PROGRAMS_FILE" <<'PY'
+import hashlib, json, sys
+meta = json.load(open(sys.argv[1]))
+raw = open(sys.argv[2], "rb").read()
+expected = (meta.get("cross_round_inputs", {}).get("seed_programs", {})
+            .get("snapshot_sha256"))
+observed = hashlib.sha256(raw).hexdigest()
+if not expected or observed != expected:
+    raise SystemExit(
+        f"immutable seed-program snapshot mismatch: expected={expected} observed={observed}"
+    )
+payload = json.loads(raw)
+if not isinstance(payload, dict):
+    raise SystemExit("immutable seed-program snapshot is not a JSON object")
+PY
+
+# --- rollouts: one process per declared H2 slot, bounded pool ------------ #
+# Legacy rounds contain only valid candidate slots.  The inference-16 protocol
+# uses exactly K=8 H2 slots: an invalid/duplicate H1 proposal spends its paired
+# H2 slot on the incoming task-local incumbent harness.  The collector still
+# attributes that H1 row as invalid (-1); the fallback is budget accounting,
+# not a way to launder an invalid proposal into a positive training example.
+fixed_args=()
+if [ "${SAH_FIXED_INFERENCE_SLOTS:-0}" = 1 ]; then
+  fixed_args+=(--fixed-slots)
+  [ -z "${SCREEN_EVALS:-}" ] || {
+    echo "fixed inference slots are incompatible with cascade SCREEN_EVALS" >&2
+    exit 2
+  }
+fi
+python3 -m outer.trajectory_budget --round-dir "$ROUND_DIR" "${fixed_args[@]}"
+mapfile -t PAIRS < <(python3 - "$ROUND_DIR/h2_slot_plan.json" <<'PY'
 import json, sys
-meta = json.load(open(f"{sys.argv[1]}/round.json"))
-for tid in meta["tasks_order"]:
-    for c in meta["per_task"][tid]["candidates"]:
-        if c["valid"]:
-            print(f"{tid}:{c['k']}")
+for row in json.load(open(sys.argv[1]))["slots"]:
+    print("\t".join((
+        row["task_id"], str(row["k"]), row["h2_harness_dir"],
+        "1" if row["h2_slot_mode"] == "incumbent_fallback" else "0",
+    )))
 PY
 )
 MAX_PAR="${ROLLOUT_PAR:-8}"
-log "rollouts: ${#PAIRS[@]} (task,cand) pairs, <= $MAX_PAR concurrent"
+fallback_count=$(python3 - "$ROUND_DIR/h2_slot_plan.json" <<'PY'
+import json, sys
+print(sum(row["h2_slot_mode"] == "incumbent_fallback"
+          for row in json.load(open(sys.argv[1]))["slots"]))
+PY
+)
+log "rollouts: ${#PAIRS[@]} H2 slots ($fallback_count incumbent fallbacks), <= $MAX_PAR concurrent"
 mkdir -p "$ROUND_DIR/rollout_logs"
 # With split serving, M_phi (replica 0) is no longer needed after propose:
 # restart replica 0 with the FROZEN BASE so rollouts get all N replicas.
@@ -134,19 +182,28 @@ if [ -n "${MPHI_PATH:-}" ]; then
     RB=8801; RN=$((N_REPLICAS - 1))
   fi
 fi
-run_rollout(){ # tid k evals logsuffix
-  local tid="$1" k="$2" evals="$3" sfx="$4"
+run_rollout(){ # tid k evals logsuffix harness_dir fallback_flag
+  local tid="$1" k="$2" evals="$3" sfx="$4" cdir="$5" fallback="$6"
   local port=$((RB + ROLL_IDX % RN)); ROLL_IDX=$((ROLL_IDX + 1))
-  local cdir; cdir=$(printf '%s/tasks/%s/cand%02d' "$ROUND_DIR" "$tid" "$k")
-  OPENAI_BASE_URL="http://127.0.0.1:$port/v1" python3 -m inner.run_baseline \
+  local logical_index="${LOGICAL_ROUND_INDEX:-0}"
+  # Reserve a 16-seed block per logical comparison batch.  H1 routes consume
+  # the first eight; the executor route consumes all sixteen, so its first
+  # eight are paired exactly with proposer/context.
+  local decode_seed=$(( ${H2_SEED_BASE:-200000} + logical_index * 16 + k ))
+  [ "$fallback" = 1 ] && log "  H2 slot $tid/cand$(printf '%02d' "$k"): incumbent fallback"
+  OPENAI_BASE_URL="http://127.0.0.1:$port/v1" \
+    timeout --foreground --kill-after=60s "${ROLLOUT_WALL_TIMEOUT:-10800}s" \
+    python3 -m inner.run_baseline \
     --harness-dir "$cdir" --ids "$tid" \
     --base-url "http://127.0.0.1:$port/v1" --model "$SERVED_MODEL" \
     --max-evals "$evals" ${EVAL_TIMEOUT:+--eval-timeout "$EVAL_TIMEOUT"} \
-    ${SEED_PROGRAMS_FILE:+--seed-programs-file "$SEED_PROGRAMS_FILE"} \
-    --eval-python python3 --no-trajectory \
+    --seed "$decode_seed" \
+    --seed-programs-file "$ROUND_SEED_PROGRAMS_FILE" \
+    --eval-python python3 --require-trajectory \
     --out "$ROUND_DIR/rollouts/$tid/cand$(printf '%02d' "$k")" \
     > "$ROUND_DIR/rollout_logs/${tid}-cand$(printf '%02d' "$k")${sfx}.log" 2>&1 &
 }
+log "trajectory watchdog=${ROLLOUT_WALL_TIMEOUT:-10800}s (launched work remains charged)"
 ROLL_IDX=0; rc=0
 if [ -n "${SCREEN_EVALS:-}" ]; then
   # Successive halving: every candidate gets a cheap SCREEN_EVALS rollout,
@@ -155,8 +212,9 @@ if [ -n "${SCREEN_EVALS:-}" ]; then
   log "cascade pass 1: ${#PAIRS[@]} candidates @ $SCREEN_EVALS evals"
   for pair in "${PAIRS[@]:-}"; do
     [ -n "$pair" ] || continue
+    IFS=$'\t' read -r tid k cdir fallback <<< "$pair"
     while (( $(jobs -rp | wc -l) >= MAX_PAR )); do wait -n || rc=1; done
-    run_rollout "${pair%%:*}" "${pair##*:}" "$SCREEN_EVALS" "-screen"
+    run_rollout "$tid" "$k" "$SCREEN_EVALS" "-screen" "$cdir" "$fallback"
   done
   while (( $(jobs -rp | wc -l) > 0 )); do wait -n || rc=1; done
   mapfile -t PROMOTED < <(python3 "$REPO/scripts/cascade_promote.py" "$ROUND_DIR" "${PROMOTE:-4}")
@@ -164,18 +222,23 @@ if [ -n "${SCREEN_EVALS:-}" ]; then
   for pair in "${PROMOTED[@]:-}"; do
     [ -n "$pair" ] || continue
     while (( $(jobs -rp | wc -l) >= MAX_PAR )); do wait -n || rc=1; done
-    run_rollout "${pair%%:*}" "${pair##*:}" "$MAX_EVALS" "-full"
+    tid="${pair%%:*}"; k="${pair##*:}"
+    cdir=$(printf '%s/tasks/%s/cand%02d' "$ROUND_DIR" "$tid" "$k")
+    run_rollout "$tid" "$k" "$MAX_EVALS" "-full" "$cdir" 0
   done
   while (( $(jobs -rp | wc -l) > 0 )); do wait -n || rc=1; done
 else
   for pair in "${PAIRS[@]:-}"; do
     [ -n "$pair" ] || continue
+    IFS=$'\t' read -r tid k cdir fallback <<< "$pair"
     while (( $(jobs -rp | wc -l) >= MAX_PAR )); do wait -n || rc=1; done
-    run_rollout "${pair%%:*}" "${pair##*:}" "$MAX_EVALS" ""
+    run_rollout "$tid" "$k" "$MAX_EVALS" "" "$cdir" "$fallback"
   done
   while (( $(jobs -rp | wc -l) > 0 )); do wait -n || rc=1; done
 fi
 log "rollouts finished (rc=$rc)"
+[ "$rc" -eq 0 ] || { log "one or more rollouts failed; refusing to collect"; exit "$rc"; }
+python3 "$REPO/scripts/audit_trajectories.py" "$ROUND_DIR/rollouts"
 
 # --- collect --- #
 python3 -m outer.outer_round collect --round-dir "$ROUND_DIR" 2>&1 | tee "$ROUND_DIR/collect.log"

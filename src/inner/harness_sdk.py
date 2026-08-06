@@ -28,63 +28,93 @@ SCRATCH_CAP_BYTES = 8 * 1024 * 1024
 class ToolContext:
     """Capability object handed to generated tools."""
 
+    __slots__ = (
+        "_get_program_fn", "_get_best_program_fn", "_best_score_fn",
+        "_stage_edit_fn", "_probe_fn", "_evaluate_fn", "_ledger_fn",
+        "_history_note_fn", "_task_dir", "_scratch",
+    )
+
     def __init__(self, session, scratch_dir: Path):
-        self._s = session
+        # Do not retain the live InnerSession as a context attribute.  Only
+        # bound, capability-specific callbacks are kept; the static gate rejects
+        # every private-attribute/introspection route from generated code.
+        self._get_program_fn = lambda: session.current_program
+        self._get_best_program_fn = lambda: session.best_program or session.current_program
+        self._best_score_fn = lambda: float(session.best_score)
+        self._stage_edit_fn = session.apply_edit
+        self._probe_fn = session.probe
+        self._evaluate_fn = session.evaluate
+        self._ledger_fn = lambda: session.ledger
+        self._history_note_fn = session.history_note
+        self._task_dir = Path(session.task.task_dir).resolve()
         self._scratch = Path(scratch_dir)
         self._scratch.mkdir(parents=True, exist_ok=True)
 
     # ---- program access ---------------------------------------------------
     def get_program(self) -> str:
         """Current working program text."""
-        return self._s.current_program
+        return self._get_program_fn()
 
     def get_best_program(self) -> str:
-        return self._s.best_program or self._s.current_program
+        return self._get_best_program_fn()
 
     def best_score(self) -> float:
-        return float(self._s.best_score)
+        return self._best_score_fn()
 
     def stage_edit(self, code: str) -> str:
         """Stage a SEARCH/REPLACE diff or full EVOLVE-BLOCK replacement
         (identical semantics to the edit_solution tool)."""
-        return self._s.apply_edit(code)
+        return self._stage_edit_fn(code)
 
     # ---- evaluation -------------------------------------------------------
     def probe(self, subsample: int = 2000) -> Dict[str, Any]:
         """Cheap approximate evaluation (separate probe budget)."""
-        if self._s.ledger.probe_calls >= self._s.ledger.max_probe_calls:
+        ledger = self._ledger_fn()
+        if ledger.probe_calls >= ledger.max_probe_calls:
             return {"error": "probe budget exhausted"}
-        out = self._s.probe(subsample=subsample)
+        out = self._probe_fn(subsample=subsample)
         return {"combined_score": out.combined_score, "validity": out.validity,
                 "error": out.error}
 
     def evaluate(self) -> Dict[str, Any]:
         """Full official evaluation — debits the REAL evaluation budget."""
-        if self._s.ledger.exhausted():
+        if self._ledger_fn().exhausted():
             return {"error": "evaluation budget exhausted"}
-        out = self._s.evaluate()
+        out = self._evaluate_fn()
         return {"combined_score": out.combined_score, "validity": out.validity,
                 "error": out.error}
 
     def budget_left(self) -> Dict[str, int]:
-        return {"evaluations": self._s.ledger.evaluator_budget_left(),
-                "probes": self._s.ledger.max_probe_calls - self._s.ledger.probe_calls}
+        ledger = self._ledger_fn()
+        return {"evaluations": ledger.evaluator_budget_left(),
+                "probes": ledger.max_probe_calls - ledger.probe_calls}
 
     # ---- task data (read-only, capped) ------------------------------------
     def list_task_inputs(self) -> List[str]:
         """Names of data files in the task directory (read-only view)."""
-        td = Path(self._s.task.task_dir)
+        td = self._task_dir
         out = []
         for p in sorted(td.rglob("*")):
+            rel = str(p.relative_to(td)).lower() if p.is_file() else ""
+            blocked = ("evaluator", "answer", "ground_truth", "expected", "solution")
             if p.is_file() and p.suffix in (".csv", ".txt", ".json") \
-                    and "evaluator" not in str(p.relative_to(td)):
+                    and not any(marker in rel for marker in blocked):
                 out.append(str(p.relative_to(td)))
         return out[:50]
 
     def _safe_path(self, name: str):
-        td = Path(self._s.task.task_dir).resolve()
-        p = (td / name).resolve()
-        if not str(p).startswith(str(td)) or "evaluator" in name or not p.exists():
+        td = self._task_dir
+        raw = Path(str(name))
+        if raw.is_absolute():
+            return None
+        p = (td / raw).resolve()
+        try:
+            p.relative_to(td)
+        except ValueError:
+            return None
+        rel = str(p.relative_to(td)).lower()
+        blocked = ("evaluator", "answer", "ground_truth", "expected", "solution")
+        if any(marker in rel for marker in blocked) or not p.is_file():
             return None
         return p
 
@@ -124,7 +154,7 @@ class ToolContext:
         return p.read_text() if p.exists() else "ERROR: no such file"
 
     def log(self, message: str) -> None:
-        self._s.history_note(f"[custom-tool] {str(message)[:400]}")
+        self._history_note_fn(f"[custom-tool] {str(message)[:400]}")
 
 
 class MockContext(ToolContext):

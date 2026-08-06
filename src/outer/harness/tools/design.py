@@ -17,3 +17,33 @@ def validate_spec(spec_yaml: str) -> str:
 def submit_spec(spec_yaml: str) -> str:
     """Submit the final candidate H2 spec (stop tool)."""
     return get_session().submit(spec_yaml)
+
+
+def harness_shell(command: str) -> str:
+    """Inspect the private H2 with a read-only shell-shaped command."""
+    return get_session().inspect_harness(command)
+
+
+def write_harness_file(path: str, content: str) -> str:
+    """Create or replace one mutable file in the private H2 package."""
+    return get_session().write_harness_file(path, content)
+
+
+def edit_harness_file(path: str, old_text: str, new_text: str) -> str:
+    """Replace one exact text occurrence in a mutable H2 file."""
+    return get_session().edit_harness_file(path, old_text, new_text)
+
+
+def delete_harness_file(path: str) -> str:
+    """Delete one mutable H2 file; agent.yaml must also stop mounting it."""
+    return get_session().delete_harness_file(path)
+
+
+def validate_harness() -> str:
+    """Parse, safety-check, and canonically compile the current H2 workspace."""
+    return get_session().validate_harness()
+
+
+def submit_harness() -> str:
+    """Submit the current validated H2 workspace (stop tool)."""
+    return get_session().submit_harness()

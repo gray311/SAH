@@ -33,11 +33,13 @@ STYLE = {k: st for k, _, st in ROUTES}
 
 NODES = [
     ("1", 6, "proposer_full",
-     "Multi-start init\nvia prompt + skill edits",
-     (2.2, 1.0)),
+     "Multi-start initialization:\nproposer edits system prompt + skill,\nwidening the search space",
+     (1.8, 1.05)),
     ("2", 8, "context",
-     "Brief shifts beliefs, not decisions:\nrebuilds a weak seed, below the start",
-     (10.6, -1.6)),
+     "A brief is evidence read through a frozen\npolicy: it can shift what the proposer\n"
+     "believes, not how it decides.  RL moves\nthe policy itself (node 1); here the frozen\n"
+     "policy rebuilds the weak 0.955 seed --\n20/20 evals, below the shared start",
+     (8.2, -1.62)),
     ("3", 13, "proposer_full",
      "Forced diversity: switch function\nfamily after 5 stalled iterations",
      (15.8, 1.3)),

@@ -41,8 +41,9 @@ NODES = [
      "policy rebuilds the weak 0.955 seed --\n20/20 evals, below the shared start",
      (8.2, -1.62)),
     ("3", 13, "proposer_full",
-     "Forced diversity: switch function\nfamily after 5 stalled iterations",
-     (15.8, 1.3)),
+     "Forced diversity: switch function\nfamily after 5 stalled iterations.\n"
+     "Inherited as skills and enforced as code,\nthis is machinery an executor update\ncannot author",
+     (15.8, 1.22)),
 ]
 
 def render(active, outputs):

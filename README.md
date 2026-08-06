@@ -16,6 +16,16 @@ instance-wise GRPO group**; the policy gradient trains `M_phi` on the *outer* (H
 generation) trajectories. One task per step, online. See [`plan.md`](plan.md) for the
 full spec.
 
+## Documentation
+
+- [`REPOSITORY_USAGE.md`](REPOSITORY_USAGE.md) — cluster setup, smoke tests,
+  campaign launch/resume, artifacts, and reproducibility rules.
+- [`POST_MAIN_RESULTS_EXPERIMENT_PLAN.md`](POST_MAIN_RESULTS_EXPERIMENT_PLAN.md) —
+  the frozen 11-task three-method evolution-curve protocol and state-matched
+  cross-task transfer plan.
+- [`PIPELINE_FIX_SUMMARY.md`](PIPELINE_FIX_SUMMARY.md) — inheritance,
+  component-enforcement, trajectory-retention, and provenance fixes.
+
 ## Layout
 
 | path | what |

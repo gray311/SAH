@@ -44,7 +44,7 @@ NODES = [
      "The big rise is mostly recovery from the\nr1890 drop.  The brief does what telemetry\n"
      "can do -- flag eval cost and a repeated\nlocal optimum -- yet the diff credits\n"
      "init/tuning, not the new probe tool (used once)",
-     (16.6, 0.24)),
+     (16.6, 0.05)),
     ("3", 13, "proposer_full",
      "Forced diversity: switch function\nfamily after 5 stalled iterations.\n"
      "Inherited as skills and enforced as code,\nthis is machinery an executor update\ncannot author",

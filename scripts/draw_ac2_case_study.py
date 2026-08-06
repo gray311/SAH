@@ -46,7 +46,7 @@ NODES = [
      "telemetry can flag problems, not fix them",
      (16.6, -0.14)),
     ("3", 13, "proposer_full",
-     "Forced diversity: switch function\nfamily after 5 stalled iterations.\n"
+     "Forced diversity: when a function family\nstalls repeatedly, switch to a new one.\n"
      "Inherited as skills and enforced as code,\nthis is machinery an executor update\ncannot author",
      (15.8, 1.22)),
 ]

@@ -33,30 +33,18 @@ STYLE = {k: st for k, _, st in ROUTES}
 
 NODES = [
     ("1", 6, "proposer_full",
-     "Multi-start initialization: the proposer edits system prompt + "
-     "skill, widening the search space."),
+     "Multi-start init\nvia prompt + skill edits",
+     (2.2, 1.0)),
     ("2", 8, "context",
-     "A brief is evidence read through a frozen policy: it can shift what "
-     "the proposer believes, not how it decides.  RL moves the policy "
-     "itself (node 1); here the frozen policy rebuilds the weak 0.955 "
-     "seed -- 20/20 evals, below the shared start."),
+     "Brief shifts beliefs, not decisions:\nrebuilds a weak seed, below the start",
+     (10.6, -1.6)),
     ("3", 13, "proposer_full",
-     "Machinery only this route can add: inherited skills force "
-     "diversity -- cycle 8-12 step-function families, reinitializing "
-     "every 100-300 steps instead of riding one basin; this jump's seed "
-     "traces to them by hash.  The proposer even writes the rule as "
-     "code: an enforce_diversification middleware forces a family switch "
-     "after 5 stalled iterations, and a new function class after 3 "
-     "stalled families.  Executor updates keep the harness fixed and "
-     "cannot author any of this."),
+     "Forced diversity: switch function\nfamily after 5 stalled iterations",
+     (15.8, 1.3)),
 ]
 
 def render(active, outputs):
-    fig = plt.figure(figsize=(11.8, 4.9))
-    gs = fig.add_gridspec(1, 2, width_ratios=[0.60, 0.40],
-                          left=0.06, right=0.985, top=0.955, bottom=0.115,
-                          wspace=0.06)
-    ax = fig.add_subplot(gs[0])
+    fig, ax = plt.subplots(figsize=(7.8, 4.6))
     for key, label, st in ROUTES:
         pts = S[key]
         ax.step([p["x"] for p in pts], [gap(p["score"]) for p in pts],
@@ -73,11 +61,10 @@ def render(active, outputs):
     ax.grid(color="#e8e8e8", lw=0.7)
     for sp in ("top", "right"):
         ax.spines[sp].set_visible(False)
-    ax.legend(loc="lower right", bbox_to_anchor=(0.995, 0.03), fontsize=8.6,
+    ax.legend(loc="lower right", bbox_to_anchor=(0.995, 0.03), fontsize=8.8,
               frameon=False, handlelength=2.2)
 
-    shown = [n for n in NODES if n[0] in active]
-    for num, x, route, _ in shown:
+    for num, x, route, text, txy in [n for n in NODES if n[0] in active]:
         pts = S[route]
         exact = [p for p in pts if p["x"] == x]
         y = gap(exact[0]["score"]) if exact else \
@@ -87,27 +74,14 @@ def render(active, outputs):
                 zorder=11)
         ax.text(x, y, num, ha="center", va="center", fontsize=8, color=c,
                 weight="bold", zorder=12)
-
-    # ---- right panel: numbered node texts ----
-    px = fig.add_subplot(gs[1]); px.axis("off")
-    px.set_xlim(0, 1); px.set_ylim(0, 1)
-    y = 0.985
-    for num, _, route, text in shown:
-        c = STYLE[route]["color"]
-        lines = textwrap.wrap(text, width=54)
-        h = 0.052 * len(lines) + 0.035
-        px.add_patch(plt.Rectangle((0.015, y - h), 0.97, h, fill=True,
-                     fc="white", ec=c, lw=1.0, zorder=2,
-                     transform=px.transAxes, clip_on=False))
-        px.add_patch(plt.Circle((0.055, y - 0.033), 0.021, fc="white",
-                     ec=c, lw=1.6, zorder=3, transform=px.transAxes,
-                     clip_on=False))
-        px.text(0.055, y - 0.033, num, ha="center", va="center", fontsize=8,
-                color=c, weight="bold", zorder=4, transform=px.transAxes)
-        px.text(0.10, y - 0.018, "\n".join(lines), ha="left", va="top",
-                fontsize=8.3, color="#333333", zorder=3, linespacing=1.25,
-                transform=px.transAxes)
-        y -= h + 0.028
+        ax.annotate(text, xy=(x, y), xytext=txy, fontsize=8.0,
+                    color="#333333", ha="left", va="center", zorder=10,
+                    arrowprops=dict(arrowstyle="-", color=c, lw=1.0,
+                                    shrinkA=2, shrinkB=8,
+                                    connectionstyle="arc3,rad=0.15"),
+                    bbox=dict(boxstyle="round,pad=0.35", fc="white", ec=c,
+                              lw=0.9, alpha=0.95))
+    fig.tight_layout()
     for out in outputs:
         fig.savefig(out, dpi=200)
     plt.close(fig)

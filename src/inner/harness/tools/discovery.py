@@ -11,12 +11,19 @@ from inner.harness.tools.runtime import get_session
 
 def edit_solution(code: str) -> str:
     """Replace the EVOLVE-BLOCK body with ``code`` (full rewrite of the region)."""
-    return get_session().apply_edit(code)
+    session = get_session()
+    refusal = session.check_tool_gate("edit_solution")
+    if refusal:
+        return refusal
+    return session.apply_edit(code)
 
 
 def evaluate_solution() -> str:
     """Score the current program; report combined_score, validity, best, budget."""
     session = get_session()
+    refusal = session.check_tool_gate("evaluate_solution")
+    if refusal:
+        return refusal
     ledger = session.ledger
     if ledger.evaluator_exhausted():
         return (
@@ -45,6 +52,9 @@ def evaluate_solution() -> str:
 def probe_solution() -> str:
     """Cheap approximate score of the CURRENT program on subsampled data."""
     session = get_session()
+    refusal = session.check_tool_gate("probe_solution")
+    if refusal:
+        return refusal
     if session.ledger.probe_calls >= session.ledger.max_probe_calls:
         return "probe budget exhausted; use evaluate_solution for the real score."
     out = session.probe()

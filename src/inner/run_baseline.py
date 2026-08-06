@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import json
 import os
 import sys
@@ -34,6 +35,21 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # put `src/` on pa
 
 from inner.eft_task import load_tasks, get_task, EFTTask  # noqa: E402
 from inner.eval_runner import evaluate_program  # noqa: E402
+from inner.package_hash import h2_sha256  # noqa: E402
+
+
+def _has_executor_trajectory(trajectory) -> bool:
+    """Return whether a saved history contains at least one executor turn."""
+    if not isinstance(trajectory, list) or not trajectory:
+        return False
+    for message in trajectory:
+        if not isinstance(message, dict):
+            continue
+        role = message.get("role", "")
+        role = getattr(role, "value", role)
+        if str(role).lower().split(".")[-1] == "assistant":
+            return True
+    return False
 
 
 def _select(args) -> list:
@@ -62,7 +78,8 @@ def _agent_run(task: EFTTask, args, out_dir: Path) -> dict:
 
     ep = LLMEndpoint(model=args.model, base_url=args.base_url, api_key=args.api_key,
                      temperature=args.temperature, top_p=args.top_p, max_tokens=args.max_tokens,
-                     timeout=args.llm_timeout, enable_thinking=args.thinking)
+                     timeout=args.llm_timeout, enable_thinking=args.thinking,
+                     seed=args.seed)
     if args.max_iters > 0:
         max_iters = args.max_iters
     elif args.harness_dir:
@@ -72,13 +89,54 @@ def _agent_run(task: EFTTask, args, out_dir: Path) -> dict:
     h2 = H2Config(max_evaluator_calls=args.max_evals, max_iterations=max_iters,
                   eval_timeout_s=args.eval_timeout, python_exe=args.eval_python)
     ckpt = str(out_dir / "checkpoints" / f"{task.task_id}.json")
+    h2_package = (
+        Path(args.harness_dir).resolve()
+        if args.harness_dir else Path(__file__).resolve().parent / "harness"
+    )
+    h2_sha_before = h2_sha256(h2_package)
     res = run_task(task, endpoint=ep, h2=h2, keep_trajectory=not args.no_trajectory,
                    checkpoint_path=ckpt,
                    harness_dir=Path(args.harness_dir) if args.harness_dir else None)
-    return {**{k: v for k, v in asdict(res).items() if k != "trajectory"},
-            "mode": "agent", "delta": res.best_score - res.seed_score,
+    h2_sha_after = h2_sha256(h2_package)
+    if h2_sha_after != h2_sha_before:
+        audit_error = "H2MutationError: harness package changed during rollout"
+        res.error = f"{res.error}; {audit_error}" if res.error else audit_error
+        res.stop_reason = "h2_package_mutated"
+        res.score_eligible = False
+        if res.trajectory is not None:
+            res.trajectory.append({"role": "framework", "content": audit_error})
+    trajectory_ok = _has_executor_trajectory(res.trajectory)
+    if args.require_trajectory and not trajectory_ok:
+        audit_error = ("TrajectoryAuditError: required executor trajectory is "
+                       "missing or contains no assistant turn")
+        res.error = f"{res.error}; {audit_error}" if res.error else audit_error
+        if res.stop_reason == "completed":
+            res.stop_reason = "trajectory_missing"
+        # Preserve the diagnostic program/score in ``_full`` while preventing
+        # a missing conversation from entering reward, replay, or a curve.
+        res.score_eligible = False
+    full = asdict(res)
+    full["h2_package_provenance"] = {
+        "path": str(h2_package),
+        "sha256": h2_sha_before,
+        "sha256_after": h2_sha_after,
+        "stable_during_rollout": h2_sha_before == h2_sha_after,
+        "hash_scheme": "canonical-h2-v1",
+    }
+    seed_provenance = dict(getattr(task, "_seed_program_provenance", {}) or {})
+    seed_program = task.initial_program
+    seed_provenance.update({
+        "program_sha256": hashlib.sha256(seed_program.encode()).hexdigest(),
+        "observed_seed_score": float(res.seed_score),
+    })
+    full["seed_program_provenance"] = seed_provenance
+    published_best = res.best_score if res.score_eligible else None
+    published_delta = (res.best_score - res.seed_score) if res.score_eligible else None
+    return {**{k: v for k, v in full.items() if k != "trajectory"},
+            "mode": "agent", "best_score": published_best,
+            "delta": published_delta,
             "evaluations": res.ledger.get("evaluator_calls", 0),
-            "_full": asdict(res)}
+            "_full": full, "_trajectory_ok": trajectory_ok}
 
 
 def main() -> None:
@@ -98,6 +156,8 @@ def main() -> None:
     ap.add_argument("--max-tokens", type=int, default=8192)
     ap.add_argument("--llm-timeout", type=float, default=600.0)
     ap.add_argument("--thinking", action="store_true", help="enable Qwen thinking (default off)")
+    ap.add_argument("--seed", type=int, default=None,
+                    help="explicit decode seed recorded in every H2 result")
     # budget / eval
     ap.add_argument("--max-evals", type=int, default=10, help="evaluator-call budget per task")
     ap.add_argument("--max-iters", type=int, default=0, help="agent-loop cap; 0 = auto (3*max_evals+8; candidate packages keep their agent.yaml value)")
@@ -106,7 +166,13 @@ def main() -> None:
     ap.add_argument("--eval-timeout", type=float, default=None, help="override per-eval timeout (s)")
     ap.add_argument("--eval-python", default=os.environ.get("INNER_EVAL_PYTHON", sys.executable),
                     help="interpreter with the task deps (numpy/scipy/jax/...) for eval subprocess")
-    ap.add_argument("--no-trajectory", action="store_true")
+    trajectory_group = ap.add_mutually_exclusive_group()
+    trajectory_group.add_argument(
+        "--no-trajectory", action="store_true",
+        help="do not save agent history (manual debugging only; never use for reported runs)")
+    trajectory_group.add_argument(
+        "--require-trajectory", action="store_true",
+        help="save agent history and fail the run unless it contains an executor turn")
     ap.add_argument("--seed-programs-file", default=None,
                     help="JSON {task_id: program_text | {program: text}}; overrides the task's initial program (best-program inheritance across outer rounds)")
     ap.add_argument("--out", default=None, help="output dir (default runs/inner_baseline/<ts>)")
@@ -119,6 +185,26 @@ def main() -> None:
     (out_dir / "results").mkdir(exist_ok=True)
 
     tasks = _select(args)
+    seed_registry_path = (
+        Path(args.seed_programs_file).resolve()
+        if args.seed_programs_file else None
+    )
+    seed_registry_sha256 = None
+    if seed_registry_path is not None and seed_registry_path.is_file():
+        seed_registry_sha256 = hashlib.sha256(
+            seed_registry_path.read_bytes()
+        ).hexdigest()
+    for task in tasks:
+        initial = task.initial_program
+        task._seed_program_provenance = {
+            "mode": "task_initial",
+            "program_path": str(Path(task.initial_program_path).resolve()),
+            "program_sha256": hashlib.sha256(initial.encode()).hexdigest(),
+            "registry_path": str(seed_registry_path) if seed_registry_path else None,
+            "registry_sha256": seed_registry_sha256,
+            "registry_entry_present": False,
+            "claimed_score": None,
+        }
     if args.seed_programs_file and Path(args.seed_programs_file).exists():
         # A missing/empty seed-programs file means "no inheritance yet" (fresh
         # workspace, e.g. a new adaptive A/B run) — fall back to each task's
@@ -135,9 +221,28 @@ def main() -> None:
             if not ent:
                 continue
             text = ent["program"] if isinstance(ent, dict) else ent
+            if not isinstance(text, str) or not text:
+                raise ValueError(
+                    f"seed-program registry entry for {task.task_id} has no program text"
+                )
             ov = out_dir / f"seed_override__{task.task_id}.py"
             ov.write_text(text)
             task.initial_program_path = ov
+            task._seed_program_provenance = {
+                "mode": "inherited_registry",
+                "program_path": str(ov.resolve()),
+                "program_sha256": hashlib.sha256(text.encode()).hexdigest(),
+                "registry_path": str(seed_registry_path),
+                "registry_sha256": seed_registry_sha256,
+                "registry_entry_present": True,
+                "claimed_score": (
+                    float(ent["score"])
+                    if isinstance(ent, dict) and ent.get("score") is not None
+                    else None
+                ),
+                "registry_round": ent.get("round") if isinstance(ent, dict) else None,
+                "registry_k": ent.get("k") if isinstance(ent, dict) else None,
+            }
             parents = ent.get("parents") if isinstance(ent, dict) else None
             if parents:
                 task.crossover_parents = parents  # consumed by harness_runner
@@ -148,30 +253,49 @@ def main() -> None:
         "n_tasks": len(tasks), "task_ids": [t.task_id for t in tasks],
         "base_url": args.base_url, "model": args.model, "temperature": args.temperature,
         "top_p": args.top_p, "max_tokens": args.max_tokens, "max_evals": args.max_evals,
-        "eval_python": args.eval_python, "argv": sys.argv,
+        "decode_seed": args.seed,
+        "seed_program_registry": {
+            "path": str(seed_registry_path) if seed_registry_path else None,
+            "sha256": seed_registry_sha256,
+        },
+        "eval_python": args.eval_python,
+        "trajectory_policy": ("required" if args.require_trajectory else
+                              "disabled" if args.no_trajectory else "saved"),
+        "generated_middleware_policy": (
+            "gate+compile+mount+invoke>=1+errors=0; fires may be 0; "
+            "dict returns may enforce a require_tools gate (finish exempt, "
+            "auto-lift after 2 refusals, refusals consume no budget)"
+        ),
+        "argv": sys.argv,
     }
     (out_dir / "provenance.json").write_text(json.dumps(provenance, indent=2))
     print(f"[run] {provenance['mode']} | {len(tasks)} tasks | out={out_dir}")
 
     rows = []
+    trajectory_failures = []
     for i, task in enumerate(tasks, 1):
         print(f"[{i}/{len(tasks)}] {task.task_id} ({task.cost_tier}) ...", flush=True)
+        trajectory_ok = None
         try:
             row = _seed_only(task, args) if args.seed_only else _agent_run(task, args, out_dir)
         except Exception as e:
             row = {"task_id": task.task_id, "source": task.source, "mode": "error",
                    "seed_score": None, "best_score": None, "delta": None,
                    "error": f"{type(e).__name__}: {e}"}
+        trajectory_ok = row.pop("_trajectory_ok", trajectory_ok)
         full = row.pop("_full", None)
         (out_dir / "results" / f"{task.task_id}.json").write_text(
             json.dumps(full if full is not None else row, indent=2))
         rows.append(row)
+        if args.require_trajectory and not args.seed_only and trajectory_ok is not True:
+            trajectory_failures.append(task.task_id)
         print(f"      best={row.get('best_score')} seed={row.get('seed_score')} "
               f"delta={row.get('delta')} evals={row.get('evaluations')} err={row.get('error')}")
 
     (out_dir / "summary.json").write_text(json.dumps(rows, indent=2))
     cols = ["task_id", "source", "cost_tier", "mode", "seed_score", "best_score",
-            "delta", "validity", "evaluations", "error"]
+            "delta", "validity", "evaluations", "score_eligible", "stop_reason",
+            "error"]
     with open(out_dir / "summary.csv", "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=cols, extrasaction="ignore")
         w.writeheader()
@@ -183,6 +307,11 @@ def main() -> None:
         improved = sum(1 for r in scored if (r.get("delta") or 0) > 1e-9)
         print(f"\n[done] {len(scored)} scored | improved over seed: {improved}/{len(scored)}")
     print(f"[done] summary -> {out_dir}/summary.csv")
+    if trajectory_failures:
+        joined = ", ".join(trajectory_failures)
+        print(f"[trajectory-audit] ERROR: missing required executor history: {joined}",
+              file=sys.stderr)
+        raise SystemExit(2)
 
 
 if __name__ == "__main__":

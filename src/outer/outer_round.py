@@ -20,6 +20,7 @@ pass --bases-file <prev_round>/next_bases.json.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import sys
@@ -33,6 +34,7 @@ if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
 from outer import proposer_io as pio, harness_spec as hs, propose as pp, rewards as rw  # noqa: E402
+from outer.program_ratchet import suppress_task_training, update_program_ratchet  # noqa: E402
 from outer.materialize import materialize, INNER_HARNESS  # noqa: E402
 
 REPO = _SRC.parent
@@ -65,26 +67,87 @@ def _load_bases(bases_file: str | None, tasks: list) -> Dict[str, Dict[str, Any]
     return bases
 
 
+def _input_file_provenance(path_value: str | None) -> Dict[str, Any]:
+    """Hash a mutable cross-round input at the moment this round consumes it."""
+    if not path_value:
+        return {"path": None, "exists": False, "sha256": None, "bytes": 0}
+    path = Path(path_value)
+    if not path.is_file():
+        return {"path": str(path), "exists": False, "sha256": None, "bytes": 0}
+    raw = path.read_bytes()
+    return {
+        "path": str(path),
+        "exists": True,
+        "sha256": hashlib.sha256(raw).hexdigest(),
+        "bytes": len(raw),
+    }
+
+
 def cmd_propose(args) -> None:
     from inner.eft_task import get_task  # tasks registry (spec + seed program)
 
     round_dir = Path(args.round_dir)
     round_dir.mkdir(parents=True, exist_ok=True)
     bases = _load_bases(args.bases_file, args.tasks)
+    feedback_input = _input_file_provenance(
+        getattr(args, "feedback_file", None)
+    )
+    program_input = _input_file_provenance(
+        getattr(args, "seed_programs_file", None)
+    )
+    bases_input = _input_file_provenance(getattr(args, "bases_file", None))
     base_urls = [f"http://127.0.0.1:{8800 + g}/v1" for g in range(args.n_replicas)] \
         if args.n_replicas > 0 else [args.base_url]
 
     # per-task context: base spec (that task's current best harness) + user message
     inherited = {}
+    logical_index = int(os.environ.get("LOGICAL_ROUND_INDEX", "0") or 0)
+    if os.environ.get("SAH_FIXED_INFERENCE_SLOTS", "0") == "1" \
+            and logical_index > 0 \
+            and not getattr(args, "seed_programs_file", None):
+        raise RuntimeError(
+            "canonical post-cold round requires --seed-programs-file"
+        )
     if getattr(args, "seed_programs_file", None):
         try:
             inherited = json.loads(Path(args.seed_programs_file).read_text())
+            if not isinstance(inherited, dict):
+                raise TypeError("seed-program registry must be a JSON object")
         except Exception as e:
+            if os.environ.get("SAH_FIXED_INFERENCE_SLOTS", "0") == "1" \
+                    and logical_index > 0:
+                raise RuntimeError(
+                    "canonical post-cold round requires its task-local "
+                    "seed-program registry"
+                ) from e
             print(f"[propose] WARNING: seed-programs-file unreadable ({e}); using task seeds")
+            inherited = {}
+    # Rollouts consume this immutable round-local copy, never the mutable
+    # workspace registry that the collector will update after the batch.
+    seed_snapshot = round_dir / "seed_programs_in.json"
+    seed_snapshot.write_text(
+        json.dumps(inherited, indent=2, ensure_ascii=False) + "\n"
+    )
+    snapshot_raw = seed_snapshot.read_bytes()
+    program_input["snapshot_path"] = str(seed_snapshot.resolve())
+    program_input["snapshot_sha256"] = hashlib.sha256(snapshot_raw).hexdigest()
+    program_input["snapshot_bytes"] = len(snapshot_raw)
+
+    # Anti-tampering: verify the task texts about to be served against the
+    # pinned registry (fail-closed under SAH_TASK_TEXT_ENFORCE=1).
+    from outer.task_text_registry import verify_task_texts
+    _tasks_by_id = {tid: get_task(tid) for tid in args.tasks}
+    task_text_provenance = verify_task_texts(_tasks_by_id)
+    (round_dir / "task_text_provenance.json").write_text(
+        json.dumps(task_text_provenance, indent=1)
+    )
+    for _tid, _row in task_text_provenance.get("tasks", {}).items():
+        if _row.get("status") == "MISMATCH":
+            print(f"[task-text] WARNING: {_tid} differs from the pinned registry")
 
     ctx: Dict[str, Dict[str, Any]] = {}
     for tid in args.tasks:
-        task = get_task(tid)
+        task = _tasks_by_id[tid]
         base_spec = hs.read_base_spec(Path(bases[tid]["package"]))
         ent = inherited.get(tid)
         if ent:  # inheritance: rollouts start from the current best program
@@ -95,18 +158,35 @@ def cmd_propose(args) -> None:
             seed_prog, seed_sc = task.initial_program, float(bases[tid]["seed_score"])
         fb_text = ""
         fb = None
+        analysis_enabled = os.environ.get("SAH_ANALYSIS", "0") == "1"
+        analysis_required = os.environ.get("SAH_ANALYSIS_REQUIRED", "0") == "1"
+        if analysis_required and not analysis_enabled:
+            raise RuntimeError(
+                "SAH_ANALYSIS_REQUIRED=1 requires SAH_ANALYSIS=1"
+            )
+        analysis_meta = {
+            "enabled": analysis_enabled,
+            "required_after_cold_round": analysis_required,
+            "feedback_available": False,
+            "brief_attached": False,
+            "model_calls": 0,
+            "specialists": [],
+            "feedback_input": feedback_input,
+        }
         if getattr(args, "feedback_file", None):
             try:
                 fb = json.loads(Path(args.feedback_file).read_text()).get(tid)
                 if fb:
                     fb_text = pio.render_feedback(fb)
+                    analysis_meta["feedback_available"] = True
             except Exception as e:
                 print(f"[propose] WARNING: feedback-file unreadable ({e})")
         # optional analysis brief (campaign_config: analysis.enabled). Two
         # read-only specialists on the SAME frozen M0 distill the feedback into a
-        # bounded, leak-guarded brief appended to the proposer message. Default
-        # off; fail-open on any error so a flaky analyzer never blocks a round.
-        if os.environ.get("SAH_ANALYSIS", "0") == "1" and fb:
+        # bounded, leak-guarded brief appended to the proposer message. Legacy
+        # runs fail open; the canonical context arm sets SAH_ANALYSIS_REQUIRED=1
+        # and fails closed after the cold round.
+        if analysis_enabled and fb:
             try:
                 from outer import analysis as an
                 # LEAK GUARD: analysis MUST run on the frozen M0, never the
@@ -122,11 +202,25 @@ def cmd_propose(args) -> None:
                     want_design=os.environ.get("SAH_ANALYSIS_DESIGN", "1") == "1")
                 if brief:
                     fb_text += brief
+                    analysis_meta.update({
+                        "brief_attached": True,
+                        "model_calls": 2,
+                        "specialists": ["performance", "design"],
+                    })
                     print(f"[propose] {tid}: analysis brief attached ({len(brief)} chars)")
+                elif analysis_required:
+                    raise RuntimeError(
+                        f"{tid}: required post-cold analyzer produced no brief"
+                    )
             except Exception as e:
+                if analysis_required:
+                    raise RuntimeError(
+                        f"{tid}: required post-cold analyzer failed"
+                    ) from e
                 print(f"[propose] WARNING: analysis stage skipped ({e})")
         ctx[tid] = {
             "base_spec": base_spec,
+            "analysis": analysis_meta,
             "user_message": pio.build_user_message(
                 task_id=tid, task_spec=task.spec,
                 seed_program=seed_prog,
@@ -145,12 +239,12 @@ def cmd_propose(args) -> None:
     # existed — like forcing an unexplored arm — without touching the fixed H1.
     force_frac = float(getattr(args, "force_tool_frac", 0.0) or 0.0)
     force_ks = set(range(min(args.k, max(0, round(args.k * force_frac)))))
-    _FORCE_MSG = ("\n\n## REQUIRED FOR THIS CANDIDATE\nThis candidate MUST include "
-                  "at least one entry under `new_tools` that gives the solver a "
-                  "genuinely new capability (a task-specific probe, an input "
-                  "analyzer, a custom mutation/scoring operator). Follow the worked "
-                  "example exactly for the YAML block-scalar format. A candidate "
-                  "with no new_tools is not acceptable here.")
+    _FORCE_MSG = ("\n\n## REQUIRED FOR THIS CANDIDATE\nThis candidate MUST add "
+                  "at least one generated tool that gives the executor a genuinely "
+                  "new capability. Add its entry to agent.yaml, its schema under "
+                  "tools/, its implementation under custom_tools/, and its exact "
+                  "name plus usage guidance to prompt.md. A candidate with no new "
+                  "mounted tool is not acceptable here.")
 
     def _msg_for(tid, k):
         msg = ctx[tid]["user_message"]
@@ -212,13 +306,21 @@ def cmd_propose(args) -> None:
                      "review_log": getattr(rec, "review_log", [])}
             if rec.valid:
                 cdir = round_dir / "tasks" / tid / f"cand{rec.k:02d}"
+                component_lineage = hs.generated_component_lineage(
+                    ctx[tid]["base_spec"], rec.effective
+                )
                 materialize(rec.effective, cdir, raw_spec_text=rec.raw_submission,
                             meta={"round": args.round, "task_id": tid, "k": rec.k,
                                   "spec_hash": rec.spec_hash,
                                   "changed_fields": rec.changed_fields,
                                   "base_package": bases[tid]["package"],
+                                  "base_component_inventory":
+                                      hs.generated_component_inventory(
+                                          ctx[tid]["base_spec"]),
+                                  "component_lineage": component_lineage,
                                   "effective": rec.effective})
                 entry["dir"] = str(cdir)
+                entry["component_lineage"] = component_lineage
             cands.append(entry)
             trajectories.append({"task_id": tid, "k": rec.k,
                                  "raw_submission": rec.raw_submission,
@@ -230,14 +332,78 @@ def cmd_propose(args) -> None:
                          "base_score": bases[tid]["score"],
                          "seed_score": bases[tid]["seed_score"],
                          "base_spec_hash": hs.spec_hash(ctx[tid]["base_spec"]),
+                         "analysis": ctx[tid]["analysis"],
                          "candidates": cands}
 
+    fixed_inference_slots = (
+        os.environ.get("SAH_FIXED_INFERENCE_SLOTS", "0") == "1"
+    )
+    logical_round_raw = os.environ.get("LOGICAL_ROUND_INDEX", "")
+    logical_round_index = (
+        int(logical_round_raw) if logical_round_raw.strip() else None
+    )
+    if fixed_inference_slots and logical_round_index is None:
+        raise RuntimeError(
+            "fixed inference slots require LOGICAL_ROUND_INDEX for x-axis provenance"
+        )
+    nominal_total = 2 * int(args.k) if fixed_inference_slots else None
     (round_dir / "round.json").write_text(json.dumps({
         "round": args.round, "created": time.strftime("%Y%m%d-%H%M%S"),
+        "slurm_job_id": os.environ.get("SLURM_JOB_ID"),
         "mode": "instance_wise",
         "h1_version": pio.H1_VERSION, "h1_package_hash": pio.h1_hash(),
-        "proposer": {"base_urls": base_urls, "model": args.model, "seed": args.seed},
+        "proposer": {
+            "base_urls": base_urls,
+            "model": args.model,
+            "seed": args.seed,
+            "checkpoint": (
+                os.environ.get("MPHI_PATH")
+                or os.environ.get("MODEL_PATH")
+                or None
+            ),
+            "executor_checkpoint": os.environ.get("MODEL_PATH") or None,
+        },
         "tasks_order": args.tasks, "max_evals": args.max_evals, "k": args.k,
+        "cross_round_inputs": {
+            "bases": bases_input,
+            "feedback": feedback_input,
+            "seed_programs": program_input,
+        },
+        "inference_trajectory_budget": {
+            "schema": 1,
+            "axis_unit": "generated_agent_trajectory",
+            "fixed_h1_plus_h2_slots": fixed_inference_slots,
+            "logical_round_index": logical_round_index,
+            "h1_slots_per_task": int(args.k),
+            "h2_slots_per_task": (
+                int(args.k) if fixed_inference_slots else None
+            ),
+            "nominal_total_slots_per_task": nominal_total,
+            "shared_anchor_x": 1 if fixed_inference_slots else None,
+            "axis_x_after_round": (
+                1 + (logical_round_index + 1) * nominal_total
+                if fixed_inference_slots else None
+            ),
+            "h2_decode_seed_base": int(os.environ.get("H2_SEED_BASE", "200000")),
+            "h2_decode_seeds": [
+                int(os.environ.get("H2_SEED_BASE", "200000"))
+                + logical_round_index * 16 + k
+                for k in range(int(args.k))
+            ],
+            "analyzer_calls_excluded_from_axis": True,
+            "post_submit_reviewer_model_calls": 0,
+        },
+        "program_ratchet_mode": os.environ.get(
+            "SAH_PROGRAM_RATCHET_MODE", "legacy_qd"
+        ),
+        "eval_timeout_s": int(float(os.environ.get("EVAL_TIMEOUT", "0") or 0)),
+        "trajectory_wall_timeout_s": int(float(
+            os.environ.get("ROLLOUT_WALL_TIMEOUT", "0") or 0
+        )),
+        "proposal_parallelism": {
+            "requested_workers": int(args.parallel),
+            "serving_replicas": len(base_urls),
+        },
         "bases_in": bases,
         "per_task": per_task,
     }, indent=2))
@@ -365,109 +531,122 @@ def cmd_collect(args) -> None:
             # leak marker, else neutralize unproven result-claim words so they
             # can't survive as facts. Default-on; a no-op on clean structured notes.
             if os.environ.get("SAH_LEAK_NEUTRALIZE", "1") == "1":
-                from outer.leak_guard import sanitize
-                prev_note = sanitize(prev_note, neutralize=True)
+                from outer.leak_guard import code_signals, sanitize_note
+                dropped_for = code_signals(prev_note)
+                prev_note = sanitize_note(prev_note)
+                if dropped_for:
+                    print(f"[leak-guard] {tid}: analyst_note DROPPED "
+                          f"(code-injection signals: {dropped_for})")
             if prev_note:
                 feedback[tid]["analyst_note"] = prev_note
     fb_path.write_text(json.dumps(feedback, indent=1))
+    (round_dir / "task_feedback_after.json").write_text(
+        json.dumps(feedback, indent=1)
+    )
 
-    # global best-program inheritance: merge this round's winners into
-    # <outer_root>/best_programs.json (next steps' rollouts start there)
+    # Route-independent program inheritance.  Canonical comparison runs set
+    # SAH_PROGRAM_RATCHET_MODE=strict_single; legacy exploratory campaigns keep
+    # their historical QD/crossover memory behind an explicit mode.
     bp_path = round_dir.parent / "best_programs.json"
+    ratchet_mode = os.environ.get("SAH_PROGRAM_RATCHET_MODE", "legacy_qd")
+    ratchet_mode_source = (
+        "env" if "SAH_PROGRAM_RATCHET_MODE" in os.environ else "default"
+    )
+    if (os.environ.get("SAH_REQUIRE_STRICT_RATCHET", "0") == "1"
+            and ratchet_mode != "strict_single"):
+        raise RuntimeError(
+            "SAH_REQUIRE_STRICT_RATCHET=1 but program ratchet mode is "
+            f"{ratchet_mode!r} ({ratchet_mode_source}); canonical campaigns "
+            "must run strict_single"
+        )
+    logical_index = (
+        meta.get("inference_trajectory_budget") or {}
+    ).get("logical_round_index")
     try:
         best_programs = json.loads(bp_path.read_text()) if bp_path.exists() else {}
-    except Exception:
+        if not isinstance(best_programs, dict):
+            raise TypeError("program incumbent registry must be a JSON object")
+    except Exception as exc:
+        if ratchet_mode == "strict_single":
+            raise RuntimeError(
+                f"canonical program incumbent registry is unreadable: {bp_path}"
+            ) from exc
         best_programs = {}
-    for tid, g in groups.items():
-        if g["best_k"] is None or g["best_score"] is None:
-            continue
-        prev = best_programs.get(tid, {})
-        if isinstance(prev, dict) and prev.get("score", float("-inf")) >= g["best_score"]:
-            continue
-        prog, prog_score = None, float("-inf")
-        for res in sorted((round_dir / "rollouts" / tid / f"cand{g['best_k']:02d}").glob("*/results/*.json")):
-            try:
-                d = json.loads(res.read_text())
-                # pick the program from the RUN that produced the best score —
-                # under the cascade a screen run can beat the full run, and
-                # taking "last file wins" banked a mismatched program (r25 txn)
-                if d.get("best_program") and float(d.get("best_score", -1e18)) > prog_score:
-                    prog, prog_score = d["best_program"], float(d["best_score"])
-            except Exception:
-                pass
-        if prog:
-            # lineage crossover parents: the displaced best becomes a parent
-            # (diverse basin material for future hybridization), cap 2
-            parents = list((prev or {}).get("parents") or [])
-            if isinstance(prev, dict) and prev.get("program") and \
-               prev["program"] != prog:
-                parents = [{"score": prev["score"], "program": prev["program"]}] + parents
-            best_programs[tid] = {"score": g["best_score"], "program": prog,
-                                  "round": meta["round"], "k": g["best_k"],
-                                  "parents": parents[:2]}
-            print(f"  [inherit] {tid}: best_programs.json <- round{meta['round']:03d}/"
-                  f"cand{g['best_k']:02d} ({g['best_score']:.6g}, "
-                  f"{len(parents[:2])} parents)")
-    # Quality-diversity elite pool (MAP-Elites-lite): lineage parents are
-    # same-basin by construction — observed on hadamard, whose two crossover
-    # parents were both QR+SA descendants of the current best, giving
-    # crossover nothing structurally different to hybridize with. Here we
-    # pool high-scoring programs from OTHER basins (similarity < 0.7 vs the
-    # best AND vs each pooled elite), even from non-improving rounds — a
-    # 0.49-scoring random-construction attempt is exactly the material a
-    # 0.56-scoring QR basin needs. Pool rides best_programs.json as "elites"
-    # and replaces "parents" (the key harness_runner already feeds to M0).
-    import difflib
-
-    def _sim(a: str, b: str) -> float:
-        return difflib.SequenceMatcher(None, a[:4000], b[:4000]).ratio()
-
-    for tid in groups:
-        ent = best_programs.get(tid)
-        if not (isinstance(ent, dict) and ent.get("program")):
-            continue
-        best_prog = ent["program"]
-        best_sc = float(ent.get("score", 0.0))
-        floor = best_sc - 0.15 * abs(best_sc)
-        pool = [e for e in (ent.get("elites") or []) if e.get("program")]
-        seen = []
-        for res in (round_dir / "rollouts" / tid).glob("cand*/*/results/*.json"):
-            try:
-                d = json.loads(res.read_text())
-                p, s = d.get("best_program"), float(d.get("best_score", -1e18))
-            except Exception:
-                continue
-            if p and s >= floor and p != best_prog:
-                seen.append((s, p))
-        for s, p in sorted(seen, key=lambda x: -x[0]):
-            if _sim(p, best_prog) >= 0.7:
-                continue                      # same basin as the current best
-            twin = next((e for e in pool if _sim(p, e["program"]) >= 0.7), None)
-            if twin is not None:              # same basin as a pooled elite:
-                if s > float(twin.get("score", -1e18)):
-                    twin.update(score=s, program=p)   # keep the better one
-                continue
-            pool.append({"score": s, "program": p})
-        pool = sorted(pool, key=lambda e: -float(e.get("score", 0)))[:3]
-        if pool:
-            ent["elites"] = pool
-            ent["parents"] = [{"score": e["score"], "program": e["program"]}
-                              for e in pool]
-            print(f"  [elites] {tid}: {len(pool)} diverse basin(s), "
-                  f"scores {[round(float(e['score']), 4) for e in pool]}")
+    if ratchet_mode == "strict_single" and logical_index not in (None, 0) \
+            and not bp_path.is_file():
+        raise RuntimeError(
+            f"canonical post-cold round lacks program incumbent registry: {bp_path}"
+        )
+    best_programs, ratchet_audit = update_program_ratchet(
+        mode=ratchet_mode,
+        round_dir=round_dir,
+        groups=groups,
+        bases_in=meta.get("bases_in", {}),
+        previous=best_programs,
+        round_id=int(meta["round"]),
+    )
+    for tid, row in ratchet_audit["tasks"].items():
+        groups[tid]["program_ratchet"] = row
+        groups[tid]["accepted_improvement"] = bool(row.get("promoted"))
+        if ratchet_mode == "strict_single" and groups[tid].get("improved") \
+                and not row.get("promoted"):
+            # A raw score cannot advance H2 when it cannot be bound to a newly
+            # improved program from the same rollout.  This closes the legacy
+            # step-0/inherited-program attribution hole.
+            pt = meta["per_task"][tid]
+            next_bases[tid] = {
+                "package": pt["base_package"],
+                "score": pt["base_score"],
+                "seed_score": pt["seed_score"],
+                "from": "unchanged_program_attribution_failed",
+            }
+            # Do not let an unbound step-0/noisy score update proposer weights
+            # indirectly.  Keeping the diagnostic rewards while zeroing every
+            # task-row advantage makes replay conversion skip this update.
+            suppress_task_training(batch_rows, tid, row.get("reason"))
+            groups[tid]["training_suppressed"] = True
+            groups[tid]["training_suppression_reason"] = row.get("reason")
+        if tid in feedback:
+            feedback[tid]["accepted_improvement"] = bool(row.get("promoted"))
+            feedback[tid]["program_ratchet_reason"] = row.get("reason")
+            feedback[tid]["outgoing_base_score"] = next_bases[tid]["score"]
+        print(
+            f"  [program-ratchet:{ratchet_mode}] {tid}: "
+            f"promoted={row.get('promoted')} reason={row.get('reason', 'legacy')}"
+        )
 
     bp_path.write_text(json.dumps(best_programs, indent=1))
+    (round_dir / "best_programs_after.json").write_text(
+        json.dumps(best_programs, indent=1)
+    )
+    ratchet_audit["mode_source"] = ratchet_mode_source
+    ratchet_audit["strict_required"] = (
+        os.environ.get("SAH_REQUIRE_STRICT_RATCHET", "0") == "1"
+    )
+    (round_dir / "program_ratchet_audit.json").write_text(
+        json.dumps(ratchet_audit, indent=2)
+    )
+    # Rewrite after the joint H2/program transition so the next context sees
+    # the accepted state, not merely a noisy/raw candidate maximum.
+    fb_path.write_text(json.dumps(feedback, indent=1))
+    (round_dir / "task_feedback_after.json").write_text(
+        json.dumps(feedback, indent=1)
+    )
 
     with open(round_dir / "grpo_batch.jsonl", "w") as f:
         for row in batch_rows:
             f.write(json.dumps(row) + "\n")
     (round_dir / "round_summary.json").write_text(json.dumps({
         "round": meta["round"], "groups": groups,
+        "inference_trajectory_budget": meta.get("inference_trajectory_budget"),
         "improved_tasks": [t for t, g in groups.items() if g["improved"]],
+        "accepted_improved_tasks": [
+            t for t, g in groups.items() if g.get("accepted_improvement")
+        ],
     }, indent=2))
     (round_dir / "next_bases.json").write_text(json.dumps(next_bases, indent=2))
-    n_imp = sum(g["improved"] for g in groups.values())
-    print(f"[collect] {len(batch_rows)} GRPO rows | {n_imp}/{len(groups)} tasks improved "
+    n_imp = sum(bool(g.get("accepted_improvement")) for g in groups.values())
+    print(f"[collect] {len(batch_rows)} GRPO rows | {n_imp}/{len(groups)} tasks accepted-improved "
           f"-> grpo_batch.jsonl, round_summary.json, next_bases.json")
 
 

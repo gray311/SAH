@@ -24,6 +24,11 @@ from typing import Any, Dict, Optional
 
 import yaml
 
+from outer.harness_spec import (
+    component_prompt_issues,
+    generated_component_inventory,
+)
+
 INNER_HARNESS = Path(__file__).resolve().parents[1] / "inner" / "harness"
 
 _TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
@@ -61,30 +66,106 @@ _TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
 
 _BUILTIN_OPTIONAL = {"probe_solution"}
 
-# generated-middleware wrapper: the model supplies just the hook function body;
-# we wrap it in a NexAU Middleware subclass that fails OPEN (a crashing hook
-# never kills the rollout) and only ever appends a framework message.
-_MW_WRAPPER = '''"""Generated middleware (h2spec/1.0) — wrapped, fail-open."""
+# Generated-middleware wrapper: the model supplies just the hook function body.
+# Runtime errors remain diagnostic-fail-open so we retain the rest of the
+# executor trajectory, but the rollout-level participation audit is
+# reward-fail-closed: a missing mount/invocation or any hook error makes the
+# rollout score ineligible.
+_MW_WRAPPER = '''"""Generated middleware (h2spec/1.0), lifecycle-audited."""
 from nexau.archs.main_sub.execution.hooks import (
     BeforeModelHookInput, HookResult, Middleware)
 from nexau.core.messages import Message, Role, TextBlock
+from inner.harness.middleware.generated_context import GeneratedHookTracker
+from inner.harness.tools.runtime import get_session
 
 # --USER-HOOK-START--
 {user_code}
 # --USER-HOOK-END--
 
 class GeneratedMiddleware(Middleware):
+    def __init__(self):
+        self._name = {name_repr}
+        self._hook = {hook_repr}
+        self._tracker = GeneratedHookTracker()
+        self._reported_errors = set()
+        try:
+            get_session().register_middleware(self._name, self._hook)
+        except Exception:
+            # The rollout-level participation check will report a mount failure.
+            pass
+
+    def _audit(self, text):
+        try:
+            get_session().history_note("[middleware:" + {name_repr} + "] " + str(text)[:320])
+        except Exception:
+            pass
+
+    def _record(self, event, iteration, error=None):
+        try:
+            get_session().record_middleware_event(
+                self._name, event, iteration=iteration, error=error)
+        except Exception:
+            pass
+
     def {hook}(self, hook_input):
+        iteration = int(getattr(hook_input, "current_iteration", 0) or 0)
+        self._record("invoked", iteration)
         try:
-            note = {hook}(hook_input)
-        except Exception:
+            context = self._tracker.snapshot(hook_input, get_session())
+            result = {hook}(context)
+        except Exception as exc:
+            self._record("error", iteration, error=str(exc))
+            key = (type(exc).__name__, str(exc)[:200])
+            if key not in self._reported_errors:
+                self._reported_errors.add(key)
+                self._audit("ERROR " + key[0] + ": " + key[1])
             return HookResult.no_changes()
-        if not note:
+        if not result:
+            return HookResult.no_changes()
+        # The hook stays a pure function.  It may return either an advisory
+        # note (str) or a dict {{"note": str?, "require_tools": [tool, ...]?}}.
+        # The trusted wrapper applies effects; malformed shapes are hook
+        # errors, never silent no-ops.
+        note = None
+        require_tools = None
+        if isinstance(result, dict):
+            unknown = set(result) - {{"note", "require_tools"}}
+            if unknown:
+                self._record("error", iteration,
+                             error="unknown hook-result keys: " + repr(sorted(unknown)))
+                self._audit("ERROR unknown hook-result keys " + repr(sorted(unknown)))
+                return HookResult.no_changes()
+            note = result.get("note")
+            require_tools = result.get("require_tools")
+        else:
+            note = result
+        fired = False
+        if require_tools:
+            try:
+                get_session().request_tool_gate(self._name, require_tools)
+                fired = True
+                self._audit("ENFORCED iteration=" + str(iteration)
+                            + " require_tools=" + repr(list(require_tools)))
+            except Exception as exc:
+                self._record("error", iteration, error=str(exc))
+                self._audit("ENFORCE_ERROR " + type(exc).__name__ + ": " + str(exc)[:200])
+                return HookResult.no_changes()
+        if not note and not fired:
             return HookResult.no_changes()
         try:
-            msg = Message(role=Role.FRAMEWORK, content=[TextBlock(text=str(note)[:2000])])
-            return HookResult.with_modifications(messages=[*hook_input.messages, msg])
-        except Exception:
+            if fired:
+                self._record("fired", iteration)
+            if note:
+                msg = Message(role=Role.FRAMEWORK, content=[TextBlock(text=str(note)[:2000])])
+                if not fired:
+                    self._record("fired", iteration)
+                self._audit("FIRED iteration=" + str(context.get("iteration", 0))
+                            + " note=" + str(note)[:180])
+                return HookResult.with_modifications(messages=[*hook_input.messages, msg])
+            return HookResult.no_changes()
+        except Exception as exc:
+            self._record("error", iteration, error=str(exc))
+            self._audit("EMIT_ERROR " + type(exc).__name__ + ": " + str(exc)[:200])
             return HookResult.no_changes()
 '''
 
@@ -106,15 +187,24 @@ def _build_skill_list(effective: Dict[str, Any], cand_dir: Path) -> list:
 
 
 def _build_custom_middlewares(effective: Dict[str, Any], cand_dir: Path) -> list:
-    """Materialize generated middleware code (gated+reviewed at propose time)
-    into middlewares/<name>.py wrapped in a fail-open Middleware subclass."""
+    """Materialize generated middleware code (gated during H1 validation)
+    into middlewares/<name>.py wrapped in a lifecycle-audited Middleware."""
     out = []
     for mw in effective.get("new_middlewares", []):
         name = mw["name"]
         (cand_dir / "middlewares").mkdir(parents=True, exist_ok=True)
         code = _MW_WRAPPER.format(user_code=mw["implementation_py"].strip(),
-                                  hook=mw["hook"])
+                                  hook=mw["hook"], name_repr=repr(name),
+                                  hook_repr=repr(mw["hook"]))
+        compile(code, str(cand_dir / "middlewares" / f"{name}.py"), "exec")
         (cand_dir / "middlewares" / f"{name}.py").write_text(code)
+        (cand_dir / "middlewares" / f"{name}.middleware.yaml").write_text(
+            _yaml_str({
+                "name": name,
+                "hook": mw["hook"],
+                "description": mw.get("description", ""),
+            })
+        )
         out.append({"import": f"middlewares.{name}:GeneratedMiddleware", "params": {}})
     return out
 
@@ -137,9 +227,9 @@ def _build_tool_list(effective: Dict[str, Any], cand_dir: Path) -> list:
             "description": t["description"],
             "input_schema": t.get("input_schema") or {"type": "object", "properties": {}},
         }))
-        # bind every generated tool to the single dispatcher; its source path
-        # rides through NexAU extra_kwargs (merged into the tool call params)
-        src = str((cand_dir / "custom_tools" / f"{name}.py").resolve())
+        # Keep packages relocatable and prevent a stale absolute temp path from
+        # selecting code outside the mounted H2 package at execution time.
+        src = f"./custom_tools/{name}.py"
         tools.append({"name": name, "yaml_path": f"./tools/{name}.tool.yaml",
                       "binding": "inner.harness.tools.custom_runtime:custom_tool",
                       "extra_kwargs": {"py_path": src}})
@@ -150,8 +240,32 @@ def _yaml_str(data: Dict[str, Any]) -> str:
     return yaml.safe_dump(data, sort_keys=False, allow_unicode=True, width=100)
 
 
+def _agent_component_inventory(agent: Dict[str, Any]) -> Dict[str, list]:
+    """Generated components actually mounted by a materialized agent config."""
+
+    tools = [
+        str(row.get("name")) for row in agent.get("tools", [])
+        if "custom_runtime" in str(row.get("binding", ""))
+    ]
+    skills = [
+        Path(str(binding)).name for binding in agent.get("skills", [])
+        if Path(str(binding)).name != "discovery-optimization"
+    ]
+    middlewares = []
+    for row in agent.get("middlewares", []):
+        binding = str(row.get("import", ""))
+        if binding.endswith(":GeneratedMiddleware"):
+            middlewares.append(binding.split(":", 1)[0].rsplit(".", 1)[-1])
+    return {
+        "new_tools": tools,
+        "new_skills": skills,
+        "new_middlewares": middlewares,
+    }
+
+
 def materialize(effective: Dict[str, Any], cand_dir: Path, *,
-                raw_spec_text: str = "", meta: Optional[Dict[str, Any]] = None) -> Path:
+                raw_spec_text: str = "", meta: Optional[Dict[str, Any]] = None,
+                validate_prompt: bool = True) -> Path:
     """Write the full candidate package for ``effective`` (a FULL merged spec)."""
     cand_dir = Path(cand_dir)
     if cand_dir.exists():
@@ -160,8 +274,17 @@ def materialize(effective: Dict[str, Any], cand_dir: Path, *,
     (cand_dir / "skills" / "discovery-optimization").mkdir(parents=True)
     (cand_dir / "middlewares").mkdir(parents=True)
 
-    # --- prompt.md (system prompt) --- #
-    (cand_dir / "prompt.md").write_text(effective["system_prompt"].rstrip() + "\n")
+    prompt_issues = component_prompt_issues(effective)
+    if validate_prompt and prompt_issues:
+        raise ValueError("invalid proposer-owned system_prompt: "
+                         + "; ".join(prompt_issues))
+    # The executor system prompt is H2 genome authored by the proposer.
+    # Normal materialization verifies it but never appends, repairs, or
+    # rewrites it.  ``validate_prompt=False`` exists only to seed H1's private
+    # draft from a legacy parent; final candidates always use the strict path.
+    (cand_dir / "prompt.md").write_text(
+        effective["system_prompt"].rstrip() + "\n"
+    )
 
     # --- skill --- #
     skill = "---\nname: discovery-optimization\ndescription: " + \
@@ -225,6 +348,12 @@ def materialize(effective: Dict[str, Any], cand_dir: Path, *,
             "max_tokens": int(sampling.get("max_tokens", 8192)),
             "temperature": float(sampling.get("temperature", 0.7)),
             "top_p": float(sampling.get("top_p", 0.95)),
+            # Keep every proposer-owned sampling field visible in agent.yaml.
+            # harness_runner also reads the canonical effective spec from
+            # meta.json and applies the same value at execution time.
+            "extra_params": {
+                "extra_body": {"top_k": int(sampling.get("top_k", 20))},
+            },
             "stream": False,
         },
         "sandbox_config": {"type": "local", "work_dir": "/tmp"},
@@ -248,11 +377,25 @@ def materialize(effective: Dict[str, Any], cand_dir: Path, *,
         ],
         "tracers": [{"import": "nexau.archs.tracer.adapters.in_memory:InMemoryTracer"}],
     }
+    expected_inventory = generated_component_inventory(effective)
+    mounted_inventory = _agent_component_inventory(agent)
+    if mounted_inventory != expected_inventory:
+        raise RuntimeError(
+            "generated component materialization mismatch: "
+            f"expected={expected_inventory}, mounted={mounted_inventory}"
+        )
     (cand_dir / "agent.yaml").write_text(_yaml_str(agent))
 
     # --- provenance --- #
     if raw_spec_text:
         (cand_dir / "spec.yaml").write_text(raw_spec_text.rstrip() + "\n")
-    (cand_dir / "meta.json").write_text(json.dumps(meta or {}, indent=2))
+    meta_payload = dict(meta or {})
+    meta_payload["component_inventory"] = expected_inventory
+    (cand_dir / "component_manifest.json").write_text(json.dumps({
+        "schema": "generated-components/1.0",
+        "inventory": expected_inventory,
+        "lineage": meta_payload.get("component_lineage", {}),
+    }, indent=2))
+    (cand_dir / "meta.json").write_text(json.dumps(meta_payload, indent=2))
     # note: the candidate's spec sampling top_k is applied at runtime via extra_body
     return cand_dir

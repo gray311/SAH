@@ -9,10 +9,12 @@ and accounted here, never self-reported by the harness).
 from __future__ import annotations
 
 import contextvars
+import tempfile
 import textwrap
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, List, Optional
+from pathlib import Path
 
 from inner import program_edit as pe
 from inner.eft_task import EFTTask
@@ -63,12 +65,18 @@ class InnerSession:
     eval_timeout_s: Optional[float] = None
     python_exe: Optional[str] = None
     checkpoint_path: Optional[str] = None  # if set, best-so-far is written here after each new best (wall-safe)
+    harness_dir: Optional[str] = None
 
     current_program: str = ""
     best_score: float = float("-inf")
     best_program: str = ""
     best_metrics: Dict[str, float] = field(default_factory=dict)
     history: List[StepRecord] = field(default_factory=list)
+    middleware_audit: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    tool_gate: Optional[Dict[str, Any]] = field(default=None, repr=False)
+    tool_audit: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    skill_audit: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    _custom_scratch: Optional[str] = field(default=None, repr=False)
     _pending_edit_note: str = "seed"
     _pending_edit_mode: str = "seed"
 
@@ -200,6 +208,153 @@ class InnerSession:
             edit_note=str(note)[:400], combined_score=self.best_score,
             validity=1.0, error=None, wall_s=0.0, is_new_best=False))
 
+    # -- generated tool/skill audit --------------------------------------- #
+    def register_tool(self, name: str, source: str) -> None:
+        row = self.tool_audit.setdefault(str(name), {
+            "source": str(source), "mounts": 0, "invocations": 0,
+            "completed": 0, "errors": 0, "last_error": None,
+        })
+        row["source"] = str(source)
+        row["mounts"] += 1
+
+    def record_tool_event(self, name: str, event: str, error: Optional[str] = None) -> None:
+        row = self.tool_audit.setdefault(str(name), {
+            "source": None, "mounts": 0, "invocations": 0,
+            "completed": 0, "errors": 0, "last_error": None,
+        })
+        if event == "invoked":
+            row["invocations"] += 1
+        elif event == "completed":
+            row["completed"] += 1
+        elif event == "error":
+            row["errors"] += 1
+            row["last_error"] = str(error or "unknown custom-tool error")[:400]
+        else:
+            raise ValueError(f"unknown tool event: {event}")
+
+    def register_skill(self, name: str, source: str) -> None:
+        row = self.skill_audit.setdefault(str(name), {
+            "source": str(source), "mounts": 0, "loads": 0,
+        })
+        row["source"] = str(source)
+        row["mounts"] += 1
+
+    def record_skill_load(self, name: str) -> None:
+        if name in self.skill_audit:
+            self.skill_audit[name]["loads"] += 1
+
+    def custom_tool_scratch(self) -> Path:
+        if self._custom_scratch is None:
+            safe_task = "".join(c if c.isalnum() else "_" for c in self.task.task_id)[-48:]
+            self._custom_scratch = tempfile.mkdtemp(prefix=f"sah_tool_{safe_task}_")
+        return Path(self._custom_scratch)
+
+    # -- generated-middleware participation audit ------------------------- #
+    def register_middleware(self, name: str, hook: str) -> None:
+        row = self.middleware_audit.setdefault(str(name), {
+            "hook": str(hook), "mounts": 0, "invocations": 0,
+            "fires": 0, "errors": 0, "last_iteration": None,
+            "last_error": None,
+        })
+        row["hook"] = str(hook)
+        row["mounts"] += 1
+
+    def record_middleware_event(
+        self, name: str, event: str, *, iteration: Optional[int] = None,
+        error: Optional[str] = None,
+    ) -> None:
+        row = self.middleware_audit.setdefault(str(name), {
+            "hook": "unknown", "mounts": 0, "invocations": 0,
+            "fires": 0, "errors": 0, "last_iteration": None,
+            "last_error": None,
+        })
+        if event == "invoked":
+            row["invocations"] += 1
+        elif event == "fired":
+            row["fires"] += 1
+        elif event == "error":
+            row["errors"] += 1
+            row["last_error"] = str(error or "unknown middleware error")[:400]
+        else:
+            raise ValueError(f"unknown middleware event: {event}")
+        if iteration is not None:
+            row["last_iteration"] = int(iteration)
+
+    # -- middleware tool gate (mechanical enforcement) -------------------- #
+    #
+    # A generated before_model hook may request that the executor's next tool
+    # call come from a named subset.  The hook itself stays a pure function;
+    # the trusted wrapper applies the effect here.  Enforcement happens in the
+    # tool layer: a disallowed call is refused with a structured message and
+    # consumes no budget.  ``finish`` is never gated, and repeated refusals
+    # auto-lift the gate so a confused executor cannot be hard-locked.
+    GATEABLE_TOOLS = ("probe_solution", "edit_solution", "evaluate_solution")
+    GATE_AUTO_LIFT_AFTER = 2
+
+    def _gate_stats(self, name: str) -> Dict[str, int]:
+        row = self.middleware_audit.setdefault(str(name), {
+            "hook": "unknown", "mounts": 0, "invocations": 0,
+            "fires": 0, "errors": 0, "last_iteration": None,
+            "last_error": None,
+        })
+        return row.setdefault("gate", {
+            "enforced": 0, "satisfied": 0, "refused": 0, "auto_lifted": 0,
+        })
+
+    def request_tool_gate(self, name: str, require_tools: Any) -> None:
+        if isinstance(require_tools, str):
+            require_tools = [require_tools]
+        try:
+            tools = tuple(dict.fromkeys(str(t) for t in require_tools))
+        except TypeError:
+            raise ValueError("require_tools must be a list of tool names")
+        if not tools or any(t not in self.GATEABLE_TOOLS for t in tools):
+            raise ValueError(
+                "require_tools must be a non-empty subset of "
+                f"{list(self.GATEABLE_TOOLS)}; got {list(tools)!r}"
+            )
+        self.tool_gate = {"require": tools, "set_by": str(name), "refusals": 0}
+        self._gate_stats(name)["enforced"] += 1
+
+    def check_tool_gate(self, tool_name: str) -> Optional[str]:
+        gate = self.tool_gate
+        if not gate or tool_name == "finish":
+            return None
+        name = gate["set_by"]
+        if tool_name in gate["require"]:
+            self.tool_gate = None
+            self._gate_stats(name)["satisfied"] += 1
+            return None
+        gate["refusals"] += 1
+        self._gate_stats(name)["refused"] += 1
+        required = " or ".join(gate["require"])
+        if gate["refusals"] >= self.GATE_AUTO_LIFT_AFTER:
+            self.tool_gate = None
+            self._gate_stats(name)["auto_lifted"] += 1
+            self.history_note(
+                f"[tool-gate:{name}] auto-lifted after repeated refusals"
+            )
+        return (
+            f"GATED by middleware {name!r}: call {required} first. "
+            "This call consumed no budget."
+        )
+
+    def middleware_participation_issues(self, expected: List[str]) -> List[str]:
+        issues: List[str] = []
+        for name in expected:
+            row = self.middleware_audit.get(name)
+            if row is None or int(row.get("mounts", 0)) < 1:
+                issues.append(f"{name}: not mounted")
+                continue
+            if int(row.get("invocations", 0)) < 1:
+                issues.append(f"{name}: mounted but never invoked")
+            if int(row.get("errors", 0)) > 0:
+                issues.append(
+                    f"{name}: {row['errors']} execution error(s); "
+                    f"last={row.get('last_error')!r}"
+                )
+        return issues
+
     def seed_baseline(self) -> EvalOutcome:
         """Evaluate the seed once to initialise best-so-far (not charged to budget)."""
         self._pending_edit_mode, self._pending_edit_note = "seed", "seed program"
@@ -236,6 +391,9 @@ class InnerSession:
             "best_metrics": self.best_metrics,
             "ledger": asdict(self.ledger),
             "steps": [asdict(s) for s in self.history],
+            "middleware_audit": self.middleware_audit,
+            "tool_audit": self.tool_audit,
+            "skill_audit": self.skill_audit,
         }
 
 

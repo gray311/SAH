@@ -36,10 +36,11 @@ NODES = [
      "Multi-start initialization:\nproposer edits system prompt + skill,\nwidening the search space",
      (1.8, 1.05)),
     ("2", 8, "context",
-     "Cold start, identical conditions: both arms\nbegin from the same weak seed with no\n"
-     "summary yet.  Under the frozen proposer's\nharness the executor climbs far less than\n"
-     "under the trained one (node 1), ending\nbelow the start.  The gap is the policy,\nnot the information",
-     (8.2, -1.68)),
+     "The frozen proposer's harness gives the\nexecutor one construction path and no\n"
+     "probe discipline: every expensive\nevaluation burns on climbing a single\n"
+     "basin, ending below the start -- unlike\nthe search-widening harness of node 1.\n"
+     "A frozen proposer emits plausible\ndesigns; training selects proven ones",
+     (8.2, -1.72)),
     ("4", 14, "context",
      "The jump is large only because the\nprevious round fell.  Beyond that recovery\n"
      "the gain is small, and comes from ordinary\nprogram tuning, not the tool added in\n"

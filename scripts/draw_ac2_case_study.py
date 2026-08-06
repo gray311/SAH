@@ -44,6 +44,16 @@ NODES = [
      "the gain is small, and comes from ordinary\nprogram tuning, not the tool added in\n"
      "response to feedback: feedback locates\nproblems, it does not improve the proposer",
      (16.6, -0.20)),
+    ("7", 31, "proposer_full",
+     "Breakthrough: the trained proposer\nships a step-config generator plus\n"
+     "a probing-budget rule, and the\nexecutor follows the workflow --\n"
+     "screen with cheap probes, full\nevaluations only for finalists --\nlanding a new best",
+     (27.8, 1.38)),
+    ("8", 33, "executor",
+     "The executor route's one real gain:\na local rewrite of the optimizer\n"
+     "inside the fixed harness -- no\nprobing, no new interface.  Executor\n"
+     "updates can improve the program,\nnever the process",
+     (26.4, -1.5)),
     ("3", 13, "proposer_full",
      "Forced diversity: when a function family\nstalls repeatedly, switch to a new one.\n"
      "Inherited as skills and enforced as code,\nthis is machinery an executor update\ncannot author",
@@ -60,16 +70,17 @@ def render(active, outputs):
     ax.text(1.2, 0.06, "human best", fontsize=8.5, color="#555555",
             va="bottom")
     ax.axvline(B, color="#bbbbbb", lw=1.0, ls="--", zorder=1)
-    ax.text(B - 0.7, -2.55, f"common budget $B{{=}}{B}$", fontsize=8,
-            color="#888888", rotation=90, ha="right", va="bottom")
+    ax.text(B + 0.55, -2.62, f"common budget $B{{=}}{B}$", fontsize=8,
+            color="#888888", rotation=90, ha="left", va="bottom")
     ax.set_xlabel("Iteration")
     ax.set_ylabel("Gap to human best (%)")
     ax.set_xlim(0.5, B + 1.5)
     ax.grid(color="#e8e8e8", lw=0.7)
     for sp in ("top", "right"):
         ax.spines[sp].set_visible(False)
-    ax.legend(loc="lower right", bbox_to_anchor=(0.995, 0.03), fontsize=8.8,
-              frameon=False, handlelength=2.2)
+    fig.legend(*ax.get_legend_handles_labels(), loc="lower center",
+               bbox_to_anchor=(0.5, -0.005), fontsize=8.8, frameon=False,
+               handlelength=2.0, ncols=3, columnspacing=1.3)
 
     for num, x, route, text, txy in [n for n in NODES if n[0] in active]:
         pts = S[route]
@@ -87,8 +98,8 @@ def render(active, outputs):
                                     shrinkA=2, shrinkB=8,
                                     connectionstyle="arc3,rad=0.15"),
                     bbox=dict(boxstyle="round,pad=0.35", fc="white", ec=c,
-                              lw=0.9, alpha=0.95))
-    fig.tight_layout()
+                              lw=0.9, alpha=1.0))
+    fig.subplots_adjust(left=0.075, right=0.985, top=0.97, bottom=0.17)
     for out in outputs:
         fig.savefig(out, dpi=200)
     plt.close(fig)
@@ -98,5 +109,11 @@ render({"1"}, ("papers/figures/ac2_case_study_node1.pdf",
                "papers/figures/ac2_case_study_node1.png"))
 render({"1", "2"}, ("papers/figures/ac2_case_study_node2.pdf",
                     "papers/figures/ac2_case_study_node2.png"))
-render({"1", "2", "3", "4"}, ("papers/figures/ac2_case_study.pdf",
-                              "papers/figures/ac2_case_study.png"))
+render({"1", "2", "3"}, ("papers/figures/ac2_case_study_node3.pdf",
+                         "papers/figures/ac2_case_study_node3.png"))
+render({"1", "2", "3", "4"}, ("papers/figures/ac2_case_study_node4.pdf",
+                              "papers/figures/ac2_case_study_node4.png"))
+render({"1", "2", "3", "4", "7"}, ("papers/figures/ac2_case_study_node7.pdf",
+                                   "papers/figures/ac2_case_study_node7.png"))
+render({"1", "2", "3", "4", "7", "8"}, ("papers/figures/ac2_case_study.pdf",
+                                        "papers/figures/ac2_case_study.png"))

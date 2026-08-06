@@ -36,15 +36,15 @@ NODES = [
      "Multi-start initialization:\nproposer edits system prompt + skill,\nwidening the search space",
      (1.8, 1.05)),
     ("2", 8, "context",
-     "Given only a summary of past rollouts,\nthe frozen proposer discards the stronger\n"
-     "design and rebuilds a weak one -- improving\nlocally, yet landing below the start.\n"
-     "A brief is evidence read through a frozen\npolicy: it shifts beliefs, not decisions",
-     (8.2, -1.62)),
+     "In this arm the proposer's weights never\nchange: a summary tells it what happened,\n"
+     "but it still proposes what its unchanged\nprior prefers -- dropping the best design\n"
+     "and restarting from a poor one.\nSummaries inform the proposer;\nthey do not change it",
+     (8.2, -1.68)),
     ("4", 14, "context",
-     "Most of this rise recovers the earlier\ndrop; the small net gain comes from\n"
-     "re-initialization and parameter tuning,\nnot the newly added probe tool --\n"
-     "telemetry can flag problems, not fix them",
-     (16.6, -0.14)),
+     "The jump is large only because the\nprevious round fell.  Beyond that recovery\n"
+     "the gain is small, and comes from ordinary\nprogram tuning, not the tool added in\n"
+     "response to feedback: feedback locates\nproblems, it does not improve the proposer",
+     (16.6, -0.20)),
     ("3", 13, "proposer_full",
      "Forced diversity: when a function family\nstalls repeatedly, switch to a new one.\n"
      "Inherited as skills and enforced as code,\nthis is machinery an executor update\ncannot author",

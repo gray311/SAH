@@ -36,9 +36,9 @@ NODES = [
      "Multi-start initialization:\nproposer edits system prompt + skill,\nwidening the search space",
      (1.8, 1.05)),
     ("2", 8, "context",
-     "In this arm the proposer's weights never\nchange: a summary tells it what happened,\n"
-     "but it still proposes what its unchanged\nprior prefers -- dropping the best design\n"
-     "and restarting from a poor one.\nSummaries inform the proposer;\nthey do not change it",
+     "Cold start, identical conditions: both arms\nbegin from the same weak seed with no\n"
+     "summary yet.  Under the frozen proposer's\nharness the executor climbs far less than\n"
+     "under the trained one (node 1), ending\nbelow the start.  The gap is the policy,\nnot the information",
      (8.2, -1.68)),
     ("4", 14, "context",
      "The jump is large only because the\nprevious round fell.  Beyond that recovery\n"

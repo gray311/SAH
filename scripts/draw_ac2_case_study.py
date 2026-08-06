@@ -36,15 +36,15 @@ NODES = [
      "Multi-start initialization:\nproposer edits system prompt + skill,\nwidening the search space",
      (1.8, 1.05)),
     ("2", 8, "context",
-     "A brief is evidence read through a frozen\npolicy: it can shift what the proposer\n"
-     "believes, not how it decides.  RL moves\nthe policy itself (node 1); here the frozen\n"
-     "policy rebuilds the weak 0.955 seed --\n20/20 evals, below the shared start",
+     "Given only a summary of past rollouts,\nthe frozen proposer discards the stronger\n"
+     "design and rebuilds a weak one -- improving\nlocally, yet landing below the start.\n"
+     "A brief is evidence read through a frozen\npolicy: it shifts beliefs, not decisions",
      (8.2, -1.62)),
     ("4", 14, "context",
-     "The big rise is mostly recovery from the\nr1890 drop.  The brief does what telemetry\n"
-     "can do -- flag eval cost and a repeated\nlocal optimum -- yet the diff credits\n"
-     "init/tuning, not the new probe tool (used once)",
-     (16.6, 0.05)),
+     "Most of this rise recovers the earlier\ndrop; the small net gain comes from\n"
+     "re-initialization and parameter tuning,\nnot the newly added probe tool --\n"
+     "telemetry can flag problems, not fix them",
+     (16.6, -0.14)),
     ("3", 13, "proposer_full",
      "Forced diversity: switch function\nfamily after 5 stalled iterations.\n"
      "Inherited as skills and enforced as code,\nthis is machinery an executor update\ncannot author",

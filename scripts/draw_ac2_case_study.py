@@ -40,6 +40,11 @@ NODES = [
      "believes, not how it decides.  RL moves\nthe policy itself (node 1); here the frozen\n"
      "policy rebuilds the weak 0.955 seed --\n20/20 evals, below the shared start",
      (8.2, -1.62)),
+    ("4", 14, "context",
+     "The big rise is mostly recovery from the\nr1890 drop.  The brief does what telemetry\n"
+     "can do -- flag eval cost and a repeated\nlocal optimum -- yet the diff credits\n"
+     "init/tuning, not the new probe tool (used once)",
+     (16.6, 0.24)),
     ("3", 13, "proposer_full",
      "Forced diversity: switch function\nfamily after 5 stalled iterations.\n"
      "Inherited as skills and enforced as code,\nthis is machinery an executor update\ncannot author",
@@ -94,5 +99,5 @@ render({"1"}, ("papers/figures/ac2_case_study_node1.pdf",
                "papers/figures/ac2_case_study_node1.png"))
 render({"1", "2"}, ("papers/figures/ac2_case_study_node2.pdf",
                     "papers/figures/ac2_case_study_node2.png"))
-render({"1", "2", "3"}, ("papers/figures/ac2_case_study.pdf",
-                         "papers/figures/ac2_case_study.png"))
+render({"1", "2", "3", "4"}, ("papers/figures/ac2_case_study.pdf",
+                              "papers/figures/ac2_case_study.png"))

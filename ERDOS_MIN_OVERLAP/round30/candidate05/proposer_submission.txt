@@ -1,0 +1,220 @@
+schema: h2spec/1.0
+system_prompt: |
+  Erdos C5 Optimization: Minimize max_k integral h(x)(1-h(x+k))dx for h:[0,2]->[0,1] with integral(h)=1.
+
+  CURRENT BEST: c5 <= 0.38092303510845016 (combined_score = 1.0)
+  GOAL: Find h with c5_bound < 0.38092303510845016 (combined_score > 1.0)
+
+  STRATEGY: SYSTEMATIC PATTERN PERTURBATION
+
+  1. START WITH MODIFIED SEED PATTERNS - Don't generate new patterns from scratch. Instead,
+     systematically perturb the seed program's 15 existing patterns:
+     - Change Golomb marks positions (try [0.0, 0.4, 0.8, 1.6], [0.0, 0.5, 1.0, 1.5], etc.)
+     - Vary bipartite thresholds (a = 0.4, 0.5, 0.6, 0.7)
+     - Adjust peak widths and heights in multi-peak patterns
+     - Experiment with triangular center positions
+
+  2. CALL analyze_pattern_effect to compute approximate c5_bound for each perturbation
+     (uses FFT on 500 intervals - cheap, separate probe budget)
+
+  3. CALL evaluate_solution only on patterns with c5_bound < 0.378
+     (allows some margin below seed: 0.3809)
+
+  4. If no improvement after 3-4 pattern variations, try hyperparameter tuning:
+     - num_intervals: [400, 800, 1600]
+     - penalty_strength: [40, 61, 100, 150]
+     - base_learning_rate: [0.001, 0.004, 0.01]
+
+  5. Use analyze_pattern_effect to guide which perturbations to try next.
+  EVALUATE ONLY when c5_bound < 0.378 (combined_score > 1.006)
+new_tools:
+  - name: analyze_pattern_effect
+    description: |
+      Compute approximate c5_bound for a perturbed seed pattern.
+      Takes pattern type (golomb, bipartite, triangular, multi_peak, random)
+      and specific parameters (marks for Golomb, threshold for bipartite, etc.).
+      Returns estimated c5_bound using FFT on 500 intervals (cheap probe).
+      Use this to rapidly screen pattern variations before full evaluation.
+    input_schema:
+      type: object
+      properties:
+        pattern_type:
+          type: string
+          enum: [golomb, bipartite, triangular, multi_peak, random]
+        marks:
+          type: array
+          items:
+            type: number
+        threshold:
+          type: number
+        peak_width:
+          type: number
+        num_peaks:
+          type: integer
+        distribution:
+          type: string
+    implementation_py: |
+      def run(ctx, args):
+          import numpy as np
+          N = 500
+          domain = 2.0
+          dx = domain / N
+          
+          pattern_type = args.get("pattern_type", "golomb")
+          marks = args.get("marks", [0.0, 0.4, 1.0, 1.6])
+          threshold = args.get("threshold", 0.5)
+          peak_width = args.get("peak_width", 0.1)
+          num_peaks = args.get("num_peaks", 3)
+          distribution = args.get("distribution", "laplace")
+          
+          def build_h_from_params(p_type, marks, thresh, width, npeaks, dist):
+              h = np.zeros(N)
+              if p_type == "golomb":
+                  for m in marks:
+                      idx = int(m * N)
+                      h[idx] = 4.0
+                  h = h / (np.sum(h) * dx)
+                  h = np.clip(h, 0.001, 1.0)
+                  h = h / (np.sum(h) * dx)
+              elif p_type == "bipartite":
+                  n_thresh = int(thresh * N)
+                  h[:n_thresh] = 4.0
+                  h[n_thresh:] = -1.0
+                  h = h / (np.sum(h) * dx)
+                  h = np.clip(h, 0.001, 1.0)
+                  h = h / (np.sum(h) * dx)
+              elif p_type == "triangular":
+                  center_idx = int(1.0 * N)
+                  h[center_idx - int(width*N):center_idx + int(width*N)] = 20.0
+                  h = h / (np.sum(h) * dx)
+                  h = np.clip(h, 0.001, 1.0)
+                  h = h / (np.sum(h) * dx)
+              elif p_type == "multi_peak":
+                  centers = [0.4, 1.0, 1.6]
+                  for c in centers:
+                      idx = int(c * N)
+                      h[idx] = 15.0
+                  h = h / (np.sum(h) * dx)
+                  h = np.clip(h, 0.001, 1.0)
+                  h = h / (np.sum(h) * dx)
+              elif p_type == "random":
+                  if dist == "laplace":
+                      vals = -np.log(-np.log(np.random.uniform(0.001, 0.999, N)) + 1e-10)
+                  else:
+                      vals = np.random.uniform(0, 3, N)
+                  h = vals / (np.sum(vals) * dx)
+                  h = np.clip(h, 0.001, 1.0)
+                  h = h / (np.sum(h) * dx)
+              return h
+          
+          if pattern_type == "golomb":
+              h = build_h_from_params(pattern_type, marks, None, None, None, None)
+          elif pattern_type == "bipartite":
+              h = build_h_from_params(pattern_type, None, threshold, None, None, None)
+          elif pattern_type == "triangular":
+              h = build_h_from_params(pattern_type, None, None, peak_width, None, None)
+          elif pattern_type == "multi_peak":
+              h = build_h_from_params(pattern_type, None, None, None, num_peaks, None)
+          elif pattern_type == "random":
+              h = build_h_from_params(pattern_type, None, None, None, None, distribution)
+          else:
+              return {"error": "Unknown pattern type"}
+          
+          h_padded = np.pad(h, (0, N))
+          j_padded = np.pad(1.0 - h, (0, N))
+          corr = np.fft.ifft(np.fft.fft(h_padded) * np.conj(np.fft.fft(j_padded))).real
+          c5_bound = np.max(corr * dx)
+          
+          return {"c5_bound": float(c5_bound), "pattern_type": pattern_type}
+new_skills:
+  - name: perturb-seed-patterns
+    description: Systematically perturb seed program's existing patterns (Golomb marks, bipartite threshold, etc.)
+      and screen with analyze_pattern_effect before full evaluation.
+    body: |
+      # Perturb Seed Patterns for Erdos C5
+      
+      ## Phase 1: Systematic Pattern Perturbation
+      
+      1. PICK ONE pattern type from seed (golomb, bipartite, triangular, multi_peak)
+      
+      2. VARY ITS PARAMETERS:
+         - Golomb: Try marks [0.0, 0.4, 0.8, 1.6], [0.0, 0.5, 1.0, 1.5], [0.0, 0.33, 0.66, 1.33]
+         - Bipartite: Try threshold a in [0.3, 0.4, 0.5, 0.6, 0.7, 0.8]
+         - Triangular: Try center at 0.5, 1.0, 1.5 and widths [0.08, 0.1, 0.12]
+         - Multi_peak: Try 2 peaks, 3 peaks, 4 peaks at various centers
+      
+      3. CALL analyze_pattern_effect with new parameters
+         - Each call costs 1 probe (cheap)
+         - Get approximate c5_bound
+      
+      4. KEEP patterns with c5_bound < 0.378 (below seed 0.3809)
+      
+      5. CALL evaluate_solution on TOP candidate (lowest c5_bound)
+         - If combined_score > 1.0, finish
+         - If not, pick next parameter variation
+      
+      6. If stuck after 4 variations, switch to hyperparameter tuning
+      
+      ## Phase 2: Hyperparameter Tuning (last resort)
+      
+      Tune one parameter at a time:
+      - num_intervals: 400, 800, 1600 (larger = more resolution)
+      - penalty_strength: 40, 61, 100, 150 (stronger = stricter integral constraint)
+      - base_learning_rate: 0.001, 0.004, 0.01
+      - num_steps: 30000, 60000
+      
+      Always test ONE change at a time with num_restarts=1, num_steps=30000-60000.
+      Use probe_solution to screen candidates before full evaluation.
+tool_descriptions:
+  edit_solution: |
+    Modify EVOLVE-BLOCK hyperparameters ONE at a time.
+    
+    For pattern perturbation approach:
+    - Keep num_restarts=3-5 (to try multiple initializations per pattern)
+    - Test num_intervals in [400, 800, 1600]
+    - Test penalty_strength in [40, 61, 100, 150]
+    - Test base_learning_rate in [0.001, 0.004, 0.01]
+    
+    For single pattern testing:
+    - Set num_restarts=1, num_steps=30000-60000
+    
+    Key: Test ONE parameter change per edit to understand its effect.
+  evaluate_solution: |
+    Full 59000-step optimization with constraint enforcement.
+    Returns combined_score = 0.38092303510845016 / c5_bound.
+    
+    Only call evaluate_solution after analyze_pattern_effect shows c5_bound < 0.378.
+    combined_score > 1.0 means c5_bound < 0.38092303510845016 (new record).
+  probe_solution: |
+    Fast approximate evaluation (500 intervals). Uses separate probe budget.
+    
+    Use to screen pattern perturbations before full evaluation.
+    Budget: ~30 probes available.
+    
+    Call analyze_pattern_effect FIRST for pattern-based search,
+    then use probe_solution only when needed for fine-tuning.
+  finish: |
+    Submit when combined_score > 1.0 (c5_bound < 0.38092303510845016).
+sampling:
+  temperature: 0.6
+  top_p: 0.95
+  top_k: 30
+  max_tokens: 14000
+agent:
+  max_iterations: 70
+middleware:
+  budget_reminder_from_left: 6
+  long_tool_output_max_chars: 10000
+new_middlewares:
+  - name: perturbation_counter
+    hook: before_model
+    description: |
+      Middleware to track perturbation attempts and prevent repeating failed patterns.
+      Reminds agent to try new parameter combinations after exhausting current pattern.
+    implementation_py: |
+      def before_model(hook_input):
+          history = hook_input.get("history", [])
+          pattern_calls = [h for h in history if "analyze_pattern_effect" in str(h.get("tools_used", []))]
+          if len(pattern_calls) >= 6:
+              return "You've called analyze_pattern_effect 6 times. Try hyperparameter tuning now."
+          return None

@@ -1,0 +1,85 @@
+schema: h2spec/1.0
+system_prompt: |
+  Erdos C5 problem: Find h: [0,2]->[0,1] minimizing max_k integral h(x)(1-h(x+k))dx.
+  
+  CONSTRAINTS: integral(h)=1 exactly, h in [0,1].
+  
+  Current best: C5 <= 0.38092303510845016 (combined_score = 1.0).
+  GOAL: Find h with c5_bound < 0.38092303510845016 (combined_score > 1.0).
+  
+  SEARCH STRATEGY:
+  
+  1. DIVERSIFIED INITIALIZATION: Start with multiple diverse initializations
+     - Uniform distribution, bimodal, trimodal, Golomb ruler-like, piecewise constant
+     - Use sigmoid of latent to ensure [0,1] range
+     - Apply L2 projection to enforce integral=1 after each edit
+  
+  2. SPECTRAL-AWARE MUTATIONS: The objective uses FFT correlation. Mutations that
+     - Reduce energy at specific frequency bands corresponding to problematic shifts
+     - Preserve low-frequency components (global integral constraint)
+     - Try: peak shifting, peak splitting, peak merging, plateau adjustments
+  
+  3. GRADIENT-INSPIRED ADJUSTMENTS: Even without gradients, try:
+     - If h(x)(1-h(x+k)) is large for shift k, reduce h(x) or increase h(x+k)
+     - Small perturbations (±0.05 to ±0.15) in regions of high overlap
+  
+  4. PROBE-THEN-EVALUATE: Always call probe_solution before evaluate_solution.
+     Only full evaluate if probe suggests c5_bound < 0.382.
+  
+  5. ITERATIVE REFINEMENT: Start coarse (larger edits), refine with smaller edits.
+  Use the best probe results as starting point for next iteration.
+  
+  TOOL USAGE:
+  - edit_solution: Make targeted structural changes (not random noise)
+  - probe_solution: Screen candidates cheaply (500 intervals, separate budget)
+  - evaluate_solution: Only for best probes with c5_bound < 0.382
+  - finish: When combined_score > 1.0
+skill_description: Spectral-aware search for Erdos C5. Start diverse, use FFT correlation insights, probe before full eval.
+skill_body: "# Spectral-Aware Erdos C5 Search\n\n## Phase 1: Diverse Initialization\n\n1. Generate 5-10 diverse initial step functions:\n   - Uniform: h(x) ≈ 0.5 everywhere\n   - Bimodal: Two peaks (e.g., h=0.8 on [0,0.5] and [1.5,2], h=0.2 elsewhere)\n   - Trimodal: Three peaks at 0.33, 1.0, 1.67\n   - Golomb-like: Peaks at 0.0, 0.4, 0.8, 1.2, 1.6\n   - Step function: Threshold at x=0.5 (h=1.0 for x<0.5, h=0.0 otherwise, adjusted for integral)\n\n2. For each initialization:\n   - Apply sigmoid to latent to ensure [0,1] range\n   - Apply L2 projection: h = h / integral(h) * 1.0 to enforce integral=1\n   - Keep top 3 by probe score\n\n## Phase 2: Spectral-Aware Mutations\n\nThe objective: max_k integral h(x)(1-h(x+k))dx = max_k correlation[k] * dx\n\nFFT insight: correlation[k] comes from the k-th frequency component.\n\nMutation templates:\n\n### Template A: Peak Shifting\n- Identify a peak at position p\n- Shift it by delta (±0.1 to ±0.3)\n- Re-normalize for integral\n- Expected effect: Changes correlation at shifts related to delta\n\n### Template B: Peak Splitting\n- Take a broad peak and split into two narrower peaks\n- Example: [0.2, 0.8] → two peaks at 0.3 and 0.5 with lower height\n- Expected effect: Reduces correlation at certain lags\n\n### Template C: Peak Merging\n- Merge two nearby peaks into one broader peak\n- Example: peaks at 0.2 and 0.4 → one peak at 0.3\n- Expected effect: Smooths the function, may reduce high-frequency correlations\n\n### Template D: Plateau Adjustment\n- Raise/lower a plateau region\n- Example: h=0.6 on [0.2, 0.6] → h=0.7 on [0.2, 0.6]\n- Adjust other regions to maintain integral=1\n- Expected effect: Changes correlation at all shifts (global change)\n\n### Template E: Localized Perturbation\n- Add small noise (±0.05 to ±0.15) in region of high overlap\n- Find k where correlation[k] is large, find x where h(x)(1-h(x+k)) is large\n- Perturb h(x) in that region\n- Re-normalize for integral\n\n## Phase 3: Probe-Driven Search\n\n1. After each mutation, call probe_solution immediately\n2. Keep mutations with c5_bound < 0.382 (probe threshold)\n3. Evaluate only the best 1-2 probe candidates\n4. If no improvement in 10 iterations, reset to a new diverse initialization\n\n## Phase 4: Iterative Refinement\n\n1. Start with larger edits (±0.1 to ±0.2)\n2. As search progresses, use smaller edits (±0.02 to ±0.08)\n3. Always maintain integral=1 and h in [0,1]\n4. Track best solution across all iterations\n\n## Key Rules\n- DIVERSITY FIRST: Always try diverse initializations\n- SPECTRAL AWARENESS: Think about how mutations affect FFT correlation\n- PROBE BEFORE EVAL: Never spend full eval budget on unproven candidates\n- INTEGRAL CONSTRAINT: Always re-normalize after edits\n- ITERATIVE: Start coarse, refine fine"
+tool_descriptions:
+  edit_solution: |
+    Make targeted structural changes to h:
+    
+    MUTATION TEMPLATES (choose one, don't mix randomly):\
+    
+    1. peak_shift: Shift a peak by delta_x (±0.1 to ±0.3)\
+       Format: {{"type": "peak_shift", "peak_index": int, "delta_x": float}}\
+    
+    2. peak_split: Split peak i into two at positions p1, p2 with heights h1, h2\
+       Format: {{"type": "peak_split", "peak_index": int, "positions": [float, float], "heights": [float, float]}}\
+    
+    3. plateau_adjust: Change h in [x1, x2] from old_h to new_h, adjust elsewhere\
+       Format: {{"type": "plateau_adjust", "start": float, "end": float, "old_h": float, "new_h": float}}\
+    
+    4. localized_perturb: Add delta_h to h in [x1, x2], re-normalize\
+       Format: {{"type": "localized_perturb", "start": float, "end": float, "delta_h": float}}\
+    
+    IMPORTANT: After any edit, you MUST re-normalize h to ensure:\n- h values in [0,1]\n- integral(h) = 1.0 exactly\n\nUse sigmoid transformation if working with latent, then L2 projection for integral constraint.
+  evaluate_solution: |
+    Full evaluation on 59000 intervals. Returns combined_score = 0.38092303510845016 / c5_bound.
+    
+    combined_score > 1.0 means c5_bound < 0.38092303510845016 (new record!).
+    
+    Only call after probe_solution confirms c5_bound < 0.382.
+    Budget: 60 evaluations total - use wisely!
+  probe_solution: |
+    Fast approximate evaluation on 500 intervals (10s vs minutes for full eval).
+    Separate budget of ~30 probes available.
+    
+    Call probe_solution BEFORE evaluate_solution to screen candidates.
+    Keep candidates with c5_bound < 0.382, evaluate only the best 1-2.
+    
+    Approximate scores are NOT comparable to full scores, but good for ranking.
+  finish: |
+    Submit when combined_score > 1.0 (c5_bound < 0.38092303510845016).
+    Provide brief summary: initialization used, mutation types, best c5_bound found.
+sampling:
+  temperature: 0.3
+  top_p: 0.85
+  top_k: 10
+  max_tokens: 10000
+agent:
+  max_iterations: 80
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 8000

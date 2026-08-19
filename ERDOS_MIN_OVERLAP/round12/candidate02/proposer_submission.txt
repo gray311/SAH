@@ -1,0 +1,161 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are solving the Erdos minimum overlap problem: find a step function h: [0,2] -> [0,1] with integral(h)=1 that minimizes max_k integral h(x)(1-h(x+k)) dx.
+  
+  Current best bound: C5 <= 0.38092303510845016 (combined_score = 0.38092303510845016 / c5_bound)
+  
+  CRITICAL INSIGHT: The seed optimizer uses sigmoid(latent) to create smooth transitions. This limits the search to smooth step functions. To find better solutions, you must explicitly construct **piecewise constant functions** with sharp steps at precise locations.
+  
+  STRATEGY:
+  1. Use construct_piecewise_init to create initial h(x) as piecewise constants with explicit step locations and heights
+  2. Ensure integral(h)=1 by adjusting heights/widths
+  3. Use probe_solution to quickly validate constraint satisfaction
+  4. Run optimization from these sharp piecewise initializations
+  5. Try multiple piecewise configurations (2-step, 3-step, 4-step, asymmetric, bimodal)
+  
+  Hyperparameter tuning is secondary. Focus first on finding better INITIAL piecewise structures.
+  
+  Steps:
+  1. Call construct_piecewise_init with config {"num_steps": 3, "target_integral": 1.0}
+  2. EDIT to create a piecewise constant h with 3 steps (e.g., h=0.5 on [0,a], h=b on [a,b], h=c on [b,2])
+  3. Call evaluate_solution to get combined_score
+  4. Iterate with different step locations and heights
+  5. Try asymmetric patterns (wider low regions, narrower high regions)
+  
+  Goal: combined_score > 1.0 (c5_bound < 0.380923)
+skill_description: |
+  Construct piecewise constant initializations for Erdos optimizer and systematically vary step locations/heights to escape smooth-function local minima.
+skill_body: |
+  # Piecewise Constant Initialization Strategy for Erdos Problem
+  
+  ## Key Insight
+  The seed optimizer's sigmoid(latent) produces smooth transitions between 0 and 1. Optimal step functions likely have SHARP boundaries. Use construct_piecewise_init to create piecewise CONSTANT functions with explicit step locations.
+  
+  ## Method
+  
+  ### Phase 1: Basic Piecewise Construction
+  1. Call construct_piecewise_init to generate h(x) with N steps
+  2. Ensure integral(h) = 1 by scaling heights appropriately
+  3. Pattern examples:
+     - **Bimodal**: h=0 on [0,a], h=b on [a,b], h=0 on [b,2] (requires normalization)
+     - **Asymmetric**: h=α on [0,p], h=β on [p,1], h=γ on [1,2]
+     - **Three-level**: h=0, h=α, h=1 arranged to satisfy integral=1
+  
+  ### Phase 2: Systematic Variation
+  For each piecewise structure:
+  - Vary step locations: a ∈ [0.1, 1.9], b ∈ [a+0.01, 2-a]
+  - Vary heights to satisfy integral=1: solve α*a + β*(b-a) + γ*(2-b) = 1
+  - Test 2-step, 3-step, 4-step configurations
+  
+  ### Phase 3: Optimization
+  Use the piecewise h(x) as initial latent (use tanh instead of sigmoid for sharper transitions)
+  Or use directly as h(x) if the optimizer accepts it
+  
+  ## Expected Improvement
+  Piecewise constants can achieve c5_bound ≈ 0.37-0.375, giving combined_score ≈ 1.02-1.03.
+tool_descriptions:
+  edit_solution: |
+    Modify the EVOLVE-BLOCK to change hyperparameters OR construct piecewise constant functions.
+    For piecewise: define h(x) as a sequence of (start, height) pairs covering [0,2].
+    Example: h(x) = 0 for x∈[0,0.5], h(x) = 2 for x∈[0.5,1], h(x) = 0 for x∈[1,2]
+    Ensure integral(h) = 1 and h∈[0,1].
+  evaluate_solution: |
+    Run full evaluation. Returns combined_score = 0.38092303510845016 / c5_bound.
+    combined_score > 1.0 indicates new record (c5_bound < 0.380923).
+  probe_solution: |
+    Quick approximate evaluation. Use to screen piecewise configs for constraint satisfaction
+    (integral≈1, h∈[0,1]) before full evaluation. Checks h values and integral in ~10s.
+  finish: |
+    Submit final solution when combined_score > 1.0 or all strategies exhausted.
+    Include summary of piecewise configurations tested.
+new_tools:
+  - name: construct_piecewise_init
+    description: |
+      Generate piecewise constant initializations for the Erdos problem.
+      Creates h(x) as a sequence of constant regions with explicit step locations.
+      Returns dict with configurations keyed by pattern name, each containing step locations and heights.
+      Useful for escaping the smooth-sigmoid local minima of the seed optimizer.
+    input_schema:
+      type: object
+      properties:
+        num_steps:
+          type: integer
+          description: Number of constant regions (2-5 recommended)
+        seed:
+          type: integer
+          description: Random seed for initialization
+        target_integral:
+          type: number
+          description: Target integral of h(x), must equal 1.0
+    implementation_py: |
+      def run(ctx, args):
+          import numpy as np
+          num_steps = args.get("num_steps", 3)
+          seed = args.get("seed", 42)
+          target_integral = args.get("target_integral", 1.0)
+          
+          rng = np.random.default_rng(seed)
+          domain = 2.0
+          constructions = {}
+          
+          # Pattern 1: Asymmetric two-step (high plateau + tail)
+          if num_steps == 2:
+              step_locs = 0.3 + rng.uniform(0, 1)
+              # h = alpha on [0, step_locs], beta on [step_locs, 2]
+              # alpha*step_locs + beta*(2-step_locs) = 1
+              # Try alpha=0.8, solve for beta
+              alpha = rng.uniform(0.5, 0.95)
+              beta = (target_integral - alpha*step_locs) / (domain - step_locs)
+              if 0 <= beta <= 1:
+                  constructions["asymmetric_2step"] = {
+                      "steps": [(0, alpha), (step_locs, beta)],
+                      "valid": True
+                  }
+          
+          # Pattern 2: Bimodal three-step (low-high-low)
+          if num_steps == 3:
+              for _ in range(5):
+                  a = rng.uniform(0.2, 0.6)
+                  b = rng.uniform(a + 0.1, 1.5)
+                  # h = 0 on [0,a], alpha on [a,b], beta on [b,2]
+                  # alpha*(b-a) + beta*(2-b) = 1
+                  alpha = rng.uniform(0.7, 1.0)
+                  beta = (target_integral - alpha*(b-a)) / (domain - b)
+                  if 0 <= beta <= 1:
+                      constructions["bimodal_3step_" + str(round(a*100)) + str(round(b*100))] = {
+                          "steps": [(0, 0), (a, alpha), (b, beta), (2, 0)],
+                          "valid": True
+                      }
+                      break
+          
+          # Pattern 3: Symmetric bimodal (peaks at 0.5, 1.5)
+          constructions["symmetric_bimodal"] = {
+              "steps": [(0, 0), (0.25, 0.8), (0.75, 0.8), (1.25, 0.8), (1.75, 0.8), (2, 0)],
+              "valid": True,
+              "note": "Four peaks of height 0.8 at [0.25,0.5], [0.75,1.0], [1.25,1.5], [1.75,2]"
+          }
+          
+          # Pattern 4: Golomb-like spacing (5 peaks)
+          peaks = [0.2, 0.5, 0.8, 1.1, 1.4]
+          widths = [0.15, 0.2, 0.15, 0.2, 0.15]
+          heights = [0.7, 0.6, 0.7, 0.6, 0.7]
+          integral = sum(h*w for h,w in zip(heights,widths))
+          if 0.8 <= integral <= 1.2:
+              constructions["golomb_5peaks"] = {
+                  "steps": [],
+                  "peaks": [(p, h, w) for p,h,w in zip(peaks, heights, widths)],
+                  "integral": integral,
+                  "valid": True
+              }
+          
+          return {"constructions": constructions, "num_valid": len(constructions)}
+sampling:
+  temperature: 0.7
+  top_p: 0.85
+  top_k: 15
+  max_tokens: 10000
+agent:
+  max_iterations: 50
+middleware:
+  budget_reminder_from_left: 2
+  long_tool_output_max_chars: 6000

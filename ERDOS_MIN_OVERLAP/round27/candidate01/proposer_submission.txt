@@ -1,0 +1,292 @@
+schema: h2spec/1.0
+system_prompt: |
+  Erdos minimum overlap problem (C5): Find h: [0,2]->[0,1] minimizing max_k integral h(x)(1-h(x+k))dx.
+
+  CONSTRAINT: integral(h) = 1 exactly. h values in [0,1].
+
+  Current best: C5 <= 0.38092303510845016 (combined_score = 1.0).
+
+  GOAL: Find h achieving c5_bound < 0.38092303510845016 (combined_score > 1.0).
+
+  CRITICAL INSIGHT: The seed optimizer trains from initializations (patterns 5-14 in _get_best_initialization), but training is slow.
+  DO NOT waste evals on training when you can directly test pattern initializations.
+
+  STRATEGY:
+  1. FIRST, use test_pattern_direct to instantly evaluate these 5 patterns (each takes ~0.1s, no training):
+     - Pattern Bipartite: h=4 on [0,a), h=-1 on [a,2), sigmoid to [0,1], normalize integral=1
+     - Pattern Bipartite: h=4 on [0,a), h=-1 on [a,2-a), ... 
+     - Pattern Tri-modal: 3 narrow Gaussian peaks at specified centers
+     - Pattern Tri-modal: 3 narrow rectangular peaks
+     - Pattern Tri-modal: 3 moderate Gaussian peaks
+     - Pattern Symmetric-4 peaks: 4 narrow peaks at 0.15, 0.85, 1.15, 1.85
+
+  2. Use test_pattern_direct to construct and score each pattern (analytical c5 via FFT, instant)
+  3. Call evaluate_solution ONLY on the best 1-2 patterns (fast training from good start)
+  4. If no pattern < 0.37, then try hyperparameter variations of training
+
+  5. Budget: 20 evals. Use test_pattern_direct 5-10x to screen, then 2-4 full evals.
+
+  6. PATTERN FORMULAS (copy from seed code, normalized for integral=1):
+     Bipartite(a): latent = [4 for x<a] + [-1 for x>=a] -> sigmoid -> normalize integral=1
+     TriGauss(c1,c2,c3,sigma): 3 Gaussians centered at c1,c2,c3 with bandwidth sigma
+     TriRect(c1,c2,c3,w): 3 rectangles of width w at c1,c2,c3
+     Sym4(w): 4 peaks at 0.15,0.85,1.15,1.85 with width w
+
+  7. If stuck, restart with same patterns but different widths/centers.
+new_tools:
+  - name: test_pattern_direct
+    description: |
+      Instantly construct and score 5 pre-defined patterns from the seed code.
+      Each pattern: latent -> sigmoid -> normalize integral=1 -> compute c5 via FFT.
+      No training needed (instant). Use to quickly screen pattern space.
+      
+      Patterns tested:
+      - Bipartite [0.5]: h=4 on [0,0.5), h=-1 on [0.5,2)
+      - Bipartite [0.55]: h=4 on [0,0.55), h=-1 on [0.55,2)
+      - TriGauss [0.4,1.0,1.6] [w=0.08]: 3 Gaussians
+      - TriRect [0.4,1.0,1.6] [w=0.12]: 3 rectangles
+      - TriGauss [0.4,1.0,1.6] [w=0.15]: 3 Gaussians (wider)
+      - Sym4 [w=0.1]: 4 peaks at 0.15,0.85,1.15,1.85
+      
+      Returns: list of {pattern, h_list, integral, c5_bound}
+      Use best candidates (c5_bound < 0.37) for full evaluate_solution.
+    input_schema:
+      type: object
+      properties:
+        domain:
+          type: number
+          default: 2.0
+        N:
+          type: number
+          default: 800
+    implementation_py: |
+      def run(ctx, args):
+          import jax
+          import jax.numpy as jnp
+          import numpy as np
+          
+          domain = args.get("domain", 2.0)
+          N = int(args.get("N", 800))
+          dx = domain / N
+          
+          patterns = []
+          
+          # Pattern 1: Bipartite [0,0.5)
+          latent = jnp.zeros(N)
+          latent = latent.at[:int(N*0.5)].set(4.0)
+          latent = latent.at[int(N*0.5):].set(-1.0)
+          h = jax.nn.sigmoid(latent)
+          h = h / (jnp.sum(h) * dx)
+          h = jnp.clip(h, 0.001, 1.0)
+          h = h / (jnp.sum(h) * dx)
+          h = jnp.clip(h, 0.001, 1.0)
+          j = 1.0 - h
+          h_p = jnp.pad(h, (0, N))
+          j_p = jnp.pad(j, (0, N))
+          corr = jnp.fft.ifft(jnp.fft.fft(h_p) * jnp.conj(jnp.fft.fft(j_p))).real
+          c5 = float(jnp.max(corr * dx))
+          patterns.append({"pattern": "bipartite_05", "h": h.tolist(), "integral": float(jnp.sum(h)*dx), "c5_bound": c5})
+          
+          # Pattern 2: Bipartite [0,0.55)
+          latent = jnp.zeros(N)
+          latent = latent.at[:int(N*0.55)].set(4.0)
+          latent = latent.at[int(N*0.55):].set(-1.0)
+          h = jax.nn.sigmoid(latent)
+          h = h / (jnp.sum(h) * dx)
+          h = jnp.clip(h, 0.001, 1.0)
+          h = h / (jnp.sum(h) * dx)
+          h = jnp.clip(h, 0.001, 1.0)
+          j = 1.0 - h
+          h_p = jnp.pad(h, (0, N))
+          j_p = jnp.pad(j, (0, N))
+          corr = jnp.fft.ifft(jnp.fft.fft(h_p) * jnp.conj(jnp.fft.fft(j_p))).real
+          c5 = float(jnp.max(corr * dx))
+          patterns.append({"pattern": "bipartite_055", "h": h.tolist(), "integral": float(jnp.sum(h)*dx), "c5_bound": c5})
+          
+          # Pattern 3: TriGauss [0.4,1.0,1.6] w=0.08
+          latent = jnp.zeros(N)
+          for c in [0.4, 1.0, 1.6]:
+              w = N * 0.08
+              latent = latent.at[(c*N-w/2):int(c*N+w/2)].set(8.0)
+          h = jax.nn.sigmoid(latent)
+          h = h / (jnp.sum(h) * dx)
+          h = jnp.clip(h, 0.001, 1.0)
+          h = h / (jnp.sum(h) * dx)
+          h = jnp.clip(h, 0.001, 1.0)
+          j = 1.0 - h
+          h_p = jnp.pad(h, (0, N))
+          j_p = jnp.pad(j, (0, N))
+          corr = jnp.fft.ifft(jnp.fft.fft(h_p) * jnp.conj(jnp.fft.fft(j_p))).real
+          c5 = float(jnp.max(corr * dx))
+          patterns.append({"pattern": "trigauss_08", "h": h.tolist(), "integral": float(jnp.sum(h)*dx), "c5_bound": c5})
+          
+          # Pattern 4: TriRect [0.4,1.0,1.6] w=0.12
+          latent = jnp.zeros(N)
+          for c in [0.4, 1.0, 1.6]:
+              w = N * 0.12
+              latent = latent.at[(c*N-w/2):int(c*N+w/2)].set(6.0)
+          h = jax.nn.sigmoid(latent)
+          h = h / (jnp.sum(h) * dx)
+          h = jnp.clip(h, 0.001, 1.0)
+          h = h / (jnp.sum(h) * dx)
+          h = jnp.clip(h, 0.001, 1.0)
+          j = 1.0 - h
+          h_p = jnp.pad(h, (0, N))
+          j_p = jnp.pad(j, (0, N))
+          corr = jnp.fft.ifft(jnp.fft.fft(h_p) * jnp.conj(jnp.fft.fft(j_p))).real
+          c5 = float(jnp.max(corr * dx))
+          patterns.append({"pattern": "trirect_12", "h": h.tolist(), "integral": float(jnp.sum(h)*dx), "c5_bound": c5})
+          
+          # Pattern 5: TriGauss [0.4,1.0,1.6] w=0.15
+          latent = jnp.zeros(N)
+          for c in [0.4, 1.0, 1.6]:
+              w = N * 0.15
+              latent = latent.at[(c*N-w/2):int(c*N+w/2)].set(7.0)
+          h = jax.nn.sigmoid(latent)
+          h = h / (jnp.sum(h) * dx)
+          h = jnp.clip(h, 0.001, 1.0)
+          h = h / (jnp.sum(h) * dx)
+          h = jnp.clip(h, 0.001, 1.0)
+          j = 1.0 - h
+          h_p = jnp.pad(h, (0, N))
+          j_p = jnp.pad(j, (0, N))
+          corr = jnp.fft.ifft(jnp.fft.fft(h_p) * jnp.conj(jnp.fft.fft(j_p))).real
+          c5 = float(jnp.max(corr * dx))
+          patterns.append({"pattern": "trigauss_15", "h": h.tolist(), "integral": float(jnp.sum(h)*dx), "c5_bound": c5})
+          
+          # Pattern 6: Sym4 [w=0.1] 4 peaks at 0.15,0.85,1.15,1.85
+          latent = jnp.zeros(N)
+          for c in [0.15, 0.85, 1.15, 1.85]:
+              w = N * 0.1
+              latent = latent.at[(c*N-w/2):int(c*N+w/2)].set(7.0)
+          h = jax.nn.sigmoid(latent)
+          h = h / (jnp.sum(h) * dx)
+          h = jnp.clip(h, 0.001, 1.0)
+          h = h / (jnp.sum(h) * dx)
+          h = jnp.clip(h, 0.001, 1.0)
+          j = 1.0 - h
+          h_p = jnp.pad(h, (0, N))
+          j_p = jnp.pad(j, (0, N))
+          corr = jnp.fft.ifft(jnp.fft.fft(h_p) * jnp.conj(jnp.fft.fft(j_p))).real
+          c5 = float(jnp.max(corr * dx))
+          patterns.append({"pattern": "sym4_01", "h": h.tolist(), "integral": float(jnp.sum(h)*dx), "c5_bound": c5})
+          
+          return {"patterns": patterns, "num_patterns": 6}
+skill_description: |
+  Analytical pattern screening for Erdos C5. Use test_pattern_direct to instantly construct and score
+  6 patterns (bipartite, tri-modal variants, symmetric-4). Each pattern is: latent -> sigmoid -> integral=1 normalize -> c5 via FFT.
+  No training (instant). Call once, pick best c5_bound < 0.37, then evaluate fully.
+skill_body: |
+  # Analytical Pattern Screening
+
+  ## Strategy
+
+  The seed code has 15 initialization patterns (5-14). Training from them takes 59000 steps.
+  Instead, use test_pattern_direct to instantly construct and score these patterns.
+
+  ## Workflow
+
+  1. CALL test_pattern_direct (no args needed)
+     - Returns 6 patterns with precomputed c5_bound (analytical, no training)
+     - Each h has integral=1 guaranteed
+
+  2. EXAMINE results:
+     - Look for c5_bound < 0.37 (promising)
+     - Skip patterns with c5_bound > 0.375 (too bad)
+
+  3. CALL evaluate_solution on the TOP 1-2 patterns (best c5_bound)
+     - These will train from good initializations
+     - With good start, training may find c5_bound < 0.380923
+
+  4. If no improvement, try the SAME patterns with different widths:
+     - For tri-modal: try widths 0.06, 0.1, 0.15, 0.2
+     - For bipartite: try split points 0.4, 0.5, 0.55, 0.6
+
+  5. If stuck, try hyperparameter tuning of training (num_steps, lr, penalty)
+
+  ## Expected Outcome
+
+  One of the 6 analytical patterns should have c5_bound < 0.37.
+  Training from that pattern may yield c5_bound < 0.380923.
+tool_descriptions:
+  edit_solution: |
+    Modify EVOLVE-BLOCK for training hyperparameters.
+    Only use AFTER identifying a good pattern with test_pattern_direct.
+    
+    Key hyperparameters:
+    - num_restarts: 1 (use single good pattern) vs 3 (diversity)
+    - num_steps: 30000 (fast test) to 100000 (full search)
+    - base_learning_rate: 0.001, 0.005, 0.01, 0.02
+    - penalty_strength: 40, 60, 80, 120
+    - num_intervals: 400, 800, 1600, 3200
+
+  evaluate_solution: |
+    Full 59000-step optimization from current solution.
+    Returns combined_score = 0.38092303510845016 / c5_bound.
+    
+    Use ONLY on patterns identified by test_pattern_direct with c5_bound < 0.37.
+    Full eval is expensive; don't waste on bad patterns.
+
+  probe_solution: |
+    Fast approximate evaluation (500 intervals).
+    Already available, use for quick screening before full eval.
+    
+    Alternative: use test_pattern_direct for instant pattern scoring (cheaper, more accurate for patterns).
+
+  finish: |
+    Submit when combined_score > 1.0 (c5_bound < 0.38092303510845016).
+sampling:
+  temperature: 0.7
+  top_p: 0.9
+  top_k: 15
+  max_tokens: 12000
+agent:
+  max_iterations: 30
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 8000
+new_skills:
+- name: pattern-first-strategy
+  description: Use test_pattern_direct FIRST before any training-based exploration. Screen patterns analytically, then train from winners.
+  body: |
+    # Pattern-First Strategy for Erdos C5
+
+    ## Core Principle
+
+    Don't waste evals on training from random initializations.
+    The seed has 6 proven pattern types - use test_pattern_direct to score them instantly.
+
+    ## Step-by-Step
+
+    1. FIRST CALL: test_pattern_direct (no args needed)
+       - Instantly constructs 6 patterns (analytical c5)
+       - Takes ~0.1s, no evaluation budget used
+
+    2. SELECT: Pick pattern(s) with c5_bound < 0.37
+       - Ideally find one with c5_bound < 0.365
+       - Pattern "sym4_01" (4 peaks) is promising for minimizing overlap
+       - Pattern "trirect_12" (3 rectangles) may concentrate mass well
+
+    3. TRAIN: Call edit_solution to enable single-restart training:
+       - Set num_restarts=1 (use one pattern, not 3)
+       - Set num_steps=59000 (full training from this good start)
+       - Keep other hyperparameters near defaults
+
+    4. EVALUATE: Call evaluate_solution once
+       - The optimizer should refine the pattern
+       - Goal: c5_bound < 0.380923
+
+    ## If No Success
+
+    - Try the same pattern with different width parameters
+    - Try variations: Sym4 with w=0.08, 0.12, 0.15
+    - Then consider hyperparameter tuning
+
+    ## Why This Works
+
+    - The 6 patterns are analytical solutions to "how to distribute mass"
+    - Training from a good pattern can fine-tune it
+    - Random initializations (seed default) don't know about good patterns
+    - test_pattern_direct gives you the "map" before you "hike"
+new_tools: []
+remove_tools: []

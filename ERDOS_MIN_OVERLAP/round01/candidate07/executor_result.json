@@ -1,0 +1,293 @@
+{
+  "task_id": "eft__math__erdos_min_overlap",
+  "source": "eft",
+  "best_score": 0.7889776741322249,
+  "seed_score": 0.7694488256878874,
+  "best_metrics": {
+    "c5_bound": 0.48280584812164307,
+    "combined_score": 0.7889776741322249,
+    "n_points": 50,
+    "eval_time": 1.535416603088379
+  },
+  "best_program": "# EVOLVE-BLOCK-START\nimport jax\nimport jax.numpy as jnp\nimport optax\nimport numpy as np\nfrom dataclasses import dataclass\n\n\n@dataclass\nclass Hyperparameters:\n    num_intervals: int = 50\n    local_search_iters: int = 100\n\n\nclass C5Search:\n    def __init__(self, cfg: Hyperparameters):\n        self.cfg = cfg\n        self.N = cfg.num_intervals\n        self.dx = 2.0 / self.N\n\n    def get_max_overlap(self, h_arr):\n        \"\"\"Compute max(k) of integral h(x)(1-h(x+k))dx.\"\"\"\n        h = jnp.clip(h_arr, 0.0, 1.0)\n        j_h = 1.0 - h\n        \n        N = self.N\n        h_pad = jnp.pad(h, (0, N))\n        j_pad = jnp.pad(j_h, (0, N))\n        \n        corr = jnp.fft.fft(h_pad) * jnp.conj(jnp.fft.fft(j_pad))\n        corr_ifft = jnp.fft.ifft(corr).real\n        \n        result = float(jnp.max(corr_ifft * self.dx))\n        return result\n\n    def normalize_h(self, arr):\n        \"\"\"Scale so integral is exactly 1.\"\"\"\n        for _ in range(50):\n            integ = float(jnp.sum(arr) * self.dx)\n            if abs(integ - 1.0) < 0.0005:\n                break\n            arr = jnp.clip(arr / integ, 0.01, 0.99)\n        \n        final_integ = float(jnp.sum(arr) * self.dx)\n        arr = arr / final_integ\n        arr = jnp.clip(arr, 0.0, 1.0)\n        return arr\n\n    def init_smooth(self, seed):\n        \"\"\"Create smooth initial guess with proper mass.\"\"\"\n        rng = jax.random.PRNGKey(seed)\n        raw_vals = jax.random.normal(rng, (self.N,))\n        h_raw = jax.nn.sigmoid(raw_vals) * 10.0\n        \n        h_norm = self.normalize_h(h_raw)\n        return h_norm\n\n    def small_perturb(self, h, rng_seed):\n        \"\"\"Make small changes to random entries.\"\"\"\n        rng = jax.random.PRNGKey(rng_seed)\n        pert = h.copy()\n        \n        # Pick indices\n        N_total = len(h)\n        n_choices = max(1, min(3, N_total // 20))\n        \n        idx_gen = jnp.arange(N_total)\n        perm_idx = jax.random.permutation(rng, idx_gen)\n        selected_indices = perm_idx[:n_choices].tolist()\n        \n        # Generate bounded deltas [0, 1) then scale to [-0.02, 0.02]\n        rand_vals = jax.random.uniform(rng, n_choices)  # [0, 1)\n        \n        for sel_i, idx_i in enumerate(selected_indices):\n            delta = rand_vals[sel_i] * 0.04 - 0.02\n            pert = pert.at[idx_i].set(pert[idx_i] + delta)\n        \n        norm_h = self.normalize_h(pert)\n        return norm_h\n\n    def run_search(self):\n        best_c5 = float('inf')\n        best_h = None\n        initial = self.init_smooth(42)\n        prev_c5 = self.get_max_overlap(initial)\n        \n        for it in range(self.cfg.local_search_iters):\n            h_cand = self.small_perturb(best_h if best_h is not None else initial, int(it * 31337 + 17))\n            cand_c5 = self.get_max_overlap(h_cand)\n            \n            if cand_c5 < best_c5 - 1e-9:\n                best_c5 = cand_c5\n                best_h = h_cand\n        return best_h, best_c5\n\n    def run_optimization(self):\n        h_final, c5_val = self.run_search()\n        return h_final, c5_val, self.N\n\n\ndef run():\n    cfg = Hyperparameters(num_intervals=50, local_search_iters=150)\n    searcher = C5Search(cfg)\n    final_h, c5_res, n_pts = searcher.run_optimization()\n    return np.array(final_h), c5_res, n_pts\n# EVOLVE-BLOCK-END",
+  "stop_reason": "completed",
+  "ledger": {
+    "max_evaluator_calls": 20,
+    "evaluator_calls": 1,
+    "max_probe_calls": 30,
+    "probe_calls": 22,
+    "edit_calls": 25,
+    "llm_input_tokens": 0,
+    "llm_output_tokens": 0,
+    "llm_calls": 49,
+    "sandbox_seconds": 7.87015700340271
+  },
+  "steps": [
+    {
+      "step": 0,
+      "kind": "seed",
+      "edit_mode": "seed",
+      "edit_note": "seed program",
+      "combined_score": 0.7694488256878874,
+      "validity": 1.0,
+      "error": null,
+      "wall_s": 4.790868759155273,
+      "is_new_best": true
+    },
+    {
+      "step": 1,
+      "kind": "probe",
+      "edit_mode": "probe",
+      "edit_note": "subsample=2000",
+      "combined_score": 0.0,
+      "validity": 0.0,
+      "error": "Integral of h is not close to 1. Got: 0.851990",
+      "wall_s": 3.169480323791504,
+      "is_new_best": false
+    },
+    {
+      "step": 2,
+      "kind": "probe",
+      "edit_mode": "probe",
+      "edit_note": "subsample=2000",
+      "combined_score": 0.0,
+      "validity": 0.0,
+      "error": "choice() got an unexpected keyword argument 'size'",
+      "wall_s": 3.3722541332244873,
+      "is_new_best": false
+    },
+    {
+      "step": 3,
+      "kind": "probe",
+      "edit_mode": "probe",
+      "edit_note": "subsample=2000",
+      "combined_score": 0.0,
+      "validity": 0.0,
+      "error": "The truth value of an array with more than one element is ambiguous. Use a.any() or a.all()",
+      "wall_s": 2.418227434158325,
+      "is_new_best": false
+    },
+    {
+      "step": 4,
+      "kind": "probe",
+      "edit_mode": "probe",
+      "edit_note": "subsample=2000",
+      "combined_score": 0.0,
+      "validity": 0.0,
+      "error": "choice() got an unexpected keyword argument 'size'",
+      "wall_s": 2.81911039352417,
+      "is_new_best": false
+    },
+    {
+      "step": 5,
+      "kind": "probe",
+      "edit_mode": "probe",
+      "edit_note": "subsample=2000",
+      "combined_score": 0.0,
+      "validity": 0.0,
+      "error": "name 'h' is not defined",
+      "wall_s": 2.968932628631592,
+      "is_new_best": false
+    },
+    {
+      "step": 6,
+      "kind": "probe",
+      "edit_mode": "probe",
+      "edit_note": "subsample=2000",
+      "combined_score": 0.0,
+      "validity": 0.0,
+      "error": "uniform() got an unexpected keyword argument 'min_val'",
+      "wall_s": 3.171190023422241,
+      "is_new_best": false
+    },
+    {
+      "step": 7,
+      "kind": "probe",
+      "edit_mode": "probe",
+      "edit_note": "subsample=2000",
+      "combined_score": 0.0,
+      "validity": 0.0,
+      "error": "C5 mismatch: reported 0.458175, computed 0.582583",
+      "wall_s": 3.620393753051758,
+      "is_new_best": false
+    },
+    {
+      "step": 8,
+      "kind": "probe",
+      "edit_mode": "probe",
+      "edit_note": "subsample=2000",
+      "combined_score": 0.0,
+      "validity": 0.0,
+      "error": "Using a non-tuple sequence for multidimensional indexing is not allowed; use `arr[array(seq)]` instead of `arr[seq]`. See https://github.com/jax-ml/jax/issues/4564 for more information.",
+      "wall_s": 3.3210818767547607,
+      "is_new_best": false
+    },
+    {
+      "step": 9,
+      "kind": "probe",
+      "edit_mode": "probe",
+      "edit_note": "subsample=2000",
+      "combined_score": 0.0,
+      "validity": 0.0,
+      "error": "uniform() got an unexpected keyword argument 'min_val'",
+      "wall_s": 2.921334981918335,
+      "is_new_best": false
+    },
+    {
+      "step": 10,
+      "kind": "probe",
+      "edit_mode": "probe",
+      "edit_note": "subsample=2000",
+      "combined_score": 0.0,
+      "validity": 0.0,
+      "error": "Cannot broadcast to shape with fewer dimensions: arr_shape=(1,) shape=()",
+      "wall_s": 2.86942982673645,
+      "is_new_best": false
+    },
+    {
+      "step": 11,
+      "kind": "probe",
+      "edit_mode": "probe",
+      "edit_note": "subsample=2000",
+      "combined_score": 0.0,
+      "validity": 0.0,
+      "error": "name 'k_seed' is not defined",
+      "wall_s": 2.4708597660064697,
+      "is_new_best": false
+    },
+    {
+      "step": 12,
+      "kind": "probe",
+      "edit_mode": "probe",
+      "edit_note": "subsample=2000",
+      "combined_score": 0.0,
+      "validity": 0.0,
+      "error": "'C5Optimizer' object has no attribute 'x_current'",
+      "wall_s": 2.5691215991973877,
+      "is_new_best": false
+    },
+    {
+      "step": 13,
+      "kind": "probe",
+      "edit_mode": "probe",
+      "edit_note": "subsample=2000",
+      "combined_score": 0.0,
+      "validity": 0.0,
+      "error": "'int' object has no attribute 'astype'",
+      "wall_s": 2.7715227603912354,
+      "is_new_best": false
+    },
+    {
+      "step": 14,
+      "kind": "probe",
+      "edit_mode": "probe",
+      "edit_note": "subsample=2000",
+      "combined_score": 0.0,
+      "validity": 0.0,
+      "error": "Cannot broadcast to shape with fewer dimensions: arr_shape=(1,) shape=()",
+      "wall_s": 2.8471522331237793,
+      "is_new_best": false
+    },
+    {
+      "step": 15,
+      "kind": "probe",
+      "edit_mode": "probe",
+      "edit_note": "subsample=2000",
+      "combined_score": 0.0,
+      "validity": 0.0,
+      "error": "leading zeros in decimal integer literals are not permitted; use an 0o prefix for octal integers (candidate.py, line 64)",
+      "wall_s": 0.8716883659362793,
+      "is_new_best": false
+    },
+    {
+      "step": 16,
+      "kind": "probe",
+      "edit_mode": "probe",
+      "edit_note": "subsample=2000",
+      "combined_score": 0.0,
+      "validity": 0.0,
+      "error": "Integral of h is not close to 1. Got: 1.001893",
+      "wall_s": 3.569833993911743,
+      "is_new_best": false
+    },
+    {
+      "step": 17,
+      "kind": "probe",
+      "edit_mode": "probe",
+      "edit_note": "subsample=2000",
+      "combined_score": 0.0,
+      "validity": 0.0,
+      "error": "Integral of h is not close to 1. Got: 1.019870",
+      "wall_s": 3.773068904876709,
+      "is_new_best": false
+    },
+    {
+      "step": 18,
+      "kind": "probe",
+      "edit_mode": "probe",
+      "edit_note": "subsample=2000",
+      "combined_score": 0.0,
+      "validity": 0.0,
+      "error": "Integral of h is not close to 1. Got: 1.001853",
+      "wall_s": 3.5197629928588867,
+      "is_new_best": false
+    },
+    {
+      "step": 19,
+      "kind": "probe",
+      "edit_mode": "probe",
+      "edit_note": "subsample=2000",
+      "combined_score": 0.0,
+      "validity": 0.0,
+      "error": "C5 mismatch: reported 0.469528, computed 0.494853",
+      "wall_s": 3.2187466621398926,
+      "is_new_best": false
+    },
+    {
+      "step": 20,
+      "kind": "probe",
+      "edit_mode": "probe",
+      "edit_note": "subsample=2000",
+      "combined_score": 0.0,
+      "validity": 0.0,
+      "error": "uniform() got an unexpected keyword argument 'min_val'",
+      "wall_s": 3.121760845184326,
+      "is_new_best": false
+    },
+    {
+      "step": 21,
+      "kind": "probe",
+      "edit_mode": "probe",
+      "edit_note": "subsample=2000",
+      "combined_score": 0.7889776741322249,
+      "validity": 1.0,
+      "error": null,
+      "wall_s": 3.770054578781128,
+      "is_new_best": false
+    },
+    {
+      "step": 22,
+      "kind": "full_rewrite",
+      "edit_mode": "full_rewrite",
+      "edit_note": "spliced new EVOLVE-BLOCK",
+      "combined_score": 0.7889776741322249,
+      "validity": 1.0,
+      "error": null,
+      "wall_s": 3.0792882442474365,
+      "is_new_best": true
+    },
+    {
+      "step": 23,
+      "kind": "probe",
+      "edit_mode": "probe",
+      "edit_note": "subsample=2000",
+      "combined_score": 0.0,
+      "validity": 0.0,
+      "error": "permutation requires ndarray or scalar arguments, got <class 'list'> at position 0.",
+      "wall_s": 2.8323545455932617,
+      "is_new_best": false
+    }
+  ],
+  "trajectory": null,
+  "error": null
+}

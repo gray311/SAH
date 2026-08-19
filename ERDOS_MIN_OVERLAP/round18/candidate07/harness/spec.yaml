@@ -1,0 +1,253 @@
+schema: h2spec/1.0
+system_prompt: |
+  Erdos minimum overlap problem: find h: [0,2]->[0,1] minimizing max_k integral h(x)(1-h(x+k))dx.
+  
+  Constraint: integral(h) = 1 exactly.
+  
+  Current best: C5 <= 0.38092303510845016.
+  
+  Goal: Beat seed score of 0.999945 (c5_bound < 0.380923).
+  
+  Strategy:
+  
+  1. CALL generate_many_candidates to get 10+ diverse initializations
+  
+  2. Analyze candidates: compute approximate c5_bound (use tool's precomputed value)
+  
+  3. CALL evaluate_solution on candidates with c5_bound < 0.36 (generous threshold)
+  
+  4. If no improvement, generate a new batch with different temperature
+  
+  5. Never waste evals on integral-violating candidates
+  
+  6. The seed optimizer uses 15 pattern variations - we need to explore MORE, not fewer.
+  7. Use 2-3 evals per iteration, and run 15-20 iterations to exhaust the 30 eval budget.
+  
+  Key: Generate MANY diverse candidates, screen cheaply, evaluate the best.
+skill_description: |
+  Generate many diverse pattern-based initializations for Erdos optimization.
+  Use precomputed analytical scores to screen candidates before full evaluation.
+tool_descriptions:
+  edit_solution: |
+    Modify EVOLVE-BLOCK to change hyperparameters or code structure.
+    
+    For single-candidate testing: set num_restarts=1, seed_start=0.
+    
+    For multi-candidate testing: keep num_restarts=3.
+  evaluate_solution: |
+    Run full 59000-step optimization on a candidate. Returns combined_score = 0.38092303510845016 / c5_bound.
+    
+    Higher is better. combined_score > 1.0 means a new record.
+  probe_solution: |
+    Fast approximate evaluation (500 intervals, analytical c5). Uses probe budget.
+  finish: |
+    Submit when combined_score > 1.0 (c5_bound < 0.38092303510845016).
+sampling:
+  temperature: 0.7
+  top_p: 0.9
+  top_k: 50
+  max_tokens: 16000
+agent:
+  max_iterations: 60
+middleware:
+  budget_reminder_from_left: 3
+  long_tool_output_max_chars: 8000
+new_tools:
+  - name: generate_many_candidates
+    description: |
+      Generate 12 diverse pattern-based initializations for Erdos optimization.
+      Patterns include: random normals, uniform, sinusoidal, threshold patterns,
+      Golomb ruler, bipartite, tri-modal, and variations with different seeds.
+      
+      Each candidate has precomputed integral and c5_bound (analytical, no training).
+      
+      Call once per batch. Filter candidates with c5_bound < 0.36 for full evaluation.
+    input_schema:
+      type: object
+      properties:
+        temperature:
+          type: number
+          default: 0.7
+    implementation_py: |
+      def run(ctx, args):
+          import numpy as np
+          N = 800
+          domain = 2.0
+          dx = domain / N
+          
+          def compute_c5(h):
+              j_val = 1.0 - h
+              h_padded = np.pad(h, (0, N))
+              j_padded = np.pad(j_val, (0, N))
+              corr_fft = np.fft.fft(h_padded) * np.conj(np.fft.fft(j_padded))
+              correlation = np.fft.ifft(corr_fft).real
+              return np.max(correlation * dx)
+          
+          def normalize(h):
+              integral = np.sum(h) * dx
+              return h / integral
+          
+          candidates = []
+          
+          # Pattern 0-7: Random-based patterns
+          seeds = [0, 1, 2, 3, 4, 5, 6, 7]
+          for i, seed in enumerate(seeds[:4]):
+              np.random.seed(seed)
+              latent = np.random.normal(0, 1.5, N)
+              h = np.clip(np.sigmoid(latent), 0.001, 1.0)
+              h = normalize(h)
+              c5 = compute_c5(h)
+              candidates.append({
+                  "h": h.tolist(),
+                  "integral": float(np.sum(h) * dx),
+                  "c5_bound": float(c5),
+                  "pattern_type": f"random_norm_seed{seed}"
+              })
+          
+          # Pattern 8-11: Threshold patterns
+          thresholds = [(0.4, 0.6), (0.5, 0.5), (0.6, 0.4), (0.3, 0.7)]
+          for idx, (t1, t2) in enumerate(thresholds):
+              np.random.seed(10 + idx)
+              x = np.linspace(0, 2, N)
+              latent = np.where(x < t1, 4.0, -4.0)
+              latent = latent + np.random.normal(0, 0.5, N)
+              h = np.clip(np.sigmoid(latent), 0.001, 1.0)
+              h = normalize(h)
+              c5 = compute_c5(h)
+              candidates.append({
+                  "h": h.tolist(),
+                  "integral": float(np.sum(h) * dx),
+                  "c5_bound": float(c5),
+                  "pattern_type": f"threshold_t1{t1}_t2{t2}"
+              })
+          
+          # Pattern 12: Bipartite
+          np.random.seed(20)
+          x = np.linspace(0, 2, N)
+          a = 0.5 + 0.1 * np.random.rand()
+          latent = np.where(x < a, 3.0, -3.0)
+          latent = latent + np.random.normal(0, 0.3, N)
+          h = np.clip(np.sigmoid(latent), 0.001, 1.0)
+          h = normalize(h)
+          c5 = compute_c5(h)
+          candidates.append({
+              "h": h.tolist(),
+              "integral": float(np.sum(h) * dx),
+                  "c5_bound": float(c5),
+              "pattern_type": "bipartite_var"
+          })
+          
+          # Pattern 13: Tri-modal
+          np.random.seed(30)
+          x = np.linspace(0, 2, N)
+          peaks = [0.4 + np.random.rand() * 0.2, 
+                   1.0 + np.random.rand() * 0.05, 
+                   1.6 + np.random.rand() * 0.2]
+          peaks = [max(0.1, min(1.9, p)) for p in peaks]
+          tri_h = np.zeros(N)
+          for p in peaks:
+              tri_h += 6.0 * np.exp(-((x - p) / 0.15)**2)
+          tri_h = np.clip(tri_h, 0.001, 5.0)
+          tri_h = normalize(tri_h)
+          c5 = compute_c5(tri_h)
+          candidates.append({
+              "h": tri_h.tolist(),
+              "integral": float(np.sum(tri_h) * dx),
+                  "c5_bound": float(c5),
+              "pattern_type": "tri_modal_var"
+          })
+          
+          # Pattern 14: Golomb-like
+          np.random.seed(40)
+          marks = [0.0, 0.45 + np.random.rand()*0.1, 1.0, 1.6, 2.0 - 0.1 - np.random.rand()*0.1]
+          marks = [max(0.05, min(1.95, m)) for m in marks]
+          golomb_h = np.zeros(N)
+          for m in marks:
+              golomb_h += 8.0 * np.exp(-((x - m) / 0.15)**2)
+          golomb_h = normalize(np.clip(golomb_h, 0.001, 5.0))
+          c5 = compute_c5(golomb_h)
+          candidates.append({
+              "h": golomb_h.tolist(),
+              "integral": float(np.sum(golomb_h) * dx),
+                  "c5_bound": float(c5),
+              "pattern_type": "golomb_var"
+          })
+          
+          # Pattern 15: Wave pattern
+          np.random.seed(50)
+          x = np.linspace(0, 2, N)
+          latent = np.sin(2 * np.pi * x) * 1.5 + np.cos(4 * np.pi * x) * 0.8
+          latent = latent + np.random.normal(0, 0.4, N)
+          h = np.clip(np.sigmoid(latent), 0.001, 1.0)
+          h = normalize(h)
+          c5 = compute_c5(h)
+          candidates.append({
+              "h": h.tolist(),
+              "integral": float(np.sum(h) * dx),
+                  "c5_bound": float(c5),
+              "pattern_type": "wave_var"
+          })
+          
+          return {"candidates": candidates, "num_candidates": len(candidates)}
+new_skills:
+  - name: multi-candidate-search
+    description: |
+      Generate many diverse initializations and screen them with precomputed scores.
+      Evaluate only the best candidates (c5_bound < 0.36).
+    body: |
+      # Multi-Candidate Search Strategy
+      
+      ## Workflow
+      
+      1. CALL generate_many_candidates(temperature=0.7)
+      
+      2. EXAMINE all 12 candidates:
+         - Check integral (should be ~1.0)
+         - Note c5_bound (precomputed analytical score)
+      
+      3. FILTER candidates:
+         - SKIP if integral != 1.0 (constraint violation)
+         - SKIP if c5_bound >= 0.36 (too bad)
+         - KEEP all with c5_bound < 0.36
+      
+      4. CALL evaluate_solution on all kept candidates (typically 2-5)
+      
+      5. If no improvement, CALL generate_many_candidates with temperature=0.9
+         for more exploration
+      
+      ## Why This Works
+      
+      - 12 diverse patterns: random, threshold, bipartite, tri-modal, Golomb, wave
+      - Precomputed analytical scores: no training needed
+      - Multiple seeds: each pattern varied with different random seeds
+      - Budget-efficient: 1 tool call, 2-6 evals max
+      
+      ## Expected Results
+      
+      With 12 candidates, we expect 2-5 to pass the c5 < 0.36 filter.
+      This gives us multiple chances to find improvements.
+new_middlewares:
+  - name: encourage_explore
+    hook: before_model
+    description: |
+      Middleware to encourage exploring multiple candidates before giving up.
+    implementation_py: |
+      def before_model(hook_input):
+          state = hook_input.get("state", {})
+          evals_left = state.get("evals_left", 0)
+          probes_used = state.get("probes_used", 0)
+          
+          if evals_left >= 4 and probes_used < 1:
+              return (
+                  "You have 4+ evals left and haven't probed yet.\\n"
+                  "Call generate_many_candidates to get 12 candidates.\\n"
+                  "Evaluate 3-5 with c5_bound < 0.36.\\n"
+                  "Don't stop after 1 batch - generate new patterns!"
+              )
+          elif evals_left >= 2:
+              return (
+                  f"2 evals left. Use them wisely.\\n"
+                  "Look for c5_bound < 0.35 candidates for full eval.\\n"
+                  "Consider trying temperature=0.9 for more diversity."
+              )
+          return None

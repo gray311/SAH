@@ -1,0 +1,264 @@
+schema: h2spec/1.0
+system_prompt: 'Erdos minimum overlap problem (C5): Find a step function h: [0,2]->[0,1] minimizing max_k integral h(x)(1-h(x+k))dx.
+
+CONSTRAINT: integral(h) = 1 exactly. h values in [0,1].
+
+Current best: C5 <= 0.38092303510845016 (combined_score = 1.0).
+
+GOAL: Find h achieving c5_bound < 0.38092303510845016 (combined_score > 1.0).
+
+KEY INSIGHT: The optimal h is likely a simple step function (plateaus of 0 and 1).
+
+STRATEGY:
+
+1. Use step_function_builder to create simple step functions with plateau patterns:
+   - Two plateau patterns: h=1 on [0,a], h=0 on [a,2] (satisfies integral=1 if a=0.5)
+   - Three plateau patterns: h=1 on [0,a], h=0 on [a,b], h=1 on [b,2]
+   - Alternating patterns: h=1 on multiple small intervals
+
+2. For each candidate, use probe_solution to quickly estimate c5_bound
+
+3. Evaluate the best probe candidates fully
+
+4. If combined_score > 1.0, finish
+
+5. Try different plateau configurations systematically:
+   - First: simple bipartite (one transition at a=0.5)
+   - Second: two transitions (plateau-hi, plateau-lo, plateau-hi)
+   - Third: three transitions (alternating 1-0-1-0 pattern)
+
+Remember: Focus on SIMPLE step functions with clear plateau boundaries. Avoid complex sigmoidal or random patterns. The constraint integral(h)=1 means the total "on" time must be exactly 1.0.'
+skill_description: Construct simple step functions with plateau patterns. Test bipartite, tri-partite, and alternating patterns. Use probe_solution to quickly screen candidates. Focus on configurations where h=1 on intervals totaling length 1.0.
+skill_body: '# Step Function Construction for Erdos C5
+
+## Core Strategy: Build Simple Step Functions
+
+The optimal h is likely a simple step function (plateaus of 0 and 1), not a complex sigmoid.
+
+## Pattern Types to Try
+
+### Pattern 1: Bipartite (Single Transition)
+- h = 1 on [0, 0.5], h = 0 on [0.5, 2]
+- This is the natural constraint-satisfying step function
+- Calculate overlap for k in [0, 2]
+
+### Pattern 2: Tri-partite (Two Transitions)
+- h = 1 on [0, a], h = 0 on [a, b], h = 1 on [b, 2]
+- Constraint: a + (2-b) = 1 (total "on" time = 1)
+- Try various a, b values: (0.4, 0.6), (0.3, 1.0), (0.25, 0.75), etc.
+
+### Pattern 3: Alternating (Multiple Short Plateaus)
+- h = 1 on multiple small intervals totaling length 1
+- Example: h = 1 on [0, 0.2], [0.8, 1.0], [1.2, 1.4], [1.8, 2.0]
+- Test if spreading the "on" regions reduces peak overlap
+
+### Pattern 4: Centered Pattern
+- h = 1 on [c-0.5, c+0.5] (centered plateau)
+- Try c = 0, 0.5, 1.0, 1.5, 2
+
+## Workflow
+
+1. Start with bipartite pattern a=0.5
+2. Probe it quickly
+3. If combined_score <= 1.0, try other patterns
+4. Test tri-partite with various (a,b) pairs
+5. Test alternating patterns
+6. Evaluate the best probe candidates fully
+7. Finish when combined_score > 1.0
+
+## Key Constraint
+Always ensure: measure of {x: h(x)=1} = 1.0 exactly.'
+tool_descriptions:
+  edit_solution: 'Modify the program to use a DIRECT step function definition instead of sigmoid latent space.
+
+  To create a bipartite step:
+  - Set h as a piecewise constant: h = 1 for x in [0, 0.5], h = 0 for x in [0.5, 2]
+  - Use np.piecewise or direct indexing
+
+  To create tri-partite:
+  - h = 1 on [0, a], h = 0 on [a, b], h = 1 on [b, 2]
+  - Ensure (a - 0) + (2 - b) = 1
+
+  Parameters to vary: transition points a, b, plateau positions.
+
+  Example edit: Replace the sigmoid+latent approach with direct np.piecewise construction.'
+  evaluate_solution: 'Full evaluation with 59000 steps. Returns combined_score = 0.38092303510845016 / c5_bound.
+  
+  Use this ONLY after probe confirms c5_bound < 0.375.
+  combined_score > 1.0 means new record.'
+  probe_solution: 'Fast approximate evaluation (500 intervals). Good for screening step function candidates.
+  
+  Use probe to quickly test different plateau configurations before full evaluation.'
+  finish: 'Submit when combined_score > 1.0 (c5_bound < 0.38092303510845016).'
+sampling:
+  temperature: 0.8
+  top_p: 0.95
+  top_k: 25
+  max_tokens: 16000
+agent:
+  max_iterations: 80
+middleware:
+  budget_reminder_from_left: 8
+  long_tool_output_max_chars: 10000
+new_tools:
+  - name: step_function_builder
+    description: |
+      Directly construct step functions with specified plateau patterns.
+      
+      Use this to create h with binary values (0 or 1) satisfying integral(h)=1.
+      
+      Available pattern types:
+      - "bipartite_left": h=1 on [0, 0.5], h=0 on [0.5, 2]
+      - "bipartite_right": h=0 on [0, 0.5], h=1 on [0.5, 2]  
+      - "centered": h=1 on [c-0.5, c+0.5] for chosen center c
+      - "two_plateaus_left": h=1 on [0,a] U [b,2] where a+(2-b)=1
+      - "alternating": h=1 on multiple small intervals totaling length 1
+      
+      The tool generates complete EVOLVE-BLOCK code replacing the sigmoid approach.
+    input_schema:
+      type: object
+      properties:
+        pattern:
+          type: string
+          enum:
+            - bipartite_left
+            - bipartite_right
+            - centered
+            - two_plateaus_left
+            - alternating
+        parameters:
+          type: object
+          description: Additional parameters (e.g., center position, plateau lengths)
+          properties: {}
+    implementation_py: |
+      def run(ctx, args):
+          import numpy as np
+          pattern = args.get("pattern", "bipartite_left")
+          params = args.get("parameters", {})
+          
+          N = 800
+          domain = 2.0
+          dx = domain / N
+          x = np.linspace(0, 2, N+1)[:-1]
+          
+          if pattern == "bipartite_left":
+              h = np.where(x < 0.5, 1.0, 0.0)
+              integral_check = np.trapz(h, dx)
+          elif pattern == "bipartite_right":
+              h = np.where(x >= 0.5, 1.0, 0.0)
+              integral_check = np.trapz(h, dx)
+          elif pattern == "centered":
+              center = params.get("center", 1.0)
+              half_width = 0.5
+              left = center - half_width
+              right = center + half_width
+              h = np.where((x >= left) & (x <= right), 1.0, 0.0)
+              integral_check = np.trapz(h, dx)
+          elif pattern == "two_plateaus_left":
+              a = params.get("a_left", 0.4)
+              b = params.get("b_right", 1.6)
+              total_on = a + (2.0 - b)
+              if abs(total_on - 1.0) > 0.001:
+                  b = a + (2.0 - 1.0)  # enforce integral=1
+              h = np.zeros(N)
+              h[:int(a/ dx)] = 1.0
+              h[int(b/ dx):] = 1.0
+              integral_check = np.trapz(h, dx)
+          elif pattern == "alternating":
+              # Four small plateaus: [0,0.2], [0.8,1.0], [1.2,1.4], [1.8,2.0]
+              h = np.zeros(N)
+              h[:int(0.2/dx)] = 1.0
+              h[int(0.8/dx):int(1.0/dx)] = 1.0
+              h[int(1.2/dx):int(1.4/dx)] = 1.0
+              h[int(1.8/dx):] = 1.0
+              integral_check = np.trapz(h, dx)
+          else:
+              return {"error": f"Unknown pattern: {pattern}"}
+          
+          # Pad for FFT computation
+          h_padded = np.pad(h, (0, N))
+          j_padded = np.pad(1.0 - h, (0, N))
+          
+          corr_fft = np.fft.fft(h_padded) * np.conj(np.fft.fft(j_padded))
+          correlation = np.fft.ifft(corr_fft).real
+          c5_bound = np.max(correlation * dx)
+          
+          return {
+              "pattern": pattern,
+              "parameters": params,
+              "h_preview": h[:20].tolist(),
+              "integral_check": float(integral_check),
+              "c5_bound_approx": float(c5_bound),
+              "note": f"Generated step function pattern {pattern}. Integral = {integral_check:.4f}"
+          }
+new_skills:
+  - name: construct-step-functions
+    description: Build direct step functions with binary plateaus. Start with bipartite, try tri-partite, alternating patterns. Enforce integral(h)=1 exactly.
+    body: '# Constructing Step Functions for Erdos C5
+
+## Direct Step Function Approach
+
+Forget the sigmoid latent space. Build h directly as a step function with binary values.
+
+## Pattern Hierarchy
+
+### Level 1: Bipartite (1 Transition)
+Try these first:
+- LEFT-BASED: h=1 on [0, 0.5], h=0 on [0.5, 2]
+- RIGHT-BASED: h=0 on [0, 0.5], h=1 on [0.5, 2]
+
+These are the simplest integral=1 satisfying functions.
+
+### Level 2: Tri-partite (2 Transitions)  
+h=1 on [0,a], h=0 on [a,b], h=1 on [b,2]
+Constraint: a + (2-b) = 1
+
+Try these (a, b) pairs:
+- (0.4, 0.6), (0.3, 1.0), (0.25, 0.75), (0.2, 0.8)
+- (0.45, 0.55), (0.35, 0.95)
+
+### Level 3: Alternating (Multiple Plateaus)
+Spread the "on" regions:
+- Four plateaus: [0,0.2], [0.8,1.0], [1.2,1.4], [1.8,2.0]
+- Three plateaus: [0,0.33], [0.67,1.0], [1.33,2.0]
+
+## Workflow
+
+1. Generate bipartite patterns first (LEFT and RIGHT)
+2. Use step_function_builder to get code for each
+3. Probe each quickly with probe_solution
+4. Evaluate the best probe candidates
+5. If no improvement, try tri-partite patterns
+6. Finally, try alternating patterns
+
+## Remember
+- Integral must be EXACTLY 1.0
+- h values must be EXACTLY 0 or 1
+- Simpler = better for step functions'
+new_middlewares:
+  - name: step_pattern_reminder
+    hook: before_model
+    description: Remind solver to use step_function_builder for direct step function construction
+    implementation_py: |
+      def before_model(hook_input):
+          history = hook_input.get("history", [])
+          
+          # Early game: remind to use step_function_builder
+          if len(history) <= 3:
+              return "Start by calling step_function_builder with pattern=bipartite_left to create a simple step function with integral=1."
+          
+          # Check if step_function_builder was used
+          has_builder = any("step_function_builder" in str(turn.get("tools_used", [])) for turn in history)
+          if not has_builder:
+              return "You have not used step_function_builder yet. Call it to generate step function code directly."
+          
+          # If used bipartite, suggest trying other patterns
+          used_bipartite = any("bipartite_left" in str(turn.get("tools_used", [])) or "bipartite_right" in str(turn.get("tools_used", [])) for turn in history)
+          if used_bipartite and len(history) <= 10:
+              return "You have tried bipartite patterns. Next, try step_function_builder with pattern=two_plateaus_left for a tri-partite function."
+          
+          # If exhausted bipartite, suggest alternating
+          if len(history) > 15:
+              return "Consider trying alternating patterns: step_function_builder(pattern=alternating) to spread the on-regions."
+          
+          return None

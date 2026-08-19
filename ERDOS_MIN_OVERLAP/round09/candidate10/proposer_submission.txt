@@ -1,0 +1,138 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are an expert in harmonic analysis and the Erdős minimum overlap problem.
+
+  Target: Find h: [0,2]->[0,1] with integral(h)=1 that minimizes max_k integral h(x)(1-h(x+k))dx.
+
+  Current best: C5 ≤ 0.38092303510845016. Beat this to get combined_score > 1.0.
+
+  SEARCH STRATEGY (CRITICAL):
+
+  1. Call analyze_constructions() FIRST to get multiple construction types with varied parameters
+
+  2. For EACH construction, run 3-5 restarts with different perturbations before calling evaluate_solution
+
+  3. Use probe_solution to rapidly rank variants within the local search
+
+  4. Only call evaluate_solution on your absolute best candidate from step 2
+
+  Key insight: The seed program's single-run-from-bad-init approach fails because the landscape has deep local optima. You need multiple restarts PER construction.
+
+  What to edit:
+  - Implement analyze_constructions() tool call at start
+  - Add a multi-restart loop: for each construction, run 3-5 perturbations
+  - Use probe_solution after each restart to rank locally
+  - Evaluate only the top candidate with evaluate_solution
+  - Ensure constraint satisfaction via penalty term
+skill_description: |
+  Erdos minimum overlap optimization using systematic multi-restart search around principled constructions.
+  The key is running multiple perturbed restarts per construction and using probe-based ranking.
+skill_body: |
+  # Multi-Restart Search Strategy for Erdos Problem
+
+  ## Why Multi-Restart Works
+  The landscape has deep local optima. The seed program runs ONE optimization per initialization,
+  but you need 3-5 restarts PER construction with varied perturbations.
+
+  ## Method
+
+  ### Step 1: Generate Constructions
+  Call analyze_constructions() to get 7 diverse initializations.
+
+  ### Step 2: For Each Construction
+  For each construction returned:
+  1. Create perturbations (3-5 total) with Gaussian noise (std=0.1, 0.3, 0.5)
+  2. For each perturbation, run optimizer with varied hyperparams:
+     - Restart A: lr=0.01, penalty=1500, steps=20000
+     - Restart B: lr=0.005, penalty=1000, steps=30000
+     - Restart C: lr=0.001, penalty=3000, steps=40000
+  3. Use probe_solution to get c5_bound (cheap, separate budget)
+  4. Track the variant with best probe score
+
+  ### Step 3: Final Evaluation
+  - Evaluate only the top 1-2 candidates
+  - Stop if combined_score > 1.0 (c5_bound < 0.380923)
+
+  ## Critical Tips
+  - Save best program between restarts (use ctx.scratch_write)
+  - Use constraint penalty: (integral(h) - 1)^2 * 1000-2000
+  - jit all computation for speed
+  - Probe budget (~30) is unlimited; eval budget (30) is precious
+tool_descriptions:
+  edit_solution: |
+    Modify the EVOLVE-BLOCK. Implement:
+    1. Call analyze_constructions() at start
+    2. Multi-restart loop: for each construction, run 3-5 perturbations
+    3. Use probe_solution after each restart to rank locally
+    4. Evaluate only the top candidate with evaluate_solution
+    5. Ensure constraint satisfaction via penalty term
+  evaluate_solution: |
+    Run full evaluation, return combined_score = 0.38092303510845016 / c5_bound.
+    Score > 1.0 means success.
+  probe_solution: |
+    Quick approximate c5_bound evaluation on subsampled data.
+    Use this to rank variants during local search without consuming full budget.
+  finish: |
+    End when exhausted eval budget with no improvement below 0.380923, or after 5 cycles.
+sampling:
+  temperature: 1.0
+  top_p: 0.95
+  top_k: 30
+  max_tokens: 16000
+agent:
+  max_iterations: 70
+middleware:
+  budget_reminder_from_left: 3
+  long_tool_output_max_chars: 15000
+new_tools:
+  - name: analyze_constructions
+    description: |
+      Generate diverse initializations for the Erdos problem. Returns dict with keys:
+      bimodal_tight, bimodal_wide, triangular_3step, periodic_1, periodic_1_5, four_bimodal, symmetric_bimodal.
+      Each latent vector is ready for gradient descent.
+    input_schema:
+      type: object
+      properties: {}
+    implementation_py: |
+      def run(ctx, args):
+          import numpy as np
+          N = 800
+          domain = 2.0
+          dx = domain / N
+          rng = np.random.default_rng(123)
+          constructions = {}
+          x = np.linspace(0, domain, N)
+          # bimodal_tight: Two narrow peaks at 0.25 and 0.75
+          latent = np.exp(-((x-0.25)/0.12)**2 * 25) + np.exp(-((x-0.75)/0.12)**2 * 25)
+          constructions['bimodal_tight'] = latent
+          # bimodal_wide: Broader peaks
+          latent = np.exp(-((x-0.25)/0.25)**2 * 12) + np.exp(-((x-0.75)/0.25)**2 * 12)
+          constructions['bimodal_wide'] = latent
+          # triangular_3step: Three-level pattern
+          phases = np.array([0.0, 0.333, 0.666])
+          levels = np.array([-5, 5, -5])
+          latent = np.zeros(N)
+          for p, l in zip(phases, levels):
+              in_range = (x >= p) & (x < p + 0.333)
+              latent += l * in_range
+          constructions['triangular_3step'] = latent
+          # periodic_1: Period-1 alternating
+          periodic = 2.0 * (x < 0.5) - 1.0
+          latent = periodic * 5.0
+          constructions['periodic_1'] = latent
+          # periodic_1_5: Period-1.5 alternating
+          periodic = 2.0 * (x < 0.667) - 1.0
+          latent = periodic * 5.0
+          constructions['periodic_1_5'] = latent
+          # four_bimodal: Four narrow peaks
+          peaks = np.array([0.1, 0.4, 1.0, 1.7])
+          latent = np.zeros(N)
+          for p in peaks:
+              latent += np.exp(-((x-p)/0.1)**2 * 20)
+          constructions['four_bimodal'] = latent
+          # symmetric_bimodal: Symmetric about x=1
+          latent = np.exp(-((x-1)/0.15)**2 * 18) * 2.0
+          constructions['symmetric_bimodal'] = latent
+          return {"constructions": constructions}
+new_skills: []
+new_middlewares: []

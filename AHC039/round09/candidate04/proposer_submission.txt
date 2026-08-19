@@ -1,0 +1,291 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are a C++ polygon optimizer for axis-aligned fish capture. Goal: maximize (mackerels - sardines + 1).
+  
+  CRITICAL INSIGHT: The problem is about finding compact clusters of mackerels while avoiding sardines.
+  The seed program's approach is too slow and misses optimal cluster patterns.
+  
+  SEARCH METHOD (encodes in EVOLVE-BLOCK C++ code):
+  
+  1. INPUT ANALYSIS (use analyze_mackerel_clusters tool):
+     - Parse fish positions from input
+     - Group mackerels by proximity (within 2000 units)
+     - Compute cluster density: mackerels_per_unit_area
+     - Identify top 10 clusters by pure mackerel count
+     - For each cluster, estimate minimum enclosing rectangle (MER)
+     - Check if MER contains few sardines
+     - Score clusters by (mackerels_in_MER - sardines_in_MER)
+  
+  2. CLUSTER-BASED POLYGON CONSTRUCTION:
+     - Start with highest-scoring cluster
+     - Build MER around cluster mackerels
+     - Expand MER slightly if it captures more mackerels with minimal sardine penalty
+     - Ensure perimeter <= 400,000 and vertices <= 1000
+  
+  3. COMBINE MULTIPLE CLUSTERS (if beneficial):
+     - If two clusters are close enough, combine their MERs
+     - Use union of rectangles (may need 8+ vertices)
+     - Check if combined score improves
+  
+  4. LOCAL OPTIMIZATION:
+     - For each polygon edge, try small shifts (±1, ±2, ±5 units)
+     - Keep shift that improves score without adding sardines
+     - Limit to 2 refinement rounds
+  
+  5. VALIDATION:
+     - Output valid polygon (4-1000 vertices, integer coords, no self-intersection)
+     - Ensure perimeter <= 400,000
+  
+  Tools:
+  - edit_solution: Replace EVOLVE-BLOCK with complete C++ implementing cluster-based optimization
+  - evaluate_solution: Run C++ program, get score
+  - probe_solution: Use with analyze_mackerel_clusters output to quickly test variations
+  - finish: Submit when you have encoded a working cluster-based optimizer
+
+  KEY DIFFERENCE from seed: Focus on compact mackerel clusters, not corridor expansion.
+  Use density analysis to find high-value regions and build minimal-perimeter polygons around them.
+skill_description: |
+  Cluster-based mackerel optimization. Analyze input to find dense mackerel clusters, build minimal-perimeter polygons around top clusters, avoid sardines, combine clusters if beneficial, local edge optimization.
+skill_body: |
+  # Cluster-Based Mackerel Optimization Strategy
+  
+  ## Core Insight
+  The optimal strategy is to find compact clusters of mackerels and build minimal-perimeter
+  polygons around them, rather than using corridor expansion which creates inefficient shapes.
+  
+  ## Step 1: Cluster Detection
+  - Parse all mackerel positions from input
+  - Use a distance threshold of 2000 units to group nearby mackerels into clusters
+  - For each cluster, count mackerels and compute bounding box
+  
+  ## Step 2: Cluster Scoring
+  - For each cluster, compute minimum enclosing rectangle (MER)
+  - Count sardines inside each MER
+  - Score = mackerels - sardines
+  - Rank clusters by score
+  
+  ## Step 3: Polygon Construction
+  - Take top 5-10 clusters by score
+  - Build polygon as union of their MERs
+  - If MERs overlap, merge to minimize perimeter
+  - Ensure: 4 <= vertices <= 1000, perimeter <= 400,000
+  
+  ## Step 4: Local Optimization
+  - For each edge of the polygon:
+    * Try shifts ±1, ±2, ±5 units
+    * Keep shift that improves (mackerels - sardines)
+  - Repeat 2 rounds
+  
+  ## Step 5: Multiple Restarts
+  - Run 10-15 restarts with different cluster combinations
+  - Track best polygon across all restarts
+  
+  ## C++ Implementation Notes
+  - Use efficient clustering (e.g., simple distance-based grouping)
+  - Pre-compute MER for each cluster at startup
+  - Rectangle intersection/union logic for merging
+  - Time per evaluation: < 2.0s
+tool_descriptions:
+  edit_solution: |
+    Replace EVOLVE-BLOCK with C++ implementing cluster-based optimization:
+    
+    1. Parse fish positions, group mackerels into clusters (distance <= 2000)
+    2. For each cluster, compute MER and score = mackerels - sardines_in_MER
+    3. Take top clusters, build polygon as union of their MERs
+    4. Merge overlapping MERs to minimize perimeter
+    5. Local edge optimization with ±1, ±2, ±5 shifts, 2 rounds
+    6. Run 10-15 restarts with different cluster combinations
+    7. Output best polygon
+    
+    Ensure <2.0s execution, valid output format.
+  evaluate_solution: Run C++ program. Returns score (mackerels-sardines+1), validity, and remaining evaluations (budget=30). Each run has ~2.0s search window.
+  probe_solution: |
+    Use cluster analysis output to quickly test polygon variations.
+    Input: cluster scores, MER coordinates
+    Output: approximate score using subset of clusters
+  finish: End when you've submitted a working cluster-based optimizer with 10-15 restarts and local edge optimization.
+sampling:
+  temperature: 1.2
+  top_p: 0.85
+  top_k: 25
+  max_tokens: 14336
+agent:
+  max_iterations: 40
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 15000
+new_tools:
+- name: analyze_mackerel_clusters
+  description: |
+    Analyze mackerel positions to find dense clusters and their minimum enclosing rectangles (MERs).
+    Groups mackerels within 2000 units, computes MER for each cluster, counts sardines in each MER,
+    and ranks clusters by score (mackerels - sardines).
+  input_schema:
+    type: object
+    properties:
+      distance_threshold:
+        type: integer
+        default: 2000
+  implementation_py: |
+    def run(ctx, args):
+        import json
+        
+        distance_threshold = args.get("distance_threshold", 2000)
+        
+        # Parse program to extract fish positions
+        program_text = ctx.get_program()
+        mackerels = []
+        sardines = []
+        
+        # Find fish data from input - look for coordinate patterns in the input section
+        lines = program_text.split('\n')
+        in_input_section = False
+        for line in lines:
+            if 'Input is given' in line or 'Standard Input' in line:
+                in_input_section = True
+                continue
+            if in_input_section:
+                # Try to parse coordinates - they might be in string form or as numbers
+                if 'N ' in line or 'n ' in line or ('x_' in line and 'y_' not in line):
+                    # This might be the start of fish data
+                    pass
+                # Look for pattern like: x_i, y_i for mackerel or sardine
+                parts = line.strip().split()
+                if len(parts) >= 2:
+                    try:
+                        x, y = int(parts[0]), int(parts[1])
+                        # Determine if mackerel or sardine based on context
+                        if 'mackerel' in line.lower() or i < ctx.get_program().count('mackerel'):
+                            mackerels.append((x, y))
+                        else:
+                            sardines.append((x, y))
+                    except:
+                        pass
+        
+        # Alternative: look for direct coordinate extraction in evolve block
+        # Extract all coordinate pairs from the program
+        coords = []
+        import re
+        # Find all (x, y) patterns
+        matches = re.findall(r'\(([+-]?\d+),[ ]*([+-]?\d+)\)', program_text)
+        for match in matches:
+            coords.append((int(match[0]), int(match[1])))
+        
+        # If coords found, use them
+        if coords:
+            # Filter to mackerels (first N points, assuming N mackerels)
+            n_mackerels = len(coords) // 2
+            mackerels = coords[:n_mackerels]
+            sardines = coords[n_mackerels:]
+        
+        # If still empty, try to extract from input section more carefully
+        if not mackerels or not sardines:
+            # Look for fish positions in the program structure
+            # The program should have parsed input somewhere
+            # Try to find array-like structures
+            mackerels = []
+            sardines = []
+            
+        # Cluster mackerels by proximity
+        clusters = []
+        used = [False] * len(mackerels)
+        
+        for i, (mx, my) in enumerate(mackerels):
+            if used[i]:
+                continue
+            
+            cluster = [(mx, my)]
+            used[i] = True
+            
+            for j, (other_x, other_y) in enumerate(mackerels):
+                if j == i or used[j]:
+                    continue
+                # Check if within distance threshold
+                dist_sq = (mx - other_x)**2 + **(my - other_y)2
+                if dist_sq <= distance_threshold**2:
+                    cluster.append((other_x, other_y))
+                    used[j] = True
+            
+            if len(cluster) >= 1:
+                # Compute bounding box (MER)
+                min_x = min(p[0] for p in cluster)
+                max_x = max(p[0] for p in cluster)
+                min_y = min(p[1] for p in cluster)
+                max_y = max(p[1] for p in cluster)
+                
+                # Count sardines in MER
+                sardines_in_mer = sum(1 for (sx, sy) in sardines if min_x <= sx <= max_x and min_y <= sy <= max_y)
+                
+                clusters.append({
+                    "mackerels": len(cluster),
+                    "sardines": sardines_in_mer,
+                    "score": len(cluster) - sardines_in_mer,
+                    "min_x": min_x, "max_x": max_x,
+                    "min_y": min_y, "max_y": max_y
+                })
+        
+        # Sort by score (descending)
+        clusters.sort(key=lambda c: c["score"], reverse=True)
+        
+        return {
+            "num_clusters": len(clusters),
+            "clusters": clusters[:20],  # Top 20 clusters
+            "best_cluster": clusters[0] if clusters else None
+        }
+new_skills:
+- name: cluster-optimization-guide
+  description: Find dense mackerel clusters, build minimal-perimeter polygons around top clusters, avoid sardines, combine clusters if beneficial.
+  body: |
+    # Cluster-Based Mackerel Optimization Guide
+    
+    ## Core Strategy
+    Find compact clusters of mackerels and build minimal-perimeter polygons around them.
+    This is more effective than corridor expansion because it focuses on high-density regions.
+    
+    ## Step 1: Cluster Detection
+    - Parse all mackerel positions from input
+    - Use distance threshold of 2000 units to group nearby mackerels
+    - Each cluster should contain multiple mackerels (ideally 10+)
+    
+    ## Step 2: Scoring and Ranking
+    - For each cluster, compute minimum enclosing rectangle (MER)
+    - Count sardines inside each MER
+    - Score = mackerels - sardines
+    - Rank clusters by score (descending)
+    
+    ## Step 3: Polygon Construction
+    - Take top 5-10 clusters by score
+    - Build polygon as union of their MERs
+    - If MERs overlap significantly, merge to minimize perimeter
+    - Use convex hull or union algorithm for clean polygon
+    
+    ## Step 4: Local Optimization
+    - For each edge of the polygon:
+      * Try shifts ±1, ±2, ±5 units
+      * Count mackerels and sardines inside shifted rectangle
+      * Keep shift that improves score without adding sardines
+    - Repeat 2 refinement rounds
+    
+    ## Step 5: Multiple Restarts
+    - Run 10-15 restarts with different cluster combinations
+    - In each restart: use a different subset of top clusters
+    - Track best polygon across all restarts
+    
+    ## Key Success Factors
+    - Focus on cluster density, not just raw count
+    - Minimize perimeter by merging overlapping MERs
+    - Avoid sardines near mackerel clusters
+    - Use many restarts to explore different cluster combinations
+    
+    ## C++ Implementation Tips
+    - Use efficient clustering (O(n^2) is fine for 5000 points with small threshold)
+    - Pre-compute MER for each cluster
+    - Rectangle union algorithm to merge overlapping MERs
+    - Time per evaluation: < 2.0s
+new_middlewares:
+- name: cluster_focus_reminder
+  hook: before_model
+  description: Reminder to focus on mackerel clusters for polygon construction
+  implementation_py: |
+    def before_model(hook_input):
+        return "Focus on finding dense mackerel clusters. Build minimal-perimeter polygons around top clusters. Score = mackerels - sardines. Run 10-15 restarts with different cluster combinations."

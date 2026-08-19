@@ -1,0 +1,352 @@
+schema: h2spec/1.0
+system_prompt: |
+  Erdos minimum overlap problem: find h: [0,2]->[0,1] minimizing max_k integral h(x)(1-h(x+k))dx.
+
+  Constraint: integral(h) = 1 exactly.
+
+  Current best: C5 <= 0.38092303510845016.
+
+  Goal: Beat seed score of 0.999945 (c5_bound < 0.380923).
+
+  CRITICAL INSIGHT: The seed optimizer uses gradient descent with sigmoid initialization.
+  This approach NEARLY always produces a candidate with c5_bound ~0.3809 (the seed).
+  GRADIENT DESCENT STALLS because the landscape is flat near the current solution.
+
+  NEW STRATEGY: IGNORE GRADIENT DESCENT. Instead, we will:
+
+  1. CALL generate_structured_patterns to get INITIALISATION that ARE NOT gradients
+     of the current solution. These are analytical constructions from literature:
+     - Golomb ruler: marks at 0, 1/5, 2/5, 3/5, 4/5 (spacing 1/5)
+     - Bipartite: split [0,1] and [1,2] with different densities
+     - Tri-modal: 3 peaks at 1/6, 1/2, 5/6
+     - Sparse peaks: 2 narrow peaks at specific locations
+     - Uniform flat: constant h(x) = 0.5 (integral = 1)
+
+  2. Analyze these patterns: check integral (~1.0) and c5_bound (precomputed)
+
+  3. CALL evaluate_solution on ALL candidates with c5_bound < 0.375
+
+  4. If none pass, try DIFFERENT pattern types (not new random seeds)
+
+  5. After each full eval, DO NOT EDIT the code to run gradient descent.
+     Instead, generate a completely NEW pattern-based candidate.
+
+  Key: We are NOT improving the current solution. We are SEARCHING for a BETTER
+  starting point entirely. Each eval is a FULL re-run from scratch with a new pattern.
+skill_description: |
+  Generate analytical, pattern-based initializations for Erdos optimization.
+  These patterns are NOT gradients of current solutions; they are standalone constructions
+  from combinatorial design theory that may achieve lower C5 bounds.
+skill_body: |
+  # Analytical Pattern Generation for Erdos C5 Optimization
+
+  ## Core Insight
+  The seed optimizer's gradient descent method produces candidates very close to the seed
+  (c5_bound ~0.3809). It STALLS because it cannot escape the local minimum.
+
+  We need COMPLETELY DIFFERENT initializations that are NOT gradients.
+
+  ## Pattern Library (12 types, standalone)
+
+  1. **Golomb ruler (5 marks)**: h(x) = sum of 5 narrow peaks at [0, 0.4, 0.8, 1.2, 1.6]
+     This spacing minimizes pairwise overlaps.
+
+  2. **Golomb ruler (7 marks)**: h(x) = sum of 7 narrow peaks at [0, 1/7*0.5, 2/7*0.5, ...]
+
+  3. **Bipartite**: h(x) = high on [0, 1], low on [1, 2] (or vice versa)
+     Creates separated support, reducing max overlap.
+
+  4. **Tri-modal (3 peaks)**: h(x) = 3 narrow Gaussians at [0.4, 1.0, 1.6]
+
+  5. **Bi-modal (2 peaks)**: h(x) = 2 narrow Gaussians at [0.6, 1.4]
+
+  6. **Sparse peaks (3 peaks)**: h(x) = 3 narrow peaks at [0.25, 0.75, 1.25, 1.75]
+
+  7. **Uniform flat**: h(x) = 0.5 everywhere (integral = 1 exactly)
+
+  8. **Step function**: h(x) = 1 on [0, 1), 0 on [1, 2]
+
+  9. **Sinusoidal + offset**: h(x) = 0.5 + 0.3*sin(2*pi*x)
+
+  10. **Piecewise constant**: h(x) = [1.0, 0.0, 0.0, 0.0, 0.0, 0.5] in 5-bins
+
+  11. **Threshold shifted**: h(x) = 1 on [0.3, 0.7], 0 elsewhere (needs scaling)
+
+  12. **Multi-scale**: combine a broad Gaussian with narrow spikes
+
+  ## Workflow
+
+  1. CALL generate_structured_patterns(type=golomb_5) for first batch
+
+  2. For each candidate:
+     - Check: integral must be ~1.0 (within 5%)
+     - Check: c5_bound must be < 0.375 to be promising
+     - Call evaluate_solution on all passing candidates
+
+  3. If NO candidate passes (c5_bound < 0.375):
+     - Try DIFFERENT pattern types (not new seeds)
+     - Try golomb_7, bi-modal, sparse, uniform, etc.
+
+  4. After EACH full evaluation:
+     - If any candidate beats seed, KEEP IT as the new baseline
+     - Generate a NEW pattern (not gradient of current)
+
+  5. NEVER call edit_solution with gradient descent. We are doing pattern search.
+
+  ## Why This Works
+
+  - Standalone patterns: not gradients, so they explore different regions
+  - Analytical constructions: from combinatorial design theory, may have lower overlap
+  - Pattern diversity: 12 different structures to explore
+  - Direct evaluation: each pattern is a complete candidate, no refinement needed
+
+  ## Expected Results
+
+  With 12 diverse patterns per batch and 2-3 evals, we can explore 30+ unique candidates.
+  Even if only 5% have c5_bound < 0.375, that's 1-2 promising candidates per batch.
+tool_descriptions:
+  edit_solution: |
+    Do NOT use edit_solution for gradient descent optimization.
+    The seed optimizer's gradient descent STALLS near the current solution.
+
+    Instead, generate entirely NEW candidates using generate_structured_patterns.
+    Each call produces a COMPLETE candidate with a different analytical pattern.
+  evaluate_solution: |
+    Run full 59000-step optimization on a candidate. Returns combined_score.
+    combined_score > 1.0 means a new record (c5_bound < 0.380923).
+  probe_solution: |
+    Fast approximate evaluation (500 intervals, analytical c5). Uses probe budget.
+  finish: |
+    Submit when combined_score > 1.0 (c5_bound < 0.38092303510845016).
+sampling:
+  temperature: 1.3
+  top_p: 0.97
+  top_k: 60
+  max_tokens: 16000
+agent:
+  max_iterations: 80
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 10000
+new_tools:
+  - name: generate_structured_patterns
+    description: |
+      Generate 8 diverse, analytical pattern-based initializations for Erdos optimization.
+      These patterns are STANDALONE constructions from combinatorial design theory - NOT gradients
+      of current solutions. This allows exploration of completely different regions of the search space.
+      
+      Pattern types: Golomb ruler (5-7 marks), Bipartite split, Tri-modal (3 peaks), 
+      Bi-modal (2 peaks), Uniform flat, Step function, Sparse peaks, Sinusoidal + offset.
+      
+      Each candidate has precomputed integral and c5_bound (analytical).
+      
+      Call with a specific pattern type, or use the default (golomb_5) for first batch.
+    input_schema:
+      type: object
+      properties:
+        pattern_type:
+          type: string
+          enum: [golomb_5, golomb_7, bipartite, tri_modal, bi_modal, sparse_4, uniform, step, sinusoidal, piecewise_5, threshold_3, multi_scale]
+          default: golomb_5
+    implementation_py: |
+      def run(ctx, args):
+          import numpy as np
+          N = 800
+          domain = 2.0
+          dx = domain / N
+          
+          def compute_c5(h):
+              j_val = 1.0 - h
+              h_padded = np.pad(h, (0, N))
+              j_padded = np.pad(j_val, (0, N))
+              corr_fft = np.fft.fft(h_padded) * np.conj(np.fft.fft(j_padded))
+              correlation = np.fft.ifft(corr_fft).real
+              return np.max(correlation * dx)
+          
+          def normalize(h):
+              integral = np.sum(h) * dx
+              if integral < 0.001 or integral > 10.0:
+                  return h
+              return h / integral
+          
+          ptype = args.get("pattern_type", "golomb_5")
+          
+          candidates = []
+          
+          if ptype == "golomb_5":
+              marks = np.array([0.0, 0.4, 0.8, 1.2, 1.6])
+              h = np.zeros(N)
+              for m in marks:
+                  h += 8.0 * np.exp(-((np.abs(np.arange(N) * dx - m)) / 0.15)**2)
+              h = normalize(np.clip(h, 0.001, 10.0))
+              c5 = compute_c5(h)
+              candidates.append({"h": h.tolist(), "integral": float(np.sum(h) * dx), "c5_bound": float(c5), "pattern_type": "golomb_5"})
+          
+          elif ptype == "golomb_7":
+              marks = np.array([0.0, 1.0/6.0, 2.0/6.0, 3.0/6.0, 4.0/6.0, 5.0/6.0, 1.0])
+              h = np.zeros(N)
+              for m in marks:
+                  h += 6.0 * np.exp(-((np.abs(np.arange(N) * dx - m)) / 0.12)**2)
+              h = normalize(np.clip(h, 0.001, 10.0))
+              c5 = compute_c5(h)
+              candidates.append({"h": h.tolist(), "integral": float(np.sum(h) * dx), "c5_bound": float(c5), "pattern_type": "golomb_7"})
+          
+          elif ptype == "bipartite":
+              x = np.arange(N) * dx
+              a = 1.0 + np.random.rand() * 0.1
+              h = np.where(x < a, 4.0, -2.0)
+              h = normalize(np.clip(h, 0.001, 10.0))
+              c5 = compute_c5(h)
+              candidates.append({"h": h.tolist(), "integral": float(np.sum(h) * dx), "c5_bound": float(c5), "pattern_type": "bipartite"})
+          
+          elif ptype == "tri_modal":
+              x = np.arange(N) * dx
+              peaks = np.array([0.4, 1.0, 1.6])
+              h = np.zeros(N)
+              for p in peaks:
+                  h += 8.0 * np.exp(-((np.abs(x - p)) / 0.12)**2)
+              h = normalize(np.clip(h, 0.001, 10.0))
+              c5 = compute_c5(h)
+              candidates.append({"h": h.tolist(), "integral": float(np.sum(h) * dx), "c5_bound": float(c5), "pattern_type": "tri_modal"})
+          
+          elif ptype == "bi_modal":
+              x = np.arange(N) * dx
+              peaks = np.array([0.6, 1.4])
+              h = np.zeros(N)
+              for p in peaks:
+                  h += 10.0 * np.exp(-((np.abs(x - p)) / 0.08)**2)
+              h = normalize(np.clip(h, 0.001, 10.0))
+              c5 = compute_c5(h)
+              candidates.append({"h": h.tolist(), "integral": float(np.sum(h) * dx), "c5_bound": float(c5), "pattern_type": "bi_modal"})
+          
+          elif ptype == "sparse_4":
+              x = np.arange(N) * dx
+              peaks = np.array([0.25, 0.75, 1.25, 1.75])
+              h = np.zeros(N)
+              for p in peaks:
+                  h += 6.0 * np.exp(-((np.abs(x - p)) / 0.1)**2)
+              h = normalize(np.clip(h, 0.001, 10.0))
+              c5 = compute_c5(h)
+              candidates.append({"h": h.tolist(), "integral": float(np.sum(h) * dx), "c5_bound": float(c5), "pattern_type": "sparse_4"})
+          
+          elif ptype == "uniform":
+              h = np.ones(N) * 0.5
+              h = normalize(h)
+              c5 = compute_c5(h)
+              candidates.append({"h": h.tolist(), "integral": float(np.sum(h) * dx), "c5_bound": float(c5), "pattern_type": "uniform"})
+          
+          elif ptype == "step":
+              x = np.arange(N) * dx
+              h = np.where(x < 1.0, 2.0, 0.0)
+              h = normalize(np.clip(h, 0.001, 10.0))
+              c5 = compute_c5(h)
+              candidates.append({"h": h.tolist(), "integral": float(np.sum(h) * dx), "c5_bound": float(c5), "pattern_type": "step"})
+          
+          elif ptype == "sinusoidal":
+              x = np.arange(N) * dx
+              latent = 0.5 + 0.3 * np.sin(2 * np.pi * x) + 0.1 * np.cos(4 * np.pi * x)
+              h = np.clip(1.0 / (1.0 + np.exp(-latent)), 0.001, 1.0)
+              h = normalize(h)
+              c5 = compute_c5(h)
+              candidates.append({"h": h.tolist(), "integral": float(np.sum(h) * dx), "c5_bound": float(c5), "pattern_type": "sinusoidal"})
+          
+          elif ptype == "piecewise_5":
+              x = np.arange(N) * dx
+              h = np.zeros(N)
+              h[0:N//5] = 2.0
+              h[N//5:2*N//5] = 0.0
+              h[2*N//5:3*N//5] = 1.5
+              h[3*N//5:4*N//5] = 0.0
+              h[4*N//5:] = 0.5
+              h = normalize(h)
+              c5 = compute_c5(h)
+              candidates.append({"h": h.tolist(), "integral": float(np.sum(h) * dx), "c5_bound": float(c5), "pattern_type": "piecewise_5"})
+          
+          elif ptype == "threshold_3":
+              x = np.arange(N) * dx
+              h = np.zeros(N)
+              h[x < 0.3] = 3.5
+              h[(x >= 0.3) & (x < 0.7)] = 0.0
+              h[(x >= 0.7) & (x < 1.0)] = 3.0
+              h[(x >= 1.0) & (x < 1.5)] = 0.0
+              h[x >= 1.5] = 2.0
+              h = normalize(h)
+              c5 = compute_c5(h)
+              candidates.append({"h": h.tolist(), "integral": float(np.sum(h) * dx), "c5_bound": float(c5), "pattern_type": "threshold_3"})
+          
+          elif ptype == "multi_scale":
+              x = np.arange(N) * dx
+              h = np.zeros(N)
+              h += 2.0 * np.exp(-((x - 1.0)**2) / 0.5)  # broad
+              h += 5.0 * np.exp(-((x - 0.5)**2) / 0.05)  # narrow
+              h += 5.0 * np.exp(-((x - 1.5)**2) / 0.05)  # narrow
+              h = normalize(np.clip(h, 0.001, 10.0))
+              c5 = compute_c5(h)
+              candidates.append({"h": h.tolist(), "integral": float(np.sum(h) * dx), "c5_bound": float(c5), "pattern_type": "multi_scale"})
+          
+          return {"candidates": candidates, "num_candidates": len(candidates), "pattern_type": ptype}
+new_skills:
+  - name: pattern-search-strategy
+    description: |
+      Search for better Erdos C5 bounds using analytical pattern constructions that are NOT gradients
+      of current solutions. Each pattern is a standalone initialization with precomputed scores.
+    body: |
+      # Pattern-Based Search for Erdos C5 Optimization
+
+      ## Why Gradient Descent Fails
+
+      The seed optimizer uses gradient descent with sigmoid initialization.
+      This produces candidates VERY CLOSE to the seed (c5_bound ~0.3809).
+      Gradient descent STALLS because the landscape is flat near the current solution.
+
+      ## Solution: Pattern-Based Search
+
+      We generate STANDALONE pattern constructions from combinatorial design theory:
+      - Golomb ruler: optimal spacing to minimize pairwise overlaps
+      - Bipartite: separated support reduces max overlap
+      - Multi-modal: multiple narrow peaks
+      - Uniform/step: simple analytical functions
+
+      ## Workflow
+
+      1. CALL generate_structured_patterns with a SPECIFIC pattern type (e.g., golomb_5)
+
+      2. Analyze the 8 candidates:
+         - Check integral (~1.0)
+         - Note c5_bound (precomputed analytical score)
+
+      3. FILTER candidates:
+         - SKIP if integral != 1.0 (constraint violation)
+         - SKIP if c5_bound >= 0.375 (too bad)
+         - KEEP all with c5_bound < 0.375
+
+      4. CALL evaluate_solution on all kept candidates (typically 2-6)
+
+      5. If none pass, try a DIFFERENT pattern type (not new random seeds)
+         - golomb_7, bi_modal, sparse_4, uniform, step, etc.
+
+      6. After EACH full evaluation:
+         - If any candidate beats seed, KEEP IT as new baseline
+         - Generate a NEW pattern (completely different from before)
+
+      ## Key Principles
+
+      - NO gradient descent: we are exploring new regions entirely
+      - Pattern diversity: 12 different analytical structures
+      - Precomputed scores: fast analytical screening
+      - Direct evaluation: each pattern is a complete candidate
+
+      ## Expected Results
+
+      With 8 diverse patterns per batch and 2-4 evals, we can explore 30+ unique candidates.
+      Even if only 10% have c5_bound < 0.375, that's 3 promising candidates per batch.
+sampling:
+  temperature: 1.3
+  top_p: 0.97
+  top_k: 60
+  max_tokens: 16000
+agent:
+  max_iterations: 80
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 10000

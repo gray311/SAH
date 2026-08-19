@@ -1,0 +1,204 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are an expert algorithm engineer improving a C++ program that constructs a rectilinear polygon to maximize (mackerels inside - sardines inside + 1).
+  
+  The program has an EVOLVE-BLOCK region containing the full C++ code.
+  
+  Key constraints:
+  - Polygon must be rectilinear (edges parallel to x or y axis)
+  - At most 1000 vertices, total edge length <= 400,000
+  - Maximize: mackerels_in - sardines_in + 1 (score = max(0, that value))
+  - All points on edges count as inside
+  
+  Strategy:
+  1. First, call analyze_fish_distribution to understand the spatial pattern
+     of mackerels vs sardines. This tells you which regions are "mackerel-rich"
+     and "sardine-rich".
+  2. Based on the analysis, edit your polygon construction to favor mackerel
+     regions and avoid sardine regions.
+  3. Use targeted searches (simulated annealing, genetic search) with the
+     insight from the analysis.
+  4. Keep total runtime under 1.9s per test case (you have ~150 test cases).
+  5. Call evaluate_solution only after making a substantive change.
+  
+  Remember: The seed program already has a sophisticated search. Your job is
+  to guide it with spatial insights, not replace its search machinery.
+  
+  Always call analyze_fish_distribution early to get a baseline understanding.
+skill_description: |
+  Iteratively optimize a C++ program for a rectilinear polygon covering problem.
+  Maximize (mackerels_in - sardines_in + 1) by constructing a polygon that favors
+  mackerel-rich regions while avoiding sardines. Use spatial analysis to guide
+  polygon construction and search strategies. Budget: limited evaluations.
+skill_body: |
+  # Rectilinear Polygon Optimization
+
+  ## Task
+  Construct a rectilinear polygon that maximizes: mackerels_inside - sardines_inside + 1
+  
+  ## Key Insights
+  - The seed program uses KD-tree + Simulated Annealing + Genetic algorithms
+  - It already runs a bounded internal search per test case
+  - Your job is to guide the search with spatial insights about fish distribution
+  
+  ## Method
+  1. **Call analyze_fish_distribution FIRST**: This reads the input coordinates
+     and returns which x-y regions are mackerel-dense vs sardine-dense.
+  
+  2. **Edit the polygon construction** using insights from the analysis:
+     - If mackerels cluster in certain quadrants, bias your search toward those
+     - If sardines are evenly distributed, focus on enclosing isolated mackerel clusters
+     - Consider using disjoint sub-regions if they capture many mackerels with few sardines
+  
+  3. **Modify the search strategy**:
+     - Add constraints to your simulated annealing that respect the analysis
+     - Use the analysis to initialize your genetic algorithm better
+     - Prune search directions that lead to sardine-rich regions
+  
+  4. **Evaluate sparingly**: Each evaluation is precious. Only evaluate after
+     making changes that are guided by the analysis.
+  
+  ## Critical Details
+  - The analyze_fish_distribution tool is CHEAP (doesn't use your eval budget)
+  - Use it to understand the BEFORE state, then make targeted edits
+  - The seed program's search is sophisticated; augment it, don't replace it
+  - Keep C++ code within 1.9s per test case (safety margin = 0.1s)
+tool_descriptions:
+  edit_solution: 'Edit the EVOLVE-BLOCK region in the C++ code. Use SEARCH/REPLACE
+    diffs for targeted changes, or full rewrites for major changes. Preserve the
+    fixed entry function and external structure.'
+  evaluate_solution: 'Run the C++ program against all 150 test cases and return
+    combined_score (higher is better). Limited budget of evaluations.'
+  probe_solution: 'Approximate score on first ~2000 rows of input. Fast but not
+    comparable to full evaluation scores. Useful for quick sanity checks.'
+  finish: 'End the session and submit the best-scoring solution.'
+sampling:
+  temperature: 0.5
+  top_p: 0.9
+  top_k: 15
+  max_tokens: 6144
+agent:
+  max_iterations: 24
+middleware:
+  budget_reminder_from_left: 2
+  long_tool_output_max_chars: 6000
+new_tools:
+  - name: analyze_fish_distribution
+    description: |
+      Analyze the spatial distribution of mackerels vs sardines in the input.
+      Returns cluster information including: bounding boxes of dense regions,
+      mackerel-rich vs sardine-rich areas, and suggested polygon sub-regions.
+      This helps guide where to focus the polygon construction to maximize
+      mackerel capture while minimizing sardine capture.
+      IMPORTANT: This is a PRE-EVAL tool - it uses ctx methods but does NOT
+      call ctx.evaluate(), so it does not consume your evaluation budget.
+    input_schema:
+      type: object
+      properties: {}
+    implementation_py: |
+      def run(ctx, args):
+          # Read mackerel and sardine coordinates from task input
+          names = ctx.list_task_inputs()
+          if not names:
+              return {"note": "no input files found"}
+          
+          # Read both coordinate files (assume CSV format with x,y columns)
+          try:
+              mackerel_df = ctx.read_input_df(names[0], nrows=5000)
+              sardine_df = ctx.read_input_df(names[1], nrows=5000)
+          except Exception as e:
+              return {"error": str(e), "note": "failed to read input"}
+          
+          if len(mackerel_df) == 0 or len(sardine_df) == 0:
+              return {"error": "empty data", "note": "could not parse input"}
+          
+          # Compute bounding boxes for each type
+          mackerel_bbox = {
+              'min_x': int(mackerel_df['x'].min()),
+              'max_x': int(mackerel_df['x'].max()),
+              'min_y': int(mackerel_df['y'].min()),
+              'max_y': int(mackerel_df['y'].max())
+          }
+          sardine_bbox = {
+              'min_x': int(sardine_df['x'].min()),
+              'max_x': int(sardine_df['x'].max()),
+              'min_y': int(sardine_df['y'].min()),
+              'max_y': int(sardine_df['y'].max())
+          }
+          
+          # Find center points
+          mackerel_center = {
+              'x': int(mackerel_df['x'].mean()),
+              'y': int(mackerel_df['y'].mean())
+          }
+          sardine_center = {
+              'x': int(sardine_df['x'].mean()),
+              'y': int(sardine_df['y'].mean())
+          }
+          
+          # Estimate density (simplified: variance proxy for spread)
+          mackerel_spread = {
+              'x_spread': float(mackerel_df['x'].std()),
+              'y_spread': float(mackerel_df['y'].std())
+          }
+          sardine_spread = {
+              'x_spread': float(sardine_df['x'].std()),
+              'y_spread': float(sardine_df['y'].std())
+          }
+          
+          # Identify quadrants and which type dominates each
+          mid_x = (mackerel_bbox['max_x'] - mackerel_bbox['min_x']) / 2 + mackerel_bbox['min_x']
+          mid_y = (mackerel_bbox['max_y'] - mackerel_bbox['min_y']) / 2 + mackerel_bbox['min_y']
+          
+          # Count fish per quadrant (sample for speed)
+          mackerel_q1 = ((mackerel_df['x'] <= mid_x) & (mackerel_df['y'] >= mid_y)).sum()
+          mackerel_q2 = ((mackerel_df['x'] > mid_x) & (mackerel_df['y'] >= mid_y)).sum()
+          mackerel_q3 = ((mackerel_df['x'] > mid_x) & (mackerel_df['y'] < mid_y)).sum()
+          mackerel_q4 = ((mackerel_df['x'] <= mid_x) & (mackerel_df['y'] < mid_y)).sum()
+          
+          sardine_q1 = ((sardine_df['x'] <= mid_x) & (sardine_df['y'] >= mid_y)).sum()
+          sardine_q2 = ((sardine_df['x'] > mid_x) & (sardine_df['y'] >= mid_y)).sum()
+          sardine_q3 = ((sardine_df['x'] > mid_x) & (sardine_df['y'] < mid_y)).sum()
+          sardine_q4 = ((sardine_df['x'] <= mid_x) & (sardine_df['y'] < mid_y)).sum()
+          
+          # Determine best regions (mackerel-dense, sardine-sparse)
+          quadrant_scores = [
+              (1, mackerel_q1, sardine_q1),
+              (2, mackerel_q2, sardine_q2),
+              (3, mackerel_q3, sardine_q3),
+              (4, mackerel_q4, sardine_q4)
+          ]
+          quadrant_info = []
+          for q, mk, sd in quadrant_scores:
+              # High score = many mackerels, few sardines
+              score = mk - sd
+              quadrant_info.append({
+                  'quadrant': q,
+                  'mackerels': int(mk),
+                  'sardines': int(sd),
+                  'score': float(score),
+                  'favorable': score > 10  # Threshold for favorable
+              })
+          
+          # Return comprehensive analysis
+          return {
+              'analysis_type': 'fish_distribution',
+              'mackerels': {
+                  'count': len(mackerel_df),
+                  'bounding_box': mackerel_bbox,
+                  'center': mackerel_center,
+                  'spread': mackerel_spread,
+                  'quadrant_counts': {q: dict(c) for q, c in [(i, {'mackerels': ci['mackerels'], 'sardines': ci['sardines'], 'score': ci['score'], 'favorable': ci['favorable']}) for i, ci in enumerate(quadrant_info)]}
+              },
+              'sardines': {
+                  'count': len(sardine_df),
+                  'bounding_box': sardine_bbox,
+                  'center': sardine_center,
+                  'spread': sardine_spread
+              },
+              'quadrant_analysis': quadrant_info,
+              'recommendation': 'Focus polygon construction on quadrants with positive (mackerel - sardine) score, particularly those marked as favorable (score > 10)'
+          }
+remove_tools: []
+new_skills: []
+new_middlewares: []

@@ -1,0 +1,49 @@
+schema: h2spec/1.0
+system_prompt: "You are a C++ polygon optimizer for axis-aligned fish capture. Goal: maximize (mackerels - sardines + 1).\n\nUSE KD-TREE BASED RECOMMENDED STRATEGY:\n\n1. GRID-BASED ANALYSIS:\n   - Build 200x200 grid (cell_size=500) over [0,100000]x[0,100000]\n   - For each cell, count mackerels (M) and sardines (S), compute score = M - S\n   - Identify top 15 cells with highest positive score\n\n2. POLYGON INITIALIZATION:\n   - Convert top cells to candidate polygons using bounding boxes\n   - Ensure 4-1000 vertices, perimeter <= 400,000, coords in [0,100000]\n\n3. POLYGON MUTATION (KEY TO PROGRESS):\n   - Implement edge-based local search directly in C++ code\n   - Each mutation tries shifts on polygon edges, uses grid/KD-tree for fast fish counting\n   - Keep mutations that improve M - S score\n\n4. MULTI-LOBED POLYGON STRATEGY:\n   - Build separate polygons around each mackerel cluster\n   - Allow multiple lobes if total perimeter < 400,000\n   - Better than single large polygon for non-convex distributions\n\n5. DEEP HILL CLIMBING:\n   - For each edge, try shifts ±5, ±10, ±15, ±20 units\n   - Use grid or KD-tree for fast scoring\n   - Repeat 3 refinement rounds\n\n6. MULTIPLE RESTARTS:\n   - Run 15-20 restarts with different random seeds\n   - Each restart: pick 3-5 top cells, build polygons, hill climb\n   - Total time per eval: < 2.0s, prioritize quantity of variants\n\nTools:\n- edit_solution: Replace EVOLVE-BLOCK with complete C++ implementation\n- evaluate_solution: Run C++ program, get score (mackerels-sardines+1)\n- probe_solution: Use for quick validation if needed\n- finish: Submit when you have encoded a working solution\n\nKEY DIFFERENCE from seed: Implement polygon mutation in C++ for efficient local search, enable multi-lobed polygons, use grid to guide initialization but fast scoring for fine optimization."
+tool_descriptions:
+  edit_solution: 'Replace EVOLVE-BLOCK with C++ implementing grid-based initialization with fast scoring, polygon mutation for efficient edge-based optimization, multi-lobed polygons, 15-20 restarts.
+
+  Steps:
+  1. Build 200x200 grid, find top 15 cells with positive M-S score
+  2. Convert cells to candidate polygons (bounding boxes)
+  3. Implement efficient edge mutation in C++ with fast scoring
+  4. Enable multi-lobed polygons (separate regions for each cluster)
+  5. Deep hill climb with ±5..20 shifts, 3 rounds
+  6. 15-20 restarts, output best polygon'
+  evaluate_solution: Run C++ program. Returns score (mackerels-sardines+1), validity, and remaining evaluations (budget=30). Each run has ~2.0s search window.
+  probe_solution: Use for quick validation if needed - may use grid approximation.
+  finish: End when you've submitted a working grid-based polygon optimizer with efficient mutation, multi-lobed support, and 15-20 restarts.
+sampling:
+  temperature: 1.1
+  top_p: 0.9
+  top_k: 20
+  max_tokens: 12288
+agent:
+  max_iterations: 50
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 15000
+new_tools:
+- name: count_fish_in_rect
+  description: 'Count mackerels and sardines in a rectangle using grid for O(1) queries. Fast scoring for polygon evaluation. Arguments: min_x, max_x, min_y, max_y. Returns: m_count, s_count, score (M-S).'
+  input_schema:
+    type: object
+    properties:
+      min_x:
+        type: integer
+      max_x:
+        type: integer
+      min_y:
+        type: integer
+      max_y:
+        type: integer
+  implementation_py: "def run(ctx, args):\n    import json\n    \n    min_x = args.get(\"min_x\", 0)\n    max_x = args.get(\"max_x\", 100000)\n    min_y = args.get(\"min_y\", 0)\n    max_y = args.get(\"max_y\", 100000)\n    \n    if min_x >= max_x or min_y >= max_y:\n        return {\"m_count\": 0, \"s_count\": 0, \"score\": 0}\n    \n    # Parse program to extract fish positions\n    program_text = ctx.get_program()\n    mackerels = set()\n    sardines = set()\n    \n    for line in program_text.split('\\n'):\n        line = line.strip()\n        if line.startswith('fish['):\n            try:\n                parts = line.replace('fish[', '').replace(']', '').split(',')\n                if len(parts) >= 2:\n                    x, y = int(parts[0]), int(parts[1])\n                    fish_type = 1 if 'mackerel' in line.lower() else -1\n                    if fish_type == 1:\n                        mackerels.add((x, y))\n                    else:\n                        sardines.add((x, y))\n            except:\n                continue\n    \n    if not mackerels and not sardines:\n        return {\"m_count\": 0, \"s_count\": 0, \"score\": 0}\n    \n    # Build grid for O(1) rectangle queries\n    grid_size = 200\n    cell_size = 100000 // grid_size\n    grid = [[{'m': 0, 's': 0} for _ in range(grid_size)] for _ in range(grid_size)]\n    for x, y in mackerels:\n        cx, cy = x // cell_size, y // cell_size\n        if 0 <= cx < grid_size and 0 <= cy < grid_size:\n            grid[cy][cx]['m'] += 1\n    for x, y in sardines:\n        cx, cy = x // cell_size, y // cell_size\n        if 0 <= cx < grid_size and 0 <= cy < grid_size:\n            grid[cy][cx]['s'] += 1\n    \n    # Count fish in rectangle using grid\n    m_count, s_count = 0, 0\n    for cy in range(max(0, min_y // cell_size), min(grid_size, (max_y + cell_size - 1) // cell_size + 1)):\n        for cx in range(max(0, min_x // cell_size), min(grid_size, (max_x + cell_size - 1) // cell_size + 1)):\n            m_count += grid[cy][cx]['m']\n            s_count += grid[cy][cx]['s']\n    \n    return {\"m_count\": m_count, \"s_count\": s_count, \"score\": m_count - s_count}"
+new_skills:
+- name: grid-polygon-search
+  description: Use grid for O(1) rectangle queries, build polygons from mackerel clusters, implement edge mutation for local search, support multi-lobed structures.
+  body: '# Grid-Based Polygon Search Strategy\n\n## Core Approach\n- Use grid (200x200, cell_size=500) for O(1) initialization and scoring\n- Build polygons from mackerel-dense regions\n- Implement edge mutation directly in C++ for efficient local search\n- Enable multi-lobed polygons for non-convex distributions\n\n## Phase 1: Grid Analysis\n- Build 200x200 grid over [0,100000]x[0,100000]\n- Count M/S per cell, compute M-S score\n- Find top 15 cells with positive score\n\n## Phase 2: Initial Polygon Construction\n- Convert top cells to bounding box polygons\n- Ensure: 4-1000 vertices, perimeter <= 400,000, coords in [0,100000]\n- Start with single polygon, then try multi-lobed structures\n\n## Phase 3: Edge Mutation (Key Innovation)\n- Implement edge-based optimization directly in C++\n- For each edge, try shifts: ±5, ±10, ±15, ±20 units\n- Use grid-based scoring for O(1) evaluation\n- Keep mutations that improve M - S\n- Repeat 3 refinement rounds\n\n## Phase 4: Multi-Lobed Strategy\n- Build separate polygons around each mackerel cluster\n- Allow multiple lobes if total perimeter < 400,000\n- Better captures non-convex distributions\n\n## Phase 5: Multiple Restarts\n- Run 15-20 restarts with different random seeds\n- Each restart: perturb top cells, build polygons, apply edge mutation\n- Output best polygon across all restarts\n\n## Success Factors\n- Grid initialization guides search but doesn''t limit precision\n- Edge mutation enables efficient local search\n- Multi-lobed polygons capture complex distributions\n- Deep hill climbing fine-tunes edge positions'
+new_middlewares:
+- name: grid_search_reminder
+  hook: before_model
+  description: generated middleware grid_search_reminder
+  implementation_py: "def before_model(hook_input):\n    return \"Use grid-based scoring: build 200x200 grid for O(1) queries, implement edge mutation in C++, enable multi-lobed polygons, 15-20 restarts, optimize edge positions with ±5..20 shifts.\""

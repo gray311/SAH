@@ -1,0 +1,195 @@
+schema: h2spec/1.0
+system_prompt: |
+  Erdos minimum overlap problem: find a STEP FUNCTION h: [0,2]->[0,1] minimizing max_k integral h(x)(1-h(x+k))dx.
+  
+  KEY INSIGHT: The optimal solution is likely a TRUE STEP FUNCTION (piecewise constant with few jumps), NOT a smooth curve.
+  
+  Current best: C5 <= 0.38092303510845016.
+  
+  Goal: Beat seed score (c5_bound < 0.380923).
+  
+  STRATEGY:
+  
+  1. REDUCE discretization DRAMATICALLY: Set num_intervals=50 or fewer to force step-function structure. The seed code optimizes smooth curves but we need coarse grids.
+  
+  2. CHANGE initialization: Generate HARD step functions (not sigmoid curves). Use direct threshold-based h values (0, 0.5, 1.0) rather than soft sigmoid outputs.
+  
+  3. EDIT to simplify the optimizer: Reduce num_steps to 5000-10000 (no need for long training when structure is fixed), keep penalty_strength=61.0.
+  
+  4. Try SPECIFIC step patterns: Uniform steps (equal heights), binary steps (0 or 1), and asymmetric step functions.
+  
+  5. If training-based approaches fail, EDIT to remove the optimizer entirely and use direct formula-based step functions.
+  
+  6. Coarse grid = faster evaluation + natural step-function discovery. Use 8-12 evals for this structural search.
+skill_description: |
+  Generate TRUE STEP FUNCTIONS (piecewise constant) for Erdos optimization. Use coarse discretization and hard thresholds, not smooth sigmoid curves.
+skill_body: |
+  # Step Function Strategy for Erdos Optimization
+  
+  ## Problem
+  The seed optimizer produces smooth sigmoid curves. The optimal solution is likely a TRUE STEP FUNCTION with few jumps.
+  
+  ## Solution
+  
+  1. USE COARSE DISCRETIZATION: Set num_intervals=20, 30, or 40. This forces the solution to be a step function naturally.
+  
+  2. GENERATE HARD INITIALIZATIONS: Don't use sigmoid. Directly set h values to 0, 0.5, or 1.0 based on threshold patterns.
+  
+  3. SAMPLE STRUCTURAL PATTERNS:
+     - Uniform step: h = constant (integral constraint determines value)
+     - Binary step: h = 0 on [0, a), 1 on [a, 2]
+     - Asymmetric step: different heights on different intervals
+     - Symmetric step: h symmetric around x=1
+  
+  4. VERIFY INTEGRAL: sum(h) * dx must equal 1.0 exactly for step functions.
+  
+  5. EVALUATE STRUCTURAL VARIANTS: Test 3-5 different step patterns with different jump locations.
+  
+  ## Expected Outcome
+  Coarse grids + hard steps = true step functions that the smooth optimizer misses.
+tool_descriptions:
+  edit_solution: |
+    Modify EVOLVE-BLOCK for step function search.
+    
+    For coarse discretization: num_intervals=20, 30, or 40
+    For short training: num_steps=5000 or 10000
+    For hard initialization: change sigmoid to direct threshold values
+    
+    Example edit for coarse grid:
+    Replace num_intervals: int = 800 with num_intervals: int = 30
+    Replace num_steps: int = 120000 with num_steps: int = 10000
+    Replace penalty_strength: float = 61.0 with penalty_strength: float = 61.0
+    
+    Example hard initialization edit:
+    Replace `h = jax.nn.sigmoid(latent)` with `h = latent` (where latent is already thresholded 0-1)
+sampling:
+  temperature: 1.5
+  top_p: 0.9
+  top_k: 50
+  max_tokens: 16384
+agent:
+  max_iterations: 25
+middleware:
+  budget_reminder_from_left: 8
+  long_tool_output_max_chars: 20000
+new_tools:
+  - name: generate_step_functions
+    description: |
+      Generate 5 diverse TRUE STEP FUNCTIONS (piecewise constant) with coarse discretization.
+      Each has hard thresholds (h in {0, 0.5, 1.0}) and precomputed c5_bound using analytical method.
+      Call with grid_size=20, 30, or 40.
+    input_schema:
+      type: object
+      properties:
+        grid_size:
+          type: integer
+          default: 30
+    implementation_py: |
+      def run(ctx, args):
+          import numpy as np
+          grid_size = args.get("grid_size", 30)
+          N = grid_size
+          domain = 2.0
+          dx = domain / N
+          
+          def compute_c5(h_arr):
+              h_padded = np.pad(h_arr, (0, N))
+              j_padded = np.pad(1.0 - h_arr, (0, N))
+              corr = np.fft.ifft(np.fft.fft(h_padded) * np.conj(np.fft.fft(j_padded))).real
+              return np.max(corr * dx)
+          
+          candidates = []
+          
+          # Pattern 1: Binary step at different locations
+          for a in [0.2, 0.4, 0.6, 0.8]:
+              h = np.zeros(N)
+              h[int(a * N)] = 1.0
+              integral = np.sum(h) * dx
+              if abs(integral - 1.0) < 0.01:
+                  h = h / integral
+              candidates.append({"h": h.tolist(), "c5_bound": float(compute_c5(h)), "pattern": f"binary_step_a{a}"})
+          
+          # Pattern 2: Uniform step (constant)
+          h_uniform = np.ones(N) * 0.5
+          candidates.append({"h": h_uniform.tolist(), "c5_bound": float(compute_c5(h_uniform)), "pattern": "uniform_0.5"})
+          
+          # Pattern 3: Three-level step
+          h_3level = np.zeros(N)
+          h_3level[:int(0.3*N)] = 1.0
+          h_3level[int(0.3*N):int(0.7*N)] = 0.5
+          h_3level[int(0.7*N):] = 0.0
+          candidates.append({"h": h_3level.tolist(), "c5_bound": float(compute_c5(h_3level)), "pattern": "three_level"})
+          
+          # Pattern 4: Asymmetric with integral constraint
+          h_asym = np.zeros(N)
+          h_asym[:int(0.5*N)] = 1.0
+          h_asym[int(0.5*N):] = 0.0
+          candidates.append({"h": h_asym.tolist(), "c5_bound": float(compute_c5(h_asym)), "pattern": "asymmetric_50"})
+          
+          # Pattern 5: Central step
+          h_central = np.zeros(N)
+          h_central[int(0.25*N):int(0.75*N)] = 1.0
+          candidates.append({"h": h_central.tolist(), "c5_bound": float(compute_c5(h_central)), "pattern": "central_step"})
+          
+          return {"candidates": candidates, "grid_size": grid_size}
+new_skills:
+  - name: structural-step-search
+    description: |
+      Search for TRUE STEP FUNCTIONS using coarse discretization and hard thresholds.
+      Generate 5-8 structural patterns, evaluate best with full eval.
+    body: |
+      # Structural Step Function Search
+      
+      ## Workflow
+      
+      1. CALL generate_step_functions(grid_size=30)
+      
+      2. EXAMINE all candidates:
+         - Check c5_bound (precomputed analytical score)
+         - Look for c5_bound < 0.37 (promising step function)
+      
+      3. CALL evaluate_solution on candidates with c5_bound < 0.37
+      
+      4. If no success, TRY COARSER GRID:
+         CALL generate_step_functions(grid_size=20)
+         or grid_size=40
+      
+      5. Try different step PATTURNS:
+         - Binary steps (jump at different locations)
+         - Uniform steps (constant height)
+         - Multi-level steps (2-3 different values)
+         - Asymmetric steps
+      
+      ## Why This Works
+      
+      - Coarse grids force step-function structure
+      - Hard thresholds (not sigmoids) capture true steps
+      - Direct c5 computation avoids optimization waste
+      - Multiple structural patterns increase discovery chances
+      
+      ## Expected Results
+      
+      With 5-8 step patterns, expect 2-4 to pass c5 < 0.37 filter.
+      Full evaluation should find step functions beating smooth curves.
+new_middlewares:
+  - name: push_coarse_grid
+    hook: before_model
+    description: |
+      Middleware to push coarse discretization when solver uses fine grids.
+      Encourages step-function discovery.
+    implementation_py: |
+      def before_model(hook_input):
+          edit = hook_input.get("last_edit", "")
+          
+          if "num_intervals" in edit:
+              old_val = hook_input.get("last_edit_details", "")
+              if "800" in old_val or "500" in old_val:
+                  return "Found fine grid (500-800 intervals). Change to COARSE grid (20-40 intervals) for step functions!"
+          
+          if "sigmoid" in edit.lower() or "sigmoid" in hook_input.get("last_state", ""):
+              return "You're using sigmoid (smooth curves). Switch to HARD step functions (0, 0.5, 1.0) for true step functions."
+          
+          if hook_input.get("evals_left", 10) > 5:
+              return "You have 5+ evals left. Try generate_step_functions with grid_size=30 to find step functions quickly."
+          
+          return None

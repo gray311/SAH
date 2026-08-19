@@ -1,0 +1,143 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are an expert in functional analysis for C2 maximization.
+
+  Current best: 0.8962799441554086 (step functions).
+
+  CRITICAL: The seed program uses JAX array mutations (f.at[start:end].set(value)) to create step functions.
+  You must generate EDITS that preserve this structure while varying patterns.
+
+  STRATEGY - PATTERN DIVERSIFICATION:
+
+  PHASE 1 (iterations 1-12): EXHAUSTIVE PATTERN SEARCH
+
+  1. Call generate_pattern_variants to create 3-4 diverse step function patterns:
+     - Variant A: Widen current peak by 8% of domain width
+     - Variant B: Create 2-peak configuration (split peak into two with small gap)
+     - Variant C: Create asymmetric pattern (left peak height = right peak height * 1.2)
+     - Variant D: Novel pattern: "plateau with spikes" (flat region with narrow high spikes)
+
+  2. Call probe_solution on ALL variants (spend 10-12 probes total)
+
+  3. Call evaluate_solution on TOP 1 probe score
+
+  4. If beats record: continue Phase 1. If no improvement after 6 iterations: switch to Phase 2
+
+  PHASE 2 (iterations 13-22): STRUCTURAL OPTIMIZATION
+
+  1. Identify dominant pattern features (peak count, height ratios, width ratios)
+  2. Generate 2 variants with targeted structural changes:
+     - Increase peak count by 1 (3-peak if 2-peak currently)
+     - Adjust height ratios: tallest = shortest * 1.3 to 1.8
+  3. Probe both, evaluate best
+
+  PHASE 3 (iterations 23-29): AGGRESSIVE REEXPLORATION
+
+  1. If stuck, call generate_pattern_variants with "high-diversity" flag:
+     - Try Gaussian-like smooth transitions (use softmax weighting)
+     - Try 4-peak configuration
+     - Try concentrated energy in narrow region (90% in 20% of domain)
+  2. Probe 3, evaluate best
+  3. Submit if c2 > 0.8962799441554086
+
+  RULES:
+  - ALWAYS generate diverse pattern families, not just parameter tweaks
+  - Use probes extensively: 8-10 probes per iteration before any full eval
+  - Generate concrete JAX edits: f = f.at[start:end].set(value)
+  - Test multi-peak, asymmetric, and concentrated patterns
+
+  TOOL USAGE:
+  - generate_pattern_variants: Call ONCE per iteration to get 3-4 diverse patterns
+  - probe_solution: Call on ALL variants (budget: 30 probes)
+  - evaluate_solution: Call ONLY on top 1 by probe score (if probe >= 1.0)
+  - finish: Report best combined_score and winning pattern
+sampling:
+  temperature: 1.1
+  top_p: 0.92
+  top_k: 30
+agent:
+  max_iterations: 29
+middleware:
+  budget_reminder_from_left: 2
+  long_tool_output_max_chars: 18000
+new_tools:
+- name: generate_pattern_variants
+  description: |
+    Generate 3-4 diverse step function patterns from current best. Call ONCE per iteration.
+    Patterns vary: peak widths (5-15%), peak heights (1.2-2.5), peak positions (20-70% domain),
+    and number of peaks (1-4). Uses JAX array mutation syntax.
+  input_schema:
+    type: object
+    properties: {}
+  implementation_py: |
+    def run(ctx, args):
+        import re
+        best_code = ctx.get_best_program()
+        
+        # Extract key parameters from seed structure
+        lines = best_code.split('\n')
+        num_intervals = 600
+        
+        def make_step(f, start, end, height):
+            return f.at[start:end].set(height)
+        
+        def make_multi_step(f, ranges, heights):
+            for (start, end), height in zip(ranges, heights):
+                f = make_step(f, start, end, height)
+            return f
+        
+        patterns = []
+        
+        # Pattern 1: Widen peak by 8%
+        start = int(0.22 * num_intervals)
+        end = int(0.78 * num_intervals)
+        f = ctx.stage_edit(best_code)
+        # Modify the step pattern to be wider
+        patterns.append({
+            'name': 'wider_peak',
+            'edit': f"start = int(0.22 * n)\nend = int(0.78 * n)\nf = f.at[start:end].set(1.45)"
+        })
+        
+        # Pattern 2: Two-peak configuration
+        patterns.append({
+            'name': 'two_peaks',
+            'edit': f"start1 = int(0.28 * n)\nend1 = int(0.38 * n)\nheight1 = 1.80\nstart2 = int(0.62 * n)\nend2 = int(0.72 * n)\nheight2 = 1.80\nf = f.at[start1:end1].set(height1)\nf = f.at[start2:end2].set(height2)"
+        })
+        
+        # Pattern 3: Asymmetric peaks
+        patterns.append({
+            'name': 'asymmetric',
+            'edit': f"start1 = int(0.20 * n)\nend1 = int(0.35 * n)\nheight1 = 2.00\nstart2 = int(0.65 * n)\nend2 = int(0.80 * n)\nheight2 = 1.70\nf = f.at[start1:end1].set(height1)\nf = f.at[start2:end2].set(height2)"
+        })
+        
+        # Pattern 4: Concentrated energy
+        patterns.append({
+            'name': 'concentrated',
+            'edit': f"start = int(0.30 * n)\nend = int(0.70 * n)\nf = f.at[start:end].set(2.20)"
+        })
+        
+        return {"patterns": patterns, "num_intervals": num_intervals}
+
+new_skills:
+- name: pattern-exploration-protocol
+  description: Step-function pattern diversification using JAX array mutations. Generate diverse configurations, not just parameter tweaks.
+  body: "# Pattern Exploration Protocol for C2 Maximization\n\n## Core Principle\nThe seed step patterns are fixed. You must GENERATE NEW pattern families, not just tweak parameters.\n\n## Phase 1: Pattern Diversification (iterations 1-12)\n\n1. Call generate_pattern_variants to get 3-4 diverse patterns:\n   - Wider peak (expand width to 55% of domain)\n   - Two-peak config (split domain into two regions, each ~40% with peak)\n   - Asymmetric (left peak taller than right by 15-25%)\n   - Concentrated (narrow high peak in 40% of domain, height 2.0-2.5)\n\n2. For EACH pattern, generate CONCRETE JAX edits:\n   - f = f.at[start:end].set(value)\n   - Use integer indices: start = int(0.28 * n), end = int(0.72 * n)\n   - Heights: 1.2-2.5, avoiding overflow\n\n3. Call probe_solution on ALL variants (spend 10-12 probes)\n\n4. Evaluate top probe score\n\n## Phase 2: Structural Refinement (iterations 13-22)\n\n1. Identify winning pattern features (peak count, height ratio, width)\n2. Generate 2 variants:\n   - Add one more peak (if 2-peak → 3-peak)\n   - Adjust height ratios: tallest / shortest = 1.3 to 1.8\n3. Probe both, evaluate best\n\n## Phase 3: Aggressive Exploration (iterations 23-29)\n\n1. If stuck, generate \"high-diversity\" patterns:\n   - 4-peak configuration\n   - Concentrated: 90% energy in 20% domain (height 2.5-3.0)\n   - Gaussian-like: smooth transitions with softplus\n2. Probe 3, evaluate best\n3. Submit if c2 > 0.8962799441554086\n\n## Key Rules\n- GENERATE DIVERSE PATTERNS, not parameter tweaks\n- Use CONCRETE JAX syntax: f.at[start:end].set(value)\n- Probe 8-10 variants before any full eval\n- Multi-peak patterns often outperform single-peak"
+new_middlewares:
+- name: ensure_pattern_diversity
+  hook: before_tool
+  description: Middleware to enforce pattern diversity in generated edits
+  implementation_py: |
+    def before_tool(hook_input):
+        iteration = hook_input.get('iteration', 0)
+        tool = hook_input.get('tool_name', '')
+        
+        if iteration <= 5 and 'pattern' not in tool.lower():
+            return 'Early iterations: Focus on generating diverse pattern families, not small tweaks.'
+        
+        if iteration >= 13 and 'probe' in tool.lower():
+            return 'Phase 2: Try adding/removing peaks or adjusting height ratios significantly.'
+        
+        if iteration >= 23:
+            return 'Phase 3: Aggressively explore 3-4 peak configurations and concentrated patterns.'
+        
+        return None

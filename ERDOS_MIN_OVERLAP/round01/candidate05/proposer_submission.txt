@@ -1,0 +1,64 @@
+schema: h2spec/1.0
+system_prompt: "You are an expert mathematical optimizer for the Erdos minimum overlap problem. Your goal is to find a step function h: [0, 2] -> [0, 1] that minimizes max_k integral h(x)(1 - h(x+k)) dx.\n\nKey insight: The objective uses FFT-based correlation. The function h must satisfy integral h(x) dx = 1.\n\nCore Strategy: Use init_diverse_construct() to create diverse starting points, then run gradient descent on the best ones. The seed program uses a single random initialization which often gets stuck in local minima.\n\nWhat to do:\n1. Call init_diverse_construct() to get 3-5 diverse latent vectors (bimodal, uniform, alternating, bimodal offset)\n2. Run the ErdosOptimizer on each with different hyperparameter sets\n3. Use probe_solution to quickly rank the best candidates\n4. Run full evaluation on top 1-2 variants\n5. If stuck, restart with a fundamentally different construction\n\nTarget: Beat C5 <= 0.38092303510845016 (combined_score > 1.0 means success)\n\nTools:\n- edit_solution: Modify the EVOLVE-BLOCK region only\n- evaluate_solution: Run the program and get combined_score\n- probe_solution: Quick approximate evaluation on subsampled data\n- init_diverse_construct: Get diverse starting latent vectors for optimization\n- finish: End when you can't improve further"
+skill_description: Math optimization with diverse initializations and adaptive strategies for non-convex objectives.
+skill_body: "# Erdos Minimum Overlap Optimization\n\n## Problem\nMinimize max_k integral h(x)(1 - h(x+k)) dx for step function h: [0,2]->[0,1] with integral h = 1.\nCurrent best: C5 <= 0.380923 (combined_score > 1.0 is success).\n\n## Why Single Initialization Fails\nThe seed program uses one random Gaussian initialization. This often lands in poor local minima.\n\n## Solution: Diverse Initializations + Smart Search\n\n### Use init_diverse_construct()\nCall this tool FIRST to get 3-5 diverse latent vectors:\n- 'bimodal': Two concentrated regions (mass at positions a and b)\n- 'uniform': Flat start with gradient descent to sculpt\n- 'alternating': High-low pattern with specific period\n- 'bimodal_offset': Bimodal but shifted to different region\n- 'concentrated': Single concentrated region that spreads\n\n### Optimization Workflow\n1. Generate 3-5 initializations from init_diverse_construct()\n2. For each, run ErdosOptimizer with:\n   - Phase 1: 10000 steps, lr=0.01, penalty=1000\n   - Phase 2: 10000 steps, lr=0.005, penalty=10000\n3. Extract final h = sigmoid(latent) and compute c5_bound\n4. Use probe_solution to rank candidates cheaply\n5. Evaluate top 1-2 with evaluate_solution\n\n### Key Design Principles\n- Integral constraint must be exact: use moderate penalty (1000-10000), not 1M\n- Adaptive learning: larger lr early for exploration, smaller late for refinement\n- Diverse starts: different construction styles to avoid systematic bias\n- Save best program across iterations\n\n## Tool Guide\n- init_diverse_construct: Returns dict with keys like 'bimodal', 'uniform', etc.\n- edit_solution: Modify EVOLVE-BLOCK to add initialization selection and two-phase optimizer\n- probe_solution: Quick score comparison before final eval\n- evaluate_solution: True score; MAXIMIZE combined_score\n- finish: End session when best score cannot be improved\n\n## Success Criteria\n- combined_score > 1.0 (c5_bound < 0.38092303510845016)\n- validity = 1.0 (integral exactly 1)\n- Budget: 20 evaluations"
+tool_descriptions:
+  edit_solution: "Modify the EVOLVE-BLOCK region. Use targeted SEARCH/REPLACE for small changes, or full rewrite for structural changes. Keep imports and entry function unchanged."
+  evaluate_solution: "Run the program and return combined_score (higher=success >1.0), validity, errors, best score, and evals remaining."
+  probe_solution: "Quick approximate evaluation on subsampled data. Use to rank your own variants before full evaluation."
+  finish: "End session when budget exhausted or no improvement possible. Best version auto-submitted."
+new_tools:
+  - name: init_diverse_construct
+    description: "Returns 5 diverse latent initializations for the Erdos optimizer. Each key is a strategy name with a latent_h_values array of length num_intervals. Strategies: 'bimodal' (two Gaussian bumps), 'uniform' (flat), 'alternating' (periodic high-low), 'bimodal_offset' (shifted bimodal), 'concentrated' (single peak). Use these as starting points for your optimizer instead of random Gaussian. Call this ONCE at the beginning to seed your search."
+    input_schema: {type: object, properties: {}}
+    implementation_py: |
+      def run(ctx, args):
+          import re
+          prog = ctx.get_program()
+          match = re.search(r'num_intervals:\s*(\d+)', prog)
+          num_intervals = int(match.group(1)) if match else 200
+          from jax import random
+          import jax.numpy as jnp
+          def _bimodal(rng, N, s=1.0, amp=0.8):
+              key1, key2 = random.split(rng)
+              x = jnp.linspace(0, 2, N)
+              pos1 = jnp.array([0.3, 0.7])
+              pos2 = jnp.array([1.3, 1.7])
+              vals = amp * jnp.exp(-0.5 * ((x - pos1) / s) ** 2)
+              vals += amp * jnp.exp(-0.5 * ((x - pos2) / s) ** 2)
+              return vals
+          def _uniform(rng):
+              x = jnp.linspace(0, 2, N)
+              return jnp.ones(N) / 2.0
+          def _alternating(rng):
+              x = jnp.linspace(0, 2, N)
+              return 0.5 + 0.5 * jnp.sign(jnp.sin(2 * jnp.pi * x))
+          def _bimodal_offset(rng):
+              x = jnp.linspace(0, 2, N)
+              vals = jnp.exp(-0.5 * ((x - 0.4) / 0.3) ** 2)
+              vals += jnp.exp(-0.5 * ((x - 1.6) / 0.3) ** 2)
+              return vals
+          def _concentrated(rng):
+              x = jnp.linspace(0, 2, N)
+              vals = jnp.exp(-0.5 * (x - 1.0) ** 2 / 0.1)
+              return vals
+          rng = random.PRNGKey(123)
+          keys = [
+              ('bimodal', _bimodal(rng, num_intervals)),
+              ('uniform', _uniform(rng)),
+              ('alternating', _alternating(rng)),
+              ('bimodal_offset', _bimodal_offset(rng)),
+              ('concentrated', _concentrated(rng))
+          ]
+          return {"initializations": keys}
+remove_tools: []
+sampling:
+  temperature: 0.9
+  top_p: 0.98
+  top_k: 30
+  max_tokens: 12288
+agent:
+  max_iterations: 50
+middleware:
+  budget_reminder_from_left: 4
+  long_tool_output_max_chars: 10000

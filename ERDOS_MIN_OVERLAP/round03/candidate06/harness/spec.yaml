@@ -1,0 +1,280 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are optimizing for the Erdős minimum overlap constant C5.
+  Target: Beat C5 ≤ 0.38092303510845016 by finding h: [0,2]→[0,1] with ∫h=1 that minimizes max_k ∫h(x)(1-h(x+k))dx.
+
+  CRITICAL STRATEGY: Use a MULTI-PHASE SEARCH:
+  
+  Phase 1 - Generate diverse constructions (bimodal, periodic, triangular, Golomb-inspired).
+  Phase 2 - REFINE each construction: systematically mutate peaks (shift positions, adjust widths, add/subtract mass).
+  Phase 3 - Rank all refined candidates using probe_solution.
+  Phase 4 - Optimize top 3 candidates with NEW hyperparameters:
+      - Start with num_intervals=1600 (finer grid), 15000 steps, lr=0.01, penalty=2000
+      - If progress stalls, increase num_intervals to 3200, reduce lr to 0.003, penalty=8000
+  
+  Key insight: The best solutions have TIGHT bimodal peaks at x≈0.25 and x≈1.75 with specific widths.
+  Start with asymmetric peaks (left peak narrower than right), then refine widths by ±0.02 in small steps.
+  Also try triangular constructions with 3-4 levels instead of just 2-3.
+
+  What to edit:
+  1. Replace _get_best_initialization with construct_structured_init() returning 5-7 diverse starts
+  2. Add refine_constructions() tool for systematic peak mutations
+  3. Update optimizer hyperparameters for Phase 3 optimization
+  4. Keep integral constraint enforcement strong (penalty ≥ 5000)
+  
+  Workflow:
+  - Call generate_constructions() FIRST to get 5 initial candidates
+  - Call refine_constructions() on each to get 3 refinements each (15 total)
+  - Probe all 15, keep top 3 by c5_bound
+  - Run full optimization on top 3
+  - Evaluate best
+skill_description: |
+  Multi-phase Erdos optimization: generate diverse structured initializations, refine via systematic peak mutations, rank with probes, optimize top candidates with adaptive hyperparameters.
+skill_body: |
+  # Erdos C5 Minimization - Multi-Phase Strategy
+  
+  ## Phase 1: Generate Diverse Constructions
+  Generate 5-7 initial step function candidates:
+  - bimodal_asymmetric: Two peaks at x=0.25 and x=1.75, LEFT peak narrower (width=0.12) than RIGHT (width=0.18)
+  - bimodal_symmetric: Equal width peaks at 0.25 and 1.75 (width=0.15 each)
+  - triangular_4level: 4-level piecewise linear from x=0 to x=2
+  - periodic_folded: Period 1 pattern folded onto [0,2]
+  - golomb_7: Optimal Golomb ruler for 7 marks scaled to domain
+  
+  Each should satisfy ∫h ≈ 1 (sigmoid output normalized).
+  
+  ## Phase 2: Refine Each Construction
+  For each initial candidate, apply TARGETED MUTATIONS:
+  
+  Mutation types:
+  - Peak_shift: Move each peak by ±0.02, ±0.04, ±0.06 (3 variants per peak)
+  - Width_tune: Adjust peak widths by ±0.015, ±0.030 (2 variants per peak)
+  - Mass_rebalance: Shift 5-10% mass between peaks (2 variants)
+  - Add_noise: Add small Gaussian noise (σ=0.02, 0.05) (2 variants)
+  
+  Call refine_constructions(initial_h, mutation_type) to get 3 refined candidates.
+  
+  ## Phase 3: Rank with Probes
+  Use probe_solution on all refined candidates to rank by c5_bound.
+  Keep top 3 by lowest c5_bound (highest probe score).
+  
+  ## Phase 4: Optimize Top Candidates
+  For each top candidate, run optimization with:
+  - num_intervals: 1600 (start), increase to 3200 if progress stalls
+  - num_steps: 15000
+  - base_learning_rate: 0.01 (for Phase 1), 0.003 (for Phase 2 if needed)
+  - penalty_strength: 2000 (Phase 1), 8000 (Phase 2, tighter constraint)
+  - num_restarts: 1 per initial
+  
+  ## Success Criteria
+  combined_score > 1.0 means c5_bound < 0.38092303510845016
+  Save best program with lowest c5_bound.
+tool_descriptions:
+  edit_solution: |
+    Edit EVOLVE-BLOCK to:
+    1. Replace _get_best_initialization() with a call to generate_constructions()
+    2. Add refine_constructions() tool implementation
+    3. Update _objective_fn with improved numerical stability
+    4. Change optimizer hyperparameters per Phase 1/2/3 above
+  evaluate_solution: Run program, return combined_score.
+  probe_solution: |
+    Quick c5_bound estimate on subsampled grid (n_intervals/4 points, 10 seconds).
+    Scores are approximate but reliable for ranking. Does NOT consume evaluation budget.
+    Use to rank many candidates quickly before full evaluation.
+  finish: End when combined_score ≤ 1.0 for 5 consecutive iterations or budget exhausted.
+sampling:
+  temperature: 1.1
+  top_p: 0.98
+  top_k: 30
+  max_tokens: 16000
+agent:
+  max_iterations: 70
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 12000
+new_tools:
+  - name: generate_constructions
+    description: |
+      Generate 5-7 diverse initial step function constructions for Erdos C5 minimization.
+      Returns latent vectors where sigmoid(h) is valid initial candidate.
+      Includes asymmetric bimodal, symmetric bimodal, 4-level triangular, periodic, golomb_7.
+    input_schema:
+      type: object
+      properties: {}
+    implementation_py: |
+      def run(ctx, args):
+          import numpy as np
+          N = ctx.get_program()
+          if 'num_intervals' in str(N):
+              N = 800
+          domain = 2.0
+          x = np.linspace(0, domain, N)
+          constructions = {}
+          
+          # Asymmetric bimodal (LEFT narrower, target: better overlap)
+          a1, a2 = 0.25, 1.75
+          bw1, bw2 = 0.12, 0.18
+          h = np.exp(-((x-a1)/bw1)**2 * 25) + np.exp(-((x-a2)/bw2)**2 * 25)
+          h = h / h.sum() * N  # normalize integral to 1
+          constructions['asym_bimodal'] = h
+          
+          # Symmetric bimodal
+          bw = 0.15
+          h = np.exp(-((x-0.25)/bw)**2 * 25) + np.exp(-((x-1.75)/bw)**2 * 25)
+          h = h / h.sum() * N
+          constructions['sym_bimodal'] = h
+          
+          # 4-level triangular
+          x_b = np.linspace(0, 2, N)
+          levels = np.array([0.2, 0.5, 0.7, 0.9])
+          phases = np.array([0.0, 0.5, 0.75, 1.0])
+          h_tri = np.zeros(N)
+          for i in range(len(phases)-1):
+              p1, p2 = phases[i], phases[i+1]
+              mask = (x_b >= p1) & (x_b < p2)
+              h_tri[mask] = levels[i]
+          h_tri = h_tri / h_tri.sum() * N
+          constructions['triangular_4'] = h_tri
+          
+          # Periodic folded
+          h_per = 1.0 / (1.0 + np.exp(-10 * ((x_b - 0.5) % 1.0 - 0.25)))
+          h_per = h_per / h_per.sum() * N
+          constructions['periodic'] = h_per
+          
+          # Golomb 7 marks: [0,1,4,9,11,12,13] scaled
+          marks = np.array([0.0, 0.1905, 0.4762, 0.9524, 1.1429, 1.1905, 1.1952]) * 2.0
+          h_gol = np.zeros(N)
+          for m in marks:
+              h_gol += np.exp(-((x_b - m)/0.08)**2 * 30)
+          h_gol = h_gol / h_gol.sum() * N
+          constructions['golomb_7'] = h_gol
+          
+          return {"constructions": constructions}
+  - name: refine_constructions
+    description: |
+      Refine a given initial construction with targeted peak mutations.
+      Takes latent vector h and mutation_type, returns 3 refined candidates.
+      Mutation types: peak_shift, width_tune, mass_rebalance, noise_add.
+      Each mutation produces systematic variations to explore local minima.
+    input_schema:
+      type: object
+      properties:
+        mutation_type:
+          type: string
+    implementation_py: |
+      def run(ctx, args):
+          import numpy as np
+          h = ctx.args.get('h', None)
+          mut_type = ctx.args.get('mutation_type', 'peak_shift')
+          if h is None:
+              h = ctx.get_program()
+              N = 800
+          else:
+              N = len(h)
+          domain = 2.0
+          x = np.linspace(0, domain, N)
+          
+          refined = []
+          if mut_type == 'peak_shift':
+              # Left peak at 0.25, right at 1.75
+              shifts = [(-0.06, -0.04, -0.02), (0.02, 0.04, 0.06)]
+              for sl, sr in shifts:
+                  h_new = h.copy()
+                  for dx, pos, sign in zip([sl, sr], [0.25, 1.75], [1, 1]):
+                      idx = np.argmin(np.abs(x - pos))
+                      h_new[idx] += dx
+                  h_new = h_new / h_new.sum() * N
+                  refined.append(h_new)
+          
+          elif mut_type == 'width_tune':
+              bw_base = 0.15
+              for dw in [-0.03, 0.0, 0.03]:
+                  bw1 = bw_base + dw
+                  bw2 = bw_base + dw * 1.2
+                  h_new = np.exp(-((x-0.25)/bw1)**2 * 25) + np.exp(-((x-1.75)/bw2)**2 * 25)
+                  h_new = h_new / h_new.sum() * N
+                  refined.append(h_new)
+          
+          elif mut_type == 'mass_rebalance':
+              for ratio in [0.95, 1.0, 1.05]:
+                  h_new = h * ratio
+                  h_new = h_new / h_new.sum() * N
+                  refined.append(h_new)
+          
+          elif mut_type == 'noise_add':
+              for sigma in [0.02, 0.05]:
+                  h_new = h + np.random.randn(N) * sigma
+                  h_new = np.clip(h_new, 0, 2)
+                  h_new = h_new / h_new.sum() * N
+                  refined.append(h_new)
+          
+          else:
+              for s in [-0.04, 0, 0.04]:
+                  h_new = h.copy()
+                  idx = np.argmin(np.abs(x - 0.25))
+                  h_new[idx] += s
+                  h_new = h_new / h_new.sum() * N
+                  refined.append(h_new)
+          
+          return {"refined": refined, "mutation_type": mut_type}
+new_skills:
+  - name: erdos-two-peak-hypothesis
+    description: |
+      Hypothesis: Best C5 solutions have two asymmetric peaks at x≈0.25 and x≈1.75.
+      LEFT peak should be NARROWER (width≈0.12) than RIGHT (width≈0.18) to reduce overlap.
+      Start with this asymmetric construction, then refine peak widths in ±0.015 steps.
+      Target c5_bound < 0.380923.
+    body: |
+      # Erdos C5: Two-Peak Asymmetric Hypothesis
+      
+      ## Key Insight
+      The minimum overlap occurs when peaks are ASYMMETRIC:
+      - Left peak at x=0.25 with width w_left ≈ 0.12
+      - Right peak at x=1.75 with width w_right ≈ 0.18
+      - This reduces h(x)(1-h(x+k)) overlap for small k
+  
+      ## Search Strategy
+      1. Start with w_left=0.12, w_right=0.18 (baseline asymmetric)
+      2. Refine: vary w_left in [0.10, 0.14] and w_right in [0.16, 0.20]
+      3. Use probe to quickly rank 9-16 combinations
+      4. Keep best 2-3 for full optimization
+  
+      ## Parameter Grid for Systematic Search
+      - w_left: 0.10, 0.12, 0.14 (3 values)
+      - w_right: 0.16, 0.18, 0.20 (3 values)
+      - Total: 9 combinations to probe, then optimize top 3
+  
+      ## Expected Improvement
+      Asymmetric peaks reduce correlation at small shifts, lowering C5 bound.
+      Symmetric peaks (w_left=w_right) are suboptimal for this domain.
+  
+      ## Implementation Notes
+      - Use gaussian peaks for smooth transitions
+      - Normalize so ∫h = 1 (sum(h) * dx = 1)
+      - Apply sigmoid in seed program's _objective_fn
+      - Monitor integral constraint: if |∫h - 1| > 0.01, increase penalty
+tool_descriptions:
+  edit_solution: |
+    Edit EVOLVE-BLOCK to implement the two-peak asymmetric hypothesis:
+    1. Replace _get_best_initialization with asymmetric bimodal at x=0.25, x=1.75
+    2. Add width refinement loop: for w_left in [0.10,0.12,0.14], w_right in [0.16,0.18,0.20]
+    3. Use probe_solution to rank all 9 width combinations
+    4. Optimize top 2-3 with num_intervals=1600, lr=0.01, penalty=2000
+    5. Evaluate best candidate
+  evaluate_solution: Run program, return combined_score.
+  probe_solution: |
+    Quick c5_bound estimate on subsampled grid. Returns approximate score.
+    Scores are NOT comparable to full evaluation but reliable for ranking.
+    Budget: 30 probes per run. Do not use evaluate_solution unless you're confident.
+  finish: End when combined_score ≤ 1.0 for 5 consecutive iterations or budget exhausted.
+sampling:
+  temperature: 1.1
+  top_p: 0.98
+  top_k: 30
+  max_tokens: 16000
+agent:
+  max_iterations: 70
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 12000
+remove_tools: []

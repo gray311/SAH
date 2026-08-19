@@ -1,0 +1,208 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are an expert in harmonic analysis and the Erdos minimum overlap problem. Your task is to find a step function h: [0,2]->[0,1] with integral(h)=1 that minimizes max_k integral(h(x)(1-h(x+k)) dx).
+  
+  CURRENT BEST: 0.38092303510845016 (combined_score = 0.38092303510845016 / c5_bound)
+  GOAL: Achieve combined_score > 1.0 (c5_bound < 0.38092303510845016)
+  
+  KEY INSIGHT: The seed program's Adam optimizer is trapped in local optima. You must use structural, non-gradient approaches:
+  
+  1. Try piecewise constant functions with SPECIFIC breakpoint patterns (not random initializations)
+  2. Use constructions that satisfy integral(h)=1 EXACTLY
+  3. Start with simple patterns: h=1 on single interval of length 1, or h=1 on two intervals of length 0.5 each
+  
+  SEARCH PRIORITY:
+  - First: Try 3-5 carefully constructed candidate solutions with few intervals (50-200), evaluate each
+  - Second: Only then attempt gradient-based refinement
+  
+  Use the new tool analyze_earthys_candidates to see structured suggestions before editing.
+skill_description: |
+  Erdos C5 bound optimization. Uses structural constructions (piecewise constant, Fourier-based) to escape local optima. Requires combined_score > 1.0.
+skill_body: |
+  # Erdos C5 Bound: Structural Construction Strategies
+  
+  ## Problem
+  Minimize: max_k integral from 0 to 2 of h(x)(1-h(x+k)) dx
+  Subject to: h:[0,2]->[0,1], integral from 0 to 2 of h(x) dx = 1
+  
+  ## Why Gradient Descent Fails
+  The seed's 59K-step Adam optimizer finds local optima. The landscape is non-convex with many plateaus.
+  
+  ## STRATEGY 1: Piecewise Constant with Strategic Breakpoints
+  
+  Try these EXACT patterns (implement directly, not random):
+  
+  Pattern A: Uniform on [0.5, 1.5]
+  - h = 1 if x in [0.5, 1.5], h = 0 otherwise
+  - Integral: 1.0 exactly
+  - This is symmetric and simple
+  
+  Pattern B: Two intervals [0, 0.5] and [1.5, 2]
+  - h = 1 if x in [0, 0.5] U [1.5, 2], h = 0 otherwise
+  - Integral: 0.5 + 0.5 = 1.0
+  
+  Pattern C: h = 1 on [0, 1], h = 0 on [1, 2]
+  - Integral: 1.0
+  
+  ## STRATEGY 2: Sparse Concentrated Functions
+  
+  Critical insight: h=1 on a single interval of length 1 satisfies integral=1.
+  The overlap integral for shift k: integral h(x)(1-h(x+k)) dx
+  
+  ## STRATEGY 3: Gradient Refinement (Last Resort)
+  
+  Only after trying structural constructions:
+  - Start with num_intervals = 50 (coarse)
+  - Use num_steps = 5000, not 59000
+  - Use multiple seeds and pick best
+  
+  ## Execution Order
+  1. Implement h=1 on [0.5, 1.5], h=0 elsewhere, evaluate (1 eval)
+  2. Implement double-interval variants, evaluate
+  3. If none beat 0.3809, try gradient with coarse intervals
+  4. Report which construction worked best
+tool_descriptions:
+  edit_solution: |
+    Modify the EVOLVE-BLOCK. Implement specific construction patterns (not random changes).
+    
+    Preferred rewrite: Replace the _get_best_initialization method with ONE of:
+    - Direct piecewise constant: h=1 on [0.5, 1.5], h=0 elsewhere
+    - Multi-step construction with specific breakpoints
+    
+    Keep the class structure but change the concrete values and construction logic.
+  evaluate_solution: |
+    Run the program. Get combined_score. Target: > 1.0 (c5_bound < 0.38092303510845016).
+    Budget: ~30 evaluations. Use probes (analyze_earthys_candidates) first.
+  probe_solution: |
+    N/A for this fast evaluator. Use evaluate_solution directly.
+  finish: |
+    End when you find combined_score > 1.0 or exhaust budget. Best auto-submitted.
+sampling:
+  temperature: 0.8
+  top_p: 0.95
+  top_k: 10
+  max_tokens: 8192
+agent:
+  max_iterations: 40
+middleware:
+  budget_reminder_from_left: 2
+  long_tool_output_max_chars: 8000
+new_tools:
+  - name: analyze_earthys_candidates
+    description: |
+      Generate 3-5 structured candidate step functions for the Erdos problem with SPECIFIC constructions (not random). Call once before editing.
+    input_schema:
+      type: object
+      properties: {}
+    implementation_py: |
+      def run(ctx, args):
+          candidates = []
+          
+          # Candidate 1: Uniform middle interval (exact integral=1)
+          candidates.append({
+              "name": "uniform_middle",
+              "description": "h=1 on [0.5, 1.5], h=0 elsewhere. Integral=1.0 exactly.",
+              "num_intervals": 200,
+              "construction": "h = jnp.where((x >= 0.5) & (x < 1.5), 1.0, 0.0)"
+          })
+          
+          # Candidate 2: Double interval [0,0.5] U [1.5,2]
+          candidates.append({
+              "name": "double_interval",
+              "description": "h=1 on [0, 0.5] U [1.5, 2], h=0 elsewhere. Integral=1.0.",
+              "num_intervals": 200,
+              "construction": "h = jnp.where((x >= 0.0) & (x < 0.5) | (x >= 1.5) & (x <= 2.0), 1.0, 0.0)"
+          })
+          
+          # Candidate 3: Left half only
+          candidates.append({
+              "name": "left_half",
+              "description": "h=1 on [0, 1], h=0 on [1, 2]. Integral=1.0.",
+              "num_intervals": 200,
+              "construction": "h = jnp.where((x >= 0.0) & (x < 1.0), 1.0, 0.0)"
+          })
+          
+          # Candidate 4: Cosine-modulated (Fourier-friendly, integral approx 1)
+          candidates.append({
+              "name": "cosine_shape",
+              "description": "h(x) = 0.5 + 0.5*cos(pi*x) for x in [0,2], clamped to [0,1]. Integral approx 1.",
+              "num_intervals": 200,
+              "construction": "h = jnp.clip(0.5 + 0.5 * jnp.cos(jnp.pi * x), 0.0, 1.0)"
+          })
+          
+          # Candidate 5: Three equal intervals
+          candidates.append({
+              "name": "three_intervals",
+              "description": "h=1 on [0, 0.333] U [0.666, 1.0] U [1.333, 1.666], h=0 elsewhere. Integral=1.0.",
+              "num_intervals": 200,
+              "construction": "h = jnp.where((x >= 0.0) & (x < 0.333333) | (x >= 0.666667) & (x < 1.0) | (x >= 1.333333) & (x < 1.666667), 1.0, 0.0)"
+          })
+          
+          return {"candidates": candidates, "note": "These are STRUCTURED candidates. Implement the construction field directly in the EVOLVE-BLOCK."}
+new_skills:
+  - name: earthos-piecewise-constructions
+    description: |
+      Use for Erdos C5: Implement SPECIFIC piecewise constant functions with exact integral=1. Not random patterns.
+    body: |
+      # Erdos C5: Piecewise Constant Constructions
+  
+      ## Core Principle
+      h:[0,2]->[0,1], integral from 0 to 2 of h(x) dx = 1. Common mistake: forgetting to normalize!
+  
+      ## Construction Recipes
+  
+      ### Recipe A: Single Interval of Length 1
+      h(x) = 1 if x in [a, a+1], else 0
+      - For a=0: h=1 on [0,1]
+      - For a=0.5: h=1 on [0.5, 1.5] - SYMMETRIC, try this first!
+      - Integral: 1*1 = 1 exactly
+  
+      ### Recipe B: Two Intervals of Length 0.5 Each
+      h(x) = 1 if x in [a, a+0.5] U [b, b+0.5], else 0
+      - If a=0, b=1.5: h=1 on [0,0.5]U[1.5,2], integral=0.5+0.5=1
+  
+      ### Recipe C: Uniform with Plateaus
+      h(x) = alpha on [a,b], beta on [c,d], 0 elsewhere
+      - Choose alpha,beta,a,b,c to satisfy: alpha*(b-a)+beta*(d-c)=1 and 0<=alpha,beta<=1
+  
+      ### Implementation Template
+      x = jnp.linspace(0, 2, N)
+      h = jnp.where((x >= a) & (x < b), alpha, 0.0)
+      h = jnp.where((x >= c) & (x <= d), beta, h)
+  
+      ## Testing Order
+      1. Try h=1 on [0.5, 1.5] (symmetric, length 1)
+      2. Try h=1 on [0, 0.5] U [1.5, 2] (two intervals, length 1)
+      3. Try h=1 on [0, 1], h=0 on [1, 2] (half the domain)
+  
+      ## Common Pitfalls
+      - Forgetting to clamp h to [0,1]
+      - Wrong integral calculation (always verify integral(h)=1)
+      - Using too many intervals (start with 50-200)
+tool_descriptions:
+  edit_solution: |
+    Modify the EVOLVE-BLOCK. Implement one of the specific constructions from the skill.
+    
+    Recommended: Replace _get_best_initialization with direct piecewise assignment using jnp.where.
+    
+    Example edit:
+    x = jnp.linspace(0, 2, N)
+    h = jnp.where((x >= 0.5) & (x < 1.5), 1.0, 0.0)
+    return h
+  evaluate_solution: |
+    Run the program. Get combined_score. Target: > 1.0 (c5_bound < 0.38092303510845016).
+    Budget: ~30 evaluations. Try ONE construction per eval.
+  probe_solution: |
+    N/A for this fast JAX evaluator. Use evaluate_solution directly.
+  finish: |
+    End when you find combined_score > 1.0 or exhaust budget. Best program auto-submitted.
+sampling:
+  temperature: 0.6
+  top_p: 0.9
+  top_k: 8
+  max_tokens: 6000
+agent:
+  max_iterations: 35
+middleware:
+  budget_reminder_from_left: 1
+  long_tool_output_max_chars: 6000

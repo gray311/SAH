@@ -1,0 +1,133 @@
+schema: h2spec/1.0
+system_prompt: "You are an expert in optimization and harmonic analysis. Your task is to evolve a Python program that finds a step function h: [0, 2] -> [0, 1] minimizing the Erdos overlap constant C5.\n\nThe program MUST preserve the EVOLVE-BLOCK region and the entry function that returns (final_h_values, c5_bound, num_intervals).\n\nCRITICAL STRATEGY for this task:\n1. This is a constrained optimization problem where you need to find a step function satisfying integral(h) = 1.\n2. GRADIENT DESCENT STRUGGLES here due to the sigmoid smoothing and complex FFT landscape.\n3. INSTEAD of pure gradient descent, use an INTERNAL GRID SEARCH or DIRECT OPTIMIZATION over the step function heights:\n   - For each interval, directly optimize h[i] in [0, 1] rather than relying on sigmoid relaxation\n   - Try MULTIPLE starting configurations (e.g., uniform, alternating, random seeds) and pick the best\n   - Consider explicit constructions: piecewise constant functions with specific patterns\n4. The program should try several different initialization strategies internally and report the best result.\n5. Be careful with computation time - the internal search must complete within the evaluation timeout.\n\nYour edits should focus on replacing the gradient-based approach with a more direct search over the step function parameters.\n\nTools:\n- edit_solution: Modify the EVOLVE-BLOCK region\n- evaluate_solution: Run the program and get combined_score\n- finish: End when no more improvements are possible"
+skill_description: Direct optimization over step function parameters for the Erdos minimum overlap problem, using internal bounded search instead of pure gradient descent.
+skill_body: "# Direct Step Function Optimization for Erdos C5\n\n## Problem\nFind h: [0,2] -> [0,1] with integral(h) = 1 that minimizes max_k integral(h(x)(1-h(x+k)))dx.\n\n## Strategy\nThe gradient-based approach struggles. Instead:\n1. DIRECT OPTIMIZATION: Optimize h[i] in [0,1] directly for each interval\n2. MULTIPLE STRATEGIES: Try uniform, alternating, random, and structured patterns\n3. BOUNDED INTERNAL SEARCH: Within each evaluation, run several configurations and pick the best\n4. EXPLICIT CONSTRUCTIONS: Consider step functions with alternating heights or specific patterns\n\n## Key Changes from Seed\n- Remove sigmoid relaxation; work directly with h values in [0,1]\n- Replace gradient descent with a bounded internal optimization loop\n- Try multiple initial configurations per evaluation\n- Use a simpler optimization method (e.g., coordinate descent, golden section, or exhaustive grid search on reduced space)\n\n## Implementation Tips\n- Use numpy arrays directly (no JAX/transformed space)\n- Clamp values to [0,1] explicitly\n- Normalize to satisfy integral constraint after optimization\n- Keep computation under 5-10 seconds per evaluation\n- Save and compare multiple configurations, report best"
+tool_descriptions:
+  edit_solution: 'Change the code in EVOLVE-BLOCK. Use SEARCH/REPLACE diffs or full rewrites. Preserve the entry function signature: returns (final_h_values, c5_bound, num_intervals). The internal implementation may change significantly.'
+  evaluate_solution: 'Run the program and return combined_score = 0.38092303510845016 / c5_bound. Higher is better (c5_bound must be < 0.38092303510845016 for score > 1). Limited budget of 20 evaluations.'
+  probe_solution: 'Cheap approximate scoring on subsampled data (first ~2000 rows). Does not consume eval budget but scores are approximate. Use to rank variants before full evaluation when the evaluator is slow.'
+  finish: 'End the session. Called when budget exhausted or no more improvements found.'
+sampling:
+  temperature: 0.9
+  top_p: 0.95
+  top_k: 30
+  max_tokens: 12288
+agent:
+  max_iterations: 50
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 12000
+new_tools:
+  - name: search_step_configurations
+    description: 'Run multiple bounded internal searches over step function parameterizations. Tests: (1) coordinate descent optimizing each interval height directly in [0,1], (2) grid search over reduced subspace of intervals, (3) alternating pattern initializations, (4) uniform + constraint-satisfying adjustments. Returns the best h configuration and its objective score.'
+    input_schema:
+      type: object
+      properties: {}
+    implementation_py: |
+      def run(ctx, args):
+          import numpy as np
+          N = 200
+          domain_width = 2.0
+          dx = domain_width / N
+          best_h = None
+          best_obj = float('inf')
+          
+          # Strategy 1: Coordinate descent on interval heights
+          h = np.ones(N) / N
+          for _ in range(50):
+              for i in range(N):
+                  for h_val in [0.1, 0.3, 0.5, 0.7, 0.9, 1.0]:
+                      h_copy = h.copy()
+                      h_copy[i] = h_val
+                      h_copy = np.clip(h_copy, 0, 1)
+                      integral = np.sum(h_copy) * dx
+                      if integral > 0:
+                          h_copy = h_copy * (1.0 / integral)
+                          h_copy = np.clip(h_copy, 0, 1)
+                      j = 1.0 - h_copy
+                      corr = np.fft.ifft(np.fft.fft(h_copy) * np.conj(np.fft.fft(j))).real * dx
+                      obj = np.max(corr)
+                      if obj < best_obj:
+                          best_obj = obj
+                          best_h = h_copy.copy()
+          
+          # Strategy 2: Alternating pattern
+          alt_h = np.zeros(N)
+          for i in range(N):
+              x = i * dx
+              if x < 0.5:
+                  alt_h[i] = 0.8
+              elif x < 1.0:
+                  alt_h[i] = 0.2
+              elif x < 1.5:
+                  alt_h[i] = 0.6
+              else:
+                  alt_h[i] = 0.4
+          alt_h = alt_h / (np.sum(alt_h) * dx)
+          alt_h = np.clip(alt_h, 0, 1)
+          j = 1.0 - alt_h
+          corr = np.fft.ifft(np.fft.fft(alt_h) * np.conj(np.fft.fft(j))).real * dx
+          alt_obj = np.max(corr)
+          if alt_obj < best_obj:
+              best_obj = alt_obj
+              best_h = alt_h
+          
+          # Strategy 3: Decreasing from left
+          dec_h = np.linspace(1.0, 0.0, N)
+          dec_h = dec_h * (N / np.sum(dec_h))
+          dec_h = np.clip(dec_h, 0, 1)
+          j = 1.0 - dec_h
+          corr = np.fft.ifft(np.fft.fft(dec_h) * np.conj(np.fft.fft(j))).real * dx
+          dec_obj = np.max(corr)
+          if dec_obj < best_obj:
+              best_obj = dec_obj
+              best_h = dec_h
+          
+          # Strategy 4: Two-block pattern
+          two_block = np.zeros(N)
+          two_block[:N//2] = 0.9
+          two_block[N//2:] = 0.1
+          two_block = two_block / (np.sum(two_block) * dx)
+          two_block = np.clip(two_block, 0, 1)
+          j = 1.0 - two_block
+          corr = np.fft.ifft(np.fft.fft(two_block) * np.conj(np.fft.fft(j))).real * dx
+          two_obj = np.max(corr)
+          if two_obj < best_obj:
+              best_obj = two_obj
+              best_h = two_block
+          
+          return {"best_h": best_h.tolist(), "best_c5": float(best_obj), "strategies_tested": 4}
+remove_tools: []
+new_skills:
+  - name: direct-step-optimization
+    description: 'Use direct optimization over step function heights instead of gradient descent. Try multiple initial configurations and bounded internal search to find low C5 values.'
+    body: |
+      # Direct Step Function Optimization
+      #
+      # Core Idea:
+      # The Erdos C5 problem requires finding h: [0,2]->[0,1] with integral(h)=1 minimizing max overlap.
+      # Gradient descent with sigmoid smoothing often gets stuck in local minima. Instead, directly
+      # optimize the step heights.
+      #
+      # Method:
+      # 1. DIRECT PARAMETERIZATION: Work with h[i] directly in [0,1] for each interval
+      # 2. CONSTRAINT SATISFYING: After any modification, renormalize to ensure integral(h) = 1
+      # 3. MULTIPLE STRATEGIES:
+      #    - Coordinate descent: optimize one interval at a time
+      #    - Grid search: try discrete values per interval
+      #    - Pattern-based: alternating, decreasing, block patterns
+      #    - Random restarts: different seeds with bounded search
+      # 4. BOUNDED INTERNAL SEARCH: Within each evaluation, run 4-10 different strategies and pick the best result
+      #
+      # Implementation:
+      # - Use numpy arrays directly (no JAX transformation overhead)
+      # - Clamp values to [0,1] after each modification
+      # - Normalize by dividing by integral(h) to enforce constraint
+      # - Keep each evaluation under 10 seconds
+      # - Report the configuration with lowest c5_bound
+      #
+      # Warning:
+      # - Do not rely on gradient methods alone
+      # - The FFT-based correlation can have multiple local minima
+      # - Different initializations often yield significantly different results
+new_middlewares: []

@@ -1,0 +1,222 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are a C++ polygon optimizer for axis-aligned fish capture. Goal: maximize (mackerels - sardines + 1).
+
+  CRITICAL INSIGHT: The seed already uses KD-trees for spatial queries. Don't rebuild from scratch with complex corridors.
+
+  STRATEGY: Focus on SMALL, TIGHT rectangles around dense mackerel clusters. Large corridors create too many sardine penalty points.
+
+  SEARCH METHOD:
+
+  1. SPATIAL CLUSTERING:
+     - Read input fish positions
+     - Use KD-tree (seed has this) to find dense mackerel regions
+     - Cluster mackerels that are within 200 units of each other
+
+  2. SMALL RECTANGLE ENUMERATION:
+     - For each mackerel cluster, try small axis-aligned rectangles (side lengths 10-150, up to 300)
+     - Prioritize rectangles that enclose MORE mackerels than sardines
+     - Use the grid for O(1) mackerel/sardine counting within rectangles
+
+  3. RAPID SCORING:
+     - Before building a full polygon, use cluster_probe tool to test if a region is promising
+     - Only build full polygons for regions with positive initial score
+
+  4. MINIMAL HILL CLIMBING:
+     - For promising candidates, try edge shifts of ±10 only (not ±5..25)
+     - ONE refinement round, not three
+
+  5. PARALLEL CANDIDATES:
+     - Generate 5-10 small rectangle candidates in parallel
+     - Pick top 3 for full evaluation
+
+  6. VALIDATION:
+     - Ensure 4 <= vertices <= 1000, perimeter <= 400,000
+     - Use simple self-intersection check (or omit if seed handles this)
+
+  Tools:
+  - edit_solution: Replace EVOLVE-BLOCK with complete C++ implementing cluster-based small-rectangle search
+  - evaluate_solution: Run C++ program, get score
+  - cluster_probe: NEW tool - fast approximate scoring of small regions using grid
+  - finish: Submit when you have working cluster-based search
+
+  KEY DIFFERENCE from seed: SMALL rectangles over large corridors, fast probing before full eval, minimal hill climbing.
+skill_description: Small rectangle search. Cluster mackerels within 200 units, generate small rectangles (10-150 units), use cluster_probe for fast filtering, minimal hill climbing (±10, one round).
+skill_body: |
+  # Small Rectangle Search Strategy
+
+  ## Core Idea
+  Instead of large corridors, enumerate small axis-aligned rectangles (10-150 units) around dense mackerel clusters.
+
+  ## Step 1: Cluster Mackerels
+  - Read fish positions from program
+  - Group mackerels within 200 units of each other into clusters
+  - Each cluster becomes a candidate region center
+
+  ## Step 2: Fast Probing with cluster_probe
+  - For each cluster, define candidate rectangle boundaries
+  - Call cluster_probe to get approximate mackerel/sardine count
+  - Skip regions with negative score
+
+  ## Step 3: Build Small Rectangles
+  - For promising clusters, create rectangles with:
+    * Width/height between 10 and 150 units
+    * Centered on cluster centroid or covering cluster bounds
+  - Generate 3-5 variations per cluster
+
+  ## Step 4: Minimal Hill Climbing
+  - For each candidate polygon:
+    * Try edge shifts of ±10 units only
+    * ONE refinement round
+    * Keep best variant
+
+  ## Step 5: Final Selection
+  - Pick top 3 polygons by approximate score
+  - Output the single best one
+
+  ## Key Success Factors
+  - Small rectangles avoid sardine penalty edges
+  - Fast probing filters unpromising regions
+  - Minimal hill climbing saves time for more candidate generation
+  leverage the seed's KD-tree if available
+tool_descriptions:
+  edit_solution: |
+    Replace EVOLVE-BLOCK with C++ implementing cluster-based small-rectangle search:
+
+    1. Parse fish positions, use KD-tree (if seed has it) for spatial indexing
+
+    2. Cluster mackerels within 200 units
+
+    3. For each cluster, generate 3-5 small rectangle candidates (10-150 units)
+
+    4. Use grid-based counting for fast mackerel/sardine estimation
+
+    5. Pick top 3 candidates, output best one
+
+    6. Ensure valid polygon: 4-1000 vertices, perimeter <= 400,000, integer coords
+
+    Total time: < 2.0s with fast grid counting
+  evaluate_solution: Run C++ program. Returns score (mackerels-sardines+1), validity, and remaining evaluations (budget=30).
+  probe_solution: NOT useful - full evaluation needed for accurate scoring. Use cluster_probe for fast filtering.
+  finish: Submit when you have working cluster-based small-rectangle search.
+sampling:
+  temperature: 0.9
+  top_p: 0.95
+  top_k: 30
+  max_tokens: 10240
+agent:
+  max_iterations: 40
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 15000
+new_tools:
+  - name: cluster_probe
+    description: |
+      Fast approximate score for a small axis-aligned region. 
+      Query a rectangle defined by (min_x, min_y, max_x, max_y).
+      Returns approximate (mackerels, sardines, score) using grid lookup.
+      Call this before building full polygons to filter promising regions.
+    input_schema:
+      type: object
+      properties:
+        min_x:
+          type: integer
+        min_y:
+          type: integer
+        max_x:
+          type: integer
+        max_y:
+          type: integer
+    implementation_py: |
+      def run(ctx, args):
+          min_x = args.get("min_x", 0)
+          min_y = args.get("min_y", 0)
+          max_x = args.get("max_x", 100000)
+          max_y = args.get("max_y", 100000)
+          
+          # Use grid-based counting for fast approximation
+          grid_size = 200
+          cell_size = 100000 // grid_size
+          
+          # Parse program to extract fish positions (same as seed)
+          program_text = ctx.get_program()
+          fish_data = []
+          for line in program_text.split('\n'):
+              line = line.strip()
+              if line.startswith('fish['):
+                  try:
+                      parts = line.replace('fish[', '').replace(']', '').split(',')
+                      if len(parts) >= 2:
+                          x, y = int(parts[0]), int(parts[1])
+                          fish_type = 1 if 'mackerel' in line.lower() else -1
+                          fish_data.append((x, y, fish_type))
+                  except:
+                      continue
+          
+          # Grid counting
+          grid = [[{'m': 0, 's': 0} for _ in range(grid_size)] for _ in range(grid_size)]
+          for x, y, ftype in fish_data:
+              cx, cy = x // cell_size, y // cell_size
+              if 0 <= cx < grid_size and 0 <= cy < grid_size:
+                  if ftype == 1:
+                      grid[cy][cx]['m'] += 1
+                  else:
+                      grid[cy][cx]['s'] += 1
+          
+          # Count fish in rectangle by summing grid cells
+          total_m = 0
+          total_s = 0
+          for y in range(max(0, min_y // cell_size), min(grid_size, (max_y + cell_size) // cell_size)):
+              for x in range(max(0, min_x // cell_size), min(grid_size, (max_x + cell_size) // cell_size)):
+                  total_m += grid[y][x]['m']
+                  total_s += grid[y][x]['s']
+          
+          return {"mackerels": total_m, "sardines": total_s, "score": total_m - total_s}
+remove_tools: []
+new_skills:
+  - name: small-rectangle-search
+    description: Focus on small tight rectangles around mackerel clusters, use cluster_probe for fast filtering, minimal hill climbing.
+    body: |
+      # Small Rectangle Search Strategy
+
+      ## Core Idea
+      Instead of large corridors, enumerate small axis-aligned rectangles (10-150 units) around dense mackerel clusters.
+
+      ## Step 1: Cluster Mackerels
+      - Read fish positions from program
+      - Group mackerels within 200 units of each other into clusters
+      - Each cluster becomes a candidate region center
+
+      ## Step 2: Fast Probing with cluster_probe
+      - For each cluster, define candidate rectangle boundaries
+      - Call cluster_probe to get approximate mackerel/sardine count
+      - Skip regions with negative score
+
+      ## Step 3: Build Small Rectangles
+      - For promising clusters, create rectangles with:
+        * Width/height between 10 and 150 units
+        * Centered on cluster centroid or covering cluster bounds
+      - Generate 3-5 variations per cluster
+
+      ## Step 4: Minimal Hill Climbing
+      - For each candidate polygon:
+        * Try edge shifts of ±10 units only
+        * ONE refinement round
+        * Keep best variant
+
+      ## Step 5: Final Selection
+      - Pick top 3 polygons by approximate score
+      - Output the single best one
+
+      ## Key Success Factors
+      - Small rectangles avoid sardine penalty edges
+      - Fast probing filters unpromising regions
+      - Minimal hill climbing saves time for more candidate generation
+      leverage the seed's KD-tree if available
+new_middlewares:
+  - name: probe_first_reminder
+    hook: before_model
+    description: generated middleware probe_first_reminder
+    implementation_py: |
+      def before_model(hook_input):
+          return "First probe small rectangles with cluster_probe before building full polygons. Focus on tight clusters, not large corridors."

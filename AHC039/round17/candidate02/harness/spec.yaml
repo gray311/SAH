@@ -1,0 +1,204 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are a C++ polygon optimizer for axis-aligned fish capture. Goal: maximize (mackerels - sardines + 1).
+  
+  STRATEGY: Use rectangle sweep-line optimization for efficient scoring.
+  
+  APPROACH:
+  1. PARSE ALL FISH: Read mackerels and sardines from input
+  2. BUILD 2D GRID: Create 1000x1000 grid (cell_size=100) for fast counting
+  3. COUNT FISH PER CELL: O(N) pass to populate grid
+  4. BUILD PREFIX SUMS: O(1) rectangle score query via 2D prefix sums
+  5. SEARCH HIGH-VALUE RECTANGLES: Try sweeping over all possible rectangle boundaries (0 to 100000), use prefix sums for instant M-S score
+  6. VALIDATE: Check perimeter <= 400,000, vertices <= 1000, coords in [0,100000]
+  7. OUTPUT: Best valid polygon (rectangle or multi-rectangle)
+  
+  KEY DIFFERENCE from seed: Use prefix sum 2D array for O(1) score queries enabling exhaustive boundary search within time limit. Seed only uses KD-tree and doesn't enumerate rectangles efficiently.
+
+skill_description: |
+  Rectangle sweep optimization with 2D prefix sums. Parse fish, build grid, compute prefix sums, search all rectangle boundaries for max M-S score, validate perimeter constraints.
+
+skill_body: |
+  ## Rectangle Sweep Optimization
+  
+  ### Phase 1: Data Parsing
+  - Read N=5000 mackerels and N=5000 sardines
+  - Store all fish with type (+1 for mackerel, -1 for sardine)
+  
+  ### Phase 2: Grid Construction
+  - Create 1000x1000 grid (cell_size=100, covering 0-100000)
+  - For each fish, increment grid[y//100][x//100] by fish type
+  
+  ### Phase 3: Prefix Sum Computation
+  - Compute 2D prefix sums in O(grid_rows * grid_cols)
+  - prefix[i][j] = sum of grid[0..i][0..j]
+  - Query rectangle score in O(1): prefix[x2][y2] - prefix[x1-1][y2] - prefix[x2][y1-1] + prefix[x1-1][y1-1]
+  
+  ### Phase 4: Rectangle Search
+  - Iterate all possible top-left (x1,y1) and bottom-right (x2,y2) coordinates
+  - Use prefix sums for instant M-S score
+  - Track best rectangles meeting constraints: perimeter <= 400,000, vertices <= 1000
+  - Consider both single rectangles and combinations (e.g., two non-overlapping rectangles)
+  
+  ### Phase 5: Output
+  - Output best valid polygon
+  - If multiple solutions exist, output the last one evaluated
+
+tool_descriptions:
+  edit_solution: 'Replace EVOLVE-BLOCK with C++ implementing rectangle sweep optimization:
+    1. Parse N mackerels and N sardines (type +1/-1)
+    2. Build 1000x1000 grid (cell_size=100)
+    3. Compute 2D prefix sums for O(1) rectangle queries
+    4. Sweep over all rectangle boundaries, track max M-S
+    5. Validate perimeter <= 400,000, vertices <= 1000, coords in [0,100000]
+    6. Output best polygon
+    Ensure <2.0s execution, valid output format (m then vertices).'
+  evaluate_solution: Run C++ program. Returns score (mackerels-sardines+1), validity, and remaining evaluations (budget=30).
+  probe_solution: NOT useful - full evaluation needed for accurate scoring.
+  finish: End when you have a working rectangle sweep optimizer with 2D prefix sums.
+sampling:
+  temperature: 0.9
+  top_p: 0.95
+  top_k: 15
+  max_tokens: 8192
+agent:
+  max_iterations: 30
+middleware:
+  budget_reminder_from_left: 3
+  long_tool_output_max_chars: 12000
+new_tools:
+- name: compute_prefix_sums
+  description: 'Build 2D grid from fish positions and compute prefix sums for O(1) rectangle scoring. Returns grid stats and best rectangle found.'
+  input_schema:
+    type: object
+    properties:
+      search_area_x1:
+        type: integer
+        default: 0
+      search_area_x2:
+        type: integer
+        default: 100000
+      search_area_y1:
+        type: integer
+        default: 0
+      search_area_y2:
+        type: integer
+        default: 100000
+  implementation_py: |
+    def run(ctx, args):
+        import math
+        
+        search_x1 = args.get("search_area_x1", 0)
+        search_x2 = args.get("search_area_x2", 100000)
+        search_y1 = args.get("search_area_y1", 0)
+        search_y2 = args.get("search_area_y2", 100000)
+        
+        cell_size = 100
+        grid_rows = (search_y2 - search_y1) // cell_size + 1
+        grid_cols = (search_x2 - search_x1) // cell_size + 1
+        
+        # Parse fish from program
+        program_text = ctx.get_program()
+        fish = []
+        for line in program_text.split('\n'):
+            line = line.strip()
+            if 'mackerel' in line.lower() or 'sardine' in line.lower():
+                try:
+                    coords = [int(x.strip()) for x in line.split() if x.strip().isdigit()]
+                    if len(coords) >= 2:
+                        fx, fy = coords[0], coords[1]
+                        ftype = 1 if 'mackerel' in line.lower() else -1
+                        fish.append((fx, fy, ftype))
+                except:
+                    continue
+        
+        # Build grid
+        grid = [[0] * grid_cols for _ in range(grid_rows)]
+        for fx, fy, ftype in fish:
+            cx = max(0, min(grid_cols - 1, (fx - search_x1) // cell_size))
+            cy = max(0, min(grid_rows - 1, (fy - search_y1) // cell_size))
+            grid[cy][cx] += ftype
+        
+        # Compute prefix sums
+        prefix = [[0] * (grid_cols + 1) for _ in range(grid_rows + 1)]
+        for i in range(grid_rows):
+            row_sum = 0
+            for j in range(grid_cols):
+                row_sum += grid[i][j]
+                prefix[i+1][j+1] = prefix[i][j+1] + row_sum
+        
+        # Find best rectangle using prefix sums
+        best_score = float('-inf')
+        best_rect = (0, 0, 0, 0)
+        best_perimeter = 1000000000
+        
+        # Sample key points to speed up
+        sample_step_x = max(1, (search_x2 - search_x1) // 200)
+        sample_step_y = max(1, (search_y2 - search_y1) // 200)
+        
+        for x1 in range(search_x1, search_x2, sample_step_x):
+            x1_cell = (x1 - search_x1) // cell_size
+            x1_bound = x1_cell * cell_size + cell_size
+            for y1 in range(search_y1, search_y2, sample_step_y):
+                y1_cell = (y1 - search_y1) // cell_size
+                y1_bound = y1_cell * cell_size + cell_size
+                for x2 in range(x1_bound, min(x1_bound + cell_size * 100, search_x2), sample_step_x):
+                    x2_cell = (x2 - search_x1) // cell_size
+                    x2_bound = x2_cell * cell_size + cell_size
+                    for y2 in range(y1_bound, min(y1_bound + cell_size * 100, search_y2), sample_step_y):
+                        score = prefix[y2_cell+1][x2_cell+1] - prefix[y1_cell][x2_cell+1] - prefix[y2_cell+1][x1_cell] + prefix[y1_cell][x1_cell]
+                        if score > best_score:
+                            best_score = score
+                            best_rect = (x1, y1, x2, y2)
+                            best_perimeter = 2 * (x2 - x1 + y2 - y1)
+        
+        return {
+            "grid_rows": grid_rows,
+            "grid_cols": grid_cols,
+            "best_score": best_score,
+            "best_rect": list(best_rect),
+            "best_perimeter": best_perimeter
+        }
+new_skills:
+- name: sweep-line-optimization
+  description: |
+    Use 2D prefix sums for O(1) rectangle scoring. Parse fish, build grid, compute prefix sums,
+    sweep over all boundaries to find max M-S rectangle.
+  body: |
+    ## Sweep-Line Rectangle Optimization
+    
+    ### Core Idea
+    Use 2D prefix sums to compute any rectangle's mackerel-sardine score in O(1) time,
+    enabling exhaustive search over all possible rectangle boundaries within the time limit.
+    
+    ### Step 1: Parse Fish Positions
+    - Read all N mackerels (type +1) and N sardines (type -1) from input
+    - Store as list of (x, y, type) tuples
+    
+    ### Step 2: Build Grid
+    - Create 1000x1000 grid (cell_size=100) covering [0, 100000]x[0, 100000]
+    - For each fish at (x, y), increment grid[y//100][x//100] by type
+    
+    ### Step 3: Compute Prefix Sums
+    - Build 2D prefix sum array: prefix[i][j] = sum of grid[0..i-1][0..j-1]
+    - Compute in O(rows*cols) time
+    
+    ### Step 4: Query Rectangle Scores in O(1)
+    - Score of rectangle [(x1,y1), (x2,y2)] = prefix[y2][x2] - prefix[y1][x1] - prefix[y2][x1-1] + prefix[y1][x1-1]
+    
+    ### Step 5: Exhaustive Boundary Search
+    - Iterate all possible top-left (x1, y1) and bottom-right (x2, y2) coordinates
+    - Use prefix sums for instant scoring
+    - Track rectangles with score > 0 and perimeter <= 400,000
+    
+    ### Step 6: Output Best Rectangle
+    - Ensure vertices <= 1000, coords in [0,100000]
+    - If no positive score found, output minimal valid polygon (score = 1)
+
+new_middlewares:
+- name: use_prefix_sums_reminder
+  hook: before_model
+  description: Remind solver to use prefix sum optimization for fast rectangle scoring
+  implementation_py: |
+    def before_model(hook_input):
+        return "Use 2D prefix sums for O(1) rectangle scoring. Parse fish, build 1000x1000 grid, sweep all boundaries for max M-S."

@@ -1,0 +1,207 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are solving the Erdos minimum overlap problem: find a step function h: [0,2] -> [0,1] with integral(h)=1 that minimizes max_k integral h(x)(1-h(x+k)) dx.
+  
+  Current best bound: C5 ≤ 0.38092303510845016 (seed achieves this).
+  Goal: Find h with combined_score > 1.0 (c5_bound < 0.380923).
+  
+  KEY INSIGHT: The seed's 800-interval discretization may be TOO coarse. The optimal step function requires precise feature placement. Your strategy:
+  
+  PHASE 1 - Discretization Sweep (USE ALL 30 EVALS):
+  1. Start with seed program
+  2. Create variants with DIFFERENT num_intervals: 200, 400, 600, 800, 1200, 1600, 2000, 2400, 3200, 4800, 6400, 8000
+  3. For each variant, also try DIFFERENT base_learning_rate: 0.001, 0.005, 0.01, 0.02, 0.05, 0.1
+  4. Use probe_solution to check constraint satisfaction (integral ≈ 1) before full eval
+  5. Call evaluate_solution only on promising variants
+  6. Track: best discretization, best learning rate for each discretization
+  
+  PHASE 2 - Structured Initialization:
+  If Phase 1 fails, use construct_structured_init tool to generate mathematically principled initializations:
+  - bimodal_tight: Two narrow peaks at 0.25, 0.75 (theoretical optimal placement)
+  - triangular_3step: Three-level pattern
+  - periodic_2: Alternating pattern
+  - golomb_5: Golomb ruler-based spacing
+  
+  Then sweep hyperparameters on each structured initialization.
+  
+  PHASE 3 - Fine-tuning:
+  If close to target, use smaller learning rate (0.001-0.003), increase num_steps (100000-300000), and fine-tune penalty.
+  
+  CRITICAL: Always check constraint satisfaction before reporting results. Use construct_structured_init when stuck.
+skill_description: Discretization-first strategy for Erdos problem with structured initialization backup.
+skill_body: |
+  # Erdos Minimum Overlap - Discretization-First Strategy
+  
+  ## Problem Understanding
+  We need to find h: [0,2] → [0,1] with ∫h=1 minimizing max_k ∫h(x)(1-h(x+k))dx.
+  The seed uses 800 intervals - but the optimal solution may need different resolution.
+  
+  ## Why Discretization Matters
+  The FFT-based correlation computation is sensitive to grid alignment. 
+  - Too coarse (e.g., 200): Cannot represent fine features
+  - Too fine (e.g., 8000): Numerical precision issues, optimization harder
+  - Optimal may be 1200-4800 with careful feature placement
+  
+  ## Strategy: Discretization Sweep (Primary Attack)
+  
+  ### Round 1: Coarse-to-Fine Sweep
+  Test: num_intervals ∈ {200, 400, 600, 800, 1200, 1600, 2400, 3200, 4800, 6400}
+  For each:
+  - Test learning_rates ∈ {0.001, 0.005, 0.01, 0.02, 0.05, 0.1}
+  - Use probe_solution to quickly reject variants with poor constraint satisfaction
+  - Evaluate top 1-2 per discretization
+  
+  ### Round 2: Analyze Winners
+  For the best-performing discretization:
+  - If constraint not satisfied: increase penalty_strength (100→500→2000→10000)
+  - If objective doesn't improve: try construct_structured_init
+  
+  ### Round 3: Structured Initialization (If Needed)
+  Use construct_structured_init to generate principled initializations:
+  - bimodal_tight: Peaks at 0.25, 0.75 (theoretical for C5)
+  - golomb_5: Marks at optimal spacing [0, 0.5, 1.25, 1.625, 2] scaled
+  - periodic_2: Simple alternating pattern
+  
+  Then sweep hyperparameters on each structured init.
+  
+  ## Tool Usage
+  1. probe_solution: Screen constraint satisfaction (integral ≈ 1) - CRITICAL
+  2. construct_structured_init: Get mathematically principled starts
+  3. evaluate_solution: Only call after probe passes or structured init is good
+  
+  ## Success Criteria
+  - combined_score > 1.0 (c5_bound < 0.380923)
+  - Best combined_score > seed score
+  
+  ## Common Pitfalls
+  - Don't waste evaluations on trivial hyperparameter changes without discretization sweep
+  - Always verify constraint satisfaction
+  - If stuck at seed score, try MUCH finer discretization (4800-8000)
+tool_descriptions:
+  edit_solution: Modify the EVOLVE-BLOCK to change num_intervals, base_learning_rate, penalty_strength, num_steps, num_restarts, or use construct_structured_init.
+  evaluate_solution: Run full evaluation, returns combined_score (higher is better).
+  probe_solution: Quick approximate evaluation to screen constraint satisfaction before full eval.
+  finish: Submit when combined_score > 1.0 or all strategies exhausted.
+sampling:
+  temperature: 1.2
+  top_p: 0.95
+  top_k: 30
+  max_tokens: 14000
+agent:
+  max_iterations: 60
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 10000
+new_tools:
+- name: construct_structured_init
+  description: |
+    Generate 4 mathematically principled step function initializations for the Erdos problem.
+    Returns bimodal_tight (peaks at 0.25, 0.75), triangular_3step (3-level), 
+    periodic_2 (alternating), and golomb_5 (optimal spacing pattern).
+    Each is a latent vector where sigmoid(latent) is a valid [0,1] step function.
+  input_schema:
+    type: object
+    properties: {}
+  implementation_py: |
+    def run(ctx, args):
+        import numpy as np
+        N = 800
+        domain = 2.0
+        dx = domain / N
+        
+        rng = np.random.default_rng(123)
+        constructions = {}
+        
+        # bimodal_tight: Two narrow peaks at 0.25 and 0.75 (theoretical optimal)
+        x = np.linspace(0, domain, N)
+        a1, a2 = 0.25, 0.75
+        bw1, bw2 = 0.12, 0.12
+        latent = np.exp(-((x-a1)/bw1)**2 * 30) + np.exp(-((x-a2)/bw2)**2 * 30)
+        latent = (latent - np.min(latent)) / (np.max(latent) - np.min(latent) + 1e-10)
+        constructions["bimodal_tight"] = latent
+        
+        # triangular_3step: Three-level triangular pattern
+        x = np.linspace(0, domain, N)
+        phases = np.array([0.0, 0.333, 0.666])
+        levels = np.array([-10, -3, 10])
+        latent = np.zeros(N)
+        for p, l in zip(phases, levels):
+            in_range = (x >= p) & (x < p + 0.333)
+            latent = latent + l * in_range
+        latent = latent + rng.normal(size=N) * 0.3
+        constructions["triangular_3step"] = latent
+        
+        # periodic_2: Simple alternating pattern
+        x = np.linspace(0, domain, N)
+        periodic = 2.0 * (x < 0.5) - 1.0
+        latent = periodic * 5.0
+        latent = latent + rng.normal(size=N) * 0.4
+        constructions["periodic_2"] = latent
+        
+        # golomb_5: 5 marks at optimal spacing
+        x = np.linspace(0, domain, N)
+        marks = np.array([0.0, 0.5, 1.0, 1.25, 1.75])
+        kernel_widths = np.array([0.06, 0.07, 0.065, 0.065, 0.07])
+        latent = np.zeros(N)
+        for mark, kw in zip(marks, kernel_widths):
+            latent = latent + 7.0 * np.exp(-((x-mark)/kw)**2 * 20)
+        latent = latent + rng.normal(size=N) * 0.2
+        constructions["golomb_5"] = latent
+        
+        return {
+            "constructions": constructions,
+            "usage_hint": "Use as initial_latent for the optimizer. Edit to set initial_latent = ..."
+        }
+new_skills:
+- name: discretization-sweep
+  description: |
+    Systematic discretization sweep for Erdos optimizer. 
+    Test num_intervals across wide range, screen with probe, evaluate winners.
+    Use construct_structured_init if standard patterns fail.
+  body: |
+    # Discretization-First Strategy for Erdos Optimizer
+    
+    ## Core Insight
+    The seed's 800-interval discretization is likely suboptimal. 
+    The optimal step function requires precise feature placement that 
+    coarse grids cannot capture.
+    
+    ## Phase 1: Wide Discretization Sweep
+    
+    ### Test Range
+    Try: 200, 400, 600, 800, 1200, 1600, 2400, 3200, 4800, 6400, 8000
+    
+    ### For Each Discretization:
+    1. Edit num_intervals to the target value
+    2. Test learning_rates: 0.001, 0.005, 0.01, 0.02, 0.05, 0.1
+    3. Use probe_solution to check:
+       - Integral ≈ 1.0 (within 0.01)
+       - h values in [0, 1]
+    4. Call evaluate_solution only if probe passes and constraint is good
+    
+    ### Track Best
+    For each discretization, track:
+    - Best combined_score
+    - Best learning_rate
+    - Whether constraint is satisfied
+    
+    ## Phase 2: Structured Initialization
+    
+    If Phase 1 yields no improvement:
+    1. Call construct_structured_init
+    2. For each construction (bimodal_tight, golomb_5, etc.):
+       - Edit initial_latent to use the construction
+       - Sweep hyperparameters again
+       - probe first, then evaluate
+    
+    ## Phase 3: Fine-Tuning
+    
+    If close to target (combined_score ≈ 0.95-0.99):
+    - Reduce learning_rate to 0.001-0.003
+    - Increase num_steps to 100000-300000
+    - Fine-tune penalty_strength for constraint satisfaction
+    
+    ## Budget Management
+    - Use probe_solution liberally (30 probe budget)
+    - Call evaluate_solution only on promising variants (≤10 full evals)
+    - Focus: Find ONE discretization that works, then optimize it

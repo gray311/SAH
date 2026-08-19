@@ -1,0 +1,84 @@
+schema: h2spec/1.0
+system_prompt: |
+  Task: minimize max_k integral h(x)(1-h(x+k)) dx for step function h: [0,2]->[0,1] with integral(h)=1
+  current_best: 0.38092303510845016
+  goal: maximize combined_score = 0.38092303510845016 / c5_bound
+  strategy: replace entire _get_best_initialization method with ONE explicit pattern (bipartite, one-step, or three-step)
+  edit_template: delete from 'def _get_best_initialization' to 'return best_latent', then insert new method with single pattern
+  hyperparameters: set num_restarts=1, seed_start=0
+  then_call: evaluate_solution once; if combined_score > 1.0, call finish
+  do_not: do not use probe_solution, do not call generate_diverse_init, do not modify existing 12 patterns
+tool_descriptions:
+  edit_solution: Replace the entire _get_best_initialization method with ONE explicit pattern.
+    Example for bipartite:
+      def _get_best_initialization(self, seed: int) -> jnp.ndarray:
+          N = self.hypers.num_intervals
+          x = jnp.linspace(0, 2, N)
+          a = 0.4
+          latent = jnp.where((x >= 0) & (x < a) | (x >= a) & (x < 2-a), 0.5, -1.0)
+          return latent
+    Set num_restarts=1, seed_start=0. Call evaluate_solution immediately.
+  evaluate_solution: Run full evaluation. Returns combined_score. Call ONCE after valid edit.
+  probe_solution: Approximate. NOT useful here. Use evaluate_solution directly.
+  finish: Call when combined_score > 1.0.
+sampling:
+  temperature: 0.8
+  top_p: 0.9
+  top_k: 10
+  max_tokens: 8000
+agent:
+  max_iterations: 20
+middleware:
+  budget_reminder_from_left: 3
+  long_tool_output_max_chars: 5000
+new_tools:
+- name: create_constraint_validated_init
+  description: Create patterns satisfying integral(h)=1 exactly.
+  input_schema:
+    type: object
+    properties: {}
+  implementation_py: |
+    def run(ctx, args):
+        import jax.numpy as jnp
+        p1 = {"name": "bipartite", "description": "h=0.6 on [0,0.833), h=0 elsewhere", "a": 0.833}
+        p2 = {"name": "one_step", "description": "h=1 on [0,1), h=0 on [1,2)", "latent": "+100 on [0,1), -100 on [1,2)"}
+        p3 = {"name": "asymmetric", "description": "h=0.9 on [0,1.111), h=0 on [1.111,2)", "latent": "sigmoid_inv(0.9) on [0,1.111)"}
+        p4 = {"name": "three_steps", "description": "h=1 on [0,0.667), h=0.5 on [0.667,1.333), h=0 on [1.333,2)", "latent": "+inf on [0,0.667), 0.5 on [0.667,1.333), 0 on rest"}
+        return {"patterns": [p1, p2, p3, p4]}
+new_skills:
+- name: explicit-pattern-editing
+  description: Replace _get_best_initialization with ONE pattern. Set num_restarts=1, seed_start=0. Call evaluate_solution. If combined_score > 1.0, call finish.
+  body: |
+    # Explicit Pattern Editing
+    ## CRITICAL: REPLACE entire _get_best_initialization method
+    ## Use EXPLICIT PATTERNS:
+    Pattern 1: h = 0.6 on [0,0.833) U [0.833,1.667), h = 0 elsewhere. Integral = 1.0
+    Pattern 2: h = 1 on [0,1), h = 0 on [1,2). Integral = 1.0
+    Pattern 3: h = 1 on [0,0.667), h = 0.5 on [0.667,1.333), h = 0 on [1.333,2). Integral = 1.0
+    
+    ## Editing Procedure:
+    1. Locate _get_best_initialization method
+    2. Delete from def to return best_latent (inclusive)
+    3. Insert new method body
+    4. Set num_restarts=1, seed_start=0
+    5. Call evaluate_solution
+    6. If combined_score > 1.0, call finish
+    
+    ## DO NOT:
+    - Add to existing 12 patterns
+    - Modify existing 12 patterns
+    - Use probe_solution
+    - Call generate_diverse_init
+new_middlewares:
+- name: enforce_single_pattern
+  hook: before_model
+  description: Ensure agent uses exactly ONE pattern with num_restarts=1
+  implementation_py: |
+    def before_model(hook_input):
+        state = hook_input.get("state", {})
+        num_restarts = state.get("num_restarts", "unknown")
+        if "num_restarts" in state and str(num_restarts) != "1":
+            return "ERROR: Set num_restarts=1. Don't use old multi-pattern init."
+        elif "num_restarts" not in state:
+            return "Reminder: Set num_restarts=1 when using single pattern."
+        return None

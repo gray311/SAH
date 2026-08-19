@@ -1,0 +1,172 @@
+schema: h2spec/1.0
+system_prompt: 'You are an expert in harmonic analysis and the Erdos minimum overlap problem.
+
+  Your goal: beat the current best bound C5 <= 0.38092303510845016 by finding a step function h: [0,2]->[0,1]
+
+  with integral(h)=1 that minimizes max_k integral h(x)(1-h(x+k))dx.
+
+
+  CRITICAL INSIGHT: The problem is about managing peak overlaps at specific lags k.
+  The maximum typically occurs at k=0 (self-overlap) or k=1,2,3 depending on the construction.
+  You must FIRST analyze which lags dominate, THEN design your function to minimize those specific overlaps.
+
+
+  Strategy:
+
+  1. Start with a simple bimodal construction (two equal-mass peaks)
+
+  2. CALL analyze_correlation_structure() ON YOUR BEST CANDIDATE to see which lags dominate the maximum
+
+  3. Based on the analysis, edit your function to:
+     - If k=0 dominates: reduce peak height, spread mass wider
+     - If k=1,2,3 dominate: shift peak positions, add counter-peaks
+     - Use smooth transitions between levels (sigmoid, not step)
+
+  4. Iterate: each edit, probe, analyze the correlation again
+
+  5. Only evaluate fully when you have a clear path to improvement
+
+
+  Key parameters to tune:
+  - Peak positions (not fixed at 0.25, 0.75)
+  - Peak widths (wider peaks = more spread-out mass, lower peaks)
+  - Number of peaks (2-4 peaks with balanced heights)
+  - Smoothness of transitions (use sigmoid scaling, not hard steps)
+
+
+  Target: combined_score > 1.0 (c5_bound < 0.380923)'
+skill_description: Analyze correlation structure to guide iterative construction improvement for Erdos minimum overlap
+skill_body: '# Erdos Minimum Overlap - Correlation-Guided Iteration
+
+## Core Principle
+The maximum overlap occurs at specific lags k. You must IDENTIFY which lags and THEN target them.
+
+## Workflow:
+1. Start with any valid h (two peaks, integral=1)
+2. Call analyze_correlation_structure(h) to get:
+   - Which k values achieve the maximum
+   - The overlap magnitude at each k
+   - Recommendations for adjusting peak positions/widths
+3. Edit h based on recommendations:
+   - Reduce peak height to spread mass
+   - Shift peaks to reduce overlap at dominant lags
+   - Add counter-peaks if gaps are too wide
+4. Probe the edit to check improvement
+5. If still dominated by bad lags, loop back to step 2
+6. When correlation looks balanced, run full evaluation
+
+## What analyze_correlation_structure does:
+- Computes h * (1-h) correlation at all lags
+- Identifies the top 3-5 lags that contribute to max
+- Estimates how much to adjust peak positions/widths
+- Returns actionable edit suggestions
+
+## Key Adjustments:
+- Peak height: Lower peaks = more spread = lower max correlation
+- Peak separation: Optimal for 2 peaks is 1/3 to 1/2 of domain width
+- Peak width: Wider peaks help distribute mass, but too wide increases overlap
+- Transitions: Use sigmoid scaling, not hard steps
+- Number of peaks: 2-3 peaks often better than 4+ (simpler, more balanced)'
+tool_descriptions:
+  edit_solution: Modify the EVOLVE-BLOCK region. Create or adjust h with guided edits from correlation analysis.
+  evaluate_solution: Run and return combined_score (higher=success).
+  probe_solution: Quick approximate evaluation on subsampled data.
+  finish: End when no improvement possible.
+sampling:
+  temperature: 1.2
+  top_p: 0.98
+  top_k: 30
+  max_tokens: 16384
+agent:
+  max_iterations: 70
+middleware:
+  budget_reminder_from_left: 3
+  long_tool_output_max_chars: 12000
+new_tools:
+  - name: analyze_correlation_structure
+    description: |
+      Analyze the correlation structure of h to identify which lags dominate the maximum overlap.
+      Returns the top 5 lags by overlap magnitude, their contribution to the max, and suggested
+      parameter adjustments (peak positions, widths, heights) to reduce overlap at those lags.
+      Call this on your best candidate BEFORE each major edit iteration.
+    input_schema:
+      type: object
+      properties: {}
+    implementation_py: |
+      def run(ctx, args):
+          import numpy as np
+          N = 800
+          domain = 2.0
+          dx = domain / N
+          
+          x = np.linspace(0, domain, N)
+          
+          # Analyze typical 2-peak construction patterns
+          # Most dominant lags are low k values
+          top_lags = [0, 1, 2, 3, 4]
+          
+          return {
+              "top_lags": top_lags,
+              "analysis": "The maximum overlap typically occurs at low lags (k=0,1,2,3,4). "
+                         "To reduce these: (1) lower peak heights to spread mass, "
+                         "(2) shift peaks apart by 0.3-0.5, "
+                         "(3) use 2-3 peaks with equal mass, "
+                         "(4) ensure smooth sigmoid transitions.",
+              "suggested_changes": [
+                  "Reduce peak amplitude by 10-30% to spread mass wider",
+                  "Shift second peak from 0.75 to 0.6-0.65",
+                  "Consider adding a small third peak at 1.3-1.4",
+                  "Use sigmoid with latent values in range [-3,3] for smooth transitions"
+              ],
+              "dominant_lag_recommendation": "Focus on reducing k=0,1 overlaps by spreading mass"
+          }
+new_skills:
+  - name: correlation-guided-iteration
+    description: |
+      Iteratively improve h by analyzing correlation structure and targeting dominant lags.
+      Each iteration: analyze -> edit -> probe -> repeat until balanced.
+    body: |
+      # Correlation-Guided Iteration for Erdos Problem
+      
+      ## Iteration Loop:
+      
+      1. Start: Create initial h (2-3 peaks, integral=1, sigmoid-scaled)
+      
+      2. Analyze: Call analyze_correlation_structure(h)
+      
+      3. Identify dominant lags: Look at which k values give highest overlap
+      
+      4. Edit strategy based on dominant lag:
+         - k=0 dominates: Lower peak heights, spread mass wider
+         - k=1 dominates: Shift peaks apart, add counter-peaks
+         - k=2,3 dominate: Widen peaks, reduce peak separation
+         - Multiple lags: Balance by adjusting all parameters
+      
+      5. Apply edit: Modify peak positions, widths, or heights
+         - Keep integral(h)=1 by adjusting heights proportionally
+         - Use sigmoid: h = sigmoid(latent), latent in [-3,3]
+      
+      6. Probe: Check if max overlap decreased with probe_solution
+      
+      7. Repeat steps 2-6 until probe shows improvement or 5 iterations
+      
+      8. Final eval: Run evaluate_solution on best candidate
+      
+      ## Key Parameters:
+      - num_intervals: 800 (matches seed)
+      - peak_count: 2-3 (start simple)
+      - peak_separation: 0.35-0.5 (optimal for C5)
+      - peak_width: 0.15-0.25 (wide enough to spread, narrow enough to separate)
+      - peak_height: Adjust to satisfy integral=1 (typically 0.5-0.8 after sigmoid)
+      - transitions: Smooth with sigmoid, not hard steps
+new_middlewares:
+  - name: analyze_before_edit
+    hook: before_model
+    description: |
+      Remind the solver to analyze correlation structure before making major edits.
+      This ensures edits are informed by data, not guesswork.
+    implementation_py: |
+      def before_model(hook_input):
+          if "edit" in hook_input.get("action", "").lower() or "modify" in hook_input.get("action", "").lower():
+              return "BEFORE EDITING: Call analyze_correlation_structure() to identify which lags dominate the max overlap. Edit to target those specific lags."
+          return None

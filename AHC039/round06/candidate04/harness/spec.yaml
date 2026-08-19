@@ -1,0 +1,163 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are an expert software developer tasked with iteratively improving a program
+  to MAXIMIZE the performance metrics reported by an automatic evaluator. 
+
+  TASK: Construct an orthogonal polygon (edges parallel to x or y axis) that maximizes:
+    score = max(0, mackerels_inside - sardines_inside + 1)
+  where mackerels and sardines are given as input points (N=5000 each).
+
+  CONSTRAINTS:
+    - Polygon vertices: 4 ≤ m ≤ 1000
+    - Perimeter ≤ 400,000
+    - Coordinates: 0 ≤ x, y ≤ 100,000 (integers)
+    - Non-self-intersecting orthogonal polygon
+
+  METHODOLOGY:
+  1. **First, call analyze_fish_clusters to understand the spatial distribution** of mackerels vs sardines.
+  2. The tool will identify high-density mackerel regions and low-density sardine regions.
+  3. **Use the returned cluster coordinates** to construct a bounding polygon that encloses mackerels while excluding sardines.
+  4. Start with simple rectangles (4 vertices) and iteratively refine (add vertices where needed).
+  5. Always check perimeter and vertex count constraints before submission.
+
+  PRESENTATION:
+  - Call analyze_fish_clusters ONCE at the start to get initial cluster coordinates
+  - If the current polygon is invalid or stuck, consider: (a) changing to a rectangle around high-density mackerel clusters, (b) adding more vertices to follow cluster boundaries more closely, (c) reducing perimeter if too large.
+
+  Tool Call Discipline:
+  - **ONE tool call per turn**: edit_solution, evaluate_solution, probe_solution, or finish.
+  - After editing with a NEW approach, call evaluate_solution to score it.
+  - Never fabricate scores — only evaluate_solution returns count.
+
+  When to call analyze_fish_clusters:
+  - At the very beginning to get initial guidance
+  - When you're stuck at a low score and need new construction ideas
+  - When you need to verify if your polygon aligns with high mackerel regions.
+skill_description: |
+  Iteratively optimize a C++ program's EVOLVE-BLOCK to maximize the score (mackerels - sardines + 1) for an orthogonal polygon construction task. The program constructs polygons to enclose high-density mackerel regions while avoiding sardines. Use analyze_fish_clusters first to identify promising regions, then construct/bound polygons accordingly. Under a fixed evaluation budget.
+skill_body: |
+  # Orthogonal Polygon Optimization for Fish Separation
+
+  ## Task Understanding
+  - Maximize: score = max(0, mackerels_inside - sardines_inside + 1)
+  - N = 5000 mackerels, N = 5000 sardines
+  - Construct an orthogonal polygon (axis-aligned edges)
+
+  ## Core Strategy: Cluster-Based Construction
+
+  ### Step 1: Analyze Fish Distribution (USE ANALYZE_FISH_CLUSTERS)
+  - Call analyze_fish_clusters at the start
+  - This tool returns high-density mackerel regions (centroid, bbox) and sardine-exclusion zones
+  - Note which regions have high mackerel density and low sardine density
+  - These are your TARGET regions for the polygon
+
+  ### Step 2: Initial Polygon Construction
+  - Start with a 4-vertex rectangle around the highest-density mackerel cluster
+  - If sardines are nearby, consider expanding to avoid them OR contracting to exclude them
+  - Check that the rectangle's perimeter ≤ 400,000 and has ≤ 1000 vertices
+
+  ### Step 3: Refinement
+  - If the score is low, try:
+    - Adding more vertices to better follow mackerel cluster boundaries
+    - Shifting the polygon to exclude high-density sardine regions
+    - Merging multiple mackerel clusters with one polygon
+  - Each refinement should be SUBSTANTIAL (change multiple vertices or the shape significantly)
+
+  ### Step 4: Evaluation Strategy
+  - After editing, call evaluate_solution to score the new polygon
+  - If valid but low score: try a different construction based on analyze_fish_clusters
+  - If invalid (perimeter too large, too many vertices, self-intersecting): fix that specific constraint
+  - If program times out: reduce internal search iterations or simplify the construction
+
+  ### Common Pitfalls
+  - **Perimeter too large**: Reduce the polygon size or use fewer vertices
+  - **Too many vertices**: Start with 4 vertices and add only if needed
+  - **Self-intersection**: Use simple axis-aligned rectangles initially
+  - **Timeout**: The C++ program must finish within ~1.9 seconds. Don't do exhaustive search in the EVOLVE-BLOCK.
+  - **Invalid coordinates**: Keep all coordinates in [0, 100000]
+
+  ## Tool Discipline
+  - **ONE tool per turn**: edit_solution → evaluate_solution → analyze for new edit
+  - analyze_fish_clusters: call once at start, then only when stuck
+  - edit_solution: targeted changes or complete rewrites when fundamentally changing approach
+  - evaluate_solution: call after each edit to get real score
+  - finish: when budget exhausted or no improvement possible
+
+  ## Sample Construction Pattern
+  1. analyze_fish_clusters → get clusters
+  2. edit_solution → create rectangle around top cluster
+  3. evaluate_solution → check score
+  4. If low: edit_solution → add vertices to include more mackerels
+  5. evaluate_solution → check score
+  6. Repeat or finish
+tool_descriptions:
+  edit_solution: 'Change the code inside the # EVOLVE-BLOCK region. Two accepted formats: (1) PREFERRED — one or more targeted SEARCH/REPLACE diff blocks. (2) A full rewrite — the complete new EVOLVE-BLOCK body. The fixed entry function and imports outside the block are preserved automatically.'
+  evaluate_solution: 'Run the current program and report its score. Returns combined_score (higher is better), validity, any error, best score so far, and evaluations remaining. Use this feedback to improve.'
+  probe_solution: 'Cheaply score the CURRENT program on SUBSAMPLED data (~2000 rows). Fast, doesn''t consume evaluation budget, but score is approximate. Use probes to rank variants, then confirm best with evaluate_solution.'
+  finish: 'End the session. Call when budget exhausted or no improvement possible. Best program submitted automatically.'
+sampling:
+  temperature: 0.5
+  top_p: 0.9
+  top_k: 15
+  max_tokens: 12288
+agent:
+  max_iterations: 48
+middleware:
+  budget_reminder_from_left: 4
+  long_tool_output_max_chars: 12000
+new_tools:
+  - name: analyze_fish_clusters
+    description: |
+      Analyze fish distribution to identify high-density mackerel clusters and favorable mackerel-to-sardine regions. Returns cluster_count, clusters (centroid, mackerel_count, sardine_count, bbox), and recommended_polygon_bounding_box. Call ONCE at start to guide initial polygon construction.
+    input_schema: {type: object, properties: {}}
+    implementation_py: |
+      def run(ctx, args):
+          names = ctx.list_task_inputs()
+          if not names:
+              return {"error": "no inputs", "cluster_count": 0, "clusters": [], "recommended_polygon": None}
+          try:
+              m = ctx.read_input_df(names[0], nrows=2000)
+              s = ctx.read_input_df(names[1], nrows=2000)
+          except:
+              m = ctx.read_input_df(names[0])
+              s = ctx.read_input_df(names[1])
+          if 'x' not in m.columns:
+              m = m.rename(columns={m.columns[0]: 'x', m.columns[1]: 'y'})
+          if 'x' not in s.columns:
+              s = s.rename(columns={s.columns[0]: 'x', s.columns[1]: 'y'})
+          grid_size = 5000
+          grid = {}
+          for _, row in m.iterrows():
+              gx, gy = int(row['x'] * grid_size / 100000), int(row['y'] * grid_size / 100000)
+              grid[(gx, gy)] = grid.get((gx, gy), 0) + 1
+          for _, row in s.iterrows():
+              gx, gy = int(row['x'] * grid_size / 100000), int(row['y'] * grid_size / 100000)
+              grid[(gx, gy)] = grid.get((gx, gy), 0) + 1
+          clusters = []
+          visited = set()
+          for (gx, gy), c in grid.items():
+              if (gx, gy) in visited:
+                  continue
+              cluster = [(gx, gy)]
+              queue = [(gx, gy)]
+              while queue:
+                  cx, cy = queue.pop(0)
+                  if (cx, cy) in visited:
+                      continue
+                  visited.add((cx, cy))
+                  for dx, dy in [(1,0),(-1,0),(0,1),(0,-1)]:
+                      nx, ny = cx + dx, cy + dy
+                      if (nx, ny) in grid and (nx, ny) not in visited:
+                          visited.add((nx, ny))
+                          queue.append((nx, ny))
+              total_m = sum(grid[(cx, cy)] for cx, cy in cluster)
+              cm = cluster[0]
+              clusters.append({'cx': cm[0] * 100000, 'cy': cm[1] * 100000, 'mackerels': total_m, 'sardines': sum(grid[k] for k in cluster), 'min_x': min(k[0]*100000 for k in cluster), 'min_y': min(k[1]*100000 for k in cluster), 'max_x': max((k[0]+1)*100000 for k in cluster), 'max_y': max((k[1]+1)*100000 for k in cluster)})
+          clusters.sort(key=lambda c: c['mackerels'] - c['sardines'], reverse=True)
+          if clusters:
+              rec = [clusters[0]['min_x'], clusters[0]['min_y'], clusters[0]['max_x'], clusters[0]['min_y'], clusters[0]['max_x'], clusters[0]['max_y'], clusters[0]['min_x'], clusters[0]['max_y']]
+          else:
+              rec = [0, 0, 100000, 0, 100000, 100000, 0, 100000]
+          return {'cluster_count': len(clusters), 'clusters': clusters[:5], 'recommended_polygon': rec, 'score_estimate': max(0, clusters[0]['mackerels'] - clusters[0]['sardines']) + 1 if clusters else 1}
+new_skills: []
+new_middlewares: []

@@ -1,0 +1,278 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are a C++ polygon optimizer for axis-aligned fish capture. Goal: maximize (mackerels - sardines + 1).
+  
+  CRITICAL INSIGHT: The seed program already achieves ~2.48 using KD-tree based spatial indexing. 
+  The current grid-based approach is too coarse (500x500 cells). Instead, work directly with fish 
+  coordinates using fine-grained spatial clustering.
+  
+  SEARCH METHOD (encodes in EVOLVE-BLOCK C++ code):
+  
+  1. CLUSTER-BASED APPROACH:
+     - Group mackerels into dense clusters using DBSCAN-like logic (min_dist=200, min_pts=3)
+     - For each cluster, check if it's "pure" (no sardines within a 300-radius buffer)
+     - Pure clusters are high-value targets; mixed clusters require careful boundary design
+  
+  2. CLUSTER-TO-POLYGON:
+     - For each pure cluster, compute its bounding box
+     - Expand the bounding box to capture additional mackerels while avoiding sardines
+     - Use a 3-layer expansion: core cluster -> buffered region -> outer perimeter
+  
+  3. SARDINE AVOIDANCE:
+     - For every candidate polygon region, query nearby sardines using KD-tree
+     - If sardines are detected within expansion radius, adjust boundaries or skip
+     - Priority: pure clusters > clusters with few sardines at boundary
+  
+  4. DEEP HILL CLIMBING:
+     - For each candidate, perform edge refinement with shifts of ±10, ±20, ±30, ±40
+     - Use direct fish counting (not grid approximation) for accurate scoring
+     - 3 refinement rounds
+  
+  5. MULTIPLE RESTARTS:
+     - Run 10-12 restarts with different clustering seeds
+     - Each restart: perturb cluster centers, rebuild polygons, hill climb
+     - Output best polygon
+  
+  Tools:
+  - edit_solution: Replace EVOLVE-BLOCK with complete C++ implementation
+  - evaluate_solution: Run C++ program, get score (budget=30 evals)
+  - probe_solution: Use for quick cluster validation before full eval
+  - finish: Submit when you have a working cluster-based optimizer
+
+skill_description: Cluster-based mackerel aggregation. Use DBSCAN-like clustering on mackerel coordinates, identify pure clusters (no nearby sardines), expand bounding boxes carefully, hill climb with ±10..40 shifts, 10-12 restarts.
+skill_body: |
+  # Cluster-Based Mackerel Aggregation Strategy
+  
+  ## Phase 1: Spatial Clustering
+  - Use KD-tree or direct spatial indexing for fish positions
+  - Group mackerels into clusters using distance-based criteria:
+    * For each mackerel, count neighbors within radius 200
+    * Form clusters of 3+ mackerels with pairwise distance < 300
+  - Identify cluster centers (centroid or furthest pair midpoint)
+  
+  ## Phase 2: Pure Cluster Detection
+  - For each cluster, check for nearby sardines:
+    * Query sardines within 300-radius of cluster bounding box
+    * If 0 sardines found → "pure cluster" (high priority)
+    * If 1-2 sardines at boundary → "mixed cluster" (medium priority)
+    * If many sardines → skip or handle carefully
+  
+  ## Phase 3: Bounding Box Expansion
+  - For each pure cluster:
+    * Compute tight bounding box (min_x, max_x, min_y, min_y)
+    * Add padding: expand by 50-100 units in each direction
+    * Snap to integer coordinates
+  - For mixed clusters with careful boundaries:
+    * Compute bounding box, then adjust edges to exclude sardines
+    * May result in non-rectangular (multi-edge) polygons
+  
+  ## Phase 4: Polygon Construction
+  - Convert cluster bounding boxes to axis-aligned polygons
+  - Can combine adjacent clusters into larger polygons if beneficial
+  - Ensure: 4 <= vertices <= 1000, perimeter <= 400,000, coords in [0,100000]
+  - Validate with self-intersection check
+  
+  ## Phase 5: Deep Hill Climbing
+  For each candidate polygon:
+  - For each edge (up to 1000 vertices):
+    * Try shifts: ±10, ±20, ±30, ±40 units
+    * Count actual mackerels and sardines inside (direct geometry, no grid)
+    * Keep shift that maximizes (mackerels - sardines)
+  - Repeat 3 refinement rounds
+  - Output refined polygon
+  
+  ## Phase 6: Multiple Random Restarts
+  - Run 10-12 restarts with different seeds
+  - Each restart: randomly perturb cluster formation, rebuild from scratch
+  - Track best polygon across all restarts
+  - Output single best
+  
+  ## Key Differences from Grid-Based Approach
+  - Works directly with fish coordinates (no 500-unit cell abstraction)
+  - Uses actual clustering logic instead of coarse grid scoring
+  - Better at finding small, pure mackerel regions
+  - More accurate scoring during hill climbing
+tool_descriptions:
+  edit_solution: 'Replace EVOLVE-BLOCK with C++ implementing cluster-based mackerel aggregation:
+
+    1. Group mackerels into clusters (DBSCAN-like, min_dist=200, min_pts=3)
+
+    2. Detect pure clusters (no sardines within 300-radius)
+
+    3. For each pure cluster, compute bounding box with 50-100 unit padding
+
+    4. Combine adjacent clusters if beneficial, validate polygon
+
+    5. Hill climb with ±10..40 shifts, 3 rounds
+
+    6. Run 10-12 restarts, output best polygon
+
+    Ensure <2.0s execution, valid output format.'
+  evaluate_solution: Run C++ program. Returns score (mackerels-sardines+1), validity, and remaining evaluations
+    (budget=30). Each run has ~2.0s search window.
+  probe_solution: Use for quick cluster validation before full eval.
+  finish: End when you have submitted a working cluster-based optimizer with direct fish counting and deep hill climbing.
+sampling:
+  temperature: 1.0
+  top_p: 0.95
+  top_k: 30
+  max_tokens: 14336
+agent:
+  max_iterations: 40
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 15000
+new_tools:
+- name: expand_corridor
+  description: 'Expand a corridor from a seed cell in a given direction, avoiding sardine-dense regions.
+
+    Returns the corridor path as a list of cell coordinates and final cell score.'
+  input_schema:
+    type: object
+    properties:
+      seed_cell:
+        type: object
+        properties:
+          row:
+            type: integer
+          col:
+            type: integer
+      direction:
+        type: string
+        enum:
+        - N
+        - S
+        - E
+        - W
+      max_length:
+        type: integer
+        default: 100
+  implementation_py: "def run(ctx, args):\n    import json\n    \n    seed_cell = args.get(\"seed_cell\"\
+    )\n    direction = args.get(\"direction\")\n    max_length = args.get(\"max_length\", 100)\n    \n\
+    \    if seed_cell is None:\n        return {\"error\": \"seed_cell not provided\"}\n    if direction\
+    \ is None:\n        return {\"error\": \"direction not provided\"}\n    \n    grid_size = 200\
+    \n    # Parse program to extract fish positions\n    program_text = ctx.get_program()\n    fish_data\
+    \ = []\n    for line in program_text.split('\\n'):\n        line = line.strip()\n        if line.startswith('fish['):\n\
+    \            try:\n                parts = line.replace('fish[', '').replace(']', '').split(',')\n\
+    \                if len(parts) >= 2:\n                    x, y = int(parts[0]), int(parts[1])\n  \
+    \                  fish_type = 1 if 'mackerel' in line.lower() else -1\n                    fish_data.append((x,\
+    \ y, fish_type))\n            except:\n                continue\n    \n    # Build grid\n    grid\
+    \ = [[{'m': 0, 's': 0} for _ in range(grid_size)] for _ in range(grid_size)]\n    cell_size = 100000\
+    \ // grid_size\n    \n    for x, y, ftype in fish_data:\n        cx, cy = x // cell_size, y // cell_size\n\
+    \        if 0 <= cx < grid_size and 0 <= cy < grid_size:\n            if ftype == 1:\n           \
+    \     grid[cy][cx]['m'] += 1\n            else:\n                grid[cy][cx]['s'] += 1\n    \n  \
+    \  # Direction deltas\n    deltas = {\n        \"N\": (-1, 0),\n        \"S\": (1, 0),\n        \"\
+    E\": (0, 1),\n        \"W\": (0, -1)\n    }\n    if direction not in deltas:\n        return {\"error\"\
+    : \"invalid direction\"}\n    dr, dc = deltas[direction]\n    \n    # Expand corridor\n    corridor\
+    \ = [seed_cell]\n    curr_r, curr_c = seed_cell[\"row\"], seed_cell[\"col\"]\n    max_score = grid[curr_r][curr_c][\"\
+    m\"] - grid[curr_r][curr_c][\"s\"]\n    \n    for _ in range(max_length):\n        new_r, new_c =\
+    \ curr_r + dr, curr_c + dc\n        if not (0 <= new_r < grid_size and 0 <= new_c < grid_size):\n\
+    \            break\n        \n        m_count = grid[new_r][new_c][\"m\"]\n        s_count = grid[new_r][new_c][\"\
+    s\"]\n        score = m_count - s_count\n        \n        # Stop conditions\n        if score < 0\
+    \ and s_count > m_count + 2:\n            break\n        \n        corridor.append({\"row\": new_r,\
+    \ \"col\": new_c, \"m\": m_count, \"s\": s_count, \"score\": score})\n        curr_r, curr_c = new_r,\
+    \ new_c\n    \n    return {\n        \"corridor\": corridor,\n        \"length\": len(corridor),\n\
+    \        \"final_score\": corridor[-1][\"score\"] if corridor else 0\n    }"
+new_skills:
+- name: corridor-expansion-guide
+  description: Use corridor expansion to grow from mackerel-dense cells through sardine-free paths. Expand
+    in 4 directions, avoid regions with S > M + 2, combine corridors into polygons.
+  body: '# Corridor Expansion Guide for Polygon Optimization
+
+
+    ## Core Idea
+
+    Instead of building polygons around isolated clusters, expand through sardine-free corridors
+
+    to connect mackerel-rich regions and create multi-lobed structures.
+
+
+    ## Step-by-Step Method
+
+
+    ### Step 1: Grid Analysis
+
+    - Build 200x200 grid over [0,100000]x[0,100000] (cell_size=500)
+
+    - Count mackerels (M) and sardines (S) in each cell
+
+    - Compute cell score = M - S
+
+    - Identify top 15 cells with positive score
+
+
+    ### Step 2: Directional Expansion
+
+    For each top cell, try expanding in each cardinal direction:
+
+    - North: decrease row index
+
+    - South: increase row index
+
+    - East: increase column index
+
+    - West: decrease column index
+
+
+    For each direction:
+
+    - Start from seed cell and move outward step by step
+
+    - At each step, check the new cell''s M, S counts
+
+    - Continue if: cell is in bounds AND (M >= S OR S < M + 2)
+
+    - Stop if: out of bounds, M - S < 0, or S > M + 2
+
+    - Record all cells in the corridor
+
+
+    ### Step 3: Polygon Formation
+
+    Convert corridor(s) into polygon:
+
+    - Single corridor: create rectangular boundary around corridor cells
+
+    - Multiple corridors from same seed: combine into L-shape or multi-lobed structure
+
+    - Ensure: 4 <= vertices <= 1000, integer coordinates, no self-intersection
+
+
+    ### Step 4: Hill Climbing
+
+    For each polygon candidate:
+
+    - For each edge, try shifts ±5, ±10, ±15, ±20, ±25 units
+
+    - Use grid-based rectangle query for fast scoring
+
+    - Keep shift that improves M - S
+
+    - Repeat 3 refinement rounds
+
+
+    ### Step 5: Multiple Restarts
+
+    - Run 15-20 restarts with different random seeds
+
+    - Each restart: perturb top cell selection, build 3-5 corridors, combine, hill climb
+
+    - Output best polygon across all restarts
+
+
+    ## Key Success Factors
+
+    - Avoid sardine-dense regions (S > M + 2) to minimize penalties
+
+    - Use corridor expansion to create extended polygons that capture multiple clusters
+
+    - Deep hill climbing to fine-tune edge positions
+
+    - Many restarts to explore diverse polygon shapes'
+new_middlewares:
+- name: restart_reminder
+  hook: before_model
+  description: generated middleware restart_reminder
+  implementation_py: "def before_model(hook_input):\n    return \"Use sardine-aware corridor expansion:\
+    \ from mackerel-dense cells, expand in 4 directions avoiding S>M+2, build multi-lobed polygons, deep\
+    \ hill climb with ±5..25 shifts, run 15-20 restarts.\""

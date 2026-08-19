@@ -1,0 +1,135 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are solving the Erdos minimum overlap problem: minimize max_k integral h(x)(1-h(x+k)) dx
+  for a step function h: [0,2] -> [0,1] with integral(h)=1.
+
+  Current best bound: C5 <= 0.38092303510845016
+
+  CRITICAL INSIGHT: The seed optimizer's hyperparameters are ALMOST OPTIMAL. The real problem is that it uses CONTINUOUS optimization that gets trapped in local minima. You need to inject DIVERSE STRUCTURAL INITIALIZATIONS that might lie in different basins of attraction.
+
+  STRATEGY - Phase 1: Structural Innovation (Primary Focus)
+  1. START with SEED program and establish baseline
+  2. EDIT _get_best_initialization() to ADD NEW INITIALIZATION PATTERNS:
+     - Bimodal patterns: two narrow peaks at different positions (e.g., peaks at 0.25+/-delta, 0.75+/-delta)
+     - Asymmetric step functions: h(x) = alpha for x < tau, h(x) = beta for x >= tau
+     - Triangular patterns: linear ramps creating peak structures
+     - Multi-level step functions: 3-4 levels with strategically placed transitions
+     - Periodic combinations: sin/cos combinations scaled appropriately
+  3. For each NEW pattern, run 2-3 hyperparameter variations of:
+     - num_intervals: 400, 800
+     - base_learning_rate: 0.003, 0.007, 0.015
+     - penalty_strength: 100, 500
+  4. Use probe_solution to SCREEN initializations quickly (check if integral constraint is satisfied)
+  5. Only call evaluate_solution on variants that pass probe screening AND show potential in probe score
+
+  STRATEGY - Phase 2: Expansion
+  If no improvement after structural injection:
+  - Expand _get_best_initialization to try 20-30 diverse patterns
+  - Use seeds from 0 to 30 for diversity
+
+  FOCUS: STRUCTURAL INNOVATION FIRST. Hyperparameter sweeps are secondary and unlikely to escape local minima.
+skill_description: Structural initialization injection for Erdos optimizer with probe-based screening.
+skill_body: |
+  # Erdos Minimum Overlap - Structural Initialization Strategy
+
+  ## Why Structural Innovation is Critical
+  The seed optimizer uses continuous optimization with 12 fixed initialization patterns.
+  This approach gets trapped in local minima. The Erdos minimum overlap problem likely
+  requires discrete combinatorial structures that lie outside the optimizer's natural
+  basin of attraction.
+
+  ## Phase 1: Inject Diverse Structural Patterns
+
+  Edit _get_best_initialization() to add NEW initialization patterns:
+
+  ### 1. Bimodal Tight Patterns
+  Two narrow peaks with optimized separation at positions like (0.2, 0.8), (0.25, 0.75)
+
+  ### 2. Asymmetric Step Functions  
+  h(x) = alpha for x < tau, h(x) = beta for x >= tau, tuned for integral=1
+
+  ### 3. Triangular Patterns
+  Linear ramps creating peak/trough structures at various positions
+
+  ### 4. Multi-Level Step Functions
+  3-4 levels with strategic transitions
+
+  ### 5. Periodic Combinations
+  sin/cos combinations with different frequencies
+
+  ## Phase 2: Enhanced Hyperparameter Exploration
+  For each NEW pattern, test 2-3 hyperparameter combinations:
+  - num_intervals: 400, 800
+  - base_learning_rate: 0.003, 0.007, 0.015
+  - penalty_strength: 100, 500
+
+  ## Screening Strategy
+  1. Use probe_solution to quickly check constraint satisfaction
+  2. Only evaluate variants with good probe scores
+  3. Track best combined_score across ALL patterns
+tool_descriptions:
+  edit_solution: Modify the EVOLVE-BLOCK region to add NEW initialization patterns in _get_best_initialization(), adjust hyperparameters, or refine existing code.
+  evaluate_solution: Run full evaluation, returns combined_score. Use sparingly - only on promising variants.
+  probe_solution: Quick approximate evaluation to screen initialization patterns and hyperparameter variants. Check constraint satisfaction and relative probe scores.
+  finish: Submit final solution when combined_score greater than 1.0 or all strategies exhausted.
+sampling:
+  temperature: 1.2
+  top_p: 0.95
+  top_k: 30
+  max_tokens: 14000
+agent:
+  max_iterations: 50
+middleware:
+  budget_reminder_from_left: 4
+  long_tool_output_max_chars: 8000
+new_tools:
+- name: structured_init
+  description: |
+    Generate 6 mathematically principled initialization patterns for the Erdos problem.
+    Tests bimodal, asymmetric, triangular, and periodic structures that might escape local minima.
+  input_schema:
+    type: object
+    properties: {}
+  implementation_py: |
+    def run(ctx, args):
+        import numpy as np
+        N = 800
+        domain = 2.0
+        x = np.linspace(0, domain, N)
+        constructions = {}
+        
+        # Bimodal: Two narrow peaks at various separations
+        for sep in [0.2, 0.25, 0.3, 0.4, 0.6, 0.75]:
+            bw = 0.07
+            latent = np.exp(-((x-sep)/bw)**2 * 35) + np.exp(-((x-(1.0-sep))/bw)**2 * 35)
+            constructions[f'bimodal_sep{sep}'] = latent
+        
+        # Asymmetric step: threshold with varying levels
+        for tau in [0.25, 0.33, 0.4, 0.5, 0.6, 0.75]:
+            for beta in [0.25, 0.33, 0.4]:
+                alpha = (1.0 - beta * (2.0 - tau)) / tau
+                if 0 < alpha < 1:
+                    latent = np.where(x < tau, alpha * 12, beta * 12)
+                    constructions[f'asym_t{tau}_b{beta}'] = latent
+        
+        # Triangular peaks
+        for pos in [0.15, 0.2, 0.25, 0.3, 0.4, 0.6, 0.7]:
+            slope = 8
+            latent = np.zeros(N)
+            latent[x < pos] = -slope * (x[pos] - x[x < pos])
+            latent[x >= pos] = slope * (pos - x[x >= pos])
+            constructions[f'triangular{pos}'] = latent
+        
+        # Periodic
+        for freq in [1.5, 2, 2.5]:
+            latent = (np.sin(np.pi * freq * x) + np.cos(np.pi * freq * x)) * 6
+            constructions[f'periodic{freq}'] = latent
+        
+        # Golomb
+        marks = np.array([0.0, 0.375, 0.75, 1.125, 1.5])
+        latent = np.zeros(N)
+        for mark in marks:
+            latent = latent + 8.0 * np.exp(-((x-mark)/0.12)**2 * 40)
+        constructions['golomb5'] = latent
+        
+        return {"constructions": constructions}

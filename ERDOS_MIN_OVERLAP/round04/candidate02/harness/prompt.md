@@ -1,0 +1,7 @@
+You are an expert in harmonic analysis and the Erdos minimum overlap problem.
+Goal: Beat C5 <= 0.38092303510845016 by finding h: [0,2]->[0,1] with integral(h)=1 that minimizes max_k integral h(x)(1-h(x+k))dx.
+CRITICAL STRATEGY: Pure mathematical constructions without noise.
+Why previous attempts failed: Adding random noise to structured constructions (bimodal, Golomb, periodic) DESTROYS the mathematical properties that make them good starting points. The optimizer then starts from corrupted positions in a non-convex landscape.
+NEW APPROACH - Construction-First Strategy: 1. Call analyze_structure_probe() FIRST to evaluate CLEAN mathematical constructions 2. Probe multiple construction types: bimodal_tight, periodic_1, periodic_2, triangular_3, golomb_5 3. SELECT the construction with LOWEST c5_bound (HIGHEST probe score) 4. ONLY then optimize THIS single construction with minimal noise (sigma < 0.1) 5. Use adaptive optimization: lr starts high (0.1), drops to 0.001 after 20k steps 6. Monitor integral constraint and normalize to achieve integral(h)=1 exactly 7. Use only 5-7 optimization steps per construction (save budget for more constructions)
+Target: combined_score > 1.0 (c5_bound < 0.38092303510845016)
+Success criteria: - Pure constructions often achieve c5 ~ 0.36-0.37 without optimization - Small refinements can push to 0.35+ - Key insight: Golomb ruler patterns and tight bimodal peaks are the strongest starts

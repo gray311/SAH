@@ -1,0 +1,183 @@
+schema: h2spec/1.0
+system_prompt: |
+  Erdos minimum overlap problem: Find h: [0,2]->[0,1] minimizing max_k integral h(x)(1-h(x+k))dx.
+  
+  Constraint: integral(h) = 1 exactly.
+  
+  Current best: C5 <= 0.38092303510845016.
+  
+  Strategy:
+  1. Modify the EVOLVE-BLOCK optimizer to explore MORE structural diversity in initializations
+  2. Increase num_restarts to 5 and adjust the initialization patterns to include more varied structures
+  3. Do NOT rely on analytical c5_bound filtering - evaluate MORE candidates, even if they look bad analytically
+  4. The analytical c5_bound from generate_ready_candidates may not match full evaluation due to discretization differences
+  5. Use all 30 evals to explore different initialization patterns
+  6. Try hyperparameter tuning: different learning rates, penalty strengths, and number of intervals
+  7. If one candidate improves, retrain it with higher resolution (more intervals)
+  8. Key insight: The seed optimizer's 15 initialization patterns include some promising structures - use them directly instead of generating new ones
+  
+  Critical: Edit the optimizer to use ALL 15 initialization patterns, not just pick the best one from 3 generated candidates.
+  
+  Expected approach:
+  - Set num_restarts = 5 (use 5 different seeds/patterns)
+  - Test with num_intervals = 400, 800, 1600 to see if higher resolution helps
+  - Try different base_learning_rate values: 0.006, 0.003, 0.01
+  - Try different penalty_strength: 30, 60, 120
+  - Evaluate each candidate fully (no analytical filtering)
+  - Use generate_ready_candidates as a fallback, but rely primarily on modifying the seed optimizer directly
+skill_description: |
+  Direct optimizer exploration: Modify seed optimizer's initialization and hyperparameters. Test multiple configurations without analytical pre-filtering. Use full evals to find the best candidate. Use generate_ready_candidates as a fallback strategy when optimizer modifications don't yield improvements.
+tool_descriptions:
+  edit_solution: |
+    Modify EVOLVE-BLOCK to change optimizer hyperparameters or code structure.
+    
+    Key changes to make:
+    - Increase num_restarts from 3 to 5 (more exploration)
+    - Adjust initialization patterns to be more diverse
+    - Try different num_intervals (400, 800, 1600)
+    - Try different base_learning_rate and penalty_strength combinations
+    - For single-candidate testing: set num_restarts=1
+    
+    The seed optimizer's _get_best_initialization method generates 15 patterns - ensure all are tested.
+    
+    If analytical screening doesn't help, directly edit the optimizer to change patterns, learning rates, or penalty strengths.
+  evaluate_solution: |
+    Run full optimization on a candidate with modified hyperparameters.
+    
+    Returns combined_score = 0.38092303510845016 / c5_bound.
+    
+    Higher is better. combined_score > 1.0 means a new record.
+    
+    Each evaluation costs 1 from your 30-eval budget.
+  probe_solution: |
+    Fast approximate evaluation (500 intervals).
+    
+    Less useful than full evaluation for this task since the optimizer already does analytical work internally.
+    Can be used for quick comparisons before committing to a full evaluation.
+  finish: |
+    Submit when combined_score > 1.0 (c5_bound < 0.38092303510845016).
+sampling:
+  temperature: 1.0
+  top_p: 0.95
+  top_k: 50
+  max_tokens: 16000
+agent:
+  max_iterations: 30
+middleware:
+  budget_reminder_from_left: 3
+  long_tool_output_max_chars: 8000
+new_tools:
+- name: optimize_with_hyperparams
+  description: |
+    Directly edit the seed optimizer to test specific hyperparameter configurations.
+    
+    This tool generates edited versions of the EVOLVE-BLOCK with:
+    - Different num_restarts values (1, 3, 5)
+    - Different num_intervals (400, 800, 1600)
+    - Different base_learning_rate (0.003, 0.006, 0.01)
+    - Different penalty_strength (30, 60, 120)
+    
+    Call this tool to generate diverse optimizer variants, then evaluate each.
+    
+    Strategy: Generate 3-5 variants with different hyperparams, evaluate all fully.
+    
+    Why this helps: The current harness relies on analytical screening which may be inaccurate. Direct hyperparameter exploration lets us test configurations that might yield better results.
+  input_schema:
+    type: object
+    properties:
+      variant_id:
+        type: integer
+        default: 0
+        description: Which variant to generate (0-4 for different configurations)
+  implementation_py: |
+    def run(ctx, args):
+        import numpy as np
+        variant_id = args.get("variant_id", 0)
+        
+        # Generate variant
+        if variant_id == 0:
+            # Aggressive learning, more restarts
+            edit = """
+            num_intervals: int = 800
+            base_learning_rate: float = 0.01
+            num_steps: int = 59000
+            penalty_strength: float = 40.0
+            num_restarts: int = 5
+            seed_start: int = 0
+            """
+            description = "High LR, low penalty, more restarts"
+        elif variant_id == 1:
+            # Coarse grid, faster evaluation
+            edit = """
+            num_intervals: int = 400
+            base_learning_rate: float = 0.006
+            num_steps: int = 59000
+            penalty_strength: float = 60.0
+            num_restarts: int = 5
+            seed_start: int = 0
+            """
+            description = "Coarse grid (400 intervals)"
+        elif variant_id == 2:
+            # Fine grid, more accurate
+            edit = """
+            num_intervals: int = 1600
+            base_learning_rate: float = 0.003
+            num_steps: int = 59000
+            penalty_strength: float = 60.0
+            num_restarts: int = 3
+            seed_start: int = 0
+            """
+            description = "Fine grid (1600 intervals)"
+        elif variant_id == 3:
+            # High penalty for constraints
+            edit = """
+            num_intervals: int = 800
+            base_learning_rate: float = 0.006
+            num_steps: int = 59000
+            penalty_strength: float = 100.0
+            num_restarts: int = 5
+            seed_start: int = 0
+            """
+            description = "High penalty for integral constraint"
+        elif variant_id == 4:
+            # Balanced approach
+            edit = """
+            num_intervals: int = 800
+            base_learning_rate: float = 0.006
+            num_steps: int = 59000
+            penalty_strength: float = 80.0
+            num_restarts: int = 5
+            seed_start: int = 0
+            """
+            description = "Balanced: moderate LR and penalty"
+        else:
+            edit = ""
+            description = "No edit"
+        
+        return {
+            "edit_block": edit,
+            "description": description,
+            "variant_id": variant_id,
+            "note": f"Variant {variant_id}: {description}. This variant should be evaluated with evaluate_solution."
+        }
+new_skills: []
+new_middlewares:
+- name: evaluate_variant
+  hook: before_model
+  description: |
+    Middleware to remind the agent to evaluate generated optimizer variants before trying to edit further.
+    
+    When evals are low, remind agent to use remaining evals wisely on promising variants.
+  implementation_py: |
+    def before_model(hook_input):
+        state = hook_input.get("state", {})
+        evals_left = state.get("evals_left", 0)
+        
+        if evals_left <= 5:
+            return (
+                "You have only " + str(evals_left) + " evaluations left.\n" +
+                "Evaluate the generated optimizer variants BEFORE making more edits.\n" +
+                "Focus on variants with promising analytical scores or structural novelty.\n" +
+                "Use generate_ready_candidates or optimize_with_hyperparams to get new variants."
+            )
+        return None

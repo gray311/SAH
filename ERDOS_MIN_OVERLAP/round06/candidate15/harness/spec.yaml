@@ -1,0 +1,243 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are a mathematical optimization expert solving the Erdős C₅ minimum overlap problem.
+  
+  **THE PROBLEM**: Find a step function h:[0,2]→[0,1] with ∫h=1 that minimizes max_k ∫h(x)(1-h(x+k))dx.
+  Current best: 0.38092303510845016. Goal: beat this to get combined_score > 1.0.
+  
+  **WHY THE SEED FAILS**: The seed uses 59,000 Adam optimization steps starting from random noise.
+  This gets trapped in local optima. The optimizer wanders too much and never finds the right structure.
+  
+  **YOUR STRATEGY - DIRECT MATHEMATICAL CONSTRUCTION**:
+  
+  1. **NEARLY COMPLETE REWRITE**: Replace the EVOLVE-BLOCK with a direct construction approach:
+     - Use FEW intervals (50-200, not 800)
+     - Manually construct piecewise constants with strategic step positions
+     - Use FFT-based C₅ computation (fast and accurate)
+     - Optimize just the step heights and positions, not a latent vector
+  
+  2. **KEY PATTERNS TO CONSIDER**:
+     - Uniform partition: h = c on [0,a], 0 elsewhere (normalize for ∫h=1)
+     - Two-plateau: h = a on [0,b], h = c on [1,2] (symmetric support)
+     - Three-part: low-high-low pattern centered at x=1
+     - Try concentrating mass: h=1 on [0.5,1.5], h=0 elsewhere
+  
+  3. **CODE STRUCTURE TO USE**:
+     - Keep Hyperparameters but reduce num_intervals to 100-150
+     - Replace ErdosOptimizer with a DirectC5Optimizer class
+     - Implement manual candidate generation (no Adam, no latent vectors)
+     - Test 5-10 candidate constructions, keep the best
+     - Compute c5_bound via FFT correlation
+  
+  4. **VALIDITY CHECKS**:
+     - Every h must satisfy: 0 ≤ h[i] ≤ 1 for all i
+     - Every h must satisfy: sum(h) * dx = 1.0 (within tolerance)
+     - Use sigmoid activation on latent OR construct directly
+  
+  5. **EXPLORATION**: Try at least 5-10 different constructions per evaluation
+  
+  **START WITH COMPLETE REWRITES**. The seed's approach is fundamentally wrong for this problem.
+skill_description: |
+  Direct mathematical construction for Erdős C₅. Build explicit step functions, not random-then-optimize.
+  Targets combined_score > 1.0 by finding c5_bound < 0.380923.
+tool_descriptions:
+  edit_solution: |
+    **COMPLETE REWRITE REQUIRED**. Replace the EVOLVE-BLOCK with a new DirectC5Optimizer that:
+    1. Uses num_intervals=100-150 (not 800)
+    2. Implements direct step function construction (no Adam optimization)
+    3. Generates 5-10 candidate patterns manually
+    4. Selects best by FFT-based c5_bound computation
+    
+    Do NOT make minor edits. The entire optimization paradigm must change.
+  evaluate_solution: |
+    Run the program, get combined_score. You have ~30 evaluations.
+    If combined_score > 1.0, you've beaten the record.
+  probe_solution: |
+    AVAILABLE - Cheap FFT-based c5_bound estimation (~10s vs minutes).
+    Use to rank candidates before full evaluation. Call probe on each of your
+    5-10 construction patterns, then evaluate the best 1-2 with evaluate_solution.
+    This saves precious evaluation budget.
+sampling:
+  temperature: 0.8
+  top_p: 0.95
+  top_k: 10
+  max_tokens: 16384
+agent:
+  max_iterations: 80
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 15000
+new_tools:
+  - name: construct_candidate
+    description: |
+      Generate a valid step function candidate with direct mathematical construction.
+      Choose one pattern from: uniform, two-plateau, three-part, concentrated mass,
+      alternating blocks, triangular-like. Ensure h∈[0,1] and ∫h=1.
+    input_schema: {type: object, properties: {pattern: {type: string}, intervals: {type: integer}}}
+    implementation_py: |
+      def run(ctx, args):
+          import math
+          N = args.get("intervals", 100)
+          dx = 2.0 / N
+          x = jnp.linspace(0, 2, N+1)[1:]  # exclude right endpoint
+          
+          pattern = args.get("pattern", "uniform")
+          
+          candidates = []
+          
+          if pattern == "uniform":
+              # h = c on [0,a], 0 elsewhere, ∫h = c*a*dx = 1 => c = 1/(a*dx)
+              for a in [0.3, 0.4, 0.5, 0.6]:
+                  c = 1.0 / (a * dx)
+                  if c > 1.0:
+                      continue
+                  h = jnp.zeros(N)
+                  h = h.at[:int(a/dx)].set(c)
+                  if jnp.any(h > 1.0):
+                      continue
+                  h = h / jnp.sum(h) * N * dx  # normalize
+                  candidates.append(h)
+          
+          elif pattern == "two_plateau":
+              # h = a on [0,b], h = c on [1,2]
+              for b in [0.2, 0.3, 0.4, 0.5]:
+                  for a in [0.5, 0.6, 0.7, 0.8]:
+                      c = 0.5 * a
+                      h = jnp.zeros(N)
+                      h = h.at[:int(b/dx)].set(a)
+                      h = h.at[int(1.0/dx):].set(c)
+                      if jnp.any(h > 1.0) or jnp.any(h < 0.0):
+                          continue
+                      total = jnp.sum(h) * dx
+                      if abs(total - 1.0) < 0.01:
+                          h = h / total * 1.0
+                          candidates.append(h)
+          
+          elif pattern == "concentrated":
+              # h = 1 on [0.5, 1.5]
+              h = jnp.zeros(N)
+              start = int(0.5/dx)
+              end = int(1.5/dx)
+              h = h.at[start:end].set(1.0)
+              integral = jnp.sum(h) * dx
+              if abs(integral - 1.0) > 0.05:
+                  scale = 1.0 / integral
+                  h = h * scale
+                  if jnp.any(h > 1.0):
+                      return {"note": "concentrated failed normalization"}
+              candidates.append(h)
+          
+          elif pattern == "alternating":
+              # Alternating blocks of different heights
+              num_blocks = 4
+              for block_ratio in [0.25, 0.3, 0.33]:
+                  h = jnp.zeros(N)
+                  for i in range(num_blocks):
+                      start_pos = i * (2.0 / num_blocks)
+                      end_pos = (i + 1) * (2.0 / num_blocks)
+                      start_idx = int(start_pos / dx)
+                      end_idx = int(end_pos / dx)
+                      h = h.at[start_idx:end_idx].set(0.5 + i * 0.2)
+                  h = h / jnp.sum(h) * N * dx
+                  if jnp.any(h > 1.0) or jnp.any(h < 0.0):
+                      continue
+                  candidates.append(h)
+          
+          else:
+              # Uniform-like with slight variation
+              base = 0.4
+              h = jnp.ones(N) * base
+              # Add small perturbations
+              for i in range(0, N, 20):
+                  pert = jnp.random.uniform(-0.1, 0.1)
+                  h = h.at[i].add(pert)
+              h = h / jnp.sum(h) * N * dx
+              if jnp.any(h > 1.0):
+                  h = h.clip(0.0, 1.0)
+              h = h / jnp.sum(h) * N * dx
+              candidates.append(h)
+          
+          # Return the best candidate
+          if not candidates:
+              # Fallback: uniform h=0.5 everywhere
+              h = jnp.ones(N) * 0.5
+              h = h / jnp.sum(h) * N * dx
+              if jnp.any(h > 1.0):
+                  h = jnp.ones(N) * 1.0 / 2.0
+              return {"h": h.tolist(), "note": "fallback uniform"}
+          
+          # Return all candidates as list
+          return {"candidates": [c.tolist() for c in candidates[:5]], "pattern": pattern, "N": N}
+
+new_skills:
+  - name: direct-construction-strategy
+    description: |
+      Build explicit step functions for the Erdős C₅ problem. Don't use gradient descent.
+      Manually construct piecewise constant functions with few breakpoints.
+    body: |
+      # Direct Construction Strategy for C₅ Minimum Overlap
+      
+      ## The Core Idea
+      
+      Instead of optimizing a latent vector with Adam for 59,000 steps (which gets stuck),
+      construct explicit step functions directly. The C₅ objective rewards specific
+      structural properties that can be built by hand.
+      
+      ## Key Patterns to Construct
+      
+      ### Pattern 1: Uniform with Compact Support
+      - h = c on [0, a], h = 0 on [a, 2]
+      - Constraint: c * a * 2 = 1 (integral over [0,2])
+      - This creates a single "bump" of constant height
+      
+      ### Pattern 2: Two-Plateau Symmetric
+      - h = a on [0, b], h = c on [1, 2], h = 0 elsewhere
+      - Symmetric around x=0.5 and x=1.5
+      - Allows separation of mass into two non-overlapping regions
+      
+      ### Pattern 3: Concentrated Mass
+      - h = 1 on [0.5, 1.5], h = 0 elsewhere (if integral permits)
+      - Maximum concentration of the function in the middle
+      
+      ### Pattern 4: Alternating Blocks
+      - h = different constant values on alternating intervals
+      - Can create interference patterns that reduce overlap
+      
+      ### Pattern 5: Three-Part Structure
+      - Low on [0, 0.5], High on [0.5, 1.0], Low on [1.0, 2]
+      - Triangle-like shape
+      
+      ## Construction Algorithm
+      
+      1. Choose a pattern from the above
+      2. Define step positions (breakpoints)
+      3. Set initial heights for each interval
+      4. Normalize to satisfy ∫h = 1 over [0,2]
+      5. Clip to [0,1] if needed (may require renormalization)
+      6. Compute c₅_bound using FFT correlation
+      7. Try multiple parameter variations of the same pattern
+      
+      ## Why This Works
+      
+      - The optimizer in the seed explores a continuous high-dimensional space randomly
+      - Direct construction explores a low-dimensional manifold of structured functions
+      - The C₅ objective likely has "valleys" that structured functions can slide into
+      - Random noise (latent + Adam) smears out these valleys
+      - Step functions with few breakpoints can find the right "shape" precisely
+      
+      ## Practical Tips
+      
+      - Start with 100 intervals, not 800
+      - Test 5-10 different constructions per evaluation
+      - Use probe_solution to rank before full evaluation
+      - If a pattern fails normalization, try adjusting heights
+      - Always verify: 0 ≤ h[i] ≤ 1 and |∑h[i]·dx - 1| < 0.01
+new_middlewares:
+  - name: construction_reminder
+    hook: before_model
+    description: |
+      Remind the solver to construct step functions directly, not optimize randomly.
+      Encourages complete rewrites of the optimizer paradigm.
+    implementation_py: |
+      def before_model(hook_input):
+          return "CONSTRAINT: Construct explicit step functions directly. Use 50-200 intervals. Generate 5-10 candidate patterns. Normalize for integral=1. Probe candidates before full eval. Do NOT use Adam optimization on latent vectors."

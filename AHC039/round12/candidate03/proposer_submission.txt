@@ -1,0 +1,256 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are a C++ polygon optimizer for axis-aligned fish capture. Goal: maximize (mackerels - sardines + 1).
+  
+  CRITICAL: The solution MUST be correct and compile for ALL 150 test cases. Any invalid output or crash scores 0.
+  
+  STRATEGY - Simple Grid-Based Rectangle Optimization:
+  
+  1. GRID BUILD (fast, O(N)):
+     - Build 200x200 grid over [0,100000]x[0,100000] with cell_size=500
+     - For each cell, count mackerels (M) and sardines (S)
+     - Precompute prefix sums for O(1) rectangle queries
+  
+  2. FIND HIGH-SCORE RECTANGLES:
+     - Try rectangles defined by grid cell boundaries
+     - Score = sum(cell_scores) for all cells in rectangle
+     - Use prefix sums for instant scoring
+  
+  3. RECTANGLE ENUMERATION:
+     - Enumerate rectangles anchored at high M-S cells
+     - Try all combinations of (min_row, max_row, min_col, max_col)
+     - Filter by perimeter constraint and vertex limit
+  
+  4. EDGE TUNING:
+     - For promising rectangles, try small adjustments (±5, ±10) to corners
+     - Re-score using prefix sums
+  
+  5. VALIDATION:
+     - Always ensure output: 4 <= vertices <= 1000, perimeter <= 400,000
+     - All coordinates in [0,100000]
+     - Simple non-self-intersecting check for axis-aligned rectangles
+  
+  6. MULTIPLE RESTARTS:
+     - Run 10-15 restarts with different random seeds
+     - Each: pick random high-M cell, enumerate rectangles, tune edges
+     - Output best valid rectangle found
+  
+  Tools:
+  - edit_solution: Replace EVOLVE-BLOCK with complete C++ implementing above
+  - evaluate_solution: Run C++ program, get score
+  - probe_solution: Can be used with grid-based rectangle scoring
+  - finish: Submit when you have a working solution
+
+  Preserve EVOLVE-BLOCK markers and exact I/O format (m then vertices). Ensure <2.0s execution.
+  KEY: Correctness first - if polygon is invalid, score is 0 for ALL test cases.
+skill_description: |
+  Simple grid-based rectangle optimization. Build 200x200 grid with prefix sums, enumerate rectangles anchored at high M-S cells, filter by constraints, tune edges, run 10-15 restarts. Focus on correctness for all 150 test cases.
+skill_body: |
+  # Grid-Based Rectangle Optimization Strategy
+  
+  ## Phase 1: Grid Construction
+  - Create 200x200 grid with cell_size=500 (covers [0,100000]x[0,100000])
+  - For each fish, increment appropriate cell counts (M for mackerel, S for sardine)
+  - Compute 2D prefix sums for O(1) rectangle queries
+  
+  ## Phase 2: Rectangle Scoring
+  - Rectangle score = prefix_sum(max_x, max_y) - prefix_sum(min_x-1, max_y) - prefix_sum(max_x, min_y-1) + prefix_sum(min_x-1, min_y-1)
+  - M-S score = mackerel_count - sardine_count + 1
+  
+  ## Phase 3: Rectangle Enumeration
+  - Find cells with highest M-S ratio
+  - For each such cell, try rectangles extending in various directions
+  - Track valid rectangles (perimeter <= 400,000, vertices <= 1000, coords in range)
+  
+  ## Phase 4: Edge Tuning
+  - For top candidates, try small adjustments to corner coordinates (±5, ±10)
+  - Re-compute score using prefix sums
+  - Keep best adjustments
+  
+  ## Phase 5: Multiple Restarts
+  - Run 10-15 restarts with different seeds
+  - Each restart: perturb starting cell, enumerate rectangles, tune
+  - Output best rectangle across all restarts
+  
+  ## Implementation Notes
+  - Use efficient prefix sum computation
+  - Rectangle vertices: (min_x, min_y), (max_x, min_y), (max_x, max_y), (min_x, max_y) - 4 vertices
+  - Always validate output before evaluation
+  - Time budget: <2.0s per evaluation
+tool_descriptions:
+  edit_solution: 'Replace EVOLVE-BLOCK with C++ implementing grid-based rectangle optimization:
+  
+    1. Build 200x200 grid, count M/S per cell
+    2. Compute 2D prefix sums for O(1) rectangle scoring
+    3. Enumerate rectangles anchored at high M-S cells
+    4. Filter by perimeter <= 400,000 and vertices <= 1000
+    5. Try edge tuning with ±5, ±10 adjustments
+    6. Run 10-15 random restarts, output best rectangle
+  
+    Ensure <2.0s execution, valid output format (4 vertices for rectangles).'
+  evaluate_solution: Run C++ program. Returns score (mackerels-sardines+1), validity, and remaining evaluations (budget=30). Each run has ~2.0s search window.
+  probe_solution: Useful for rapid rectangle scoring using grid-based prefix sums. Can evaluate many variants cheaply before full evaluation.
+  finish: End when you have a working grid-based rectangle optimizer that produces valid output for all test cases.
+sampling:
+  temperature: 0.9
+  top_p: 0.95
+  top_k: 30
+  max_tokens: 14336
+agent:
+  max_iterations: 60
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 15000
+new_tools:
+- name: score_rectangle
+  description: |
+    Score a rectangle using precomputed grid prefix sums. Returns (mackerel_count, sardine_count, net_score) for the given axis-aligned rectangle. Much faster than full evaluation - can be called many times during search. Use to quickly rank rectangle candidates before committing to full evaluation.
+  input_schema:
+    type: object
+    properties:
+      min_x:
+        type: integer
+      min_y:
+        type: integer
+      max_x:
+        type: integer
+      max_y:
+        type: integer
+  implementation_py: |
+    def run(ctx, args):
+        min_x = args.get("min_x", 0)
+        min_y = args.get("min_y", 0)
+        max_x = args.get("max_x", 100000)
+        max_y = args.get("max_y", 100000)
+        
+        # Clamp to valid range
+        min_x = max(0, min_x)
+        min_y = max(0, min_y)
+        max_x = min(100000, max_x)
+        max_y = min(100000, max_y)
+        
+        if min_x > max_x or min_y > max_y:
+            return {"error": "invalid rectangle", "mackerel_count": 0, "sardine_count": 0, "net_score": 0}
+        
+        # Parse fish data from program
+        program_text = ctx.get_program()
+        fish_data = []
+        for line in program_text.split('\n'):
+            line = line.strip()
+            if line.startswith('fish[') or 'mackerel' in line.lower() or 'sardine' in line.lower():
+                try:
+                    if '[' in line and ']' in line:
+                        parts = line.replace('fish[', '').replace(']', '').split(',')
+                        if len(parts) >= 2:
+                            x_str, y_str = parts[0].strip(), parts[1].strip()
+                            x, y = int(x_str), int(y_str)
+                            # Determine type
+                            if 'mackerel' in line.lower():
+                                fish_type = 1
+                            elif 'sardine' in line.lower():
+                                fish_type = -1
+                            else:
+                                continue
+                            fish_data.append((x, y, fish_type))
+                except:
+                    continue
+        
+        # Build grid and prefix sums
+        grid_size = 200
+        cell_size = 100000 // grid_size
+        
+        grid_m = [[0] * grid_size for _ in range(grid_size)]
+        grid_s = [[0] * grid_size for _ in range(grid_size)]
+        
+        for x, y, ftype in fish_data:
+            cx = x // cell_size
+            cy = y // cell_size
+            if 0 <= cx < grid_size and 0 <= cy < grid_size:
+                if ftype == 1:
+                    grid_m[cy][cx] += 1
+                else:
+                    grid_s[cy][cx] += 1
+        
+        # Compute prefix sums
+        pref_m = [[0] * (grid_size + 1) for _ in range(grid_size + 1)]
+        pref_s = [[0] * (grid_size + 1) for _ in range(grid_size + 1)]
+        
+        for i in range(grid_size):
+            for j in range(grid_size):
+                pref_m[i + 1][j + 1] = pref_m[i][j + 1] + pref_m[i + 1][j] - pref_m[i][j] + grid_m[i][j]
+                pref_s[i + 1][j + 1] = pref_s[i][j + 1] + pref_s[i + 1][j] - pref_s[i][j] + grid_s[i][j]
+        
+        # Clamp rectangle to grid
+        grid_min_x = min_x // cell_size
+        grid_min_y = min_y // cell_size
+        grid_max_x = max(0, (max_x // cell_size + 1) - 1)
+        grid_max_y = max(0, (max_y // cell_size + 1) - 1)
+        
+        grid_min_x = max(0, min(grid_min_x, grid_size - 1))
+        grid_min_y = max(0, min(grid_min_y, grid_size - 1))
+        grid_max_x = max(0, min(grid_max_x, grid_size - 1))
+        grid_max_y = max(0, min(grid_max_y, grid_size - 1))
+        
+        if grid_min_x > grid_max_x or grid_min_y > grid_max_y:
+            return {"mackerel_count": 0, "sardine_count": 0, "net_score": 0}
+        
+        # Query prefix sums
+        m_count = pref_m[grid_max_y + 1][grid_max_x + 1] - pref_m[grid_min_y][grid_max_x + 1] - pref_m[grid_max_y + 1][grid_min_x] + pref_m[grid_min_y][grid_min_x]
+        s_count = pref_s[grid_max_y + 1][grid_max_x + 1] - pref_s[grid_min_y][grid_max_x + 1] - pref_s[grid_max_y + 1][grid_min_x] + pref_s[grid_min_y][grid_min_x]
+        
+        net_score = m_count - s_count + 1
+        
+        return {"mackerel_count": m_count, "sardine_count": s_count, "net_score": net_score}
+new_skills:
+- name: rectangle-optimization-guide
+  description: |
+    Use grid prefix sums to efficiently score rectangles. Build grid, enumerate rectangles anchored at high M-S cells, tune edges, run restarts. Always ensure valid output.
+  body: |
+    # Rectangle Optimization Guide
+    
+    ## Core Strategy
+    
+    Use 2D prefix sums over a 200x200 grid to enable O(1) rectangle scoring. This allows rapid exploration of many rectangle candidates during optimization.
+    
+    ## Step 1: Grid Construction
+    
+    - Create 200x200 grid with cell_size=500
+    - Count mackerels and sardines in each cell
+    - Compute 2D prefix sums: P[i][j] = sum of all cells (0,0) to (i,j)
+    
+    ## Step 2: Rectangle Scoring
+    
+    - Rectangle from (min_x, min_y) to (max_x, max_y) has score:
+      score = P[max_y/500][max_x/500] - P[min_y/500-1][max_x/500] - P[max_y/500][min_x/500-1] + P[min_y/500-1][min_x/500-1]
+    
+    ## Step 3: Rectangle Enumeration
+    
+    - Find cells with highest mackerel-to-sardine ratio
+    - For each high-ratio cell, try rectangles extending outward
+    - Enumerate (min_row, max_row, min_col, max_col) combinations
+    
+    ## Step 4: Edge Tuning
+    
+    - For promising rectangles, try small adjustments to corners (±5, ±10)
+    - Re-score using prefix sums
+    - Keep best adjustments
+    
+    ## Step 5: Multiple Restarts
+    
+    - Run 10-15 restarts with different seeds
+    - Each: pick random high-M cell, enumerate rectangles, tune
+    - Output best rectangle found
+    
+    ## Critical Constraints
+    
+    - Rectangle has exactly 4 vertices: (min_x, min_y), (max_x, min_y), (max_x, max_y), (min_x, max_y)
+    - Perimeter = 2*(max_x - min_x + max_y - min_y) must be <= 400,000
+    - All coordinates in [0, 100000]
+    - Always output valid rectangle - invalid output scores 0 for ALL test cases
+new_middlewares:
+- name: validity_reminder
+  hook: before_model
+  description: 'Remind solver to ensure output is always a valid axis-aligned rectangle with 4 vertices, correct I/O format, and within constraints.'
+  implementation_py: |
+    def before_model(hook_input):
+        return "Generate a valid axis-aligned rectangle with 4 vertices (min_x,min_y), (max_x,min_y), (max_x,max_y), (min_x,max_y). Ensure perimeter <= 400000, vertices <= 1000, all coords in [0,100000]. Invalid output scores 0 for all 150 test cases."

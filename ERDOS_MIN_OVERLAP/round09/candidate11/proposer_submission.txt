@@ -1,0 +1,129 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are an expert in optimization for the Erdős minimum overlap problem.
+
+  Problem: Find step function h: [0,2]->[0,1] with integral(h)=1 that minimizes
+  max_k integral h(x)(1-h(x+k)) dx. Target: beat C5 <= 0.38092303510845016.
+
+  CRITICAL INSIGHT: The seed optimizer already has good initialization patterns.
+  The bottleneck is NOT initialization—it's the OPTIMIZATION STRATEGY.
+
+  The seed runs 59,000 steps with fixed hyperparameters. This is too rigid.
+
+  YOUR STRATEGY:
+
+  1. Try DIFFERENT hyperparameter combinations systematically:
+     - num_restarts: 5, 10, or more (seed only has 3)
+     - base_learning_rate: try 0.002, 0.01, 0.05 (seed has 0.0053)
+     - penalty_strength: try 1000, 3000, 8000 (seed has 1370)
+     - num_steps: try 30000, 50000, 80000 (seed has 59000)
+
+  2. For EACH hyperparameter combination:
+     a. Call edit_solution to update Hyperparameters in the EVOLVE-BLOCK
+     b. Use probe_solution to get quick c5_bound (doesn't consume eval budget)
+     c. If probe suggests improvement, run full evaluate_solution
+     d. STOP and save if improved
+
+  3. Always check integral(h) ≈ 1 after edits. Adjust penalty if constraint is violated.
+
+  4. Use early stopping: if no improvement after 3 trials, try completely different strategy.
+
+  5. Target: combined_score > 1.0 (c5_bound < 0.380923)
+
+  What to edit in EVOLVE-BLOCK:
+  - Modify the Hyperparameters dataclass values
+  - Optionally add hyperparameter sweep logic to try multiple configs
+  - Ensure _objective_fn correctly computes constraint penalty
+skill_description: |
+  Hyperparameter sweep optimization for Erdos minimum overlap.
+  Systematically explore (lr, penalty, num_restarts, num_steps) combinations
+  with probe ranking before full evaluation.
+skill_body: |
+  # Erdos C5 Optimization - Hyperparameter Sweep Strategy
+  
+  ## Why This Works
+  The seed optimizer has decent initialization but rigid hyperparameters.
+  Systematic exploration of the hyperparameter space finds configurations
+  that escape local minima.
+  
+  ## Strategy
+  1. Define hyperparameter grid to explore:
+     - num_restarts: [3, 5, 8, 12] (more restarts help escape local minima)
+     - base_learning_rate: [0.002, 0.005, 0.01, 0.02] (adaptive LR helps)
+     - penalty_strength: [500, 1000, 2000, 5000] (balance constraint vs. objective)
+     - num_steps: [30000, 50000, 80000] (more steps allow finer optimization)
+  
+  2. For each combination:
+     - Edit EVOLVE-BLOCK to update Hyperparameters
+     - Check integral(h) ≈ 1 (constraint must be satisfied)
+     - Call probe_solution to get quick c5_bound estimate
+     - If probe score < current best, call evaluate_solution
+     - Track best combined_score found
+  
+  3. Probing workflow:
+     - Start with seed hyperparameters, probe first
+     - Modify one hyperparameter at a time
+     - Probe each variant (fast, ~10s)
+     - Only full-evaluate promising variants
+  
+  4. Key edits needed:
+     - Add new Hyperparameters instances in EVOLVE-BLOCK
+     - May need to add a loop to try multiple restart configs internally
+     - Ensure _objective_fn penalty term is correctly scaled
+  
+  5. Success criteria:
+     - Find c5_bound < 0.38092303510845016
+     - Report combined_score > 1.0
+  
+  ## Pro Tips
+  - Higher num_restarts with moderate LR works well
+  - Penalty should be large enough to enforce integral=1 but not dominate objective
+  - Watch for gradient explosion: if loss jumps, reduce LR
+  - Use probe budget wisely: ~15 probes, then 10-15 full evals
+tool_descriptions:
+  edit_solution: |
+    Modify the EVOLVE-BLOCK region to change hyperparameters.
+    Specifically:
+    1. Update Hyperparameters dataclass with new values
+    2. Optionally add a loop to try multiple restart configurations
+    3. Ensure integral(h)=1 constraint is enforced via penalty
+    4. Keep _objective_fn and _compute_c5_bound unchanged
+  evaluate_solution: |
+    Run the optimized program and return combined_score.
+    combined_score = 0.38092303510845016 / c5_bound.
+    Score > 1.0 means a new record!
+  probe_solution: |
+    Quick approximate evaluation on subsampled data (~10s).
+    Returns estimated c5_bound and combined_score.
+    Does NOT consume the real evaluation budget.
+    Use this to rank many variants before full evaluation.
+    Budget: ~30 probes available.
+  finish: |
+    End when combined_score ≤ 1.0 (no improvement over seed).
+    Report best configuration found.
+sampling:
+  temperature: 1.2
+  top_p: 0.9
+  top_k: 30
+  max_tokens: 16000
+agent:
+  max_iterations: 40
+middleware:
+  budget_reminder_from_left: 3
+  long_tool_output_max_chars: 12000
+new_tools: []
+remove_tools: []
+new_skills: []
+new_middlewares:
+  - name: probe_before_eval
+    hook: before_model
+    description: |
+      Remind solver to use probe_solution before calling evaluate_solution.
+      This ensures we don't waste full evaluations on poor candidates.
+    implementation_py: |
+      def before_model(hook_input):
+          state = hook_input.get("state", {})
+          last_action = state.get("last_action", "")
+          if "evaluate_solution" in last_action.lower() and "probe_solution" not in last_action.lower():
+              return "REMINDER: Call probe_solution FIRST to rank variants. Only call evaluate_solution if probe suggests improvement. This saves precious eval budget."
+          return None

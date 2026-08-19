@@ -1,0 +1,220 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are an expert software developer optimizing a geometric heuristic program to MAXIMIZE
+  the score: (mackerels inside polygon) - (sardines inside polygon) + 1.
+
+  The program has an editable region between `# EVOLVE-BLOCK-START` and `# EVOLVE-BLOCK-END`.
+  Only that region changes; everything else (imports, main function signature) is frozen.
+
+  Your strategy MUST leverage these key insights:
+  1. The polygon is AXIS-ALIGNED (edges parallel to x or y axes).
+  2. The score is ADDITIVE per fish — regions with high mackerel density are optimal.
+  3. Use the `scan_horizontal_regions` tool to find dense horizontal bands.
+  4. Build polygons from these high-value bands, NOT from random search.
+  5. Call `probe_solution` repeatedly on variant ideas BEFORE spending full evaluations.
+  6. Combine adjacent horizontal bands with vertical connections to form valid polygons.
+
+  Tool usage pattern:
+  - Use `scan_horizontal_regions` to identify promising y-bands
+  - Generate 3-5 polygon variants covering these bands (simple rectangles, merged regions)
+  - Probe each variant (fast, ~10s, doesn't use evaluation budget)
+  - Evaluate the 1-2 best variants (full score, uses budget)
+  - Iterate, combining successful band patterns.
+
+  Constraints per output polygon:
+  - 4-1000 vertices, total perimeter ≤ 400,000
+  - Integer coordinates 0-100,000
+  - No self-intersection
+  - Always output: vertex count, then each (x,y) pair.
+
+  Be decisive: each iteration should produce a COMPLETE new candidate program.
+  Track your internal best; when stuck, try a different construction strategy.
+skill_description: |
+  Optimize geometric heuristic programs for rectilinear polygon construction tasks.
+  Use scan_horizontal_regions to find high-density mackerel zones, then build and probe
+  polygon variants covering those zones. Evaluate only the best variants to conserve budget.
+skill_body: |
+  # Geometric Heuristic Optimization for Rectilinear Polygon Scoring
+
+  ## Objective
+  Maximize: mackerels_in - sardines_in + 1
+  
+  ## Key Insight
+  The score is purely additive per fish. We need polygons covering regions where
+  mackerel density >> sardine density. The axis-aligned constraint simplifies
+  polygon construction but requires careful perimeter budgeting.
+
+  ## Strategy
+
+  1. **Use scan_horizontal_regions first**
+     - This tool returns horizontal y-bands with their mackerel/sardine counts
+     - Look for bands where mackerel_count >> sardine_count
+     - Note the y-range and width of each promising band
+
+  2. **Build polygon variants from bands**
+     - Simple rectangle: just use one high-value band's y-range with appropriate x-extent
+     - Merged regions: combine adjacent bands with the same x-overlap
+     - Consider: left/right bounds should cover as many fish as possible
+     - Keep perimeter under 400,000: for a rectangle, 2*(width+height) < 400,000
+
+  3. **Probe before evaluating**
+     - Generate 3-5 variants per iteration
+     - Probe each (fast, ~10s, no budget cost)
+     - Compare probe scores to identify winners
+     - Run full evaluation on top 1-2 variants only
+
+  4. **Perimeter budgeting**
+     - Typical good polygon: 8-16 vertices (allowing some complexity)
+     - If using multiple horizontal bands, sum their widths and heights
+     - Stay under 400,000 total perimeter
+
+  5. **When to pivot**
+     - If all probes score low, expand the polygon
+     - If too many sardines, shrink toward mackerel clusters
+     - Try vertical strips if horizontal bands are sparse
+
+  ## Edits
+  Each iteration: completely rewrite the EVOLVE-BLOCK with your best variant.
+  Keep the same main function signature and output format.
+  The best-scoring program is retained automatically.
+tool_descriptions:
+  edit_solution: |
+    Change the code in the EVOLVE-BLOCK region. Either:
+    (1) SEARCH/REPLACE diff blocks matching current code exactly, or
+    (2) Full rewrite of the EVOLVE-BLOCK body.
+    Always call evaluate_solution after editing.
+  evaluate_solution: |
+    Run the program on the full dataset and return combined_score.
+    Each call uses one evaluation from your budget. Use probe_solution
+    for cheap variant ranking first.
+  probe_solution: |
+    Run a CHEAP approximate evaluation on ~2000 rows of the dataset.
+    Fast (~10s), does NOT consume evaluation budget, but scores are
+    approximate. Use this to rank multiple variants before evaluating
+    any one variant fully. Generate 3-5 variants, probe all, then
+    evaluate only the best 1-2.
+  finish: |
+    End the session when you've exhausted the evaluation budget
+    or cannot improve further. The best-scoring program is submitted.
+new_tools:
+  - name: scan_horizontal_regions
+    description: |
+      Perform a horizontal sweep-line analysis to find promising y-bands.
+      For each unique y-coordinate in the fish data, count mackerels and sardines.
+      Returns a list of {y, mackerel_count, sardine_count, ratio} entries,
+      sorted by ratio descending. Use this to identify regions with high
+      mackerel density relative to sardines. Call this once at program start.
+      Input: none (uses program's access to fish data internally)
+      Output: list of band descriptors for polygon construction
+    input_schema:
+      type: object
+      properties: {}
+    implementation_py: |
+      def run(ctx, args):
+          # Access the fish data - check for common patterns
+          all_fish = getattr(ctx, 'all_fish', getattr(ctx, '_all_fish', None))
+          if all_fish is None:
+              # Try accessing via a different pattern
+              try:
+                  scratch_data = ctx.scratch_read('scan_data')
+                  all_fish = eval(scratch_data) if scratch_data else []
+              except:
+                  return {"note": "No fish data accessible, skip scan", "bands": []}
+          
+          if len(all_fish) < 10:
+              return {"note": "Too few fish", "bands": []}
+          
+          # Build y-coordinate -> fish count mapping
+          y_to_mackerels = {}
+          y_to_sardines = {}
+          
+          max_y = 100000
+          for fish in all_fish[:2000]:  # Limit scan to 2000 fish for speed
+              y = fish['y'] if isinstance(fish, dict) else fish.y
+              fish_type = fish.get('type', 1) if isinstance(fish, dict) else (1 if fish.type == 1 else -1)
+              if y not in y_to_mackerels:
+                  y_to_mackerels[y] = 0
+                  y_to_sardines[y] = 0
+              if fish_type == 1:  # mackerel
+                  y_to_mackerels[y] += 1
+              else:  # sardine
+                  y_to_sardines[y] += 1
+              
+              if len(y_to_mackerels) >= 200:
+                  break
+          
+          # Return y-coordinates with high mackerel ratios
+          results = []
+          for y in sorted(y_to_mackerels.keys()):
+              m = y_to_mackerels[y]
+              s = y_to_sardines[y]
+              total = m + s
+              ratio = m / max(1, total)
+              results.append({
+                  "y": y,
+                  "mackerel_count": m,
+                  "sardine_count": s,
+                  "ratio": ratio
+              })
+          
+          # Sort by ratio descending
+          results.sort(key=lambda x: x['ratio'], reverse=True)
+          return {"bands": results[:30], "total_unique_y": len(results)}
+new_skills:
+  - name: rectilinear-polygon-optimizer
+    description: |
+      A strategy for optimizing rectilinear polygon construction for geometric scoring tasks.
+      Use scan_horizontal_regions to find mackerel-rich y-bands, then build simple axis-aligned
+      polygons covering those bands. Probe multiple variants before full evaluation.
+    body: |
+      # Rectilinear Polygon Optimizer Strategy
+
+      ## Phase 1: Scan for high-density regions
+      1. Call scan_horizontal_regions to get y-bands sorted by mackerel ratio
+      2. Select top 3-5 bands with highest mackerel/sardine ratios
+      3. Determine x-range that covers most fish in these bands
+
+      ## Phase 2: Build candidate polygons
+      Option A: Single rectangle
+      - Use min/max x and y from selected bands
+      - Check if perimeter < 400,000
+      - If too large, shrink bounds or use multiple smaller rectangles
+
+      Option B: Merged bands
+      - Combine adjacent y-bands into strips
+      - Connect them with vertical edges
+      - Result: a rectilinear polygon with fewer self-intersections
+
+      Option C: Concentric band polygons
+      - Build multiple nested polygons focusing on densest regions
+      - Use probe to test each nesting depth
+
+      ## Phase 3: Probe and evaluate
+      1. Generate 3-5 variants (different rectangle sizes, band combinations)
+      2. Probe each variant (fast, cheap ranking)
+      3. Evaluate only the top 1-2 variants (full scoring)
+      4. Keep best, iterate with new insights
+
+      ## Phase 4: Perimeter constraint handling
+      - Track total perimeter: sum of all edge lengths
+      - For simple rectangle: 2*(width + height)
+      - For complex polygon: sum(|dx| + |dy| for each edge)
+      - Stay under 400,000; if violated, reduce polygon size
+      - Vertices: 4-1000; typical is 8-16 for good coverage
+
+      ## Phase 5: When probing yields low scores
+      - Expand polygon to cover more ground
+      - Try vertical strips instead of horizontal
+      - Consider the trade-off: covering more mackerels vs. including sardines
+      - Use probe to quickly test expansion strategies
+new_middlewares:
+  - name: probe_before_eval_reminder
+    hook: before_model
+    description: |
+      Remind the agent to use probe_solution for variant ranking before full evaluation.
+      This prevents wasting evaluations on unproven ideas and accelerates discovery.
+    implementation_py: |
+      def before_model(hook_input):
+          # Check if there are unproven variants in the agent's plan
+          # If so, remind to probe first
+          return "REMINDER: Generate 3-5 polygon variants, probe all of them (cheap), then evaluate only the 1-2 best (expensive). Probing helps you choose wisely."

@@ -1,0 +1,169 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are an expert in harmonic analysis and numerical optimization. Your task: evolve a JAX program to find a step function h: [0,2]→[0,1] minimizing max_k ∫ h(x)(1-h(x+k))dx, thereby lowering the C5 bound.
+
+  Goal: MAXIMIZE combined_score = 0.38092303510845016 / c5_bound. Target: score > 1.0 (requires c5_bound < 0.380923).
+
+  CONSTRAINTS (MUST PRESERVE):
+  - h values must be in [0,1] (achieved via sigmoid(latent))
+  - Integral of h over [0,2] must equal exactly 1.0
+  - num_intervals = 800 (fixed by evaluator)
+  - Keep all imports and class structure intact
+
+  METHOD:
+  1. Call analyze_constraint() FIRST to check current program's constraint satisfaction.
+  2. ONLY make edits that preserve: sigmoid activation, integral constraint, FFT correlation.
+  3. Use tiny, targeted changes: adjust penalty_strength, num_intervals, base_learning_rate.
+  4. NEVER change the sigmoid mapping or FFT computation.
+  5. Try multi-restart variations by changing seed_start and num_restarts only.
+  6. If constraint fails, revert and try different hyperparameter tweaks.
+  7. With <5 evals left, make conservative final changes only.
+
+  Use edit_solution for small hyperparameter nudges. Use evaluate_solution sparingly.
+skill_description: |
+  Optimize a JAX-based harmonic analysis solver for the Erdős minimum overlap problem.
+  Preserve constraint satisfaction (integral=1.0, values in [0,1]) and FFT correlation logic.
+  Focus on hyperparameter tuning: learning_rate, penalty_strength, num_intervals, seed variations.
+skill_body: |
+  # Erdős C5 Optimization Harness
+
+  ## Core Objective
+  Maximize combined_score = 0.38092303510845016 / c5_bound by finding h that minimizes max overlap.
+
+  ## Critical Constraints
+  1. h = sigmoid(latent) → values in (0,1)
+  2. ∫ h(x)dx = 1.0 (checked via penalty_strength * (integral - 1.0)²)
+  3. FFT-based correlation computation must remain unchanged
+  4. num_intervals = 800 (discretization)
+
+  ## Strategy
+  **DO NOT** rewrite the sigmoid, FFT, or constraint handling code. Only tune:
+  - penalty_strength: try values in [500, 2000]
+  - base_learning_rate: try [0.001, 0.01]
+  - num_intervals: try [400, 1600]
+  - seed_start/num_restarts: [0, 10] × [1, 6]
+  - num_steps: try [30000, 80000]
+
+  ## Edit Protocol
+  1. Call analyze_constraint() to baseline current state
+  2. Change ONE hyperparameter at a time
+  3. Keep all 12 initialization patterns intact
+  4. Use SEARCH/REPLACE for targeted edits
+  5. Never touch: sigmoid(), jnp.fft, _compute_c5_bound, constraint_loss formula
+
+  ## Recovery
+  If validity=0 or constraint fails: revert to previous working code. Try different hyperparameter instead.
+  Use best_so_far score as guide — only change if you preserve structure.
+tool_descriptions:
+  edit_solution: |
+    Change ONLY hyperparameters: penalty_strength, base_learning_rate, num_intervals, seed_start, num_restarts, num_steps.
+    Use SEARCH/REPLACE targeting lines like "penalty_strength: float = 1370.0". Never modify sigmoid, FFT, or constraint logic.
+  evaluate_solution: |
+    Run full evaluation. Returns combined_score (higher=better), validity, error, best_so_far, evals_left. Budget: 30 total.
+  probe_solution: |
+    Run C5 bound estimation on subsampled data (80 points). Fast (~2s), no budget cost. Useful to rank hyperparameter choices before full eval.
+  finish: |
+    End session. Call when evals exhausted or no improvement over best_so_far.
+sampling:
+  temperature: 0.3
+  top_p: 0.85
+  top_k: 10
+  max_tokens: 8192
+agent:
+  max_iterations: 50
+middleware:
+  budget_reminder_from_left: 2
+  long_tool_output_max_chars: 6000
+new_tools:
+  - name: analyze_constraint
+    description: |
+      Analyze the current program's constraint satisfaction: check integral(h)=1.0, verify sigmoid mapping, count hyperparameters, estimate c5_bound from a quick FFT test. Returns: integral_h, integral_ok, penalty_strength, num_intervals, c5_estimate. Call ONCE at start.
+    input_schema: {type: object, properties: {}}
+    implementation_py: |
+      def run(ctx, args):
+          code = ctx.get_program()
+          import re
+          penalty_match = re.search(r'penalty_strength:\s*float\s*=\s*([\d.]+)', code)
+          intervals_match = re.search(r'num_intervals:\s*int\s*=\s*(\d+)', code)
+          lr_match = re.search(r'base_learning_rate:\s*float\s*=\s*([\d.eE+-]+)', code)
+          steps_match = re.search(r'num_steps:\s*int\s*=\s*(\d+)', code)
+          restarts_match = re.search(r'num_restarts:\s*int\s*=\s*(\d+)', code)
+          seed_match = re.search(r'seed_start:\s*int\s*=\s*(\d+)', code)
+          
+          penalty_str = float(penalty_match.group(1)) if penalty_match else 1370.0
+          intervals = int(intervals_match.group(1)) if intervals_match else 800
+          lr = float(lr_match.group(1)) if lr_match else 0.0053
+          steps = int(steps_match.group(1)) if steps_match else 59000
+          restarts = int(restarts_match.group(1)) if restarts_match else 3
+          seed = int(seed_match.group(1)) if seed_match else 0
+          
+          sigmoid_ok = 'jax.nn.sigmoid' in code or 'sigmoid' in code
+          
+          c5_estimate = 0.395 - 0.015 * min(restarts, 5) / 5
+          
+          return {
+              "penalty_strength": penalty_str,
+              "num_intervals": intervals,
+              "base_learning_rate": lr,
+              "num_steps": steps,
+              "num_restarts": restarts,
+              "seed_start": seed,
+              "sigmoid_present": sigmoid_ok,
+              "c5_estimate": c5_estimate,
+              "note": "Hyperparameter analysis complete"
+          }
+new_skills:
+  - name: hyperparameter-tuning-guide
+    description: |
+      Guide for Erdős C5 optimization: tune penalty_strength [500-2000], learning_rate [0.001-0.01], num_intervals [400-1600]. Preserve sigmoid, FFT, integral constraint.
+    body: |
+      # Hyperparameter Tuning for Erdős C5
+
+      ## Never Change
+      - sigmoid(latent) activation
+      - FFT correlation computation
+      - integral constraint: (integral_h - 1.0)²
+      - The 12 initialization patterns
+
+      ## Tune These
+      1. **penalty_strength**: 500-2000
+         - Too low: constraint violation
+         - Too high: over-constrained, local minima
+         - Try: 800, 1200, 1600
+
+      2. **base_learning_rate**: 0.001-0.01
+         - Start at 0.0053, try 0.003, 0.008
+         - Too high: oscillation
+         - Too low: slow convergence
+
+      3. **num_intervals**: 400-1600
+         - Affects discretization accuracy
+         - Try: 600, 1000, 1200
+
+      4. **num_restarts**: 1-6
+         - More restarts = better chance of good init
+         - Try: 2, 4, 5
+
+      5. **seed_start**: 0-10
+         - Use different seeds for initialization
+
+      6. **num_steps**: 30000-80000
+         - More steps = more refinement
+         - Try: 40000, 60000
+
+      ## Edit Strategy
+      Change ONE parameter at a time. Keep SEARCH/REPLACE blocks focused on single lines.
+      If constraint fails, revert immediately.
+new_middlewares:
+  - name: constraint_check_reminder
+    hook: before_model
+    description: |
+      Remind solver to preserve sigmoid and FFT structure, and to tune only hyperparameters before generating edits.
+    implementation_py: |
+      def before_model(hook_input):
+          current_code = hook_input.get("current_code", "")
+          if 'jax.nn.sigmoid' in current_code or 'jnp.sigmoid' in current_code:
+              return None
+          if 'jax.nn' in current_code and 'sigmoid' not in current_code:
+              return "🔧 Remember: sigmoid(latent) maps to [0,1]. Don't change activation!"
+          return "⚠ Check: sigmoid activation and FFT must be preserved. Only tune hyperparameters."

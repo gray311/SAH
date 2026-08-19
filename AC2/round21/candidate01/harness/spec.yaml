@@ -1,0 +1,164 @@
+schema: h2spec/1.0
+system_prompt: 'You are an expert in functional analysis for C2 maximization.
+
+Current best: 0.8962799441554086 (step functions).
+
+CRITICAL STRATEGY: Step functions are COMBINATORIAL objects. Small parameter tweaks fail because the landscape is discrete. You must explore different TOPOLOGIES: number of pieces, their widths and heights.
+
+OVERALL STRATEGY - COMBINATORIAL SEARCH:
+
+PHASE 1 (iterations 1-12): EXPLORE VARYING TOPOLOGIES
+  1. Call generate_structural_mutations to see available topology options
+  2. Generate structural mutations: change number of pieces, recombine intervals, swap heights
+  3. Probe 4-6 variants, evaluate best
+  4. If beats record: continue. If not after 3 iterations: try different mutation type
+
+PHASE 2 (iterations 13-22): AGGRESSIVE RECONFIGURATION
+  1. If stuck, keep record but try 5-7 pieces (fewer/more than current)
+  2. Try asymmetric splits: left/right peak heights different
+  3. Probe 5 variants, evaluate best
+  4. If gradient norm < 0.001: reinitialize 50% of parameters with larger noise (std=0.15)
+
+PHASE 3 (iterations 23-30): DIVERSIFICATION
+  1. Try 4-6 new topologies with varied peak/valley patterns
+  2. Probe 3 variants, evaluate best
+  3. Submit if c2 > 0.8962799441554086
+
+RULES:
+- NEVER make tiny parameter tweaks - change STRUCTURE (number of pieces, widths)
+- ALWAYS probe 4-6 variants before any full eval (budget: 30 probes + evals)
+- If iteration 12+ with no improvement: try different topology via generate_structural_mutations
+- Use structural mutations, not gradient ascent on step parameters
+
+TOOL USAGE:
+- generate_structural_mutations: Call to create 5-7 structural variants (different piece configs)
+- probe_solution: Call on 4-6 variants to rank them cheaply
+- evaluate_solution: Call ONLY on top 1-2 by probe score'
+skill_description: Combinatorial search for step-function topologies. Explore different piece counts, widths, and height assignments. Avoid tiny parameter tweaks - change structure.
+skill_body: '# C2 Maximizer: Combinatorial Search Protocol
+
+## Core Principle
+
+Step functions are discrete combinatorial objects. Small parameter tweaks (expand peak by 5%, adjust height by 0.1) fail because the landscape is rugged and discrete. You must explore different TOPOLOGIES: number of pieces, their widths and heights.
+
+## Phase 1: Topology Exploration (iterations 1-12)
+
+Step 1: Generate Structural Mutations
+- Call generate_structural_mutations to get available topology options
+- Note the TOTAL number of pieces in each variant
+
+Step 2: Select and Probe Variants (4-7 variants)
+
+Mutation types:
+A. Change piece count: Try 4, 6, 8, 10, 12 pieces (vary from current)
+B. Recombine: Merge adjacent intervals, then split one wider interval
+C. Swap heights: Take current heights, permute them among pieces
+D. Asymmetric split: Keep same piece count but make left/right peaks different
+E. Staircase: Create monotonic increase/decrease then plateau
+
+Step 3: Probe and Evaluate
+- Call probe_solution on 4-6 variants
+- Rank by probe score
+- Evaluate top 1-2 variants
+- If beats record: continue with structural refinement
+- If no improvement after 3 iterations: switch to Phase 2
+
+## Phase 2: Aggressive Reconfiguration (iterations 13-22)
+
+Step 1: Try Different Piece Counts
+- Keep record best c2
+- Generate variants with 4, 5, 6, 7, 8 pieces (opposite direction from current)
+- Probe 5 variants
+
+Step 2: Asymmetric and Novel Patterns
+- Try left/right peak height differences (1.0 vs 2.0, 0.8 vs 2.5)
+- Try 3-peak configurations
+- Probe 5 variants, evaluate best
+
+Step 3: Gradient Reinitialization (if gradient norm < 0.001)
+- Reinitialize 50% of parameters with std=0.15 (larger noise)
+- Probe 2 variants, evaluate best
+
+## Phase 3: Diversification (iterations 23-30)
+
+Step 1: Novel Topologies
+- Try 4-6 new configurations with varied patterns
+- Examples: 4-level function, 3-level asymmetric, wide base + narrow peak
+- Probe 3 variants, evaluate best
+
+Step 2: Final Submission
+- If c2 > 0.8962799441554086: submit
+- Report best combined_score and winning configuration
+
+## Key Rules
+
+- NEVER make tiny parameter tweaks - change STRUCTURE (piece count, widths)
+- ALWAYS probe 4-6 variants before any full eval (budget: 30 probes + evals)
+- If stuck: try DIFFERENT topology via generate_structural_mutations (not same mutation type)
+- Use structural mutations: merge/split intervals, permute heights, vary piece counts'
+tool_descriptions:
+  edit_solution: 'Edit the EVOLVE-BLOCK by creating structural mutations: (1) change number of intervals, (2) merge/split intervals, (3) reassign height values to pieces. Example: for a 11-interval function, try 9 or 13 intervals. To merge: combine two adjacent intervals into one with average height. To split: divide an interval into two with heights from a predefined set (1.0, 1.5, 2.0, 2.5). Ensure f >= 0 everywhere.'
+  evaluate_solution: 'Full evaluation of the piecewise function. Budget: 30 total. Call ONLY after probe_solution ranking (top 1-2 by probe) or in Phase 3 reinitialization. Report c2, combined_score, and function structure.'
+  probe_solution: 'Approximate score on 10% subsample. FAST. Budget: 30 probes. Use to rank 4-6 structural variants before full eval. Phase 1: probe 4-6 topology variants. Phase 2: probe 5 variants. Phase 3: probe 3 variants.'
+  finish: 'Report best combined_score, the winning piece structure (number of pieces, their widths and heights), and key insights from the combinatorial search.'
+sampling:
+  temperature: 1.1
+  top_p: 0.95
+  top_k: 30
+agent:
+  max_iterations: 30
+middleware:
+  budget_reminder_from_left: 3
+  long_tool_output_max_chars: 15000
+new_tools:
+- name: generate_structural_mutations
+  description: |
+    Generate 5 structural variants: (1) asymmetric peaks left-low/right-high, (2) asymmetric left-high/right-low, (3) three-level staircase, (4) wide base + narrow peak, (5) multi-level with valley. Each variant changes TOPOLOGY significantly.
+  input_schema:
+    type: object
+    properties: {}
+  implementation_py: 'def run(ctx, args):\n    n = 600\n    variants = []\n    \n    variants.append({"description": "Asymmetric: left low, right high", "edit": "f = f.at[int(0.08*n):int(0.30*n)].set(1.0); f = f.at[int(0.30*n):int(0.60*n)].set(2.8); f = f.at[int(0.60*n):int(0.80*n)].set(1.2)"})\n    \n    variants.append({"description": "Asymmetric: left high, right low", "edit": "f = f.at[int(0.08*n):int(0.35*n)].set(2.8); f = f.at[int(0.35*n):int(0.65*n)].set(1.0); f = f.at[int(0.65*n):int(0.82*n)].set(1.4)"})\n    \n    variants.append({"description": "Three-level staircase", "edit": "f = f.at[int(0.10*n):int(0.30*n)].set(0.9); f = f.at[int(0.30*n):int(0.50*n)].set(1.9); f = f.at[int(0.50*n):int(0.75*n)].set(2.4); f = f.at[int(0.75*n):int(0.90*n)].set(1.1)"})\n    \n    variants.append({"description": "Wide base with narrow high peak", "edit": "f = f.at[int(0.12*n):int(0.88*n)].set(1.1); f = f.at[int(0.38*n):int(0.62*n)].set(3.2)"})\n    \n    variants.append({"description": "Multi-level with valley", "edit": "f = f.at[int(0.10*n):int(0.35*n)].set(1.8); f = f.at[int(0.35*n):int(0.45*n)].set(0.6); f = f.at[int(0.45*n):int(0.70*n)].set(2.6); f = f.at[int(0.70*n):int(0.85*n)].set(1.3)"})\n    \n    return {"variants": variants[:5], "num_variants": 5}'
+new_skills:
+- name: combinatorial-step-search
+  description: Structural search for step function topologies. Explore different piece counts and configurations.
+  body: '# Combinatorial Step Function Search
+
+## Core Strategy
+
+Step functions are COMBINATORIAL objects. The seed has ~11 intervals. Small parameter tweaks fail - you must explore different TOPOLOGIES.
+
+## Phase 1: Topology Exploration (iterations 1-12)
+
+1. Call generate_structural_mutations to get available topology options
+2. Generate 5-7 structural variants:
+   - Change piece count (try 4, 6, 8, 10, 12 pieces)
+   - Merge adjacent intervals
+   - Split intervals
+   - Reassign heights (permute or scale)
+   - Create asymmetric patterns
+3. Probe 4-6 variants
+4. Evaluate best, continue if improvement
+
+## Phase 2: Aggressive Reconfiguration (iterations 13-22)
+
+1. Try piece counts opposite to current (if 11 pieces, try 6-8)
+2. Try novel asymmetric patterns (left/right peak differences)
+3. Probe 5 variants, evaluate best
+4. If gradient norm < 0.001: reinitialize with std=0.15
+
+## Phase 3: Diversification (iterations 23-30)
+
+1. Try 4-6 new topologies with varied patterns
+2. Probe 3 variants, evaluate best
+3. Submit if c2 > 0.8962799441554086
+
+## Key Rules
+
+- NEVER tiny parameter tweaks - change STRUCTURE (piece count, widths)
+- ALWAYS probe 4-6 variants before full eval
+- If stuck: try DIFFERENT topology via generate_structural_mutations'
+new_middlewares:
+- name: enforce_structural_diversity
+  hook: before_tool
+  description: enforces structural mutation diversity
+  implementation_py: 'def before_tool(hook_input):\n    tool = hook_input.get("tool_name", "")\n    iteration = hook_input.get("iteration", 0)\n    \n    if tool == "evaluate_solution":\n        probes_used = hook_input.get("probes_used", 0)\n        if probes_used < 4:\n            return "Budget alert: Probe at least 4 variants before full eval."\n    \n    if iteration >= 12:\n        return "Iteration 12+: Try a different topology via generate_structural_mutations. Check if you are repeating the same piece count."\n    \n    return None'

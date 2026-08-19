@@ -1,0 +1,260 @@
+schema: h2spec/1.0
+system_prompt: |
+  Erdos minimum overlap problem (C5): Find h: [0,2]->[0,1] minimizing max_k integral h(x)(1-h(x+k))dx.
+  
+  CONSTRAINT: integral(h) = 1 exactly. h values in [0,1].
+  
+  Current best: C5 <= 0.38092303510845016 (combined_score = 1.0).
+  
+  GOAL: Find h achieving c5_bound < 0.38092303510845016 (combined_score > 1.0).
+  
+  KEY INSIGHT: The optimal solution is likely a BIPARTITE STEP FUNCTION (two-level function that transitions from 1 to 0 at some threshold t).
+  
+  STRATEGY:
+  1. Use bipartite_searcher to generate bipartite functions with different thresholds
+  2. For threshold t: h(x) = 1 if x < t, h(x) = 0 if x >= t
+  3. The integral constraint integral(h) = 1 means: t * 1 + (2-t) * 0 = t = 1, so t should be near 1.0
+  4. But we can perturb: try t in [0.8, 1.2] and let the optimizer fine-tune
+  5. Call probe_solution on candidates before full evaluation
+  6. Only evaluate when c5_bound < 0.375
+  
+  WORKFLOW:
+  - Generate 5-10 bipartite candidates with thresholds in [0.7, 1.3]
+  - Probe all to screen for c5_bound < 0.382
+  - Evaluate the best 2-3
+  - If no improvement, try multi-modal patterns
+skill_description: |
+  Use bipartite_searcher to generate step functions, probe to screen, evaluate best candidates.
+  Always start with bipartite functions - they naturally minimize overlap.
+skill_body: |
+  # Bipartite Strategy for Erdos C5
+  
+  ## Core Idea
+  The optimal solution is likely a bipartite (two-level) step function: h(x) = 1 for x < t, h(x) = 0 for x >= t.
+  
+  ## Why Bipartite?
+  - Simple structure that naturally avoids overlapping with its shifted versions
+  - The integral constraint is easy to satisfy: integral(h) = t, so t should be ~1.0
+  - Maximum overlap occurs at small k, but bipartite functions have minimal correlation
+  
+  ## Step-by-Step Workflow
+  
+  1. CALL bipartite_searcher to generate candidates with different thresholds
+     - Try t in [0.7, 1.3] to explore beyond the integral constraint
+     - The optimizer can fine-tune the exact values
+  
+  2. CALL probe_solution on each candidate
+     - Screen for c5_bound < 0.382 (cheaper than full eval)
+     - Keep candidates with good scores
+  
+  3. CALL evaluate_solution on the best 2-3 candidates
+     - If combined_score > 1.0, finish
+  
+  4. If no improvement in 3 rounds, try multi-modal patterns
+     - Three peaks at different locations
+     - Asymmetric distributions
+  
+  ## Key Rules
+  - START with bipartite_searcher (generate 5-10 candidates)
+  - Always use probe_solution first
+  - Evaluate only on candidates with c5_bound < 0.382
+  - BIPARTITE functions are your best bet for this problem
+new_tools:
+- name: bipartite_searcher
+  description: |
+    Generate bipartite (two-level) step function candidates.
+    For a threshold t, creates h(x) = 1 if x < t, h(x) = 0 if x >= t.
+    The integral constraint integral(h)=1 means t should be ~1.0, but we try t in [0.7, 1.3].
+    
+    This is the PRIMARY strategy for Erdos C5: bipartite functions naturally minimize overlap.
+    
+    Parameters:
+    - num_thresholds: number of thresholds to try (default 10)
+    - threshold_range: range [t_min, t_max] for thresholds (default [0.7, 1.3])
+    return: list of h arrays, one for each threshold
+  input_schema:
+    type: object
+    properties:
+      num_thresholds:
+        type: integer
+        default: 10
+      threshold_range:
+        type: object
+        properties:
+          min:
+            type: number
+            default: 0.7
+          max:
+            type: number
+            default: 1.3
+  implementation_py: |
+    def run(ctx, args):
+        import numpy as np
+        num_thresholds = args.get("num_thresholds", 10)
+        t_min = args.get("threshold_range", {}).get("min", 0.7)
+        t_max = args.get("threshold_range", {}).get("max", 1.3)
+        
+        # Get current program to extract num_intervals
+        h_text = ctx.get_best_program()
+        if h_text is None or h_text == "":
+            return {"error": "No best program available"}
+        
+        # Extract num_intervals from the program
+        import re
+        match = re.search(r'num_intervals:\s*(\d+)', h_text)
+        if not match:
+            return {"error": "Could not extract num_intervals from program"}
+        
+        num_intervals = int(match.group(1))
+        domain = 2.0
+        
+        thresholds = np.linspace(t_min, t_max, num_thresholds)
+        h_candidates = []
+        
+        for t in thresholds:
+            # Create bipartite function: h(x) = 1 if x < t, else 0
+            x = np.linspace(0, domain, num_intervals)
+            h = np.where(x < t, 1.0, 0.0)
+            h_candidates.append(h)
+        
+        return {
+            "candidates": h_candidates,
+            "thresholds_used": thresholds.tolist(),
+            "num_intervals": num_intervals,
+            "note": f"Generated {len(h_candidates)} bipartite candidates with thresholds {t_min:.2f}-{t_max:.2f}"
+        }
+- name: best_bipartite_selector
+  description: |
+    From a list of bipartite candidates (with their thresholds), select the best ones
+    by computing c5_bound for each using a fast approximation.
+    
+    This is a METATool that helps the solver decide which bipartite candidates
+    are worth evaluating.
+    
+    Input: list of (threshold, h_array) pairs, optionally with precomputed probe scores.
+    Output: ranked list of candidates, recommendation of which to evaluate.
+  input_schema:
+    type: object
+    properties:
+      candidates:
+        type: array
+        items:
+          type: object
+          properties:
+            threshold:
+              type: number
+            h:
+              type: array
+              items:
+                type: number
+      probe_scores:
+        type: array
+        items:
+          type: number
+  implementation_py: |
+    def run(ctx, args):
+        import numpy as np
+        
+        candidates = args.get("candidates", [])
+        probe_scores = args.get("probe_scores", [None] * len(candidates))
+        
+        results = []
+        for i, (threshold, h) in enumerate(candidates):
+            if probe_scores[i] is not None:
+                c5_bound = 0.38092303510845016 / probe_scores[i]  # approximate
+            else:
+                # Compute c5_bound for this bipartite function
+                h_padded = np.pad(h, (0, len(h)))
+                j_padded = np.pad(1.0 - h, (0, len(h)))
+                corr_fft = np.fft.fft(h_padded) * np.conj(np.fft.fft(j_padded))
+                correlation = np.fft.ifft(corr_fft).real
+                dx = 2.0 / len(h)
+                c5_bound = float(np.max(correlation * dx))
+            
+            results.append({
+                "threshold": threshold,
+                "c5_bound": c5_bound,
+                "combined_score": 0.38092303510845016 / c5_bound if c5_bound > 0 else float('inf')
+            })
+        
+        # Sort by combined_score (descending)
+        results.sort(key=lambda x: x["combined_score"], reverse=True)
+        
+        top_k = results[:5]  # Return top 5 candidates
+        
+        return {
+            "ranked_candidates": top_k,
+            "recommended_for_eval": top_k[:2],  # Recommend top 2 for full evaluation
+            "note": f"Ranked {len(candidates)} bipartite candidates, top 2 recommended for full evaluation"
+        }
+new_skills:
+- name: bipartite-first-strategy
+  description: |
+    Generate bipartite candidates, probe all, evaluate best 2.
+    Bipartite functions are the best bet for Erdos C5.
+  body: |
+    # Bipartite-First Strategy for Erdos C5
+    
+    ## Core Principle
+    The optimal solution for the Erdos C5 problem is likely a BIPARTITE STEP FUNCTION (two levels: 1 and 0).
+    
+    ## Why This Works
+    - Bipartite functions h(x) = 1 for x < t, 0 for x >= t have minimal self-overlap
+    - The correlation structure is simple: correlation decays monotonically with shift k
+    - This avoids the complex patterns that cause high overlap in random functions
+    
+    ## Step-by-Step Workflow
+    
+    1. CALL bipartite_searcher with num_thresholds=10, threshold_range=[0.7, 1.3]
+       - Generates 10 bipartite functions with different thresholds
+       - t=1.0 gives integral(h)=1.0 (satisfies constraint)
+       - t in [0.7, 1.3] explores around the constraint
+    
+    2. CALL probe_solution on EACH of the 10 candidates
+       - Screen all candidates cheaply (~10 seconds each vs minutes for full eval)
+       - Keep candidates with combined_score > 0.98 (c5_bound < 0.375)
+    
+    3. CALL evaluate_solution on the top 2 candidates
+       - Full evaluation confirms if we beat the record
+       - If combined_score > 1.0, finish
+    
+    4. If no improvement after 2 full evals:
+       - Try multi-modal: three peaks at x = 0.3, 1.0, 1.7
+       - Try asymmetric: h(x) = 1 for x in [0, 0.5] U [1.5, 2.0]
+    
+    ## Key Rules
+    - ALWAYS start with bipartite_searcher (10 candidates)
+    - PROBE ALL candidates before any full evaluation
+    - Evaluate only top 2-3 candidates
+    - BIPARTITE is your best bet - don't waste evals on random patterns
+new_middlewares:
+- name: bipartite_reminder
+  hook: before_model
+  description: |
+    Remind solver to use bipartite strategy first
+  implementation_py: |
+    def before_model(hook_input):
+        history = hook_input.get("history", [])
+        
+        # Check if we've already done bipartite search
+        has_bipartite = any("bipartite_searcher" in str(turn.get("tools_used", [])) for turn in history)
+        
+        if not has_bipartite:
+            return "REMINDER: Start with bipartite_searcher to generate bipartite step function candidates. This is your best chance at beating the current record!"
+        
+        # Check if we've probed all bipartite candidates
+        has_probed = any("probe_solution" in str(turn.get("tools_used", [])) for turn in history)
+        if has_bipartite and not has_probed:
+            return "REMINDER: You've generated bipartite candidates. CALL probe_solution on all of them before full evaluation!"
+        
+        return None
+sampling:
+  temperature: 0.8
+  top_p: 0.9
+  top_k: 15
+  max_tokens: 16000
+agent:
+  max_iterations: 50
+middleware:
+  budget_reminder_from_left: 6
+  long_tool_output_max_chars: 8000

@@ -1,0 +1,59 @@
+schema: h2spec/1.0
+system_prompt: |
+  Mission: SURPASS 0.8963 (C2 record by step functions). Maximize C2 = ||f*f||2^2 / ((integral(f))^2 ||f*f||_inf).
+  To BEAT 0.8963: 1) Call math_inspector to analyze. 2) Use probe_solution: Test 15+ variants per family BEFORE evaluate_solution. 3) Only 3-4 full evals total. 4) When probe beats baseline, commit to evaluate.
+  STRATEGY: Try piecewise-linear with optimized nodes (50-100 intervals). If stuck: try Gaussian mixtures or 3-level asymmetric steps.
+  WORKFLOW: Call math_inspector ONCE. Probe 10+ variants across 3+ families. Evaluate top 3-4. If no improvement after 5 evals: RESET.
+tool_descriptions:
+  edit_solution: Change EVOLVE-BLOCK code. Use SEARCH/REPLACE or full rewrite. Call evaluate_solution after.
+  evaluate_solution: Run program through evaluator. Returns combined_score, validity, error, best score, evaluations remaining. Limited to ~20 evals.
+  probe_solution: Cheaply score on subsampled data. Fast, separate budget. Use to rank variants, then confirm top candidates.
+  finish: End session when done. Best-scoring program submitted automatically.
+  math_inspector: Analyze current function representation and provide guidance for BEATING C2 record 0.8963. Reports: detected class, why steps work, what could exceed, mutation recipes. Call ONCE at start and when stuck.
+new_tools:
+  - name: math_inspector
+    description: Analyze current function representation and provide guidance for BEATING C2 record 0.8963. Reports: detected class, why steps achieve 0.8963, what could exceed, mutation recipes.
+    input_schema:
+      type: object
+      properties: {}
+    implementation_py: |
+      def run(ctx, args):
+          program = ctx.get_program()
+          text = str(program)
+          analysis = {"detected_class": "unknown", "why_steps_work": "Sharp transitions creating concentrated convolution", "exceed_strategies": [], "mutation_recipe": None}
+          if "piecewise-linear" in text.lower():
+              analysis["detected_class"] = "Piecewise-linear"
+              analysis["exceed_strategies"] = ["Optimize node placement", "Increase intervals to 200-300"]
+              analysis["mutation_recipe"] = "3 intervals, nodes at 0.2, 0.5, 0.8"
+          elif "step" in text.lower():
+              analysis["detected_class"] = "Step functions"
+              analysis["why_steps_work"] = "Current record: 0.8963"
+              analysis["exceed_strategies"] = ["Optimize heights", "Narrower support", "3-level steps"]
+              analysis["mutation_recipe"] = "3-level asymmetric: 0.15n-0.35n at 1.0, 0.35n-0.65n at 2.0, 0.65n-0.85n at 1.0"
+          return analysis
+sampling:
+  temperature: 1.5
+  top_p: 0.99
+  top_k: 50
+  max_tokens: 16384
+agent:
+  max_iterations: 60
+middleware:
+  budget_reminder_from_left: 3
+  long_tool_output_max_chars: 8000
+new_middlewares:
+  - name: force_record_breaking
+    hook: before_model
+    description: Ensures executor tries to beat 0.8963
+    implementation_py: |
+      def before_model(hook_input):
+          state = hook_input.get("state", {})
+          iteration = state.get("iteration", 0)
+          eval_count = state.get("eval_count", 0)
+          best_score = state.get("best_score", 1.0)
+          if iteration == 0:
+              return "STRATEGY: You have ~20 evals. Step record is 0.8963. To BEAT it, you need new representations. Call math_inspector first"
+          if eval_count >= 5 and best_score <= 0.897:
+              return "RECORD_BAR: Used {} evals without beating 0.8963. Stop tuning. Switch family. Call math_inspector".format(eval_count)
+          return None
+"

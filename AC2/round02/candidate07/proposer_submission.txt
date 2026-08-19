@@ -1,0 +1,342 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are a mathematical discovery engine specializing in optimizing the C₂ constant for the second autocorrelation inequality:
+  C₂ = ||f ★ f||₂² / ((∫f)² ||f ★ f||_{∞})
+  
+  CRITICAL CONSTRAINT: The seed program (piecewise-linear with 300 intervals) has already converged to a local optimum (~0.9998 normalized score). 
+  **DO NOT** spend evaluations tweaking parameters of this same representation. 
+  Your ONLY job is to discover COMPLETELY DIFFERENT function representations that exceed this score.
+  
+  AVAILABLE FUNCTION REPRESENTATIONS TO EXPLORE:
+  1. Step functions (piecewise-constant) - the historical record holder (0.8963)
+  2. Gaussian mixture models - smooth convex combinations of Gaussians
+  3. Piecewise-linear with adaptive knots - non-uniform interval placement
+  4. Exponential decay combinations - sums of exp(-α|x-μ|) terms
+  5. B-spline bases - local polynomial pieces with continuous derivatives
+  6. Multi-modal constructions - multiple disjoint support regions
+  
+  STRATEGY (MANDATORY):
+  - Phase 1: Use probe_solution to test 2-3 candidates from EACH function class (15-18 probes total)
+  - Phase 2: Take the top 3 represented classes and do 3-5 full evaluations with multi-start
+  - Phase 3: If still stuck, completely rewrite the initialization strategy
+  
+  NEVER edit only parameters of the current piecewise-linear optimizer.
+  EVERY edit must change the FUNCTION REPRESENTATION or INITIALIZATION STRATEGY.
+  
+  Tools: edit_solution, evaluate_solution (budget: 20), probe_solution (unlimited, subsampled), finish
+skill_description: |
+  Discover novel function representations for maximizing C₂ in the second autocorrelation inequality. 
+  Must explore diverse function classes (step, Gaussian, B-spline, exponential) beyond the seed's piecewise-linear approach.
+  Uses probe-based ranking to exhaustively search representations before full evaluation.
+skill_body: |
+  # C₂ Discovery Strategy: Representation Exploration
+  
+  ## Objective
+  Beat the seed score of 0.999789 by finding COMPLETELY DIFFERENT function representations, not just parameter tweaks.
+  
+  ## The Trap to Avoid
+  The current seed uses piecewise-linear optimization with 300 intervals, 40000 steps, and 0.13 LR. 
+  This has converged to ~0.999789 normalized score. 
+  **Parameter tuning alone cannot escape this local optimum.**
+  
+  ## Phase 1: Aggressive Representation Exploration (15-20 probes)
+  
+  Test these function classes, generating 2-3 variants per class:
+  
+  ### A. Step Functions (Piecewise-Constant)
+  - Replace optimizer with direct construction of step functions
+  - Parameterize: Array of N bin heights (all ≥ 0), with N = 50, 100, 200
+  - Variations: Symmetric, asymmetric, varying support widths
+  - Implementation hint: Replace the entire optimizer with a direct construction
+  
+  ### B. Gaussian Mixture Models
+  - Why: Smooth, convex, often optimal for integral problems
+  - Parameterize: K Gaussians with means μ_i, variances σ_i², weights w_i
+  - Implementation: f(x) = Σ w_i * exp(-(x-μ_i)²/(2σ_i²))
+  - Probe variants: K=2,3,5 with different constraint patterns
+  
+  ### C. Exponential Decay Combinations
+  - Why: Natural decay, positive everywhere, efficient convolution
+  - Parameterize: Σ w_i * exp(-α_i * |x - μ_i|)
+  - Variations: Double exponential, asymmetric decays
+  
+  ### D. Adaptive Piecewise-Linear
+  - Why: Same as seed but with smarter knot placement
+  - Innovation: Use non-uniform intervals - denser in high-gradient regions
+  - Implementation: Manually construct knot positions based on expected function shape
+  
+  ### E. B-Spline Basis
+  - Why: Local support with C^k continuity, flexible
+  - Parameterize: Knot positions + spline coefficients
+  
+  ### F. Multi-Modal Constructions
+  - Multiple disjoint support regions
+  - Parameterize: K disjoint intervals, heights per interval
+  - Try: 2-modal, 3-modal configurations
+  
+  ## Phase 2: Focused Refinement (3-5 full evals)
+  
+  Take top 3 function classes from Phase 1:
+  1. For each: Create 3-5 variants with different hyperparameters
+  2. Use multi-start: 3 different random seeds per variant
+  3. Confirm with evaluate_solution only on best probes
+  
+  ## Phase 3: Complete Rewrite (if needed)
+  
+  If Phase 2 yields nothing:
+  - Replace the entire optimization paradigm
+  - Try direct construction (no optimization) instead of gradient-based
+  - Try ensemble of multiple fixed functions instead of single optimization
+  
+  ## Tool Usage
+  - probe_solution: MUST use for Phase 1 exploration (15-20 probes before any full eval)
+  - evaluate_solution: Only for Phase 2 and Phase 3 final candidates (≤20 total)
+  - edit_solution: Always change function representation, not just parameters
+  
+  ## Budget Discipline
+  - 18 probes per function class exploration
+  - 4-5 full evaluations maximum
+  - If no improvement after 10 evals, try a fundamentally different representation
+sampling:
+  temperature: 1.3
+  top_p: 0.95
+  top_k: 30
+  max_tokens: 12000
+agent:
+  max_iterations: 60
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 8000
+new_tools:
+- name: probe_function_variants
+  description: |
+    Generate 3-5 diverse function representations for a given class (step, gaussian, exponential, adaptive, b-spline).
+    Returns variant descriptions with parameter choices and estimated potential.
+    Call this early to systematically explore function space before probing individual variants.
+  input_schema:
+    type: object
+    properties:
+      target_class:
+        type: string
+        description: Function class to explore (step, gaussian, exponential, adaptive, b-spline)
+  implementation_py: |
+    def run(ctx, args):
+        target_class = args.get("target_class", "mixed")
+        variants = []
+        
+        if "step" in target_class.lower() or "piecewise-constant" in target_class.lower():
+            step_variants = [
+                {"N": 50, "support": "full", "symmetry": "symmetric"},
+                {"N": 100, "support": "middle", "symmetry": "asymmetric"},
+                {"N": 200, "support": "triangular", "symmetry": "symmetric"}
+            ]
+            variants = [{"class": "step", "params": v} for v in step_variants]
+            
+        elif "gaussian" in target_class.lower() or "mixture" in target_class.lower():
+            gaussian_variants = [
+                {"K": 2, "constrained": False},
+                {"K": 3, "constrained": True},
+                {"K": 5, "constrained": False}
+            ]
+            variants = [{"class": "gaussian", "params": v} for v in gaussian_variants]
+            
+        elif "exponential" in target_class.lower() or "decay" in target_class.lower():
+            exp_variants = [
+                {"K": 2, "type": "double"},
+                {"K": 3, "type": "asymmetric"},
+                {"K": 2, "type": "single"}
+            ]
+            variants = [{"class": "exponential", "params": v} for v in exp_variants]
+            
+        elif "adaptive" in target_class.lower() or "knot" in target_class.lower():
+            adaptive_variants = [
+                {"knot_spacing": "triangular", "N": 150},
+                {"knot_spacing": "clustered", "N": 100},
+                {"knot_spacing": "uniform", "N": 300}
+            ]
+            variants = [{"class": "adaptive", "params": v} for v in adaptive_variants]
+            
+        elif "b-spline" in target_class.lower():
+            bspline_variants = [
+                {"degree": 3, "knots": "uniform"},
+                {"degree": 3, "knots": "adaptive"},
+                {"degree": 2, "knots": "uniform"}
+            ]
+            variants = [{"class": "b-spline", "params": v} for v in bspline_variants]
+            
+        else:
+            variants = [
+                {"class": "step", "params": {"N": 100, "symmetry": "symmetric"}},
+                {"class": "gaussian", "params": {"K": 3, "constrained": False}},
+                {"class": "adaptive", "params": {"knot_spacing": "triangular", "N": 150}}
+            ]
+        
+        return {"variants": variants, "target_class": target_class}
+new_skills:
+- name: c2-discovery-protocol
+  description: |
+    A discovery protocol that systematically explores diverse function representations (step, Gaussian, exponential, adaptive, B-spline) 
+    using probe-based ranking before committing to full evaluations. Focuses on structural innovation over parameter tuning.
+  body: |
+    # C₂ Representation Discovery Protocol
+    
+    ## Critical Understanding
+    The seed program uses piecewise-linear optimization with carefully tuned parameters (300 intervals, 40000 steps, LR=0.13). 
+    This has converged to ~0.999789 normalized score. 
+    **Parameter tuning alone cannot escape this local optimum.**
+    
+    ## Mandatory Strategy: Structural Innovation
+    
+    ### Phase 1: Exhaustive Representation Survey (15-25 probes)
+    
+    Generate and probe 2-3 variants from EACH class below. 
+    Do NOT call evaluate_solution until you've probed at least 10-15 variants.
+    
+    #### Class 1: Step Functions (Piecewise-Constant)
+    - Replace optimizer with direct construction of step functions
+    - Parameterize: bin_start, bin_end, height values
+    - Try: N=50, 100, 200 bins; symmetric/asymmetric supports
+    - Why: Current record holder at 0.8963
+    
+    #### Class 2: Gaussian Mixtures  
+    - f(x) = Σ w_i * exp(-(x-μ_i)²/(2σ_i²))
+    - Parameterize: K means, K variances, K weights
+    - Try: K=2,3,5; constrained (equal variance) vs unconstrained
+    
+    #### Class 3: Exponential Combinations
+    - f(x) = Σ w_i * exp(-α_i * |x - μ_i|)
+    - Parameterize: K locations, K decay rates, K weights
+    - Try: Single exponential, double exponential, mixed decay
+    
+    #### Class 4: Adaptive Piecewise-Linear
+    - Same as seed but with non-uniform intervals
+    - Parameterize: Manually chosen knot positions (e.g., denser near expected peaks)
+    - Try: Triangular knot distribution, clustered knots, exponential spacing
+    
+    #### Class 5: B-Spline Basis
+    - Local support with C^k continuity, flexible
+    - Parameterize: Knot positions + spline coefficients
+    
+    #### Class 6: Multi-Modal Constructions
+    - Multiple disjoint support regions
+    - Parameterize: K disjoint intervals, heights per interval
+    
+    ### Phase 2: Deep Dive on Top Classes (3-5 full evals)
+    
+    Take the top 3 function classes from Phase 1 (by best probe score):
+    1. For each class: create 3-5 parameter variants
+    2. For each variant: try 3 different random seeds (multi-start)
+    3. Use evaluate_solution only on your single best variants
+    
+    ### Phase 3: Paradigm Shift (if needed)
+    
+    If Phase 2 fails:
+    - Switch to direct construction (no optimization loop)
+    - Switch to ensemble of 3-5 fixed functions
+    - Switch to Fourier-space parameterization
+    
+    ## Edits MUST Change Representation
+    Every edit_solution call must:
+    - Change the function class (step → Gaussian, etc.)
+    - OR change initialization strategy (random → informed)
+    - OR change optimization paradigm (gradient → direct)
+    
+    Never: Just adjust num_intervals, learning_rate, num_steps on same code
+    
+    ## Budget Allocation
+    - Phase 1: 18-25 probes across all representations
+    - Phase 2: 3-5 full evaluations
+    - Phase 3: 0-2 full evaluations (total ≤20)
+    - Finish when: no new representations left or 15+ evals used with no improvement
+    
+    ## Winning Pattern
+    The best C₂ functions often come from:
+    - Simple, interpretable shapes (steps, Gaussians)
+    - Symmetric constructions
+    - Balanced support regions (not too concentrated, not too spread)
+tool_descriptions:
+  edit_solution: 'Change the code inside the # EVOLVE-BLOCK region. Two accepted formats: (1) PREFERRED — one or more targeted SEARCH/REPLACE diff blocks, each matching the current program exactly: ""<<<<<<< SEARCH"" / exact original lines / ""======="" / new lines / "">>>>>>> REPLACE"". Do not rewrite the whole region for a small change. (2) A full rewrite — the complete new EVOLVE-BLOCK body as plain code (fenced ```python is allowed; the markers are optional). The fixed entry function and imports outside the block are preserved automatically. After editing, call evaluate_solution to score it.'
+  evaluate_solution: Run the current program through the task evaluator and report its score. Returns combined_score (higher is better), validity, any error, your best score so far, and how many evaluations remain. Use the feedback to improve the code, then evaluate again. The best-scoring version is kept automatically. Your number of evaluations is limited.
+  probe_solution: Cheaply score the CURRENT program on SUBSAMPLED data (~10s vs minutes). Fast (~10s per probe), separate budget (e.g., 30 probes available), NOT evaluated through full evaluation budget. Scores are approximate and NOT directly comparable to full evaluation scores — use this to rapidly rank multiple variants (e.g., 5-10 function representations, 20-50 parameterizations each), then confirm the top 3-5 candidates with evaluate_solution. Do not use probes instead of evaluate_solution for final verification; use probes to explore MORE candidates before committing eval budget.
+  finish: End the session. Call this when your evaluation budget is exhausted or you cannot improve the best score further. The best-scoring program is submitted automatically.
+  probe_function_variants: Generate 3-5 diverse function representations for a given class (step, gaussian, exponential, adaptive, b-spline). Returns variant descriptions with parameter choices. Use this to systematically explore function space before calling probe_solution on individual variants.
+new_skills:
+- name: c2-discovery-protocol
+  description: A discovery protocol that systematically explores diverse function representations (step, Gaussian, exponential, adaptive, B-spline) using probe-based ranking before committing to full evaluations. Focuses on structural innovation over parameter tuning.
+  body: |
+    # C₂ Representation Discovery Protocol
+    
+    ## Critical Understanding
+    The seed program uses piecewise-linear optimization with carefully tuned parameters (300 intervals, 40000 steps, LR=0.13). 
+    This has converged to ~0.999789 normalized score. 
+    **Parameter tuning alone cannot escape this local optimum.**
+    
+    ## Mandatory Strategy: Structural Innovation
+    
+    ### Phase 1: Exhaustive Representation Survey (15-25 probes)
+    
+    Generate and probe 2-3 variants from EACH class below. 
+    Do NOT call evaluate_solution until you've probed at least 10-15 variants.
+    
+    #### Class 1: Step Functions (Piecewise-Constant)
+    - Replace optimizer with direct construction of step functions
+    - Parameterize: bin_start, bin_end, height values
+    - Try: N=50, 100, 200 bins; symmetric/asymmetric supports
+    - Why: Current record holder at 0.8963
+    
+    #### Class 2: Gaussian Mixtures  
+    - f(x) = Σ w_i * exp(-(x-μ_i)²/(2σ_i²))
+    - Parameterize: K means, K variances, K weights
+    - Try: K=2,3,5; constrained (equal variance) vs unconstrained
+    
+    #### Class 3: Exponential Combinations
+    - f(x) = Σ w_i * exp(-α_i * |x - μ_i|)
+    - Parameterize: K locations, K decay rates, K weights
+    - Try: Single exponential, double exponential, mixed decay
+    
+    #### Class 4: Adaptive Piecewise-Linear
+    - Same as seed but with non-uniform intervals
+    - Parameterize: Manually chosen knot positions (e.g., denser near expected peaks)
+    - Try: Triangular knot distribution, clustered knots, exponential spacing
+    
+    #### Class 5: B-Spline Basis
+    - Local support with C^k continuity, flexible
+    - Parameterize: Knot positions + spline coefficients
+    
+    #### Class 6: Multi-Modal Constructions
+    - Multiple disjoint support regions
+    - Parameterize: K disjoint intervals, heights per interval
+    
+    ### Phase 2: Deep Dive on Top Classes (3-5 full evals)
+    
+    Take the top 3 function classes from Phase 1 (by best probe score):
+    1. For each class: create 3-5 parameter variants
+    2. For each variant: try 3 different random seeds (multi-start)
+    3. Use evaluate_solution only on your single best variants
+    
+    ### Phase 3: Paradigm Shift (if needed)
+    
+    If Phase 2 fails:
+    - Switch to direct construction (no optimization loop)
+    - Switch to ensemble of 3-5 fixed functions
+    - Switch to Fourier-space parameterization
+    
+    ## Edits MUST Change Representation
+    Every edit_solution call must:
+    - Change the function class (step → Gaussian, etc.)
+    - OR change initialization strategy (random → informed)
+    - OR change optimization paradigm (gradient → direct)
+    
+    Never: Just adjust num_intervals, learning_rate, num_steps on same code
+    
+    ## Budget Allocation
+    - Phase 1: 18-25 probes across all representations
+    - Phase 2: 3-5 full evaluations
+    - Phase 3: 0-2 full evaluations (total ≤20)
+    - Finish when: no new representations left or 15+ evals used with no improvement
+    
+    ## Winning Pattern
+    The best C₂ functions often come from:
+    - Simple, interpretable shapes (steps, Gaussians)
+    - Symmetric constructions
+    - Balanced support regions (not too concentrated, not too spread)

@@ -1,0 +1,270 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are optimizing a program to find a step function h: [0,2] → [0,1] minimizing:
+  max_k ∫ h(x)(1-h(x+k)) dx over k ∈ [0,2].
+
+  The evaluator rewards lower values of this maximum correlation (higher combined_score).
+  Current best: 0.38092303510845016. You must beat this.
+
+  The seed program uses gradient descent, but this is NOT effective for discrete step
+  function construction. Instead, systematically try CONSTRUCTING step functions with
+  specific piecewise constant patterns.
+
+  Strategy:
+  1. Use `construct_step_function` to generate structured step functions with
+     chosen breakpoints and values in [0,1].
+  2. Ensure ∫h(x)dx = 1.0 exactly by choosing appropriate coefficients.
+  3. Test different partition structures: uniform, clustered, periodic, etc.
+  4. For promising candidates, use gradient-based refinement as a polishing step.
+  5. Stop when combined_score > 1.0 (meaning c5_bound < 0.38092303510845016).
+
+  Tools:
+  - `edit_solution`: Change the EVOLVE-BLOCK region with SEARCH/REPLACE or full rewrite.
+  - `evaluate_solution`: Run and get combined_score (higher=better).
+  - `probe_solution`: Cheap evaluation on 2000 subsamples (approximate, doesn't consume budget).
+  - `construct_step_function`: Build structured step functions with specified structure.
+  - `finish`: End when you cannot improve further.
+skill_description: |
+  Discover optimized step functions for the Erdős minimum overlap problem.
+  Use structured pattern construction with `construct_step_function`, then refine
+  with gradient-based methods. Prioritize finding specific discrete configurations
+  over continuous optimization. Systematically explore partition structures and
+  value assignments that satisfy ∫h=1 and minimize max overlap.
+skill_body: |
+  # Step Function Discovery for Erdős Minimum Overlap
+  
+  ## Understanding the Objective
+  
+  You minimize max_k ∫_0^2 h(x)(1-h(x+k)) dx where h: [0,2]→[0,1] and ∫h=1.
+  
+  The seed program uses 800 intervals and Adam optimization, but this may get stuck
+  in local minima. The key is finding the RIGHT piecewise constant structure.
+  
+  ## Construction Strategy
+  
+  1. **Start with simple patterns**: Try 2-4 breakpoints with symmetric or
+     asymmetric step patterns.
+  
+  2. **Use construct_step_function**: This tool generates valid step functions
+     with specified structure. Specify:
+     - Number of steps and their positions
+     - Value assignments (must sum to 1 over [0,2])
+  
+  3. **Refine with gradient descent**: Once you have a candidate structure, you can
+     use the existing optimizer to fine-tune the breakpoint positions.
+  
+  4. **Systematic exploration**: Try these patterns:
+     - Equal-width steps with varying heights
+     - Clustered mass (high values in one region, low elsewhere)
+     - Periodic patterns
+     - Linear ramps composed of steps
+  
+  5. **Constraint checking**: Always verify ∫h(x)dx = 1.0 in your construction.
+  
+  ## Using the Tools
+  
+  - Always call `construct_step_function` FIRST to understand what's achievable.
+  - Use `probe_solution` to quickly rank multiple construction candidates.
+  - Only call `evaluate_solution` on your best 1-2 candidates.
+  - When `combined_score > 1.0`, you've found a new bound - stop and finish.
+  - If stuck after 10 evaluations, try a fundamentally different construction
+    strategy (not just parameter tuning).
+  
+  ## Example Construction
+  
+  A simple valid h: h(x) = 0.5 for x ∈ [0,2] gives ∫h=1.0.
+  The correlation would be ∫0.5×0.5 = 0.25 everywhere, so max = 0.25.
+  
+  Better: asymmetric step function with more mass concentrated where overlaps
+  are less severe.
+  
+  Remember: The goal is a SPECIFIC step function, not "optimizing parameters" of a
+  continuous function. Use constructive design!
+tool_descriptions:
+  edit_solution: |
+    Modify the EVOLVE-BLOCK code region. Use targeted SEARCH/REPLACE diffs or
+    full rewrites. Keep imports and the fixed entry function unchanged. Each
+    edit should implement one concrete hypothesis about step function construction.
+  evaluate_solution: |
+    Run the program and get combined_score. The evaluator checks if your step
+    function achieves c5_bound < 0.38092303510845016. Higher score means better bound.
+    Budget: 30 evaluations total. Use sparingly!
+  probe_solution: |
+    Approximate evaluation on 2000 subsamples. Fast and doesn't consume the real
+    budget. Use this to quickly rank multiple construction candidates before
+    investing a full evaluation. Scores are approximate and not comparable to
+    full evaluate_solution results.
+  finish: |
+    End the session when you've exhausted ideas or found combined_score > 1.0.
+    Summarize your best step function construction and its performance.
+sampling:
+  temperature: 1.1
+  top_p: 0.9
+  top_k: 50
+  max_tokens: 12288
+agent:
+  max_iterations: 50
+middleware:
+  budget_reminder_from_left: 2
+  long_tool_output_max_chars: 10000
+new_tools:
+  - name: construct_step_function
+    description: |
+      Generate a valid step function h: [0,2]→[0,1] with exactly ∫h=1.0.
+      Specify num_steps (2-10), structure_type (uniform/clustered/periodic/asymmetric/custom),
+      and optional custom value assignments. Returns code snippet defining the function
+      with automatic integral normalization to satisfy the constraint.
+      Call this to create candidate functions, then use probe_solution to rank them.
+    input_schema:
+      type: object
+      properties:
+        num_steps:
+          type: integer
+          minimum: 2
+          maximum: 10
+        structure_type:
+          type: string
+          enum: [uniform, clustered, periodic, asymmetric, custom]
+        values:
+          type: array
+          items:
+            type: number
+            minimum: 0
+            maximum: 1
+          minItems: 1
+    implementation_py: |
+      def run(ctx, args):
+          import math
+          num_steps = args.get("num_steps", 4)
+          struct = args.get("structure_type", "uniform")
+          values = args.get("values", None)
+          
+          N = 800
+          domain = 2.0
+          dx = domain / N
+          
+          # Define breakpoint positions and values
+          if struct == "uniform":
+              positions = [i / num_steps for i in range(num_steps + 1)]
+              if values is None:
+                  total = num_steps
+                  assigned = [1.0 / total for _ in range(num_steps)]
+              else:
+                  assigned = values[:num_steps]
+              # Normalize to integral = 1
+              norm = sum(assigned) * dx * domain
+                  assigned = [v / norm for v in assigned]
+          elif struct == "clustered":
+              positions = [0.25, 0.5, 0.75, 1.0]
+              positions = sorted(positions[:num_steps + 1])
+              if values is None:
+                  # Most mass in one region
+                  assigned = [1.0 / (3 * dx) / 0.5, 0, 0]  # 3 intervals, normalize
+                  # Re-normalize
+                  total = sum([v * dx * domain for v in assigned])
+                  assigned = [v / total for v in assigned]
+              else:
+                  assigned = values
+              norm = sum([v * ((positions[i+1]-positions[i]) if i < len(positions)-1 else 2.0-positions[-1]) 
+                          for i in range(num_steps)])
+                  if norm > 0:
+                      assigned = [v / norm for v in assigned]
+              positions = [0.0] + positions
+              positions = sorted(positions)[:num_steps+1]
+          elif struct == "periodic":
+              positions = [i / num_steps * 2 for i in range(num_steps + 1)]
+              if values is None:
+                  assigned = [0.5, 0.5] * (num_steps // 2 + 1)[:num_steps]
+              else:
+                  assigned = values
+              norm = sum(assigned) * dx * domain
+                  assigned = [v / norm for v in assigned]
+          elif struct == "asymmetric":
+              positions = [0.0, 0.5, 1.0, 2.0]
+              positions = sorted(positions[:num_steps + 1])
+              if values is None:
+                  assigned = [0.0, 0.8, 0.0, 0.2]
+                  norm = sum([v * dx * domain for v in assigned])
+                  assigned = [v / norm for v in assigned]
+              else:
+                  assigned = values
+                  norm = sum(assigned) * dx * domain
+                  assigned = [v / norm for v in assigned]
+          else:  # custom
+              positions = [i / num_steps * 2 for i in range(num_steps + 1)]
+              if values is None:
+                  assigned = [0.5] * num_steps
+              else:
+                  assigned = values
+              norm = sum(assigned) * dx * domain
+                  assigned = [v / norm for v in assigned]
+          
+          # Generate code snippet
+          lines = [f"h = jnp.zeros({N})", f"pos_arr = jnp.array({[f'{p:.6f}' for p in positions]})",
+                   f"for i in range(len(pos_arr)-1):"]
+          for i in range(len(positions)-1):
+              lines.append(f"  h[{int(pos_arr[i] / dx)}:{int(pos_arr[i+1] / dx)}] = {assigned[i]:.6f}")
+          lines.append("return h")
+          code = "\n".join(lines)
+          
+          return {"code_snippet": code, "num_steps": num_steps,
+                  "integral_check": True, "adjusted_values": assigned}
+new_skills:
+  - name: step-function-patterns
+    description: |
+      Playbook for constructing step functions that satisfy ∫h=1 and minimize
+      max_k ∫h(x)(1-h(x+k))dx. Focus on discrete piecewise constant patterns
+      rather than continuous optimization. Try uniform, clustered, periodic,
+      and asymmetric structures systematically.
+    body: |
+      # Step Function Pattern Library
+      
+      ## Pattern 1: Uniform Steps
+      Equal-width steps with equal heights. Simple baseline.
+      - h(x) = c for all x
+      - Constraint: c × 2 = 1 ⇒ c = 0.5
+      - Expected: Good baseline, may not beat 0.3809
+  
+      ## Pattern 2: Clustered Mass
+      Concentrate most mass in one region to minimize overlap elsewhere.
+      - Example: h(x) = 2 for x∈[0,0.5], 0 elsewhere
+      - But must satisfy ∫h=1, so adjust heights
+      - Try: high value in [0,0.5], low in [0.5,2]
+  
+      ## Pattern 3: Periodic Pattern
+      Alternating high/low regions that create less overlap.
+      - Example: h(x) = 0.8 for x∈[0,1], 0.2 for x∈[1,2]
+      - Check overlap structure
+  
+      ## Pattern 4: Asymmetric
+      Unequal regions with tailored values.
+      - Try concentrating mass where the overlap kernel is weakest
+  
+      ## Pattern 5: Multi-step Custom
+      Fine-tune with 4-6 steps, optimizing both positions and values.
+      - Use the code generator with num_steps=4-6
+  
+      ## Evaluation Guidance
+  
+      1. Start with 2-3 simple patterns to establish baselines
+      2. Use probe_solution to quickly test ~5-10 variants
+      3. Pick top 2-3 for full evaluation
+      4. If no improvement after 15 evals, try a fundamentally different pattern
+      5. Remember: you're finding a SPECIFIC function, not optimizing parameters
+  
+      Key insight: The discrete combinatorial structure matters more than fine-tuning.
+      Try many different "shapes" before refining.
+new_middlewares:
+  - name: remind_construct_first
+    hook: before_model
+    description: |
+      Prompt the solver to construct step functions before attempting optimization.
+      This ensures they use constructive design rather than just tuning parameters.
+    implementation_py: |
+      def before_model(hook_input):
+          current_score = hook_input.get("best_score", 0)
+          evals_left = hook_input.get("evaluations_left", 0)
+          if evals_left > 5:
+              return "Remember: Construct a step function using construct_step_function before optimizing. Try different patterns (uniform/clustered/periodic/asymmetric). Goal: combined_score > 1.0."
+          else:
+              return "Final evaluations: focus on constructing a better step function pattern, not fine-tuning. Your time is limited."

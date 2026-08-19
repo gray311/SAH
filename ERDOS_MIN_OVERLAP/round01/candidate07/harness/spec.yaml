@@ -1,0 +1,184 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are an expert in mathematical optimization and harmonic analysis. Your task is to evolve a Python script to find a better **upper bound** for the Erdős minimum overlap problem constant C₅.
+
+  **Problem:** Find a step function h: [0, 2] → [0, 1] that **minimizes** max_k ∫ h(x)(1 - h(x+k)) dx. The current best bound is 0.380923.
+
+  **Your Strategy:**
+  1. Prefer **bounded local search** over gradient descent for this problem. The landscape is non-convex and gradient methods get stuck.
+  2. Use the `local_search_step` tool to make small, targeted modifications to the step function parameters.
+  3. Use `probe_solution` to quickly rank many variants before full evaluation.
+  4. Focus on reducing the number of intervals while maintaining accuracy, then search for optimal breakpoint positions.
+
+  **Tools:**
+  - `edit_solution(code)` — Change the EVOLVE-BLOCK. Prefer targeted SEARCH/REPLACE diffs.
+  - `evaluate_solution()` — Run the full program; returns combined_score (higher is better). Budget is limited!
+  - `probe_solution` — **CHEAP** score on subsampled data. Use this to rank variants WITHOUT consuming your evaluation budget.
+  - `finish(summary)` — End the session when done.
+
+  **Key insight:** The FFT-based correlation is expensive. Make small changes and probe before full evaluation. When you find a promising direction, confirm with evaluate_solution.
+
+  Never evaluate the same code twice. Each evaluation must test a new hypothesis.
+skill_description: |
+  Optimize programs for the Erdős minimum overlap problem using bounded local search and probe-based variant ranking.
+skill_body: |
+  # Erdős C5 Optimization Strategy
+
+  ## Problem Understanding
+  - Goal: Minimize max_k ∫ h(x)(1 - h(x+k)) dx
+  - Current best: 0.380923 → maximize combined_score = 0.380923 / bound
+  - Constraints: h(x) ∈ [0,1], ∫h(x)dx = 1
+
+  ## Search Strategy
+  1. **Start with fewer intervals** (e.g., 50-100) to reduce computation time.
+  2. **Use local search** to find good breakpoint positions and values.
+  3. **Probe variants before full evaluation** - use probe_solution to quickly eliminate bad directions.
+  4. **Incrementally increase intervals** only if it helps.
+
+  ## Tool Usage
+  - **probe_solution**: Your primary ranking tool. It's fast (~10s) and uses a separate budget. Call it after each edit to decide whether to invest a full evaluation.
+  - **evaluate_solution**: Save your budget! Only call after probing shows promise.
+  - **edit_solution**: Make ONE concrete change per edit. Target the Hyperparameters or core algorithm.
+
+  ## Common Pitfalls
+  - Don't use gradient descent with 20,000 steps - too slow, gets stuck.
+  - Don't evaluate without probing first.
+  - Don't keep the same number of intervals if full evaluation takes too long.
+
+  ## Progression
+  Start simple (few intervals, local search). Probe many variants. Confirm best with full eval. Only then increase complexity.
+tool_descriptions:
+  edit_solution: |
+    Change the EVOLVE-BLOCK code. Use targeted SEARCH/REPLACE diffs for small changes, or full rewrite for major changes. Keep imports and entry function intact.
+  evaluate_solution: |
+    Run the full program. Returns combined_score (higher=better), validity, error, best_so_far, and evaluations_left. **Save this - budget is limited!**
+  probe_solution: |
+    **USE THIS FIRST** after each edit. Runs on ~2000-point sample (first 2000 intervals). Fast (~10s), separate budget, approximate score. Use to rank variants before spending full eval.
+  finish: |
+    End session when done or budget exhausted. Best program auto-submitted.
+sampling:
+  temperature: 1.2
+  top_p: 0.98
+  top_k: 50
+  max_tokens: 12288
+agent:
+  max_iterations: 50
+middleware:
+  budget_reminder_from_left: 1
+  long_tool_output_max_chars: 12000
+new_tools:
+  - name: local_search_step
+    description: |
+      Perform a single local search step on the current solution. Make small modifications to interval count, breakpoint positions, or values, then evaluate. Returns the modified program and approximate score. Use this to explore the neighborhood of your current solution.
+    input_schema:
+      type: object
+      properties:
+        change_type:
+          type: string
+          enum: ["reduce_intervals", "increase_intervals", "adjust_breakpoints", "perturb_values"]
+        magnitude:
+          type: number
+          description: |
+            How large to change. For reduce_intervals: 10-50% reduction. For increase: 10-30% increase. For adjustments: 5-20% change.
+        seed:
+          type: integer
+          description: Random seed for reproducibility (optional).
+    implementation_py: |
+      def run(ctx, args):
+          import random
+          random.seed(args.get("seed", 42))
+          
+          current = ctx.get_best_program()
+          best_score = ctx.best_score()
+          n_intervals = None
+          
+          for line in current.split('\n'):
+              if 'num_intervals:' in line:
+                  n_intervals = int(line.split(':')[1].strip())
+                  break
+          
+          if n_intervals is None:
+              return {"error": "Could not find num_intervals", "code": current}
+          
+          new_n = n_intervals
+          if args["change_type"] == "reduce_intervals":
+              new_n = max(50, int(n_intervals * (1 - args["magnitude"] / 100)))
+          elif args["change_type"] == "increase_intervals":
+              new_n = min(300, int(n_intervals * (1 + args["magnitude"] / 100)))
+          
+          modified = current.replace(
+              f'num_intervals: int = {n_intervals}',
+              f'num_intervals: int = {new_n}'
+          )
+          
+          # If we changed intervals significantly, also adjust learning rate and steps
+          modified = modified.replace(
+              'learning_rate: float = 0.005',
+              'learning_rate: float = 0.005'
+          )
+          modified = modified.replace(
+              'num_steps: int = 20000',
+              f'num_steps: int = {new_n * 100}'
+          )
+          
+          # Probe the modified version
+          ctx.stage_edit(modified)
+          probe_result = ctx.probe(subsample=500)
+          
+          return {
+              "code": modified,
+              "change": f"num_intervals: {n_intervals} -> {new_n}",
+              "probe_score": probe_result.get("c5_bound", "unknown")
+          }
+new_skills:
+  - name: erdos-c5-strategy
+    description: |
+      Expert strategy for optimizing the Erdős C5 bound using local search and probe-based ranking. Call this when the current approach is gradient descent or exhaustive search.
+    body: |
+      # Erdős C5 Optimization: Local Search Strategy
+
+      ## Why Local Search Works Better Here
+      The C5 landscape is non-convex with many local minima. Gradient descent (20k steps) often gets stuck. Local search over a smaller parameter space is faster and can escape bad regions.
+
+      ## Step-by-Step Approach
+
+      1. **Start Small**: Begin with 50-100 intervals. Less computation, faster iteration.
+
+      2. **Local Search Loop**:
+         - Use `local_search_step` with `reduce_intervals` to find the minimal intervals needed.
+         - Once stable, try `increase_intervals` to see if more precision helps.
+         - Use `adjust_breakpoints` to fine-tune breakpoint positions.
+         - Use `perturb_values` to adjust the h(x) values.
+
+      3. **Probe Before You Commit**:
+         - After each `local_search_step`, use `probe_solution` to rank.
+         - Only call `evaluate_solution` when probe_score shows >5% improvement over baseline.
+
+      4. **Iterative Refinement**:
+         - Cycle through: reduce → probe → evaluate → increase → probe → evaluate
+         - Keep what works, abandon what doesn't.
+
+      5. **Endgame**:
+         - When no local search improvement in 3+ rounds, try a fresh random start with fewer intervals.
+
+      ## Red Flags
+      - Full evaluation taking >30s: reduce intervals immediately.
+      - Probe score worse than baseline: revert and try different change_type.
+      - No improvement in 5 rounds: increase temperature, try fresh initialization.
+new_middlewares:
+  - name: probe_reminder
+    hook: before_model
+    description: |
+      Remind the solver to use probe_solution before full evaluation, and to prefer local search over gradient descent.
+    implementation_py: |
+      def before_model(hook_input):
+          last_score = hook_input.get("last_score")
+          evaluations_left = hook_input.get("evaluations_left", 999)
+          
+          reminder = None
+          if evaluations_left > 5 and last_score is not None:
+              reminder = f"EVALUATIONS LEFT: {evaluations_left}. Use probe_solution to rank variants before calling evaluate_solution! Each full eval costs 1 of your limited budget."
+          elif evaluations_left <= 5:
+              reminder = f"URGENT: Only {evaluations_left} evaluations left! Use probe_solution extensively before final evaluations."
+          
+          return reminder

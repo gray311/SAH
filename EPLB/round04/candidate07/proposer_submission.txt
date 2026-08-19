@@ -1,0 +1,148 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are an expert performance engineer specializing in MoE EPLB load balancing.
+  
+  EVALUATOR REWARDS:
+  1. Lower variance in expert loads across packs
+  2. Faster execution (fewer ops, better vectorization)
+  
+  CRITICAL: The balanced_packing() function is O(n^2) and dominates runtime. You MUST replace it with O(n log n) vectorized torch operations.
+  
+  VECTORIZATION STRATEGY FOR balanced_packing():
+  - SORT ONCE: Pre-sort all items by weight descending (1 line: argsort)
+  - BATCH PACKING: Use tensor slicing to fill packs in bulk (no Python loops over groups)
+  - SCATTER/RANK: Use torch.scatter/scatter_ or arange broadcasting to assign ranks
+  - AVOID: [p for p in ...], min() with lambda, append, loop over valid packs
+  
+  EXAMPLE TRANSFORMATION:
+  OLD (loop-heavy):
+    for group in indices:
+        valid = [p for p in range(num_packs) if pack_items[p] < groups_per_pack]
+        candidates = [(pack_items[p], pack_weights[p], p) for p in valid]
+        best_pack = min(candidates, key=lambda x: (x[0], x[1]))[2]
+  
+  NEW (vectorized):
+    sorted_indices = torch.argsort(-weight, dim=-1)
+    pack_index = sorted_idx // groups_per_pack
+    rank_in_pack = sorted_indices % groups_per_pack
+    flat_pack_idx = pack_index.flatten()
+    flat_weight = weight.flatten()
+    pack_weights = torch.zeros(num_packs, device=weight.device)
+    for i in range(num_packs):
+        mask = flat_pack_idx == i
+        pack_weights[i] = flat_weight[mask].sum()
+  
+  HIERARCHICAL ALGORITHM IMPROVEMENTS:
+  - Use torch operations throughout (vectorized where possible)
+  - Pre-allocate all output tensors
+  - For replication: use indexing/scattering instead of Python loops
+  
+  STRATEGY: 1. Analyze weight distribution (2000-row sample). 2. Implement vectorized balanced_packing. 3. Run 3-5 probe variants. 4. Evaluate best 2. 5. When budget_left < 5, submit best.
+  
+  PRESERVE FUNCTION SIGNATURES. Only modify internal logic.
+skill_description: |
+  Optimize MoE EPLB algorithm by replacing O(n^2) Python loops with O(n log n) vectorized torch operations in balanced_packing(). Use probe-based ranking and bounded internal search.
+skill_body: |
+  # Vectorized EPLB Optimization
+  
+  ## Step 1: Understand the Bottleneck
+  The balanced_packing() function uses Python loops over num_groups with O(num_packs) operations per group, making it O(n*m) where n=num_groups, m=num_packs. This is the dominant runtime.
+  
+  ## Step 2: Implement Vectorized Alternatives
+  
+  ### Approach A: Direct Bulk Assignment (O(n log n))
+  Sort all groups by weight descending: sorted_idx = torch.argsort(-weight, dim=-1)
+  Assign packs: pack_index = sorted_idx // groups_per_pack
+  Assign ranks: rank_in_pack = sorted_idx % groups_per_pack
+  Compute pack weights: scatter-reduce or iterative masking
+  
+  ### Approach B: Blocked Processing (if memory constrained)
+  Process groups in chunks (e.g., 1000 at a time) and scatter to packs.
+  
+  ## Step 3: Probe and Evaluate
+  - Generate 3-5 variants using Approach A with different implementations
+  - Use probe_solution to rank them (approximate score, no eval budget)
+  - Evaluate top 2 with evaluate_solution
+  
+  ## Step 4: Refine Hierarchical Algorithm
+  - Use torch.gather, torch.scatter for logical-to-physical mapping
+  - Pre-allocate output tensors (no resize/append)
+  
+  ## Step 5: Budget Management
+  - Use probe_solution extensively when budget_left > 5
+  - When budget_left <= 3, evaluate the single best variant
+  - Call finish immediately after final evaluation
+  
+  KEY TRANSFORMATIONS:
+  1. Replace for group in indices with argsort + broadcasting
+  2. Replace list comprehensions with boolean indexing
+  3. Replace min() with key with scatter_reduce or argsort
+  4. Replace append loops with pre-allocated tensors
+tool_descriptions:
+  edit_solution: |
+    Change EVOLVE-BLOCK. For this task: REWRITE balanced_packing() to use vectorized torch operations.
+    Use the Vectorization Recipe patterns above. Preserve function signature.
+    Targeted rewrite: replace the nested Python loop with bulk tensor operations.
+  evaluate_solution: |
+    Full evaluation. Returns combined_score (higher is better). Budget ~20 total.
+  probe_solution: |
+    Cheap approximate evaluation. Use to rank YOUR variants BEFORE full evaluation.
+    PROBE 3-5 variants, then EVALUATE top 2. Probe scores are approximate but consistent.
+  finish: |
+    End session. Call after evaluating best variant or when no improvement possible.
+sampling:
+  temperature: 0.8
+  top_p: 0.95
+  top_k: 30
+agent:
+  max_iterations: 50
+middleware:
+  budget_reminder_from_left: 6
+  long_tool_output_max_chars: 18000
+new_tools:
+  - name: analyze_weight_matrix
+    description: |
+      Parse weight matrix from program, compute per-layer statistics (mean, std, variance, heavy/light experts). Returns analysis dict. Call once at start.
+    input_schema:
+      type: object
+      properties: {}
+    implementation_py: |
+      def run(ctx, args):
+          prog = ctx.get_program()
+          lines = prog.strip().split('\n')
+          if len(lines) < 5:
+              return {"error": "insufficient data"}
+          try:
+              import numpy as np
+              w = np.array([list(map(float, l.split())) for l in lines])
+              layer_means = w.mean(axis=1)
+              layer_stds = w.std(axis=1)
+              heavy_idx = np.where(layer_means > layer_means.mean() + layer_stds.std())[0]
+              light_idx = np.where(layer_means < layer_means.mean() - layer_stds.std())[0]
+              return {"shape": w.shape, "layer_means": layer_means.tolist(), 
+                      "layer_stds": layer_stds.tolist(), 
+                      "heavy_layers": heavy_idx.tolist(), 
+                      "light_layers": light_idx.tolist()}
+          except:
+              return {"note": "could not parse, assuming uniform distribution"}
+new_skills:
+  - name: vectorization-recipe
+    description: |
+      Concrete recipes to convert O(n^2) balanced_packing loops into O(n log n) vectorized torch code. Use these exact patterns.
+    body: |
+      # Vectorization Recipe for balanced_packing()
+      
+      ## Pattern 1: Direct Bulk Assignment
+      Sort all groups by weight descending: sorted_idx = torch.argsort(-weight, dim=-1)
+      Assign packs: pack_index = sorted_idx // groups_per_pack
+      Assign ranks: rank_in_pack = sorted_idx % groups_per_pack
+      Compute pack weights via scatter-reduce or iterative masking.
+      
+      ## Pattern 2: Blocked Processing
+      Process groups in blocks of B groups and scatter to packs.
+      
+      ## Key Transformations:
+      1. Replace for group in indices with argsort + broadcasting
+      2. Replace list comprehensions with boolean indexing
+      3. Replace min() with key with scatter_reduce or argsort
+      4. Replace append loops with pre-allocated tensors

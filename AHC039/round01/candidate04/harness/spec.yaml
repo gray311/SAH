@@ -1,0 +1,233 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are an expert C++ developer optimizing a geometric packing algorithm.
+  Task: Find an axis-aligned polygon maximizing (mackerels_inside - sardines_inside + 1).
+  
+  CRITICAL: Implement a TIME-BASED INTERNAL SEARCH LOOP inside your code.
+  The evaluator gives you 2.0 seconds per test case. Your program MUST:
+  1. Start with a seed polygon (e.g., bounding box or simple shape)
+  2. Loop: (a) evaluate current score, (b) generate a modified polygon, (c) if improved, keep it
+  3. Continue until time expires or no improvement in 100 iterations
+  
+  SEARCH STRATEGY:
+  - Use greedy: grow polygon outward to capture nearby mackerels
+  - Or use local search: randomly perturb one vertex, keep if score improves
+  - Or use divide-and-conquer: partition grid into regions, optimize each
+  
+  PERFORMANCE: You have 20 evaluations total, 150 test cases. Spend ~8s on search to pass all 150.
+  Don't be greedy-only — use internal iteration to improve from seed.
+  
+  The EVOLVE-BLOCK contains CPP_CODE. Only edit that region. Preserve the fixed entry function.
+skill_description: |
+  Optimize C++ code for geometric NP-hard problems with time-based internal search.
+  Use edit_solution to mutate EVOLVE-BLOCK, evaluate_solution to score, finish when done.
+skill_body: |
+  # Time-Based Search for Geometric Optimization
+  
+  ## Core Method: Internal Search Loop
+  
+  Your program MUST implement a search loop inside main() or main's body.
+  The evaluator runs your code for up to 2 seconds per test case.
+  
+  ### Step 1: Initialize
+  - Parse input, build data structures (KD-tree, grid, adjacency lists)
+  - Start with a baseline polygon (bounding box, rectangle covering all points)
+  - Record baseline score
+  
+  ### Step 2: Search Loop (runs until time expires)
+  for iteration = 0; elapsed_time < ACTUAL_TIME_LIMIT; iteration++:
+    if iteration % 50 == 0:
+      # Periodic local search: try small perturbations
+      temp_score = evaluate_current_polygon()
+      if temp_score > best_score:
+        best_polygon = current_polygon
+        best_score = temp_score
+    
+    # Generate candidate polygon
+    candidate = mutate_polygon(current_polygon)
+    # Mutations: extend edge by k units, move vertex, add/remove vertex
+    
+    # Quick check: does candidate fit constraints?
+    if not fits_constraints(candidate):
+      continue
+    
+    # Quick heuristic score (don't call full evaluator)
+    candidate_score = fast_score(candidate)
+    if candidate_score > best_score:
+      current_polygon = candidate
+      best_score = candidate_score
+  
+  ### Step 3: Termination
+  - When time expires, output best_score polygon
+  
+  ## Mutation Operators to Implement
+  1. ExtendEdge: extend a horizontal/vertical edge outward by 500-1000 units
+  2. MoveVertex: shift one vertex by (100,0), (0,100), or (-100,0)
+  3. AddVertex: insert a new vertex between two existing ones
+  4. CollapseEdge: remove a vertex (merge two edges)
+  
+  ## Scoring Heuristic
+  - For each edge segment, count points on a grid aligned with the segment
+  - Use KD-tree to quickly count points in regions
+  - This avoids calling the slow evaluator repeatedly
+  
+  ## Constraints to Enforce
+  - Vertices: 4-1000, all distinct integer coords in [0, 100000]
+  - Edges axis-aligned (dx=0 or dy=0)
+  - Perimeter <= 400000
+  - No self-intersection
+  
+  ## Time Budget
+  - Use ACTUAL_TIME_LIMIT_SECONDS from constants (~1.95s safe margin)
+  - Aim for 80-150 iterations per test case
+  - Each iteration: O(N) or O(log N) with KD-tree
+tool_descriptions:
+  edit_solution: |
+    Change the EVOLVE-BLOCK region. Use SEARCH/REPLACE diffs targeting the search loop,
+    mutation operators, or scoring logic. Or send full new CPP_CODE for major rewrites.
+    Must preserve the fixed entry function outside EVOLVE-BLOCK.
+  evaluate_solution: |
+    Run your C++ program on all 150 test cases. Returns combined_score (higher better),
+    validity (0 if crashes/invalid), error message, best_so_far, and evals_left.
+    Budget: 20 evaluations. Each evaluation tests one code version across all 150 cases.
+  probe_solution: |
+    CHEAP approximate scoring on SUBSAMPLED data (~2000 rows). Does NOT consume eval budget.
+    Useful for ranking multiple polygon variants quickly during development,
+    but scores are approximate and NOT comparable to evaluate_solution scores.
+  finish: |
+    End the session. Best code is auto-submitted.
+sampling:
+  temperature: 1.2
+  top_p: 0.98
+  top_k: 30
+  max_tokens: 12288
+agent:
+  max_iterations: 50
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 12000
+new_tools:
+  - name: analyze_fish_grid
+    description: |
+      Build a grid representation of fish positions (100x1000 cells for 0-100000 coord range).
+      Returns: grid[cell_idx].mackerel_count, grid[cell_idx].sardine_count.
+      Each cell is [x1,x2) x [y1,y2) with integer boundaries.
+      Call once at program start to enable fast O(1) scoring.
+    input_schema: {type: object, properties: {}}
+    implementation_py: |
+      def run(ctx, args):
+          names = ctx.list_task_inputs()
+          if not names:
+              return {"note": "no task inputs"}
+          
+          # Read mackerel positions
+          mackerels = []
+          try:
+              m_file = ctx.task_input_path("mackerels.csv")
+              with open(m_file, 'r') as f:
+                  for line in f:
+                      parts = line.strip().split()
+                      if len(parts) >= 2:
+                          mackerels.append((int(parts[0]), int(parts[1])))
+          except:
+              pass
+          
+          # Read sardine positions
+          sardines = []
+          try:
+              s_file = ctx.task_input_path("sardines.csv")
+              with open(s_file, 'r') as f:
+                  for line in f:
+                      parts = line.strip().split()
+                      if len(parts) >= 2:
+                          sardines.append((int(parts[0]), int(parts[1])))
+          except:
+              pass
+          
+          # Build grid cell counts (100x100 cells for 0-100000 range)
+          CELL_SIZE = 100
+          mackerel_grid = {}
+          sardine_grid = {}
+          
+          for x, y in mackerels:
+              cell_x = x // CELL_SIZE
+              cell_y = y // CELL_SIZE
+              key = (cell_x, cell_y)
+              mackerel_grid[key] = mackerel_grid.get(key, 0) + 1
+          
+          for x, y in sardines:
+              cell_x = x // CELL_SIZE
+              cell_y = y // CELL_SIZE
+              key = (cell_x, cell_y)
+              sardine_grid[key] = sardine_grid.get(key, 0) + 1
+          
+          return {"mackerel_grid": mackerel_grid, "sardine_grid": sardine_grid,
+                  "mackerel_count": len(mackerels), "sardine_count": len(sardines)}
+remove_tools: []
+new_skills:
+  - name: geometric-search-playbook
+    description: |
+      For axis-aligned polygon optimization with mackerel/sardine scoring:
+      1. Build grid of fish counts per 100x100 cell
+      2. Start with bounding box covering all mackerels
+      3. Iterate: extend edges toward high mackerel / low sardine regions
+      4. Prune edges that add more sardines than mackerels
+      5. Stop when perimeter > 400000 or no improvement in 50 iterations
+    body: |
+      # Geometric Search Playbook for Axis-Aligned Polygon Optimization
+      
+      ## Problem Understanding
+      Maximize: mackerels_inside - sardines_inside + 1
+      Constraints: axis-aligned edges, 4-1000 vertices, perimeter <= 400000
+      Coords: integer 0-100000, N=5000 each type
+      
+      ## Algorithm: Grid-Based Greedy Growth
+      
+      ### Phase 1: Preprocessing
+      1. Read all fish positions
+      2. Build a grid: divide [0,100000]x[0,100000] into 1000x1000 cells
+      3. For each cell, count mackerels and sardines inside
+      
+      ### Phase 2: Initial Polygon
+      Start with minimum viable polygon (rectangle):
+      - Find min/max x and y of mackerels only
+      - Create rectangle: (minx,miny) -> (maxx,miny) -> (maxx,maxy) -> (minx,maxy)
+      - Score this baseline
+      
+      ### Phase 3: Edge Extension Loop
+      For each edge (4 edges initially):
+        For direction outward by 500-1000 units:
+          - Check new cells crossed
+          - Count added mackerels and sardines
+          - If delta > 0: extend this edge by that amount
+          - Stop if added sardines >= added mackerels
+        Repeat for each of 4 sides
+        
+      ### Phase 4: Local Search
+      While time remains and improvement possible:
+        For each vertex:
+          Try moving by (+/- 100, 0) or (0, +/- 100)
+          If valid (axis-aligned, constraints met) and improves score:
+            Make the move
+        If no improvement in 50 iterations: break
+      
+      ### Phase 5: Optimization
+      - Collapse edges: remove vertices that create collinear 3+ points
+      - Ensure no self-intersection (check edge pairs)
+      - Verify all constraints before output
+      
+      ## Key Tips
+      - Use KD-tree for fast point-in-region queries
+      - Grid enables O(1) cell-based scoring
+      - Time budget: 80-120 iterations max for 2s test case
+      - Keep polygon simple: prefer fewer vertices
+      - Perimeter constraint is tight; don't extend too far
+new_middlewares:
+  - name: force_search_loop
+    hook: before_model
+    description: |
+      Remind executor to implement internal search loop with time limit.
+      Prevents the executor from generating static/one-shot polygons.
+    implementation_py: |
+      def before_model(hook_input):
+          return "REMEMBER: Your C++ code MUST include a time-based search loop inside main(). Start with a seed polygon, then iteratively improve it by extending edges, moving vertices, or adding/removing vertices. Loop until elapsed_time > ACTUAL_TIME_LIMIT (~1.95s) or no improvement for 100 iterations. Use grid-based scoring for fast evaluation. Do NOT output a single fixed polygon — active search is required."

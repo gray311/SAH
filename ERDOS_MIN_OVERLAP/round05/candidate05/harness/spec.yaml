@@ -1,0 +1,211 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are an expert in mathematical optimization for step functions. Your goal is to find a function h: [0,2] -> [0,1] that minimizes max_k integral h(x)(1-h(x+k))dx.
+  
+  Current best upper bound: C5 <= 0.38092303510845016
+  Goal: Find a step function with combined_score > 1 (i.e., C5_bound < 0.38092303510845016)
+  
+  STRATEGY: This is a DISCRETE optimization problem. The seed uses gradient descent on a sigmoid parameterization, but step functions may be better found through:
+  1. Coarse-to-fine approach: Start with few intervals (e.g., 16, 32, 64), optimize, then refine
+  2. Pattern-based constructions: Try explicit piecewise-constant patterns, not just random initializations
+  3. Structural simplification: Assume h takes values from a small discrete set (e.g., {0.1, 0.5, 0.9}) then optimize the boundaries
+  4. Alternative parameterizations: Use hard thresholding or quantized representations
+  
+  Be decisive: Each evaluation is expensive (30 total budget). Make each edit substantive - change the search paradigm, not just hyperparameters.
+  
+  Remember: The EVOLVE-BLOCK can completely replace the optimizer. Write entirely new code that implements a different strategy.
+skill_description: |
+  Optimize step functions for the Erdos minimum overlap problem. Use coarse-to-fine discretization, pattern-based constructions, and structural simplification to find functions with lower C5 bounds. Budget: 30 evaluations.
+skill_body: |
+  # Erdos C5 Optimization Strategy
+  
+  ## Problem
+  Find step function h: [0,2] -> [0,1] minimizing max_k integral h(x)(1-h(x+k))dx.
+  Constraint: integral h(x)dx = 1 exactly.
+  
+  ## Key Insights for This Task
+  1. The seed's gradient-based approach with 8000 intervals may be over-parameterized and stuck in local optima
+  2. Step functions have intrinsic discreteness - exploit this with:
+     - Fewer intervals optimized carefully
+     - Quantized value ranges
+     - Boundary optimization instead of point-wise optimization
+  3. Good starting points: explicit pattern functions, then refine
+  
+  ## Strategy Options
+  
+  ### A. Coarse-to-Fine Discretization
+  - Start with 16-32 intervals, optimize, then progressively refine to 128, 256, 512
+  - Train on coarse, evaluate on fine for transfer
+  
+  ### B. Structured Patterns
+  - Try explicit piecewise-constant functions with specific boundary choices
+  - E.g., h(x) = a for x < c1, b for c1 <= x < c2, etc.
+  - Optimize: (a, b, c1, c2, ...) rather than all interval values
+  
+  ### C. Quantization Approach
+  - Assume h takes values from discrete set {v1, v2, ..., vk}
+  - Optimize only the boundaries and value assignments
+  - This is combinatorial but search space is manageable
+  
+  ### D. Multi-Stage Refinement
+  - Stage 1: Find good boundary locations (use gradient-free if needed)
+  - Stage 2: Given boundaries, optimize interval values
+  - Stage 3: Fine-tune both
+  
+  ## Editing Guidelines
+  - Complete rewrites are welcome and encouraged when changing paradigms
+  - If rewriting the optimizer: keep the class structure but change _get_best_initialization and/or _optimize_single_run substantially
+  - Consider replacing _objective_fn with a constraint-handling approach that's less punitive
+  
+  ## Evaluation Discipline
+  - Each of 30 evaluations counts heavily
+  - If seed score is 0.999641 (barely beating the 1.0 baseline), you need significant improvement
+  - combined_score > 1 means new record; aim for > 1.05 (at least 5% improvement)
+  
+  ## Common Pitfalls
+  - Don't just tweak hyperparameters; the seed's approach may be fundamentally misaligned
+  - Don't use 8000 intervals from the start - it's too coarse for gradient methods
+  - The constraint integral h = 1 is critical - ensure your approach respects or penalizes it strongly
+tool_descriptions:
+  edit_solution: |
+    Change the EVOLVE-BLOCK. You can:
+    1. Rewrite the entire optimizer class with a new strategy (coarse-to-fine, quantized, pattern-based, etc.)
+    2. Targeted diffs: modify _get_best_initialization to use explicit patterns, or _optimize_single_run to use a different algorithm
+    3. Add new helper methods for structural search, then call them from _optimize_single_run
+    Preserve imports and the EVOLVE-BLOCK markers.
+  evaluate_solution: |
+    Run the program. Returns combined_score (higher = better C5 bound), validity, error, best_score_so_far, evals_left.
+    Budget: 30 total. Each edit should be substantive to justify an evaluation.
+  probe_solution: |
+    Approximate evaluation on subsampled data. NOT useful here because: (1) the evaluator is already fast (FFT-based), (2) our function is analytical, (3) probes don't learn the optimizer's internal state. Skip probes unless you're testing multiple initializations quickly.
+  finish: |
+    End when you've exhausted the budget or can't improve. Submit your best result.
+sampling:
+  temperature: 0.9
+  top_p: 0.9
+  top_k: 30
+  max_tokens: 12288
+agent:
+  max_iterations: 50
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 12000
+new_tools:
+  - name: analyze_current_best
+    description: |
+      Analyze the current best program's structure. Extract key parameters, initialization patterns, and optimization strategy to inform improvements.
+      Call this once at the start to understand what the seed does.
+    input_schema: {type: object, properties: {}}
+    implementation_py: |
+      def run(ctx, args):
+          # Check if we have access to the program text
+          try:
+              prog = ctx.get_program()
+              # Key analysis points for this task:
+              # - Look for num_intervals (default 800 in seed)
+              # - Look for optimization steps (default 59000 in seed)
+              # - Look for initialization patterns (sigmoid of latent, etc.)
+              # - Look for penalty strength (default 1370 in seed)
+              analysis = {
+                  "program_length": len(prog),
+                  "strategy_detected": "gradient_descent_sigmoid",
+                  "suggestion": "Consider reducing intervals to 128-256, trying pattern-based initialization, or quantizing values. Current seed has 8000 intervals with 59000 steps - may be over-parameterized."
+              }
+              # Try to extract key hyperparameters
+              import re
+              num_intervals = re.search(r'num_intervals.*=.*(\d+)', prog)
+              num_steps = re.search(r'num_steps.*=.*(\d+)', prog)
+              penalty = re.search(r'penalty_strength.*=.*(\d+\.?\d*)', prog)
+              if num_intervals:
+                  analysis["current_intervals"] = int(num_intervals.group(1))
+              if num_steps:
+                  analysis["current_steps"] = int(num_steps.group(1))
+              if penalty:
+                  analysis["current_penalty"] = float(penalty.group(1))
+              return analysis
+          except:
+              return {"error": "Could not analyze program", "note": "Manual inspection recommended"}
+new_skills:
+  - name: erdos-step-function-strategy
+    description: |
+      Method for optimizing step functions in Erdos minimum overlap problem. Use coarse-to-fine discretization, explicit pattern construction, and structural simplification.
+    body: |
+      # Step Function Optimization for Erdos C5 Problem
+      
+      ## Why the Seed Fails
+      The seed uses 8000 intervals with sigmoid parameterization. For a step function problem:
+      - Over-parameterization leads to local optima
+      - Gradient descent struggles with non-smooth objectives
+      - Sigmoid produces smooth transitions, not sharp steps
+      
+      ## Strategy 1: Coarse-to-Fine
+      Start with 16-32 intervals. Optimize to convergence. Then:
+      1. Save the optimized boundary points
+      2. Add new boundaries between existing intervals
+      3. Optimize the new function on refined grid
+      4. Repeat until desired resolution
+      
+      ## Strategy 2: Explicit Patterns
+      Try these initializations:
+      Pattern A: h(x) = 0.5 for x < 1, 0.0 for x >= 1
+      Pattern B: h(x) = 1.0 for x < c, 0.0 for x >= c (c in [0,2])
+      Pattern C: Three-step: h(x) = a for x < c1, b for c1 <= x < c2, 0.0 otherwise
+      Pattern D: Symmetric: h(x) = a for x < c, b for c <= x < 2-c, a for 2-c <= x < 2
+      Then optimize parameters (a, b, c1, c2) via gradient descent or grid search.
+      
+      ## Strategy 3: Quantization
+      Assume h takes values from {0.1, 0.3, 0.5, 0.7, 0.9}.
+      For each interval, assign one of these values.
+      This is a discrete optimization over assignments + continuous optimization over boundaries.
+      
+      ## Strategy 4: Boundary-First Optimization
+      1. Fix interval values (e.g., alternating high/low)
+      2. Optimize only boundary positions
+      3. Reassign interval values based on optimal boundaries
+      4. Repeat 2-3
+      
+      ## Implementation Template
+      class CoarseToFineOptimizer:
+          def __init__(self):
+              self.start_intervals = 32
+              self.refine_factor = 2
+              self.max_refines = 4
+              
+          def _optimize_level(self, num_intervals, latent_dim=None):
+              # Implement gradient-based optimization
+              # Return optimized h array
+              pass
+              
+          def _refine_boundaries(self, h_coarse):
+              # Extract boundaries from coarse solution
+              # Add intermediate boundaries
+              # Return new function
+              pass
+              
+          def optimize(self):
+              h = self._optimize_level(self.start_intervals)
+              for i in range(self.max_refines):
+                  h = self._refine_boundaries(h)
+                  h = self._optimize_level(len(h), latent_dim=len(h))
+              return h
+new_middlewares:
+  - name: structure_reminder
+    hook: before_model
+    description: |
+      Remind the solver to change the search strategy fundamentally, not just tweak parameters.
+    implementation_py: |
+      def before_model(hook_input):
+          current_score = hook_input.get("current_score")
+          if current_score is not None and current_score < 1.0:
+              return (
+                  "Warning: Score below 1.0 (seed=0.999641). The seed's 8000-interval gradient approach may be "
+                  "fundamentally misaligned for step functions. Consider: (1) Coarse-to-fine (16-512 intervals), "
+                  "(2) Explicit pattern initialization, (3) Quantized value ranges, (4) Boundary-first optimization. "
+                  "Don't just tune hyperparameters - change the search paradigm."
+              )
+          elif current_score is not None:
+              return (
+                  f"Score {current_score:.4f}. If > 1.0, you've made progress! Continue refining. "
+                  "Remember: step functions need discrete/structured approaches, not just gradient descent."
+              )
+          return None

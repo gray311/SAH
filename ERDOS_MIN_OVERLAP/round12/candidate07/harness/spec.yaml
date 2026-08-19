@@ -1,0 +1,92 @@
+schema: h2spec/1.0
+system_prompt: "You are solving the Erdos minimum overlap problem: minimize max_k integral h(x)(1-h(x+k)) dx for a step function h: [0,2] -> [0,1] with integral(h)=1. Current best bound: C5 <= 0.38092303510845016.
+
+CRITICAL INSIGHT: The seed optimizer is stuck in poor local minima. The 12 initialization patterns are clever but all lead to similar results.
+
+NEW STRATEGY: DO NOT just tweak hyperparameters. You must fundamentally CHANGE the program structure. Try these approaches:
+1. Change the optimization algorithm (e.g., use simulated annealing, genetic algorithms, or coordinate descent instead of Adam)
+2. Replace sigmoid with different activation (hard threshold, tanh, or direct binary search)
+3. Try completely different initialization strategies (e.g., direct construction of step functions, combinatorial designs)
+4. Modify the objective function (e.g., use L1 instead of L2 penalty, or multi-objective)
+5. Try coarser discretization with fewer intervals (100-200) and use that as a basis
+
+PRIORITY: Make bold structural changes. Hyperparameter sweeps have failed.
+
+Workflow:
+1. CALL evaluate_solution on seed to establish baseline (already done: 0.999855)
+2. EDIT to implement ONE of the structural changes above
+3. Call probe_solution to check constraint satisfaction quickly
+4. Call evaluate_solution if probe passes
+5. If combined_score > 1.0, you've found a new record!
+6. Continue with different structural changes if needed
+
+Focus: Algorithm redesign, not parameter tuning."
+skill_description: "Structural program redesign for Erdos optimizer. Generate entirely new algorithmic approaches rather than hyperparameter variants."
+skill_body: "# Structural Program Redesign for Erdos Minimum Overlap
+
+## Why Hyperparameter Sweeps Failed
+The seed optimizer uses 12 clever initialization patterns but fixed hyperparameters. All harness attempts tried hyperparameter sweeps and got 0.999855. This means the search is trapped in local minima regardless of learning rate or penalty strength.
+
+## New Strategy: Structural Program Mutation
+Instead of changing numbers, change the PROGRAM STRUCTURE.
+
+### Approach 1: Algorithm Replacement
+Replace Adam with:
+- Simulated Annealing: Add temperature schedule, accept worse solutions with probability exp(-delta/T)
+- Genetic Algorithm: Population-based search with crossover/mutation
+- Gradient-free methods: Nelder-Mead, Powell's method
+
+### Approach 2: Direct Construction
+Instead of learning a latent vector through sigmoid:
+- Directly construct a step function with k pieces: h(x) = sum_i w_i * indicator(x in interval_i)
+- Optimize over the widths and heights of the steps
+- Enforce sum(h) = 1 as a hard constraint
+
+### Approach 3: Coarse-to-Fine
+- Start with coarse discretization (N=100)
+- Find a good step function at coarse level
+- Refine by adding more intervals adaptively
+- This escapes poor local minima at fine discretization
+
+### Approach 4: Multi-Objective
+- Optimize both c5_bound AND minimize number of steps in h
+- Use Pareto frontier search
+- May find simpler functions with better overlap
+
+### Implementation Guide
+1. Choose ONE structural change
+2. Implement it in the EVOLVE-BLOCK (replace the optimizer class entirely)
+3. Test with probe_solution for constraint checking
+4. Evaluate and compare to seed (0.999855)
+5. If successful, that's your new baseline and continue
+
+## Key Formula for Step Function Construction
+For a k-piece step function on [0,2]:
+- Choose breakpoints 0 = x_0 < x_1 < ... < x_k = 2
+- Choose heights h_1, ..., h_k in [0,1]
+- Constraint: sum_i (x_{i+1} - x_i) * h_i = 1
+- Compute c5 bound from this piecewise function
+
+Use scipy.optimize to optimize the breakpoints and heights directly!"
+tool_descriptions:
+  edit_solution: "Modify the EVOLVE-BLOCK to make STRUCTURAL changes: replace the optimizer algorithm, change activation functions, use direct step function construction, or implement coarse-to-fine strategies. Do not just change hyperparameters."
+  evaluate_solution: "Run full evaluation, returns combined_score. Combined score > 1.0 means c5_bound < 0.380923 (new record)."
+  probe_solution: "Quick approximate evaluation to screen structural variants before full eval. Check if integral constraint is approximately satisfied."
+  finish: "Submit final solution when combined_score greater than 1.0 or after exhausting structural redesign strategies."
+sampling:
+  temperature: 1.2
+  top_p: 0.95
+  top_k: 50
+  max_tokens: 16000
+agent:
+  max_iterations: 20
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 12000
+new_tools:
+  - name: generate_structural_variant
+    description: "Generate 4 structurally diverse program variants by fundamentally changing the optimization approach. Returns dict with keys: simulated_annealing, genetic_algorithm, direct_step, coarse_to_fine. Each value is a latent vector corresponding to a completely different algorithmic approach."
+    input_schema:
+      type: object
+      properties: {}
+    implementation_py: "def run(ctx, args):\n    import numpy as np\n    N = 800\n    domain = 2.0\n    dx = domain / N\n    rng = np.random.default_rng(123)\n    constructions = {}\n    \n    # Simulated Annealing initialization: wider exploration\n    x = np.linspace(0, domain, N)\n    constructions['simulated_annealing'] = 2.0 * rng.rand(N) - 1.0\n    \n    # Genetic algorithm: population of peaks\n    num_peaks = 5\n    peak_positions = np.linspace(0.2, 1.8, num_peaks)\n    peak_widths = np.random.uniform(0.1, 0.3, num_peaks)\n    latent = np.zeros(N)\n    for pos, width in zip(peak_positions, peak_widths):\n        latent += np.exp(-((x - pos) / width)**2 * 10)\n    latent = latent + rng.normal(size=N) * 0.1\n    constructions['genetic_algorithm'] = latent\n    \n    # Direct step function: flat pieces\n    k = 5\n    breakpoints = np.linspace(0.2, 1.8, k)\n    heights = np.random.uniform(0.3, 0.7, k)\n    latent = np.zeros(N)\n    for i in range(k):\n        mask = (x >= breakpoints[i]) & (x < breakpoints[i+1] if i < k-1 else 2.0)\n        latent[mask] = heights[i] / np.sum(mask)\n    constructions['direct_step'] = latent\n    \n    # Coarse-to-fine: start with 50 intervals\n    latent_coarse = np.zeros(50)\n    for i in range(50):\n        if rng.rand() > 0.5:\n            latent_coarse[i] = 1.0\n        else:\n            latent_coarse[i] = 0.0\n    # Upsample and add noise\n    latent = np.repeat(latent_coarse, 16)[:N]\n    latent = latent + rng.normal(size=N) * 0.5\n    constructions['coarse_to_fine'] = latent\n    \n    return {\"constructions\": constructions, \"keys_used\": list(constructions.keys())}"

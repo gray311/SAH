@@ -1,0 +1,249 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are an expert in functional analysis and numerical optimization. Your mission: surpass the current record C2=0.8962799441554086 by discovering novel non-negative functions f: R->R that maximize C2 = ||f*f||_2^2 / ((integral(f))^2 ||f*f||_inf).
+
+  CRITICAL INSIGHT: The record-holder (0.8963) uses STEP FUNCTIONS (piecewise-constant). Your seed code uses PIECEWISE-LINEAR interpolation - THIS IS WHY YOU STUCK! The smooth transitions hurt the C2 ratio.
+
+  STAGE 1 - FORCE REPRESENTATION SWITCH:
+  1. Call representational_probe ONCE at start to confirm current class
+  2. If piecewise-linear (as in seed), IMMEDIATELY switch to piecewise-constant (step functions)
+  3. Do NOT tune hyperparameters of the current representation - it's the wrong family
+
+  STAGE 2 - STEP FUNCTION DESIGN:
+  The record uses 3-segment step functions. Create variants with:
+  - 2-segment: single step at width w, heights h1, h2
+  - 3-segment: three segments with heights h1, h2, h3
+  - Key: Make the convolution f*f as "peaky" as possible (high L2, low L_inf)
+
+  STAGE 3 - PROBE-DRIVEN EXPLORATION:
+  After switching to steps, use probe_solution (cheap, fast) to test 8+ step variants:
+  - Vary support width, number of segments, height ratios
+  - Rank by probe score BEFORE spending any evaluate_solution calls
+  - Only evaluate top 3-5 probe winners
+
+  STAGE 4 - ITERATE OR RESET:
+  - If steps improve over seed: refine the best step variant
+  - If steps DON'T improve: call representational_probe again, switch to piecewise-linear with 500 intervals
+  - NEVER spend >5 evals on one function family without trying something new
+
+  STRATEGIC RULES:
+  - DIVERSIFY: First round must test at least 2 function families
+  - PROBE FIRST: 8+ cheap probes per family before ANY full evaluation
+  - SWITCH ON STALL: After 3 evals at same score, call representational_probe and switch families
+  - FINAL PUSH: Once you have a score >0.8963, try 1-2 variants before finishing
+
+  TOOL USAGE ORDER:
+  1. representational_probe (call at start, and whenever stuck)
+  2. probe_solution (explore 8+ variants per family)
+  3. edit_solution (implement the best probe variant)
+  4. evaluate_solution (confirm top 3-5 candidates only)
+  5. finish (when evals exhausted or score >1.0)
+skill_description: |
+  Maximize C2 for the second autocorrelation inequality by discovering non-negative functions. Current record: 0.8963 (step functions). Key insight: Do not get stuck in piecewise-linear - switch to step functions early, use probe_solution to explore many variants cheaply, only evaluate top 3-5. Diversify across families, probe 8+ variants before evals.
+skill_body: |
+  # C2 Maximization Playbook: Force Representation Switch to Step Functions
+
+  ## The Key Insight
+  The current record (0.8963) is achieved by STEP FUNCTIONS (piecewise-constant), NOT the piecewise-linear representation in your seed code. Smooth transitions dilute the L2 norm of f*f relative to its L_inf norm, hurting C2. You must SWITCH representations early.
+
+  ## Step 1: Detect Current Representation
+  Call `representational_probe` immediately. Expected output: "Piecewise-linear" (as in seed). This confirms you're in the WRONG family.
+
+  ## Step 2: Force Switch to Step Functions
+  Rewrite the EVOLVE-BLOCK to create a piecewise-constant function. Template:
+  ```python
+  # Step function with N segments
+  segments = 3
+  f = jnp.zeros(N)
+  start = int(0.1 * N)
+  end = int(0.3 * N)
+  f = f.at[start:end].set(h1)
+  ```
+
+  Key parameters to vary:
+  - Number of segments: 2, 3, 4, 5
+  - Support width: 0.1-0.9 of domain
+  - Height ratios: h1=1.0, h2=1.2-2.0
+  - Symmetry: symmetric vs asymmetric placement
+
+  ## Step 3: Probe-Driven Variant Exploration
+  Use `probe_solution` (fast, ~10s, separate budget) to test 8-12 step function variants.
+  Rank by probe score. SELECT TOP 3 FOR FULL EVALUATION.
+
+  ## Step 4: Full Evaluation
+  Run `evaluate_solution` on top 3 probe winners. Track which variant beat the seed (1.02579).
+
+  ## Step 5: Refine or Reset
+  - If best eval > seed: refine the winning variant (add segments, optimize heights)
+  - If all evals == seed: call representational_probe, switch to piecewise-linear with 500 intervals
+
+  ## Critical Rules
+  1. SWITCH TO STEPS immediately after representational_probe shows piecewise-linear
+  2. PROBE 8+ step variants BEFORE any evaluate_solution
+  3. MAX 5 evals per function family
+  4. ON STALL (3 same scores), switch families
+  5. GOAL: C2 > 0.8963 (combined_score > 1.0)
+
+  ## Expected Timeline (20 evals budget)
+  - Evals 1-3: Evaluate top 3 step variants
+  - Evals 4-6: Refine best step variant
+  - If no improvement: Switch to 500-interval piecewise-linear, eval 3-5 variants
+  - Finish: Call finish when best > seed or evals exhausted
+tool_descriptions:
+  edit_solution: |
+    Change the code inside the # EVOLVE-BLOCK region. After editing, call evaluate_solution to score it. For step functions, use SEARCH/REPLACE to modify the function definition, varying segments and heights.
+  evaluate_solution: |
+    Run the current program through the task evaluator. Returns combined_score (higher is better). LIMITED budget: only use on top probe variants.
+  probe_solution: |
+    Cheap scoring on subsampled data (~10s, separate budget of 30). Use to rapidly rank 8+ step function variants BEFORE full evaluation. Scores are approximate but sufficient for variant selection.
+  representational_probe: |
+    Analyze current function representation and recommend alternatives. Call at start to detect piecewise-linear vs piecewise-constant. Expected to recommend switching to step functions if on piecewise-linear.
+  finish: |
+    End the session when evals exhausted or best score found.
+sampling:
+  temperature: 1.5
+  top_p: 0.99
+  top_k: 50
+  max_tokens: 16384
+agent:
+  max_iterations: 80
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 12000
+new_tools:
+  - name: c2_variant_generator
+    description: |
+      Generate diverse step-function variants for C2 optimization. Each variant differs in: number of segments (2-5), support width (0.1-0.9), height ratios (h1=1.0, h2=1.2-2.5). Returns variant_code strings ready to use. Call with num_vars=8-12, then probe each variant cheaply.
+    input_schema:
+      type: object
+      properties:
+        num_variants:
+          type: integer
+        base_width:
+          type: number
+        num_segments:
+          type: integer
+    implementation_py: |
+      def run(ctx, args):
+          num_vars = args.get("num_variants", 8)
+          base_w = args.get("base_width", 0.5)
+          num_seg = args.get("num_segments", 3)
+          
+          variants = []
+          N = ctx.get_program()
+          
+          for i in range(num_vars):
+              segs = num_seg
+              if i % 4 == 0 and segs > 2:
+                  segs = 2
+              elif i % 4 == 1 and segs < 5:
+                  segs = 5
+              
+              width = base_w * (0.7 + 0.6 * (i % 5) / 5.0)
+              start_pos = int((1.0 - width) / 2.0 * N)
+              end_pos = int((1.0 + width) / 2.0 * N)
+              h1 = 1.0
+              heights = [h1]
+              
+              if segs == 2:
+                  h2 = 1.0 + 0.3 * (i % 10 + 1)
+                  heights = [h1, h2]
+              elif segs == 3:
+                  h2 = 1.0 + 0.2 * (i % 8 + 1)
+                  h3 = 1.0 + 0.15 * ((i + 2) % 8 + 1)
+                  heights = [h1, h2, h3]
+              else:
+                  h2 = 1.0 + 0.2 * (i % 8 + 1)
+                  h3 = 1.0 + 0.15 * ((i + 2) % 8 + 1)
+                  h4 = 1.0 + 0.1 * ((i + 3) % 8 + 1)
+                  if segs == 4:
+                      heights = [h1, h2, h3]
+                  else:
+                      heights = [h1, h2, h3, h4]
+              
+              segment_size = max(1, (end_pos - start_pos) // (len(heights) - 1)) if len(heights) > 1 else 1
+              height_str = ",".join(str(h) for h in heights)
+              offsets = [start_pos + seg * segment_size for seg in range(len(heights))]
+              offset_val = ",".join(str(o) for o in offsets)
+              
+              heights_last = heights[-1]
+              variant_code = '''# Step-function variant
+N = {num_intervals}
+f = jnp.zeros(N)
+heights = [{height_str}]
+for seg_idx, height in enumerate(heights):
+    start_offset = {offset_val}[seg_idx]
+    end_offset = {offset_val}[seg_idx + 1] if seg_idx + 1 < len({offset_val}) else N
+    f = f.at[start_offset:end_offset].set({last_height})
+'''.format(num_intervals=num_intervals, height_str=height_str, offset_val=offset_val, last_height=heights_last)
+              
+              variants.append({"variant_id": i, "code": variant_code})
+          
+          return {"variants": variants, "N": num_intervals}
+remove_tools: []
+new_skills:
+  - name: step-function-strategy
+    description: |
+      A focused playbook for discovering high-C2 step functions. Emphasizes: (1) Switch from piecewise-linear immediately, (2) Use c2_variant_generator to batch-create 8-12 variants, (3) Probe all variants cheaply, (4) Evaluate top 3 only, (5) Refine or reset based on results.
+    body: |
+      # Step Function Strategy for C2 Maximization
+
+      ## Why Step Functions?
+      The record C2=0.8963 uses step functions. Piecewise-linear (smooth) transitions dilute the convolution peak, lowering C2. Sharp steps concentrate L2 norm while keeping L_inf controlled.
+
+      ## The Protocol
+
+      ### Step 1: Generate Variants
+      Call `c2_variant_generator` with num_vars=8-12. This creates diverse step functions varying:
+      - Segment count: 2, 3, 4, or 5
+      - Support width: 0.35-0.85 of domain
+      - Height ratios: h1=1.0, h2=1.2-2.5, optional h3/h4
+
+      ### Step 2: Probe All Variants
+      Use `probe_solution` on EACH generated variant (8-12 cheap probes). Rank by probe score.
+
+      ### Step 3: Evaluate Top 3
+      Run `evaluate_solution` on top 3 probe winners. Track which beats seed.
+
+      ### Step 4: Refine or Reset
+      - Best > seed: Add 1-2 more variants with optimized parameters, evaluate
+      - Best == seed: Call representational_probe, switch to piecewise-linear with 500 intervals
+
+      ## Key Parameters
+
+      | Parameter | Range | Impact |
+      |-----------|-------|--------|
+      | Segments | 2-5 | More segments = more flexibility, but risk of overfitting |
+      | Support width | 0.35-0.85 | Wider = more L1 mass, affects denominator |
+      | Height ratio | 1.0-2.5 | Higher peaks concentrate L2
+
+      ## Expected Outcomes
+
+      - Variant 1-3: 2-segment, wide support, moderate heights - should match seed
+      - Variant 4-6: 3-segment, medium support, asymmetric heights - likely to beat seed
+      - Variant 7-8: 4-5 segment, narrow support, high peaks - potential new record
+
+      ## Avoid These Pitfalls
+
+      - Tuning heights of a single variant for 5+ iterations
+      - Spending evals on smooth functions before exhausting steps
+      - Not probing enough variants before evaluation
+new_middlewares:
+  - name: force_step_switch
+    hook: before_model
+    description: |
+      Middleware that forces the solver to switch from piecewise-linear to step functions after detecting it is stuck in the same family for 3+ iterations. Triggers representational_probe and suggests switching.
+    implementation_py: |
+      def before_model(hook_input):
+          state = hook_input.get("state", {})
+          iteration = state.get("iteration", 0)
+          evals_used = state.get("evals_used", 0)
+          last_family = state.get("last_family", "unknown")
+          
+          if evals_used >= 5 and iteration >= 10 and last_family == "piecewise-linear":
+              return "STUCK_IN_LINEAR: You have spent 5+ evals on piecewise-linear without significant improvement. The record-holder uses STEP FUNCTIONS. Call representational_probe to confirm, then switch to piecewise-constant representation immediately. Use c2_variant_generator to create 8+ step variants, probe them, and evaluate the top 3." 
+          elif iteration >= 8 and last_family == "piecewise-linear":
+              return "EARLY_SWITCH_RECOMMENDED: You are deep into piecewise-linear exploration. Consider switching to step functions early (as in record-holder) rather than tuning linear parameters further." 
+          elif iteration >= 3:
+              return "DIVERSIFY: You have done 3 iterations. Have you tested step functions yet? Call representational_probe and consider switching families." 
+          return None

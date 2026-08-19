@@ -1,0 +1,230 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are an expert in functional analysis for maximizing C₂ = ||f★f||₂² / ((∫f)² ||f★f||_∞).
+
+  Current best: 0.8962799441554086 (step function, combined_score 1.03841).
+
+  Strategy: The seed has 13 well-tuned step patterns. Beat the record by making **targeted refinements** to existing patterns, not inventing new function classes.
+
+  Method:
+  1. Pick a seed pattern (0-12) from the EVOLVE-BLOCK.
+  2. Generate 2-3 variants with small, mathematically-informed mutations:
+     - Height perturbation: change peak heights by ±0.02-0.08
+     - Width adjustment: expand/contract intervals by 3-8%
+     - Asymmetry: make symmetric patterns asymmetric (e.g., 1.40 → 1.42, 1.40, 1.38)
+  3. Use probe_solution to rank variants (30 probe budget). Evaluate only top 1-2.
+  4. If no improvement after 3 iterations, try a different seed pattern.
+  5. Function constraints: f(x) ≥ 0, ∫f > 0, numerically stable.
+
+  Tools: edit_solution (implement one mutation variant), evaluate_solution (full score), probe_solution (approx score, FAST), generate_step_variants (get 3 related step function variants), finish (report best C₂).
+skill_description: |
+  Systematic step-function refinement for C₂ maximization. Mutate seed patterns with small, targeted changes: height perturbation, width adjustment, asymmetry induction. Use probes to filter before full evaluation.
+skill_body: |
+  # C₂ Maximizer: Step-Function Refinement Protocol
+
+  ## Phase 1: Pattern Selection (first iteration)
+
+  1. Review the 13 seed patterns (0-12) in the EVOLVE-BLOCK.
+  2. Pick ONE pattern to refine (start with pattern 0: high peak single step).
+
+  ## Phase 2: Targeted Mutation Generation
+
+  For your chosen pattern, create 2-3 variants with these mutation types:
+
+  **Mutation A: Height Fine-Tuning**
+  - Identify peak heights in the pattern
+  - Adjust by small amounts: ±0.02 to ±0.08
+  - Example: if heights are [1.40, 1.50, 1.40], try [1.42, 1.50, 1.38]
+
+  **Mutation B: Width Optimization**
+  - Expand core intervals by 3-6%, contract wings by similar amount
+  - Example: if pattern has [0.25n, 0.75n], try [0.24n, 0.76n]
+
+  **Mutation C: Asymmetry Induction**
+  - Break symmetry in symmetric patterns
+  - Example: [1.40, 1.50, 1.40] → [1.42, 1.50, 1.38]
+  - Example: multi-level [0.70, 1.30, 1.70, 1.30, 0.70] → [0.72, 1.32, 1.68, 1.28, 0.72]
+
+  ## Phase 3: Probe-Based Selection
+
+  1. Call generate_step_variants to get 3 concrete code implementations
+  2. Call probe_solution on each variant (use all 30 probes wisely)
+  3. Select top 1-2 variants by probe score
+  4. Call evaluate_solution ONLY on the best 1-2
+
+  ## Phase 4: Iteration & Pattern Switching
+
+  - Track which mutation type works best (height, width, or asymmetry)
+  - If current pattern yields no improvement after 3 iterations:
+    - Switch to a different seed pattern (try pattern 1-12)
+    - Reset mutation strategy for the new pattern
+  - Continue until eval budget exhausted or record broken
+
+  ## Key Principles
+
+  - Small, targeted mutations > random exploration
+  - Probes filter bad variants before wasting full evaluations
+  - Systematic pattern cycling > getting stuck on one pattern
+  - Keep trying the same mutation type if it works; switch if it fails
+tool_descriptions:
+  edit_solution: |
+    Modify the EVOLVE-BLOCK to implement ONE mutation variant. Target:
+    - Use SEARCH/REPLACE to adjust heights by ±0.02-0.08, widths by ±3-8%, or introduce asymmetry
+    - Change only ONE aspect per edit (don't combine multiple mutations)
+    - Ensure f(x) ≥ 0 and ∫f > 0
+  evaluate_solution: |
+    Full evaluation returning combined_score. Budget: 30 evals total. Call ONCE per variant after probe ranking.
+  probe_solution: |
+    Approximate score on 10% subsampled data (10s vs minutes for full eval). 30-probe budget. USE THIS TO RANK variants BEFORE full evaluation. Call probe on 3 variants, evaluate the best 1-2.
+  finish: |
+    Report the best C₂ achieved and which seed pattern + mutation type produced it.
+sampling:
+  temperature: 0.3
+  top_p: 0.9
+  top_k: 15
+  max_tokens: 12288
+agent:
+  max_iterations: 45
+middleware:
+  budget_reminder_from_left: 3
+  long_tool_output_max_chars: 15000
+new_tools:
+- name: generate_step_variants
+  description: |
+    Generate 3 step-function variants with small, mathematically-informed mutations relative to the current pattern. Returns code snippets ready to edit. Mutations: height perturbation (±0.02-0.08), width adjustment (±3-8%), asymmetry induction (2-4%).
+  input_schema:
+    type: object
+    properties: {}
+  implementation_py: |
+    def run(ctx, args):
+        import random
+        random.seed(42)
+        current_best = ctx.get_best_program()
+        
+        # Parse heights and intervals from code
+        lines = current_best.split('\n')
+        heights = []
+        intervals = []
+        
+        for line in lines:
+            if 'set(' in line:
+                h_match = line.split('set(')[1].split(')')[0]
+                try:
+                    heights.append(float(h_match))
+                except:
+                    pass
+            
+            if 'int(' in line and 'n)' in line:
+                i_parts = line.split('int(')
+                if len(i_parts) > 1:
+                    nums = i_parts[1].split(')')[0].split('*')
+                    if len(nums) >= 2:
+                        try:
+                            intervals.append((float(nums[0]), float(nums[1])))
+                        except:
+                            pass
+        
+        if not heights or not intervals:
+            return {"note": "Could not parse pattern, using defaults"}
+        
+        # Generate 3 variants with different mutation types
+        variants = []
+        
+        # Variant 1: Height perturbation (perturb all heights by small amounts)
+        h1 = []
+        for h in heights:
+            delta = random.uniform(-0.06, 0.06)
+            h1.append(round(h + delta, 2))
+        variants.append({
+            "type": "height_perturbation",
+            "description": f"Height perturbation: {heights} → {h1}",
+            "code_snippet": current_best + "\n\n# Updated heights: " + str(h1),
+            "mutation_params": {"heights": h1, "intervals": intervals}
+        })
+        
+        # Variant 2: Asymmetry induction (make symmetric patterns asymmetric)
+        h2 = []
+        mid_idx = len(heights) // 2
+        for i, h in enumerate(heights):
+            if i < mid_idx:
+                h2.append(round(h + 0.04, 2))
+            elif i == mid_idx:
+                h2.append(h)
+            else:
+                h2.append(round(h - 0.04, 2))
+        variants.append({
+            "type": "asymmetry",
+            "description": f"Asymmetry: {heights} → {h2}",
+            "code_snippet": current_best + "\n\n# Asymmetric heights: " + str(h2),
+            "mutation_params": {"heights": h2, "intervals": intervals}
+        })
+        
+        # Variant 3: Width adjustment (expand core, contract wings)
+        w2 = []
+        n_intervals = len(intervals)
+        for i, (start, end) in enumerate(intervals):
+            if i == 0 or i == n_intervals - 1:
+                w2.append((round(start * 0.98, 2), round(end * 0.98, 2)))
+            else:
+                w2.append((round(start * 1.04, 2), round(end * 1.04, 2)))
+        variants.append({
+            "type": "width_adjustment",
+            "description": f"Width adjustment: {intervals} → {w2}",
+            "code_snippet": current_best + "\n\n# Adjusted intervals: " + str(w2),
+            "mutation_params": {"heights": heights, "intervals": w2}
+        })
+        
+        return {"variants": variants, "note": "Use probe_solution to rank these 3 variants before full evaluation."}
+new_skills:
+- name: step-refinement-protocol
+  description: |
+    Targeted refinement of step-function patterns. Mutate heights (±0.02-0.08), widths (±3-8%), or induce asymmetry in one step at a time.
+  body: |
+    # Step-Function Refinement Protocol
+
+    ## Core Principle
+
+    The 13 seed patterns are well-tuned. Beat the record through **small, targeted mutations**, not random exploration.
+
+    ## Mutation Types (use one at a time)
+
+    ### 1. Height Fine-Tuning
+    - Adjust peak heights by ±0.02 to ±0.08
+    - Try both increasing and decreasing the main peak
+    - Keep other heights fixed while mutating one
+
+    ### 2. Width Optimization  
+    - Expand core intervals by 3-6%
+    - Contract wing intervals by similar amount
+    - Maintain total domain coverage
+
+    ### 3. Asymmetry Induction
+    - Take symmetric patterns and break symmetry
+    - Example: [1.40, 1.50, 1.40] → [1.42, 1.50, 1.38]
+    - Small asymmetries (2-4%) can improve the C₂ ratio
+
+    ## Execution Strategy
+
+    1. Call generate_step_variants to get 3 variants (one of each mutation type)
+    2. Call probe_solution on all 3 (uses probe budget)
+    3. Evaluate the top 1-2 by probe score
+    4. If improvement: apply same mutation type to current pattern
+    5. If no improvement after 3 iterations: switch to different seed pattern
+
+    ## Pattern Cycling
+
+    If current pattern stalls:
+    - Move to next seed pattern (0→1→2→...→12→0)
+    - Each pattern has different structure, may respond to different mutations
+    - Don't refine one pattern to exhaustion; cycle through all
+new_middlewares:
+- name: focus_on_step_refinement
+  hook: before_model
+  description: |
+    Keep the agent focused on step-function refinement rather than exploring unrelated function families.
+  implementation_py: |
+    def before_model(hook_input):
+        iteration = hook_input.get("iteration", 0)
+        if iteration > 0:
+            return "Stay focused on refining step functions. Use generate_step_variants for 3 related variants, probe to rank, evaluate top 1-2. Don't explore Gaussian mixtures or splines - stick to step patterns."
+        return None

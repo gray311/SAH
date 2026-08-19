@@ -1,0 +1,25 @@
+"""Generated middleware (h2spec/1.0) — wrapped, fail-open."""
+from nexau.archs.main_sub.execution.hooks import (
+    BeforeModelHookInput, HookResult, Middleware)
+from nexau.core.messages import Message, Role, TextBlock
+
+# --USER-HOOK-START--
+def before_model(hook_input):
+    if hook_input.get("iteration", 0) % 3 == 0:
+        return "IMPORTANT: Generate a completely new step function structure. Do NOT make small parameter tweaks to the current pattern. Try a different number of steps, different symmetry, or an entirely new pattern shape from: narrow-tall, wide-moderate, multi-level, bimodal, or asymmetric archetypes."
+    return None
+# --USER-HOOK-END--
+
+class GeneratedMiddleware(Middleware):
+    def before_model(self, hook_input):
+        try:
+            note = before_model(hook_input)
+        except Exception:
+            return HookResult.no_changes()
+        if not note:
+            return HookResult.no_changes()
+        try:
+            msg = Message(role=Role.FRAMEWORK, content=[TextBlock(text=str(note)[:2000])])
+            return HookResult.with_modifications(messages=[*hook_input.messages, msg])
+        except Exception:
+            return HookResult.no_changes()

@@ -1,0 +1,277 @@
+schema: h2spec/1.0
+system_prompt: |
+  Erdos minimum overlap: find h: [0,2]->[0,1] minimizing max_k integral h(x)(1-h(x+k))dx subject to integral(h)=1.
+  
+  Current best: C5 <= 0.38092303510845016 (combined_score = 0.380923/c5_bound, so >1.0 is success).
+  
+  Strategy - Pattern Discovery Approach:
+  
+  1. The seed program already has a working optimizer with 15 pattern initializations.
+     DO NOT try to train longer or with different hyperparameters - those won't beat the seed.
+  
+  2. Instead, your job is to generate EDITS that CREATE NEW PATTERNS with lower overlap.
+     Focus on structural changes: peak placement, interval sizing, multi-scale patterns.
+  
+  3. Use probe_solution to evaluate candidate edits cheaply (500 intervals, fast).
+     Only call evaluate_solution on candidates with probe c5_bound < 0.37.
+  
+  4. Generate edits that:
+     - Modify the seed's pattern section directly
+     - Try smaller/larger Gaussian peaks
+     - Try different threshold cutpoints
+     - Try clustered vs. distributed peak patterns
+     - Try asymmetric patterns (more mass on one side)
+  
+  5. Budget strategy: 
+     - Round 1: Generate 5 candidate edits, probe all, eval best 2
+     - Round 2+: Generate 3 new edits, probe all, eval best 1, OR repeat successful pattern
+     - Stop when combined_score > 1.0 (c5_bound < 0.380923)
+  
+  6. Remember: The constraint integral(h)=1 must be satisfied. The seed program handles this via normalization - preserve that.
+  
+  7. Key patterns to explore:
+     - Two-peak patterns with adjustable separation
+     - Three-peak patterns with different spacings
+     - Triangular/multi-trapezoid patterns
+     - Periodic patterns (sine/cosine modulated)
+     - Asymmetric two-block patterns
+skill_description: |
+  Direct pattern-editing for Erdos C5 optimization. Generate structural edits to the seed's pattern section and screen with probe_evaluation.
+skill_body: |
+  # Direct Pattern Editing Protocol
+  
+  ## Objective
+  Create edits that generate new step-function patterns h: [0,2]->[0,1] with integral=1 and lower C5 overlap.
+  
+  ## Method
+  
+  ### Step 1: Generate Candidate Edits
+  Edit the seed's EVOLVE-BLOCK pattern section to try new structural approaches:
+  - Two-peak patterns with separation in [0.3, 1.7]
+  - Three-peak patterns with spacing 0.3-0.6 between centers
+  - Bi-modal with one peak near 0 and one near 2
+  - Single broad peak (width 0.4-1.2)
+  - Clustered peaks (2-3 within [0.5, 1.5])
+  
+  For each candidate, ensure:
+  - The Gaussian peak formula is used: h += A * exp(-(x - center)^2 / (2*sigma^2))
+  - Values are clipped and normalized: h = clip(h, 0, 10), then normalize to integral=1
+  - The integral constraint is satisfied via normalization (seed does this)
+  
+  ### Step 2: Probe Evaluation
+  CALL probe_solution on ALL candidate edits to get quick c5_bound estimates.
+  Skip any with c5_bound >= 0.38 (can't beat seed).
+  
+  ### Step 3: Full Evaluation
+  CALL evaluate_solution on the 1-2 best candidates (lowest probe c5_bound).
+  
+  ### Step 4: Iterate
+  If an edit succeeds (combined_score > 1.0), STOP and call finish.
+  Otherwise, generate NEW edits based on what worked:
+  - If 2-peak worked, try different separations
+  - If 3-peak worked, try different spacings
+  - Vary peak widths (sigma) from 0.08 to 0.25
+  
+  ## Why This Works
+  - Direct edits target the actual constraint (pattern structure)
+  - Probe screening filters out bad candidates quickly
+  - Only ~5-10 evaluations needed if probe signal is strong
+  - Seed's optimizer will train each candidate - we just need better seeds
+  
+  ## Example Edits
+  
+  Edit 1 (two-peak, separation=1.0):
+  Find: "marks = jnp.array([0.0, 0.4, 0.8, 1.2, 1.6])"
+  Replace with: "peaks = [0.35, 1.35]; for p in peaks: latent = latent.at[...].set(5.0)"
+  
+  Edit 2 (three-peak, spacing=0.5):
+  Replace Golomb pattern with: "centers = [0.5, 1.0, 1.5]; for c in centers: mask = abs(x-c)<0.1; latent = latent.at[mask].set(4.0)"
+  
+  ## Warning
+  Do NOT change hyperparameters (num_intervals, penalty_strength, num_steps).
+  The seed's optimizer configuration is already tuned - only change the INITIAL PATTERN.
+tool_descriptions:
+  edit_solution: |
+    Edit the EVOLVE-BLOCK to generate a new pattern-based initialization.
+    
+    Change ONLY the pattern generation section (after "_get_best_initialization").
+    Keep the optimizer loop, FFT computation, and constraint satisfaction intact.
+    
+    Common edits:
+    - Replace Golomb marks array with custom peaks
+    - Change threshold patterns (jnp.where conditions)
+    - Modify tri-modal centers and weights
+    - Try single broad Gaussian vs. narrow peaks
+    
+    Preserve:
+    - latent clipping and normalization
+    - sigmoid activation
+    - FFT-based c5 computation
+    - Pattern selection logic (select best by lowest c5_bound)
+    
+    Example: Replace Golomb pattern (lines with "marks = jnp.array") with:
+    "peaks = jnp.array([0.4, 1.0, 1.6])
+     for p in peaks:
+         mask = jnp.abs(x - p) < 0.08
+         latent = latent.at[mask].set(4.5)"
+  evaluate_solution: |
+    Run the full JAX optimizer on the edited pattern.
+    Returns combined_score = 0.38092303510845016 / c5_bound.
+    Score > 1.0 means you found C5 < 0.380923.
+  probe_solution: |
+    Fast approximate evaluation using 500 intervals and FFT.
+    Returns estimated c5_bound (not exact, but good for ranking).
+    Use this to filter candidates: only evaluate those with c5 < 0.37.
+  finish: |
+    Submit when you find combined_score > 1.0 (i.e., c5_bound < 0.38092303510845016).
+sampling:
+  temperature: 1.2
+  top_p: 0.9
+  top_k: 30
+  max_tokens: 12288
+agent:
+  max_iterations: 25
+middleware:
+  budget_reminder_from_left: 3
+  long_tool_output_max_chars: 8000
+new_tools:
+- name: probe_pattern
+  description: |
+    Generate 3 candidate pattern edits, compute probe c5 for each, return results.
+    Call this at the start to get cheap c5 estimates.
+  input_schema:
+    type: object
+    properties:
+      num_peaks:
+        type: integer
+        default: 3
+    required: []
+  implementation_py: |
+    def run(ctx, args):
+        N = 800
+        domain = 2.0
+        dx = domain / N
+        
+        def c5_from_h(h):
+            j_val = 1.0 - h
+            h_padded = np.pad(h, (0, N))
+            j_padded = np.pad(j_val, (0, N))
+            corr = np.fft.fft(h_padded) * np.conj(np.fft.fft(j_padded))
+            corr = np.fft.ifft(corr).real
+            return np.max(corr * dx)
+        
+        def normalize(h):
+            integral = np.sum(h) * dx
+            return h / integral
+        
+        num_peaks = args.get("num_peaks", 3)
+        np.random.seed(int(ctx.budget_left("evals")) * 17 + int(ctx.budget_left("probes")))
+        
+        def make_two_peaks(sep):
+            h = np.zeros(N)
+            centers = np.array([0.5, 1.0])
+            for c in centers:
+                h += 6.0 * np.exp(-((np.linspace(0,2,N) - c) / 0.12)**2)
+            h = normalize(np.clip(h, 0.01, 10.0))
+            return h, c5_from_h(h)
+        
+        def make_three_peaks(centers):
+            h = np.zeros(N)
+            for c in centers:
+                h += 5.0 * np.exp(-((np.linspace(0,2,N) - c) / 0.1)**2)
+            h = normalize(np.clip(h, 0.01, 10.0))
+            return h, c5_from_h(h)
+        
+        def make_bipartite(cut):
+            x = np.linspace(0, 2, N)
+            h = np.where(x < cut, 4.0, -4.0)
+            h += np.random.normal(0, 0.2, N)
+            h = normalize(np.clip(1/(1+np.exp(-h)), 0.01, 10.0))
+            return h, c5_from_h(h)
+        
+        seeds = [0.3, 0.7, 0.5]
+        results = []
+        
+        # Two peaks at different separations
+        for sep in [0.5, 1.0, 1.5]:
+            h, c5 = make_two_peaks(sep)
+            results.append({
+                "description": f"Two-peak, sep={sep}",
+                "c5_bound": float(c5),
+                "h": h.tolist()
+            })
+        
+        # Three peaks
+        for centers in [[0.3, 1.0, 1.7], [0.4, 0.9, 1.5], [0.5, 1.0, 1.5]]:
+            h, c5 = make_three_peaks(centers)
+            results.append({
+                "description": f"Three-peak, centers={tuple(map(str, centers))}",
+                "c5_bound": float(c5),
+                "h": h.tolist()
+            })
+        
+        return {"patterns": results[:6]}
+new_skills:
+- name: pattern-explorer
+  description: |
+    Systematic pattern discovery for Erdos C5. Generate candidate pattern edits, probe-filter, evaluate best.
+  body: |
+    # Pattern Explorer for Erdos C5
+  
+    ## Objective
+    Find pattern edits that produce h with integral=1 and c5_bound < 0.380923.
+  
+    ## Protocol
+  
+    ### Phase 1: Generate Batch of Pattern Edits
+    Edit the seed's _get_best_initialization method to try:
+    - Two-peak patterns with separation ∈ {0.5, 1.0, 1.5}
+    - Three-peak patterns with centers ∈ {[0.3,1.0,1.7], [0.4,0.9,1.5], [0.5,1.0,1.5]}
+    - Bipartite patterns with cut ∈ {0.35, 0.5, 0.65}
+    - Broad single peak (sigma ∈ {0.15, 0.2, 0.25})
+    - Clustered peaks (2-3 within [0.6, 1.4])
+  
+    ### Phase 2: Probe Screening
+    CALL probe_pattern or probe_solution on all edits.
+    Keep only those with c5_bound < 0.37 (probe can be approximate).
+  
+    ### Phase 3: Full Evaluation
+    For each kept candidate:
+      1. Generate the edited program
+      2. CALL evaluate_solution
+      3. Record combined_score
+  
+    ### Phase 4: Iterate or Finish
+    If any combined_score > 1.0, call finish and submit.
+    Otherwise, try variations:
+      - Adjust peak widths (widen if too narrow, narrow if too broad)
+      - Shift peak positions
+      - Try different peak counts (2 vs 3 vs 4)
+      - Mix pattern types (e.g., one broad + two narrow)
+  
+    ## Key Insight
+    The seed's optimizer already trains well - we need BETTER initial patterns,
+    not longer training. Focus on pattern STRUCTURE, not hyperparameters.
+  
+    ## Constraints to Preserve
+    - Always use sigmoid: h = 1/(1+exp(-latent))
+    - Always normalize to integral=1
+    - Always clip latent to positive values before sigmoid
+new_middlewares:
+- name: pattern_probe_first
+  hook: before_model
+  description: |
+    Middleware to enforce probe-then-evaluate workflow.
+  implementation_py: |
+    def before_model(hook_input):
+        state = hook_input.get("state", {})
+        evals_left = state.get("evals_left", 0)
+        last_c5 = state.get("last_probe_c5", None)
+        
+        if last_c5 is not None and last_c5 >= 0.38:
+            return "Previous probe gave c5 >= 0.38 (>= seed). Generate a NEW pattern edit with different structure."
+        elif evals_left >= 3 and last_c5 is None:
+            return "You haven't probed yet. Generate and probe candidate patterns first. Don't evaluate immediately."
+        elif evals_left <= 2 and last_c5 < 0.37:
+            return f"Only {evals_left} evals left and last probe c5={last_c5}. If this is best, evaluate now, then finish."
+        return None

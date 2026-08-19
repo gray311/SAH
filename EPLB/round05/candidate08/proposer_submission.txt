@@ -1,0 +1,40 @@
+schema: h2spec/1.0
+system_prompt: "You are an expert performance engineer specializing in MoE EPLB load balancing.\n\nEVALUATOR REWARDS:\n1. Lower variance in expert loads across packs\n2. Faster execution (fewer ops, better vectorization)\n\nCRITICAL: The balanced_packing() function is O(n^2) with nested Python loops. Replace with O(n log n) pure PyTorch vectorized operations.\n\nYOUR STRATEGY:\nPHASE 1: Parse EVOLVE-BLOCK, note current nested loops over groups and packs\nPHASE 2: Implement vectorized packing using: sorted_idx = weight.argsort(dim=-1, descending=True); pack_idx = sorted_idx // groups_per_pack; rank_in_pack = sorted_idx % groups_per_pack\nPHASE 3: Call probe_solution 3-5 times with variants, then evaluate_solution on top 2\nPHASE 4: When budget_left < 5, finish immediately\n\nCONSTRAINTS: Pure PyTorch only. No Python loops over groups/packs in balanced_packing(). Preserve function signatures."
+skill_description: "Transform balanced_packing() from O(n^2) to O(n log n) vectorized torch ops. Use: argsort + integer division for pack/rank assignment. Generate 3-5 variants with probe, evaluate top 2."
+skill_body: "# EPLB Vectorization Method\n\n## Phase 2: Vectorized Replacement Pattern\n\nStep 1: sorted_idx = torch.argsort(weight, dim=-1, descending=True)\nStep 2: pack_idx = sorted_idx // groups_per_pack\nStep 3: rank_in_pack = sorted_idx % groups_per_pack\nStep 4: Accumulate weights via minimal layer loop\n\n## Phase 3: Validation Strategy\n1. Generate 3-5 variants\n2. Call probe_solution to rank them\n3. Call evaluate_solution on top 2\n4. Call finish on best result\n\n## Critical Rules\n- NEVER use for loops over groups or packs\n- Use integer division for pack assignment\n- Use modulus for rank assignment\n- Pure PyTorch only"
+tool_descriptions:
+  edit_solution: "Edit EVOLVE-BLOCK. REWRITE balanced_packing() using: sorted_idx = weight.argsort(dim=-1, descending=True); pack_idx = sorted_idx // groups_per_pack; rank_in_pack = sorted_idx % groups_per_pack\nDO NOT use Python for-loops over groups or packs. Preserve function signature."
+  evaluate_solution: "Full evaluation. Returns combined_score. Budget ~20 total."
+  probe_solution: "Cheap approximate evaluation. Call 3-5 times to compare variants. Then evaluate top 2."
+  finish: "End session. Call after evaluating best variant."
+sampling:
+  temperature: 1.2
+  top_p: 0.95
+  top_k: 30
+  max_tokens: 16384
+agent:
+  max_iterations: 40
+middleware:
+  budget_reminder_from_left: 6
+  long_tool_output_max_chars: 18000
+new_tools:
+  - name: generate_packing_variants
+    description: "Generate 3-5 vectorized balanced_packing implementations. Patterns: minimal indices only, weight accumulation, block processing."
+    input_schema:
+      type: object
+      properties:
+        num_variants:
+          type: integer
+          default: 5
+    implementation_py: |
+      def run(ctx, args):
+          num_variants = args.get("num_variants", 5)
+          variants = []
+          variants.append({"name": "v1", "code": "def balanced_packing(v1, num_packs):\n    num_layers, num_groups = v1.shape\n    assert num_groups % num_packs == 0\n    groups_per_pack = num_groups // num_packs\n    if groups_per_pack == 1:\n        pack_index = torch.arange(num_groups, device=v1.device)\n        rank_in_pack = torch.zeros_like(v1, dtype=torch.int64)\n        return pack_index, rank_in_pack\n    sorted_idx = torch.argsort(v1, dim=-1, descending=True)\n    pack_idx = sorted_idx // groups_per_pack\n    rank_in_pack = sorted_idx % groups_per_pack\n    return pack_idx, rank_in_pack"})
+          variants.append({"name": "v2", "code": "def balanced_packing(v2, num_packs):\n    num_layers, num_groups = v2.shape\n    assert num_groups % num_packs == 0\n    groups_per_pack = num_groups // num_packs\n    if groups_per_pack == 1:\n        pack_index = torch.arange(num_groups, device=v2.device)\n        rank_in_pack = torch.zeros_like(v2, dtype=torch.int64)\n        return pack_index, rank_in_pack\n    sorted_idx = torch.argsort(v2, dim=-1, descending=True)\n    pack_idx = sorted_idx // groups_per_pack\n    rank_in_pack = sorted_idx % groups_per_pack\n    pack_weights = torch.zeros(num_packs, device=v2.device)\n    for i in range(num_layers):\n        pack_weights += v2[i*num_groups:(i+1)*num_groups]\n    return pack_idx, rank_in_pack"})
+          variants.append({"name": "v3", "code": "def balanced_packing(v3, num_packs):\n    num_layers, num_groups = v3.shape\n    assert num_groups % num_packs == 0\n    groups_per_pack = num_groups // num_packs\n    if groups_per_pack == 1:\n        pack_index = torch.arange(num_groups, device=v3.device)\n        rank_in_pack = torch.zeros_like(v3, dtype=torch.int64)\n        return pack_index, rank_in_pack\n    sorted_idx = torch.argsort(v3, dim=-1, descending=True)\n    pack_idx = sorted_idx // groups_per_pack\n    rank_in_pack = sorted_idx % groups_per_pack\n    for block in range(0, num_layers, 100):\n        end_block = min(block + 100, num_layers)\n        layer_pack_ids = pack_idx[block:end_block].flatten()\n        for p in range(num_packs):\n            mask = layer_pack_ids == p\n            if mask.sum() > 0:\n                pack_weights[p] += v3[block:end_block][mask].sum()\n    return pack_idx, rank_in_pack"})
+          return {"variants": variants}
+new_skills:
+  - name: vectorized-implementation-patterns
+    description: "Concrete code patterns to replace the O(n^2) balanced_packing loops. Use argsort + division for packing."
+    body: "# Vectorized Patterns\n\n## Pattern: Direct Index Division\nsorted_idx = torch.argsort(weight, dim=-1, descending=True)\npack_idx = sorted_idx // groups_per_pack\nrank_in_pack = sorted_idx % groups_per_pack\n\n## Pattern: With Accumulation\nsorted_idx = torch.argsort(weight, dim=-1, descending=True)\npack_idx = sorted_idx // groups_per_pack\nrank_in_pack = sorted_idx % groups_per_pack\npack_weights = torch.zeros(num_packs, device=weight.device)\nfor i in range(num_layers):\n    pack_weights += weight[i*num_groups:(i+1)*num_groups]\n\n## Rules\n1. No loops over groups/packs\n2. Use integer division for pack assignment\n3. Pure PyTorch only"

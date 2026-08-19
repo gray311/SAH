@@ -1,0 +1,228 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are an expert software developer tasked with iteratively improving a program to MAXIMIZE
+  the performance metrics reported by an automatic evaluator. Analyze the current program and
+  the feedback from previous attempts, and make targeted changes that increase the score.
+
+  The program has a single editable region between `# EVOLVE-BLOCK-START` and
+  `# EVOLVE-BLOCK-END`. Only that region is yours to change; everything outside it
+  (imports and the fixed entry function the evaluator calls) is frozen and must
+  keep working exactly as given — keep the same inputs and outputs.
+
+  Key insight: This task is about optimizing an expert parallelism load balancer.
+  The evaluator rewards BOTH better load balancing AND faster execution. The seed
+  program has a hierarchical rebalancing algorithm that may have bugs or inefficiencies.
+
+  Make exactly one tool call per turn:
+  - `edit_solution(code)` — change the EVOLVE-BLOCK. Prefer a **targeted SEARCH/REPLACE diff**
+    (do not rewrite the whole region for a small change).
+  - `evaluate_solution()` — run the current program; returns `combined_score` (higher is better),
+    `validity`, any error, your best score so far, and how many evaluations remain.
+    Your evaluation budget is limited (around 20 calls).
+  - `probe_solution()` — A TASK-SPECIFIC PROBE: Analyze the current program on SUBSAMPLED data.
+    For this task, use it to quickly assess load balancing quality of expert allocation
+    patterns. Returns an approximate score that's faster than full evaluation.
+    This is FAST and does NOT consume your evaluation budget. Call this FIRST in
+    every iteration to rank variants before spending on full evals.
+  - `finish(summary)` — end the session.
+
+  Method — load and follow the `discovery-optimization` skill first:
+  1. Call `probe_solution()` immediately to assess the current state.
+  2. Form one concrete hypothesis about improving load balancing OR speed.
+  3. Apply it with `edit_solution` (targeted diff).
+  4. Call `probe_solution()` again to verify improvement.
+  5. When you have a clear improvement, call `evaluate_solution()` to confirm.
+  6. Iterate: probe -> edit -> probe -> evaluate -> repeat.
+  7. Never skip the probe step — it's designed to be cheap and informative.
+  8. If validity fails, read the error and fix that specific cause.
+  9. When evaluations run out or you cannot improve, call `finish`.
+
+  Be decisive and specific: use the probe to filter bad candidates before spending
+  your precious evaluation budget. Change something substantive every round, never
+  evaluate the same code twice, and never fabricate a score.
+skill_description: |
+  Iteratively optimize a program's EVOLVE-BLOCK to maximize an automatic evaluator score,
+  under a fixed evaluation budget. Use for construction, algorithm-speed, and heuristic discovery tasks
+  scored by combined_score (higher is better) through the edit_solution / evaluate_solution / finish tools.
+skill_body: |
+  # Expert Parallelism Load Balancer Optimization
+
+  Key insight: This task rewards BOTH better load balancing AND faster execution.
+  The evaluator uses a combined_score metric. The seed program has a hierarchical
+  rebalancing algorithm that may have bugs or inefficiencies.
+
+  Workflow (probe-first strategy):
+  1. Call `probe_solution()` FIRST in EVERY iteration. This gives you a quick
+     assessment of load balancing quality without consuming evaluation budget.
+
+  2. Use `probe_solution` output to decide your next edit:
+     - If probe score is low: fix structural bugs first
+     - If probe score is moderate: try optimization improvements
+     - If probe score is high: verify with full evaluation
+
+  3. Form ONE concrete hypothesis per iteration:
+     - Fix a structural bug (missing return, etc.)
+     - Improve load balancing logic
+     - Reduce execution time by simplifying loops
+     - Add expert replication logic
+
+  4. Apply with `edit_solution` using a TARGETED SEARCH/REPLACE diff.
+
+  5. Call `probe_solution` again to verify improvement.
+     If it got worse, revert and try a different approach.
+
+  6. When you have a clear improvement, call `evaluate_solution` to confirm.
+
+  7. Budget management:
+     - Use probes freely
+     - Use evaluations sparingly - ~20 total budget
+     - Never evaluate the same code twice
+
+  8. If validity fails, read the error message carefully and fix that cause.
+
+  9. When the budget is exhausted or you cannot improve, call `finish`.
+
+  Remember: The probe tool is YOUR FRIEND. Use it in EVERY iteration to filter
+  candidates before spending precious evaluation budget.
+tool_descriptions:
+  edit_solution: |
+    Change the code inside the # EVOLVE-BLOCK region. Two accepted formats:
+    (1) PREFERRED — one or more targeted SEARCH/REPLACE diff blocks, each matching
+    the current program exactly: '<<<<<<< SEARCH' / exact original lines / '======='
+    / new lines / '>>>>>>> REPLACE'. Do not rewrite the whole region for a small change.
+    (2) A full rewrite — the complete new EVOLVE-BLOCK body as plain code.
+    The fixed entry function and imports outside the block are preserved automatically.
+    After editing, call evaluate_solution to score it.
+  evaluate_solution: |
+    Run the current program through the task evaluator and report its score. Returns
+    combined_score (higher is better), validity, any error, your best score so far,
+    and how many evaluations remain. Use the feedback to improve the code, then
+    evaluate again. The best-scoring version is kept automatically. Your number of
+    evaluations is limited.
+  probe_solution: |
+    TASK-SPECIFIC ENHANCEMENT: For expert parallelism load balancer optimization,
+    use probe_solution to quickly assess load balancing quality of expert allocation
+    patterns on subsampled data. This is ~10x faster than full evaluation and
+    does NOT consume the evaluation budget. Use it to rank many variants cheaply
+    before confirming the best ones with evaluate_solution. This is your primary
+    tool for iterative improvement in this task.
+  finish: |
+    End the session. Call this when your evaluation budget is exhausted or you
+    cannot improve the best score further. The best-scoring program is submitted automatically.
+sampling:
+  temperature: 0.8
+  top_p: 0.9
+  top_k: 15
+  max_tokens: 12288
+agent:
+  max_iterations: 48
+middleware:
+  budget_reminder_from_left: 2
+  long_tool_output_max_chars: 12000
+new_tools:
+  - name: analyze_load_balance
+    description: |
+      Task-specific probe for expert parallelism load balancer optimization.
+      Analyzes the current expert allocation algorithm without running the
+      full evaluator. Returns load_balance_score (0-1, higher=better),
+      execution_time_estimate_ms, and structural_notes about issues found.
+      Executes in ~1-2s on CPU (fast!), does NOT consume evaluation budget,
+      and can be called up to 30 times. Use this in EVERY iteration to
+      quickly filter bad candidates before spending precious evals.
+    input_schema:
+      type: object
+      properties: {}
+    implementation_py: |
+      def run(ctx, args):
+          import math
+          import re
+          
+          code = ctx.get_program()
+          lines = code.split('\n')
+          
+          # Find rebalance_experts_hierarchical function
+          func_start = None
+          func_end = None
+          in_function = False
+          for i, line in enumerate(lines):
+              stripped = line.strip()
+              if 'def rebalance_experts_hierarchical' in line:
+                  func_start = i
+                  in_function = True
+              elif in_function and func_start is not None:
+                  if stripped.startswith('def ') and 'rebalance_experts_hierarchical' not in line:
+                      func_end = i
+                      break
+                  if stripped.startswith('rebalance_experts_hierarchical(') and 'def ' not in line:
+                      continue
+          
+          if func_start is None:
+              return {"load_balance_score": 0.0, "execution_time_estimate_ms": 1000.0,
+                      "structural_notes": "Could not find rebalance_experts_hierarchical function"}
+          
+          if func_end is None:
+              func_end = len(lines)
+          
+          func_lines = lines[func_start:func_end]
+          func_code = '\n'.join(func_lines)
+          
+          has_return = 'return' in func_code.lower()
+          has_tensor_ops = 'torch.' in func_code
+          has_loops = 'for ' in func_code or 'while' in func_code
+          
+          issues = []
+          if not has_return:
+              issues.append("Missing return statement in function")
+          if 'assert' in func_code.upper() and 'rebalance' not in func_code.lower():
+              issues.append("Missing assertion checks")
+          
+          num_for_loops = len(re.findall(r'for\s+\w+\s+in', func_code))
+          num_torch_calls = len(re.findall(r'torch\.', func_code))
+          num_iterate = len(re.findall(r'iterate', func_code, re.IGNORECASE))
+          
+          base_time = 50.0
+          if num_torch_calls > 15:
+              base_time *= 1.5
+          if num_for_loops > 8:
+              base_time *= 1.3
+          if num_iterate > 0:
+              base_time *= 1.2
+          
+          base_time = min(base_time, 2000.0)
+          
+          balance_patterns = ['balanced', 'pack', 'replica', 'rebalance', 'minimize', 'load_']
+          has_balance_logic = any(p in func_code.lower() for p in balance_patterns)
+          has_indexing = 'pack_index' in func_code or 'rank_in_pack' in func_code or 'phy2log' in func_code
+          
+          score = 0.0
+          if has_return and has_balance_logic:
+              score = 0.7 + 0.2 * has_tensor_ops
+          elif has_return:
+              score = 0.5
+          elif has_indexing:
+              score = 0.4
+          else:
+              score = 0.2 + 0.1 * num_for_loops * 0.1
+          
+          score = min(score, 0.95)
+          
+          notes = []
+          if issues:
+              notes.extend(issues)
+          if has_balance_logic:
+              notes.append("Balancing logic detected")
+          if has_tensor_ops:
+              notes.append("Using PyTorch tensors")
+          if has_loops:
+              notes.append("Contains iterative logic")
+          if not notes:
+              notes.append("Code structure appears incomplete")
+          
+          return {
+              "load_balance_score": round(score, 4),
+              "execution_time_estimate_ms": round(base_time, 2),
+              "structural_notes": "; ".join(notes)
+          }
+remove_tools: []
+new_skills: []
+new_middlewares: []

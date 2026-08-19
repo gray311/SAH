@@ -1,0 +1,331 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are building EXPLICIT step-function candidates for the Erdős C₅ bound problem.
+  
+  **THE TASK**: Find a step function h: [0,2]→[0,1] minimizing max_k ∫ h(x)(1-h(x+k))dx.
+  Constraint: ∫h = 1 over [0,2].
+  Target: combined_score > 1.0 (i.e., c5_bound < 0.38092303510845016).
+  
+  **DO NOT use gradient descent or Adam optimization**. The seed's optimizer fails because this is a DISCRETE STRUCTURAL problem.
+  
+  **YOUR APPROACH - Build explicit candidates**:
+  
+  1. **Define h as piecewise constant with few intervals** (e.g., 2-10 intervals, not 800)
+  2. **Manually construct h values** that satisfy ∫h=1 and h∈[0,1]
+  3. **Try different combinatorial patterns**:
+     - Single interval: h=1 on [0,1], 0 elsewhere
+     - Two intervals: h=0.5 on two regions totaling measure 2
+     - Symmetric wave: sin-based patterns centered at x=1
+     - Concentrated mass near boundaries or center
+  
+  4. **Use probe_solution to quickly score ~10-20 variants** before picking best for full eval
+  
+  5. **Only call evaluate_solution on your best 1-3 candidates**
+  
+  6. **If no progress after 10 attempts, try radically different structures** (different number of steps, different support regions)
+  
+  **CONSTRAINT CHECKING**: Before finalizing h, verify:
+  - All h[i] ∈ [0,1]
+  - Sum of h[i] × dx = 1.0 (where dx = 2/num_intervals)
+  
+  **NEW TOOL**: Use pattern_construction to generate explicit step-function candidates with guaranteed constraints.
+  
+  **BUDGET**: You have ~30 full evaluations. Spend them wisely - test many cheap variants with probes first.
+skill_description: |
+  C₅ bound via explicit step-function construction. Abandon gradient descent; build discrete candidates directly.
+skill_body: |
+  # Erdős C₅ Bound: Explicit Construction Strategy
+  
+  ## Why Gradient Descent Fails
+  
+  This is a DISCRETE OPTIMIZATION problem. The optimal h is likely a simple step function (2-5 intervals), not a complex learned function. Adam optimizer gets stuck in poor local optima on the wrong landscape.
+  
+  ## Mathematical Background
+  
+  The C₅ bound equals max_k ∫₀² h(x)(1-h(x+k))dx. We want this minimal.
+  
+  Key insight: Simple step functions with proper alignment can achieve very low overlap.
+  
+  ## Construction Recipes
+  
+  ### Pattern A: Single Mass on [0,1]
+  - h(x) = 1 for x∈[0,1], h(x) = 0 for x∈(1,2]
+  - ∫h = 1 ✓
+  - This gives some baseline C₅
+  
+  ### Pattern B: Two-Step Symmetric
+  - h(x) = 0.5 for x∈[0,0.5] ∪ [1,1.5], h(x) = 0 elsewhere
+  - Total measure = 0.5×1 = 1 ✓
+  - May reduce overlap compared to single mass
+  
+  ### Pattern C: Concentrated at Boundaries
+  - h(x) = 1 on [0,a] ∪ [2-a, 2], h(x) = 0 elsewhere
+  - Choose a so total measure = 1: a + a = 1, so a = 0.5
+  - h(x) = 1 on [0,0.5] ∪ [1.5, 2]
+  
+  ### Pattern D: Three-Interval Balanced
+  - h(x) = 1/3 on [0,1], h(x) = 0 on [1,2]
+  - Or variations with different widths
+  
+  ### Pattern E: Shifted Block
+  - h(x) = 1 on [ε, 1+ε], h(x) = 0 elsewhere (adjust ε for integral=1)
+  - Small shift from [0,1] might reduce self-overlap
+  
+  ## Execution Strategy
+  
+  1. **Start with 20-50 intervals** for discretization (not 800)
+  2. **Use pattern_construction tool** to generate explicit h arrays
+  3. **Call pattern_construction multiple times** with different parameters
+  4. **Use probe_solution** to quickly score 10-20 patterns
+  5. **Pick top 2-3 patterns, call evaluate_solution** on each
+  6. **If best score still ~1.0, try radically different structures**
+  
+  ## Tool Usage
+  
+  - **pattern_construction(args)**: Returns explicit h array for a given pattern config
+  - **probe_solution()**: Quick approximate score (don't use if patterns are already explicit)
+  - **evaluate_solution()**: Full official score - use sparingly
+  
+  ## Success Criteria
+  
+  Achieve combined_score > 1.0. Any improvement over 0.999641 is good, but we need c5_bound < 0.38092303510845016.
+  
+  ## Common Mistakes to Avoid
+  
+  - Don't use gradient-based optimization
+  - Don't use 800 intervals (overly complex, not what we need)
+  - Don't rely on random initializations with noise
+  - DO verify constraints analytically before submitting
+  DO verify ∫h=1 explicitly
+  DO ensure all h values are exactly in [0,1] (not [0,1) or (0,1])
+tool_descriptions:
+  edit_solution: |
+    Modify the EVOLVE-BLOCK. **COMPLETE REWRITES REQUIRED**.
+    
+    Remove all gradient descent code (adam optimizer, training loops, _objective_fn with gradients).
+    
+    Instead, construct h explicitly as a piecewise constant array. The code should:
+    1. Define a function that builds h from pattern parameters
+    2. Return the h array directly (no optimization loop)
+    3. Use pattern_construction tool if available
+    
+    Example structure:
+    - Define pattern config (num_intervals, pattern_type, step_widths, heights)
+    - Build h as piecewise constant array
+    - Verify ∫h=1 by adjusting if needed
+  evaluate_solution: |
+    Run program and get combined_score. You have ~30 evaluations.
+    Each full eval is precious - only call on best candidates.
+  probe_solution: |
+    Approximate score on discretized data. Call this 10-20 times on different pattern candidates to rank them before spending full evals.
+  finish: |
+    End when budget exhausted or no improvements. Best program auto-submitted.
+new_tools:
+  - name: pattern_construction
+    description: |
+      Generate explicit step-function h arrays from pattern specifications.
+      Returns h as a 1D array of shape (num_intervals,), guaranteed to satisfy:
+      - h[i] ∈ [0,1] for all i
+      - ∫h = 1 over [0,2]
+      
+      Pattern types:
+      - "single_block": h=1 on one interval of width 1, 0 elsewhere
+      - "double_step": h=c on two intervals totaling measure 1
+      - "boundary_mass": h=1 on [0,a] ∪ [2-a, 2] with a=0.5
+      - "three_interval": h=h1, h2, h3 on three consecutive intervals
+      - "shifted_block": h=1 on [a, a+1], adjusted for boundaries
+      
+      Parameters:
+      - pattern: str (one of above types)
+      - num_intervals: int (default 50)
+      - additional_params: dict (pattern-specific)
+      
+      This tool ensures constraints are satisfied analytically, avoiding penalty-based approaches.
+    input_schema:
+      type: object
+      properties:
+        pattern:
+          type: string
+          enum: [single_block, double_step, boundary_mass, three_interval, shifted_block]
+        num_intervals:
+          type: integer
+          default: 50
+        additional_params:
+          type: object
+          default: {}
+    implementation_py: |
+      def run(ctx, args):
+          import math
+          pattern = args.get("pattern", "boundary_mass")
+          num_intervals = args.get("num_intervals", 50)
+          dx = 2.0 / num_intervals
+          
+          h = jnp.zeros(num_intervals)
+          
+          if pattern == "single_block":
+              # h=1 on [0,1], 0 on (1,2]
+              end_idx = int(1.0 / dx)
+              h = h.at[:end_idx].set(1.0)
+          
+          elif pattern == "double_step":
+              # h=0.5 on two intervals of width 0.5 each
+              idx1 = int(0.0 / dx)
+              idx2 = int(0.5 / dx)
+              end1 = min(idx1 + int(0.5 / dx), num_intervals)
+              end2 = min(idx2 + int(0.5 / dx), num_intervals)
+              h = h.at[idx1:end1].set(0.5)
+              h = h.at[idx2:end2].set(0.5)
+          
+          elif pattern == "boundary_mass":
+              # h=1 on [0,0.5] ∪ [1.5, 2]
+              idx1 = 0
+              idx2 = int(1.5 / dx)
+              end1 = min(int(0.5 / dx) + 1, num_intervals)
+              end2 = num_intervals
+              h = h.at[idx1:end1].set(1.0)
+              h = h.at[idx2:end2].set(1.0)
+          
+          elif pattern == "three_interval":
+              # Three consecutive intervals, each height 1/3
+              start = int(0.0 / dx)
+              width = int(1.0 / dx)
+              end = min(start + width, num_intervals)
+              h = h.at[start:end].set(1.0 / 3.0)
+          
+          elif pattern == "shifted_block":
+              # Try shifts around 0.25 to avoid self-overlap
+              shifts = [0.0, 0.25, 0.5, 0.75, 1.0]
+              best_shift = 0.0
+              best_score = float('inf')
+              
+              # Use cheap probe if available
+              if hasattr(ctx, 'probe'):
+                  for s in shifts:
+                      trial_h = jnp.zeros(num_intervals)
+                      idx_start = int(s / dx)
+                      end_idx = min(int((s+1) / dx) + 1, num_intervals)
+                      trial_h = trial_h.at[idx_start:end_idx].set(1.0)
+                      
+                      # Verify constraint
+                      integral = jnp.sum(trial_h) * dx
+                      if abs(integral - 1.0) < 0.01:
+                          # Check C5 via approximation
+                          j = 1.0 - trial_h
+                          h_pad = jnp.pad(trial_h, (0, num_intervals))
+                          j_pad = jnp.pad(j, (0, num_intervals))
+                          corr = jnp.fft.ifft(jnp.fft.fft(h_pad) * jnp.conj(jnp.fft.fft(j_pad))).real
+                          score = jnp.max(corr) * dx
+                          if score < best_score:
+                              best_score = score
+                              best_shift = s
+                  h = jnp.zeros(num_intervals)
+                  idx_start = int(best_shift / dx)
+                  end_idx = min(int((best_shift+1) / dx) + 1, num_intervals)
+                  h = h.at[idx_start:end_idx].set(1.0)
+              else:
+                  # Default to shift 0.25
+                  idx_start = int(0.25 / dx)
+                  end_idx = min(int(1.25 / dx) + 1, num_intervals)
+                  h = h.at[idx_start:end_idx].set(1.0)
+          
+          # Final constraint correction if needed
+          integral = jnp.sum(h) * dx
+          if abs(integral - 1.0) > 0.001:
+              # Scale heights to satisfy integral constraint
+              current_sum = jnp.sum(h)
+              if current_sum > 0:
+                  scale = 1.0 / current_sum
+                  h = h * scale
+              else:
+                  # Fallback: set first interval to make integral=1
+                  h = jnp.zeros(num_intervals)
+                  h = h.at[0].set(1.0 / dx)
+          
+          # Clip to [0,1]
+          h = jnp.clip(h, 0.0, 1.0)
+          
+          return {"h": h.tolist(), "pattern": pattern, "num_intervals": num_intervals,
+                  "integral": float(jnp.sum(h) * dx)}
+new_skills:
+  - name: step-function-construction
+    description: |
+      Expert technique: Build explicit step functions directly, abandon gradient-based optimization.
+      Call this skill when designing candidate solutions for C₅ bound.
+    body: |
+      # Step-Function Construction for C₅ Bound
+  
+      ## Core Principle
+  
+      The optimal h is likely a SIMPLE step function (2-5 intervals), NOT a complex learned function.
+      Gradient descent fails because:
+      1. The landscape is discrete/flat
+      2. Sigmoid transformation adds unnecessary complexity
+      3. We're looking for specific combinatorial structures, not smooth functions
+  
+      ## Construction Checklist
+  
+      1. **Choose discretization**: 20-50 intervals is sufficient (not 800)
+      2. **Select pattern type**:
+         - single_block: One interval of h=1, width=1
+         - double_step: Two intervals of h=0.5, total width=1
+         - boundary_mass: Mass at both ends [0,0.5] ∪ [1.5,2]
+         - shifted_block: Block shifted from [0,1] to avoid self-overlap
+         - three_interval: Three consecutive intervals
+  
+      3. **Verify constraints analytically**:
+         - Check: sum(h) × dx = 1.0 exactly (not approximately)
+         - Check: all h[i] ∈ [0,1] (use 0.5 or 1.0, not arbitrary floats)
+  
+      4. **Try multiple patterns**: Generate 10-20 variants with different configs
+  
+      5. **Use probes to rank**: Call probe_solution 10-20 times on different patterns
+  
+      6. **Full eval on top 2-3**: Only call evaluate_solution on your best candidates
+  
+      7. **If stuck, radically change**: Different number of intervals, different pattern type
+  
+      ## Example Code Structure
+  
+      ```python
+      def build_h(pattern, num_intervals=50):
+          dx = 2.0 / num_intervals
+          h = jnp.zeros(num_intervals)
+          
+          if pattern == "boundary_mass":
+              # h=1 on [0,0.5] ∪ [1.5, 2]
+              h = jnp.zeros(num_intervals)
+              h = h.at[:25].set(1.0)
+              h = h.at[75:].set(1.0)
+              # Verify integral
+              
+          return h
+      ```
+  
+      ## Key Insight
+  
+      Don't optimize h values. BUILD them explicitly based on mathematical intuition.
+      Try 20 different patterns, pick the best, and evaluate that.
+  
+      ## What to Avoid
+  
+      - NO gradient descent (Adam, SGD, etc.)
+      - NO sigmoid transformations (use step functions directly)
+      - NO high discretization (20-50 intervals is enough)
+      - NO random noise added to latent vectors
+      - DO verify constraints BEFORE evaluation
+      - DO call probes to rank candidates before full evals
+new_middlewares:
+  - name: encourage_construction
+    hook: before_model
+    description: |
+      Remind the executor to abandon gradient-based optimization and use explicit step-function construction.
+      Prevents re-defaulting to Adam optimization which always fails on this task.
+    implementation_py: |
+      def before_model(hook_input):
+          return (
+              "REMINDER: This is a DISCRETE STRUCTURAL problem. Do NOT use gradient descent.\n"
+              "Build explicit step-function candidates with 2-10 intervals.\n"
+              "Use pattern_construction tool. Verify ∫h=1 analytically. "
+              "Try 10-20 different patterns, probe them, then full eval top 2-3."
+          )
+schema: h2spec/1.0

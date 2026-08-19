@@ -1,0 +1,130 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are solving the Erdos minimum overlap problem.
+  Target: Find a step function h: [0,2] → [0,1] that minimizes max_k integral h(x)(1-h(x+k)) dx.
+  Constraint: integral(h) = 1 (EXACT).
+  Current best bound: C5 ≤ 0.38092303510845016.
+  Goal: Find combined_score > 1.0 (c5_bound < 0.380923).
+  
+  CRITICAL: Build PIECEWISE-CONSTANT step functions (values in {0, 0.5, 1}), NOT smooth sigmoids.
+  
+  Method:
+  1. EDIT _get_best_initialization() to return STEPS PATTERN vectors where h[i] ∈ {0.0, 0.5, 1.0}
+  2. Ensure EXACT integral: sum(h) * dx = 1.0, which means sum(h) = N/2
+  3. For N=800: need exactly 200 ones, 400 halves, 200 zeros
+  4. Call evaluate_solution to get c5_bound
+  
+  Step patterns to try:
+  - Bimodal: [1]*200 + [0.5]*400 + [1]*200 (ones at edges, halves in middle)
+  - Golomb-based: place ones at Golomb ruler positions
+  - Alternating: repeat [1, 0.5, 1, 0.5] pattern
+  - Periodic: regular placement of ones
+  
+  Do NOT spend evals on hyperparameter tuning. CHANGE THE INITIALIZATION TO STEPS.
+skill_description: Construct piecewise-constant step functions with exact integral constraint for Erdos problem.
+skill_body: |
+  # Step Function Construction for Erdos Minimum Overlap
+  
+  ## Core Insight
+  The seed optimizer uses sigmoid(latent) which produces smooth functions.
+  For the Erdos problem, EXACT step functions (values in {0, 0.5, 1}) can achieve lower bounds.
+  
+  ## Constraint
+  - Grid: N intervals, dx = 2/N
+  - Must have: sum(h) * dx = 1 → sum(h) = N/2
+  - For N=800: exactly 200 ones, 400 halves, 200 zeros
+  
+  ## Construction Patterns
+  
+  ### Pattern 1: Edge Blocks (Bimodal)
+  h = [1.0]*200 + [0.5]*400 + [1.0]*200
+  
+  ### Pattern 2: Golomb-Inspired  
+  Use optimal Golomb ruler positions [0, 0.25, 0.625, 0.9375, 1.0] scaled to indices
+  Place 1s at these positions, fill rest with 0.5s.
+  
+  ### Pattern 3: Alternating
+  h[i] = 1 if i % 4 < 2 else 0.5
+  
+  ### Pattern 4: Concentrated
+  h = [1.0]*150 + [0.5]*400 + [1.0]*50
+  
+  ## Editing
+  Replace _get_best_initialization() to return step patterns directly.
+  Verify: np.sum(h) * dx ≈ 1.0 before evaluation.
+tool_descriptions:
+  edit_solution: Modify the EVOLVE-BLOCK region.
+  evaluate_solution: Run full evaluation, returns combined_score.
+  probe_solution: Quick approximate evaluation.
+  finish: Submit final solution when combined_score > 1.0.
+sampling:
+  temperature: 1.2
+  top_p: 0.95
+  top_k: 30
+  max_tokens: 14000
+agent:
+  max_iterations: 50
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 12000
+new_tools:
+  - name: construct_step_function
+    description: Generate a step function pattern (values in {0, 0.5, 1}) with integral(h)=1.
+    input_schema:
+      type: object
+      properties:
+        pattern_type:
+          type: string
+          default: bimodal
+    implementation_py: |
+      def run(ctx, args):
+          import numpy as np
+          N = 800
+          pattern = args.get("pattern_type", "bimodal")
+          h = np.zeros(N)
+          n1, n0_5 = 200, 400
+          if pattern == "bimodal":
+              h[:n1] = 1.0
+              h[-n1:] = 1.0
+              h[n1:-n1] = 0.5
+          elif pattern == "golomb":
+              for pos in [0, 0.25, 0.625, 0.9375, 1.0]:
+                  start = int(pos * N)
+                  end = start + 40
+                  h[start:end] = 1.0
+              h[h == 0] = 0.5
+          elif pattern == "alternating":
+              for i in range(N // 4):
+                  h[i*4:i*4+2] = 1.0
+                  h[i*4+2:i*4+4] = 0.5
+          elif pattern == "concentrated":
+              h[:150] = 1.0
+              h[150:550] = 0.5
+              h[550:] = 1.0
+          return {"h": h.tolist(), "sum_check": float(np.sum(h))}
+new_skills:
+  - name: step-function-construction
+    description: Generate step function patterns with exact integral constraint.
+    body: |
+      # Step Function Construction
+      
+      ## Core Requirement
+      For N=800 intervals: sum(h) = 400 exactly
+      Values must be in {0.0, 0.5, 1.0}
+      
+      ## Patterns to Try
+      1. Bimodal: ones at edges [1]*200 + [0.5]*400 + [1]*200
+      2. Golomb: ones at [0, 200, 500, 750, 800] with 0.5 fill
+      3. Alternating: [1, 0.5, 1, 0.5] * 200
+      4. Concentrated: [1]*150 + [0.5]*400 + [1]*50
+      
+      ## Editing Guide
+      Replace _get_best_initialization() return with your step pattern.
+      Verify sum(h) ≈ 400 before calling evaluate_solution.
+new_middlewares:
+  - name: steps_reminder
+    hook: before_model
+    description: Remind to build step functions with values {0, 0.5, 1}.
+    implementation_py: |
+      def before_model(hook_input):
+          return "Build step functions with values in {0, 0.5, 1}, ensuring sum(h) = 400 for N=800. Avoid sigmoid hyperparameter tuning."

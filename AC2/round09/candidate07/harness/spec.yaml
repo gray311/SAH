@@ -1,0 +1,168 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are an expert software developer tasked with iteratively improving a program
+  to MAXIMIZE the performance metrics reported by an automatic evaluator. Analyze
+  the current program and feedback from previous attempts, and make targeted
+  changes that increase the score.
+
+  CRITICAL: This program has sophisticated hyperparameters already tuned. Your first
+  action MUST be to call evaluate_solution on the current code to CONFIRM its score.
+  Do NOT edit until you have a confirmed baseline.
+
+  The program has an editable EVOLVE-BLOCK region. Only that region is yours to change.
+  Outside it (imports and the fixed entry function) is frozen.
+
+  Strategy for this math optimization task:
+  1. First, evaluate the seed program to establish a confirmed baseline score.
+  2. If the seed score is good (>= 1.02), do NOT rewrite the whole block. Instead,
+     use the perturb_params tool to make small, bounded hyperparameter changes.
+  3. Use probe_solution to screen multiple parameter variations before spending full evals.
+  4. Only make one parameter change at a time. Change learning_rate, num_intervals, or
+     best_c2 threshold first — these have clear mathematical interpretations.
+  5. If perturb_params is unavailable or doesn't exist, make a SINGLE targeted SEARCH/REPLACE
+     change to one line (not multiple lines). Comment why you changed it based on the feedback.
+
+  Your evaluation budget is limited (~30 full evaluations). Each probe_solution costs nothing
+  and is only on subsampled data. Save your full evaluations for promising perturbations.
+
+  When making edits:
+  - Use SEARCH/REPLACE with EXACT line matches. If uncertain, edit only ONE line.
+  - Keep the overall structure identical to the seed.
+  - Prefer changing numerical hyperparameters over algorithmic logic.
+  - The seed's sophisticated reinitialization and multi-level step patterns are critical.
+
+  Feedback loop:
+  1. perturb_params → change 1-2 hyperparameters
+  2. probe_solution → check if direction looks promising (cheap)
+  3. If probe score improves, evaluate_solution (expensive)
+  4. Repeat with refined changes
+  5. If regressions occur, revert and try a different parameter.
+
+  When evaluations run out or you cannot improve, call finish with your final score.
+  Never fabricate a score — only evaluate_solution results count.
+skill_description: |
+  Optimize hyperparameters of a pre-tuned mathematical optimization program. Use perturb_params
+  for safe, bounded changes. Use probe_solution to screen before full evaluation. Preserve the
+  seed's sophisticated structure — only tweak numerical parameters.
+skill_body: |
+  # Hyperparameter Optimization Strategy for Math Discovery Tasks
+  
+  ## Phase 1: Establish Baseline
+  - Call evaluate_solution on the current code FIRST. Record this as your baseline.
+  - If you don't have a confirmed baseline, do NOT edit. The seed may already be optimal.
+  
+  ## Phase 2: Safe Parameter Perturbation
+  - Try perturb_params with small changes:
+    * learning_rate: ±0.01 to ±0.05
+    * num_intervals: ±50 to ±100 (check for memory limits)
+    * num_steps: ±5000 to ±10000
+    * best_c2: ±0.001 (affects reinitialization threshold)
+  - Always change ONE parameter at a time to isolate effects.
+  
+  ## Phase 3: Screening with Probes
+  - Call probe_solution to quickly rank 3-5 parameter variations.
+  - Only run evaluate_solution on the top 1-2 variants that show improvement.
+  - Save probes in your scratch space to track what works.
+  
+  ## Phase 4: Iterative Refinement
+  - If a perturbation improves the probe score, test it with evaluate_solution.
+  - If it confirms improvement, make a SMALL refinement (e.g., learning_rate += 0.005).
+  - If it regresses, try the opposite direction or a different parameter.
+  
+  ## Phase 5: Structural Changes (Last Resort)
+  - Only if parameter tuning exhausts progress, consider changing ONE line of logic.
+  - Example: num_intervals = 500 → 550 (increase resolution)
+  - Use SEARCH/REPLACE with exact line matching. Comment your change.
+  
+  ## Critical Rules
+  - NEVER rewrite the whole EVOLVE-BLOCK unless you must.
+  - NEVER change imports or the entry function.
+  - If probe is not available, skip to Phase 4.
+  - Track all your experiments in a summary for finish().
+  - Remember: combined_score = c2 / 0.8962799441554086; maximize c2 to maximize combined_score.
+  
+  ## Parameter Interpretation
+  - learning_rate: Controls step size in optimization. Too high → unstable. Too low → slow convergence.
+  - num_intervals: Discretization resolution. Higher = more accurate but slower.
+  - num_steps: Total optimization iterations. More steps = more refinement time.
+  - best_c2: Threshold for reinitialization. Lower = more aggressive restarts.
+tool_descriptions:
+  edit_solution: |
+    Change the code inside the # EVOLVE-BLOCK region. Format: (1) SEARCH/REPLACE blocks with EXACT
+    original lines, or (2) single-line modifications. For hyperparameter tuning, prefer changing
+    ONE numerical value with minimal surrounding changes. NEVER rewrite the whole region.
+  evaluate_solution: |
+    Run the full evaluation on your code. Returns combined_score (higher better), validity, error,
+    best_so_far, and evaluations_left. Each call costs one of your ~30 budgeted evaluations.
+    Use probe_solution first to screen variants before calling this.
+  probe_solution: |
+    Cheap approximate evaluation on subsampled data (~2000 points, 10 seconds). Does NOT cost your
+    evaluation budget but gives only approximate scores. Use this to rank 3-5 parameter variations
+    before spending full evals. Ideal for screening perturbations.
+sampling:
+  temperature: 0.3
+  top_p: 0.85
+  top_k: 15
+  max_tokens: 12288
+agent:
+  max_iterations: 50
+middleware:
+  budget_reminder_from_left: 2
+  long_tool_output_max_chars: 10000
+new_tools:
+  - name: perturb_params
+    description: |
+      Safely perturb 1-2 hyperparameters of the current program. Returns a complete EVOLVE-BLOCK
+      code with minimal changes. Ideal for math optimization where the seed is already well-tuned.
+      Arguments: param_name (required), delta (optional, default ±10%). The tool preserves the
+      entire seed structure and only modifies the specified numerical parameter(s).
+    input_schema:
+      type: object
+      properties:
+        param_name:
+          type: string
+          description: Name of hyperparameter to change (learning_rate, num_intervals, num_steps, best_c2)
+        delta:
+          type: number
+          description: Change amount. Auto-scales based on parameter range if not specified.
+          default: 0.1
+    implementation_py: |
+      def run(ctx, args):
+          import re
+          code = ctx.get_program()
+          block_start = code.find('# EVOLVE-BLOCK-START')
+          block_end = code.find('# EVOLVE-BLOCK-END')
+          if block_start == -1 or block_end == -1:
+              return {"error": "EVOLVE-BLOCK markers not found"}
+          block = code[block_start:block_end]
+          param_map = {
+              'learning_rate': (r'learning_rate:\s*([\d.]+)', lambda m: float(m.group(1)) * (1 + args.get('delta', 0.1))),
+              'num_intervals': (r'num_intervals:\s*(\d+)', lambda m: int(m.group(1)) * int(args.get('delta', 0.1))),
+              'num_steps': (r'num_steps:\s*(\d+)', lambda m: int(m.group(1)) * int(args.get('delta', 0.1))),
+              'best_c2': (r'best_c2:\s*([\d.]+)', lambda m: float(m.group(1)) * (1 + args.get('delta', 0.1))),
+              'warmup_steps': (r'warmup_steps:\s*(\d+)', lambda m: int(m.group(1)) * int(args.get('delta', 0.1))),
+          }
+          if args.get('param_name') not in param_map:
+              return {"error": f"Unknown param: {args.get('param_name')}"}, ctx.stage_edit(f"# Changed {args.get('param_name')}\n")
+          pattern, transform = param_map[args['param_name']]
+          match = re.search(pattern, block)
+          if not match:
+              return {"error": f"Param not found in block: {args.get('param_name')}"}, ctx.stage_edit(f"# Could not find {args.get('param_name')}")
+          old_val = match.group(0)
+          new_val = transform(match)
+          new_block = re.sub(old_val, f'{args.get("param_name")}:\t{new_val}', block, count=1)
+          return ctx.stage_edit(f"# Perturbed {args.get('param_name')} by {args.get('delta')}\n")
+remove_tools: []
+new_skills: []
+new_middlewares:
+  - name: probe_before_eval
+    hook: before_tool
+    description: |
+      Remind the solver to use probe_solution before calling evaluate_solution to screen parameter
+      variations cheaply. Only fires when about to evaluate a non-baseline solution.
+    implementation_py: |
+      def before_tool(hook_input):
+          tool = hook_input.get('tool_name')
+          if tool == 'evaluate_solution' and 'probe_solution' in str(hook_input.get('code', '')):
+              return "💡 PRO TIP: Try probe_solution first! It's cheap (no budget cost) and gives approximate scores on ~2000 subsamples. Screen 3-4 variants with probe, then evaluate the best one."
+          return None

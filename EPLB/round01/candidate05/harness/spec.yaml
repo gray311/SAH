@@ -1,0 +1,147 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are an expert software developer specializing in optimization algorithms.
+  Your task is to improve the Mixture-of-Expert models Expert Parallelism Load Balancer (MoE EPLB)
+  expert rearrangement algorithm.
+  
+  The evaluator measures TWO objectives:
+  1. Load balancing quality (how evenly distributed is the expert load)
+  2. Algorithm efficiency (execution time - faster is better)
+  
+  The combined_score rewards good load balance AND fast execution. The seed algorithm
+  has a complex O(n^2) loop in balanced_packing that slows things down.
+  
+  You have a probe_solution tool that runs on SUBSAMPLED data (~2000 rows) - it's
+  10x faster than evaluate_solution and uses a separate budget of 30 probes.
+  Use probes to RANK many algorithmic variants quickly, then confirm the best one
+  with a full evaluation.
+  
+  Strategy:
+  1. Try multiple algorithmic approaches with probe_solution first (e.g., replace
+     the nested loop with a more efficient construction, try different sorting/packing strategies)
+  2. Compare probe scores to find promising variants
+  3. Validate top candidates with evaluate_solution
+  4. If the algorithm is too slow, focus on simplifying it while maintaining quality
+  
+  Target: Get above 0.127 score by improving both load balance and reducing execution time.
+skill_description: |
+  Optimize MoE EPLB algorithm for better load balance AND faster execution.
+  Use probe_solution to rapidly rank algorithmic variants before full evaluation.
+  Focus on reducing O(n^2) complexity in balanced_packing and exploring efficient constructions.
+skill_body: |
+  # MoE EPLB Optimization Strategy
+  
+  ## Phase 1: Rapid Exploration with Probes
+  
+  Always start with probe_solution to test 5-8 different algorithmic approaches cheaply
+  before spending full evaluations. Look for patterns in what improves the score.
+  
+  ## Phase 2: Algorithmic Improvements to Try
+  
+  Key bottlenecks in the current algorithm:
+  - The nested loop in balanced_packing is O(n^2) - replace with O(n log n) or O(n)
+  - Try using torch.topk or torch.sort with early stopping
+  - Consider approximations: binning by weight thresholds instead of exact min-fill
+  - Try greedy assignment with sorting first
+  
+  Concrete modifications:
+  - Replace the while loop with: sort groups by weight, assign to pack with lowest current load
+  - Use vectorized operations: torch.argmin for finding minimum pack weights
+  - Try torch.bincount or similar for efficient counting
+  
+  ## Phase 3: Validation
+  
+  1. Pick the top 2-3 probe-scoring variants
+  2. Run evaluate_solution on each
+  3. Keep the best, iterate from there
+  
+  ## Phase 4: Speed Optimization
+  
+  If execution time is the limiter:
+  - Simplify the algorithm - perfect load balance is NP-hard, aim for good enough fast
+  - Use approximation algorithms with bounded error
+  - Reduce memory allocations
+  - Vectorize loops where possible
+  
+  ## Tool Usage Pattern
+  
+  Use probe for 5-8 variants, evaluate best 2, then refine. Probe scores are approximate
+  but RANKINGS are reliable. Use them to guide your search.
+tool_descriptions:
+  edit_solution: |
+    Change the code inside the # EVOLVE-BLOCK region. Use targeted SEARCH/REPLACE diffs
+    for small changes, or full rewrites for major algorithmic redesigns. The fixed entry
+    function and imports outside the block are preserved. Key areas to modify: the
+    balanced_packing function's O(n^2) loop, the expert assignment logic, and any
+    inefficient constructions.
+  evaluate_solution: |
+    Run the current program through the full evaluator. Returns combined_score (higher is
+    better, rewards both load balance and speed), validity, errors, best_score_so_far,
+    and evaluations_remaining. Each call counts against your budget of ~20 evaluations.
+  probe_solution: |
+    Run the CURRENT program on SUBSAMPLED data (~2000 rows of any input). 10x faster than
+    evaluate_solution, uses separate budget (30 probes). Score is approximate but RANKINGS
+    of variants are reliable. Use probe_solution to test 5-8 algorithmic approaches
+    quickly, then confirm the best with evaluate_solution.
+  finish: |
+    End the session when your budget is exhausted or you cannot improve the best score.
+    The best-scoring program is submitted automatically.
+sampling:
+  temperature: 0.9
+  top_p: 0.95
+  top_k: 40
+  max_tokens: 12288
+agent:
+  max_iterations: 48
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 10000
+new_tools:
+  - name: analyze_algorithm
+    description: |
+      Analyze the current balanced_packing implementation and suggest O(n log n) alternatives.
+      Examine loop complexity, suggest vectorized replacements (torch.sort, torch.topk,
+      torch.argmin), and estimate speedup potential. Call early to guide exploration.
+    input_schema: {type: object, properties: {}}
+    implementation_py: |
+      def run(ctx, args):
+          code = ctx.get_program()
+          lines = code.split('\n')
+          issues = []
+          suggestions = []
+          
+          in_balanced_packing = False
+          for i, line in enumerate(lines):
+              if 'def balanced_packing' in line:
+                  in_balanced_packing = True
+              elif in_balanced_packing and line.startswith('def '):
+                  in_balanced_packing = False
+              elif in_balanced_packing and 'for group in indices' in line:
+                  issues.append(f"Line {i}: O(n^2) nested loop detected")
+                  suggestions.append(f"Line {i}: Replace with torch.argmin + scatter")
+                  suggestions.append(f"Alternative: weights_sorted = weight.float().sort(-1, descending=True).indices")
+                  suggestions.append(f"Alternative: Use torch.bincount for packing")
+                  break
+          
+          note = f"Algorithm analysis: {'Yes' if issues else 'No obvious bottlenecks'}"
+          if suggestions:
+              note += "\nOptimization suggestions:\n" + "\n".join(suggestions)
+          return {"notes": note, "complexity_level": 2 if issues else 0,
+                  "vectorized_alternatives": len(suggestions)}
+remove_tools: []
+new_skills: []
+new_middlewares:
+  - name: probe_reminder
+    hook: before_model
+    description: |
+      Remind the solver to use probe_solution for variant ranking before full evaluation.
+      Encourages the probe-first strategy for rapid MoE EPLB exploration.
+    implementation_py: |
+      def before_model(hook_input):
+          eval_budget = hook_input.get('evaluations_left', 20)
+          probe_budget = hook_input.get('probes_left', 30)
+          if eval_budget > 0 and eval_budget < 15:
+              return f"Low eval budget ({eval_budget} left)! Use {probe_budget} probes to rank variants before spending evaluations."
+          elif probe_budget > 20:
+              return f"Plenty of probes ({probe_budget} left). Use probe_solution to test multiple algorithmic approaches before full evaluation."
+          return None

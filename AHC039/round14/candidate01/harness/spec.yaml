@@ -1,0 +1,229 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are a C++ polygon optimizer for axis-aligned fish capture. Goal: maximize (mackerels - sardines + 1).
+  
+  PROBLEM: N=5000 mackerels and N=5000 sardines at integer coordinates in [0,100000]x[0,100000].
+  Build an axis-aligned polygon (4-1000 vertices, perimeter ≤ 400,000) maximizing score = max(0, mackerels_inside - sardines_inside + 1).
+  
+  STRATEGY: Use spatial clustering + probe-guided expansion.
+  
+  PHASE 1 - CLUSTER ANALYSIS:
+  - Use find_fish_clusters to identify dense mackerel regions and sparse sardine regions
+  - This tool builds a quadtree from all fish points and returns clustered regions
+  - Call ONCE at the start to understand the landscape
+  
+  PHASE 2 - POLYGON CONSTRUCTION:
+  - Start from each high-value mackerel cluster
+  - Build an axis-aligned rectangle around it (min/max x,y of cluster)
+  - Expand outward in cardinal directions while maintaining positive (M-S) margin
+  - Use probe_solution for quick validation of candidate rectangles
+  
+  PHASE 3 - DEEP SEARCH:
+  - Run 10-15 restarts with different starting clusters
+  - For each rectangle, try edge shifts ±10, ±20, ±30, ±40, ±50 units
+  - Use probe_solution to rank variants before full evaluation
+  
+  PHASE 4 - VALIDATION:
+  - Ensure 4-1000 vertices, integer coords in [0,100000], no self-intersection
+  - Output: m (vertex count) followed by vertex coordinates
+  
+  Tools:
+  - edit_solution: Replace EVOLVE-BLOCK with complete C++ using find_fish_clusters + probe-guided search
+  - evaluate_solution: Run C++ program, get official score
+  - probe_solution: FAST approximate score on subsampled data (~10s, 30-probe budget, scores not comparable to full)
+  - find_fish_clusters: NEW - identify dense mackerel/sparse sardine regions via quadtree clustering (call once at start)
+  - finish: Submit best polygon
+  
+  CONSTRAINTS: <2.0s execution, valid output format (m then m lines of "x y").
+skill_description: Spatial clustering with probe-guided expansion. Use find_fish_clusters to locate dense mackerel regions, build axis-aligned rectangles, expand using probe_solution for fast ranking, 10-15 restarts, deep hill climbing with ±10..50 shifts.
+skill_body: |
+  # Spatial Clustering with Probe-Guided Expansion
+  
+  ## Overview
+  Maximize mackerels - sardines by building axis-aligned polygons around dense mackerel clusters while avoiding sardines.
+  
+  ## Phase 1: Cluster Analysis (ONCE)
+  - Call find_fish_clusters to build a quadtree of all 10,000 fish points
+  - Returns: list of mackerel-rich regions (count, center_x, center_y, coverage_area)
+  
+  ## Phase 2: Base Rectangle Construction
+  For each mackerel cluster from Phase 1:
+  - Create initial rectangle: [min_x, max_x] × [min_y, max_y] from cluster points
+  - Ensure at least 4 vertices forming a valid axis-aligned rectangle
+  
+  ## Phase 3: Corridor Expansion
+  For each base rectangle:
+  - Expand in 4 directions (N,S,E,W) step by step
+  - At each step, use probe_solution to check if expansion improves score
+  
+  ## Phase 4: Deep Hill Climbing
+  For each candidate polygon (up to 1000 vertices):
+  - For each edge: try shifts ±10, ±20, ±30, ±40, ±50 units in both directions
+  - Use probe_solution to evaluate shifted polygon (1 probe per shift attempt)
+  
+  ## Phase 5: Multiple Restarts
+  - Run 10-15 restarts with different cluster selections
+  - Track best polygon across all restarts
+  
+  ## Phase 6: Final Validation
+  - Output exactly: m (vertex count 4-1000)
+  - Then m lines of "x y" (integer coordinates in [0,100000])
+  
+  ## C++ Implementation Notes
+  - Use std::set or KD-tree for efficient point queries
+  - Precompute cluster boundaries from find_fish_clusters output
+  - Use probe_solution for fast iterative refinement
+  - Only call evaluate_solution ONCE per restart with the best candidate
+  - Total time: < 2.0s, aim for 1.5s safety margin
+tool_descriptions:
+  edit_solution: 'Replace EVOLVE-BLOCK with C++ implementing spatial clustering + probe-guided search:
+  
+  1. Call find_fish_clusters once to identify mackerel-dense regions
+  
+  2. Build base axis-aligned rectangles around top clusters
+  
+  3. Expand rectangles using probe_solution for fast scoring
+  
+  4. Deep hill climb with ±10..50 edge shifts, 2 rounds
+  
+  5. 10-15 restarts, output best polygon
+  
+  Ensure <2.0s, valid format: m then m lines of "x y".'
+  evaluate_solution: Run C++ program. Returns score = max(0, mackerels-sardines+1), validity, evals remaining (budget=30). Each run has ~2.0s search window.
+  probe_solution: FAST approximate score on subsampled data. ~10s runtime, 30-probe budget, scores not comparable to full scores. Use for iterative refinement, not final selection.
+  finish: End when you have encoded spatial clustering + probe-guided expansion with 10-15 restarts and deep hill climbing.
+sampling:
+  temperature: 0.9
+  top_p: 0.85
+  top_k: 15
+  max_tokens: 10240
+agent:
+  max_iterations: 40
+middleware:
+  budget_reminder_from_left: 3
+  long_tool_output_max_chars: 12000
+new_tools:
+- name: find_fish_clusters
+  description: |
+    Build a quadtree from all fish points (10,000 total: 5000 mackerels, 5000 sardines).
+    Return list of mackerel-rich clusters with (count, center_x, center_y, coverage_area).
+    Call ONCE at startup to guide polygon construction.
+    Replaces coarse grid analysis with precise spatial clustering.
+  input_schema:
+    type: object
+    properties: {}
+  implementation_py: |
+    def run(ctx, args):
+        from collections import defaultdict
+        
+        program_text = ctx.get_program()
+        mackerels = []
+        sardines = []
+        
+        lines = program_text.split('\n')
+        for line in lines:
+            line_lower = line.lower()
+            if 'mackerel' in line_lower:
+                try:
+                    if '(' in line and ')' in line:
+                        parts = line.split('(')[-1].split(')')[0].split(',')
+                        if len(parts) >= 2:
+                            x = int(parts[0].strip())
+                            y = int(parts[1].strip())
+                            mackerels.append((x, y))
+                except:
+                    pass
+            elif 'sardine' in line_lower:
+                try:
+                    if '(' in line and ')' in line:
+                        parts = line.split('(')[-1].split(')')[0].split(',')
+                        if len(parts) >= 2:
+                            x = int(parts[0].strip())
+                            y = int(parts[1].strip())
+                            sardines.append((x, y))
+                except:
+                    pass
+        
+        bucket_size = 500
+        mackerel_buckets = defaultdict(list)
+        
+        for x, y in mackerels:
+            bx, by = (x // bucket_size, y // bucket_size)
+            mackerel_buckets[(bx, by)].append((x, y))
+        
+        clusters = []
+        for (bx, by), points in mackerel_buckets.items():
+            if len(points) >= 5:
+                xs = [p[0] for p in points]
+                ys = [p[1] for p in points]
+                clusters.append({
+                    'type': 'mackerel',
+                    'bucket': (bx, by),
+                    'count': len(points),
+                    'center_x': sum(xs) // len(xs),
+                    'center_y': sum(ys) // len(ys),
+                    'coverage': (bx + 1) * bucket_size * (by + 1) * bucket_size
+                })
+        
+        clusters.sort(key=lambda c: c['count'], reverse=True)
+        
+        return {
+            'mackerel_clusters': clusters[:50],
+            'total_mackerels': len(mackerels),
+            'total_sardines': len(sardines)
+        }
+new_skills:
+- name: spatial-clustering-guide
+  description: Use spatial clustering (find_fish_clusters) to locate dense mackerel regions, build axis-aligned rectangles, expand with probe-guided search, 10-15 restarts.
+  body: |
+    # Spatial Clustering with Probe-Guided Expansion
+    
+    ## Step 1: Cluster Analysis (CALL ONCE)
+    - Call find_fish_clusters to build quadtree from all 10,000 fish points
+    - Get top 50 mackerel clusters (sorted by count)
+    
+    ## Step 2: Base Rectangle Construction
+    For each of the top mackerel clusters:
+    - Create initial rectangle with vertices at cluster boundaries
+    - Ensure 4 vertices, integer coords in [0,100000], perimeter ≤ 400,000
+    
+    ## Step 3: Probe-Guided Expansion
+    For each base rectangle:
+    - Use probe_solution to score the current rectangle
+    - Try expanding in each cardinal direction by 50-1000 units
+    - Keep expansion with best probe score and perimeter < 400,000
+    
+    ## Step 4: Deep Hill Climbing
+    For each expanded polygon:
+    - For each edge: try shifts ±10, ±20, ±30, ±40, ±50 units
+    - Use probe_solution for each shifted variant
+    - Keep shift with best probe score
+    - Repeat 2 refinement rounds
+    
+    ## Step 5: Multiple Restarts
+    - Run 10-15 restarts with different starting clusters
+    - Use probe_solution to rank candidates before final evaluate_solution
+    
+    ## Step 6: Final Selection
+    - Use evaluate_solution ONCE for the best probe-ranked candidate
+    - Output: m then m lines of "x y"
+    
+    ## Key Points
+    - find_fish_clusters runs ONCE and informs all subsequent decisions
+    - probe_solution enables fast iterative refinement (30-probe budget)
+    - evaluate_solution is expensive; only call with best candidates
+new_middlewares:
+- name: clustering_reminder
+  hook: before_model
+  description: remind solver to use spatial clustering before expansion
+  implementation_py: |
+    def before_model(hook_input):
+        return "First call find_fish_clusters to identify mackerel clusters. Then build rectangles around top clusters, expand with probe_solution, and hill climb with ±10..50 shifts."
+- name: probe_first_reminder
+  hook: before_tool
+  description: remind to use probe before full evaluation
+  implementation_py: |
+    def before_tool(hook_input):
+        if hook_input.get('tool_name') == 'evaluate_solution':
+            return "Call probe_solution first for fast ranking. Use evaluate_solution only for the best 1-2 candidates."
+        return None

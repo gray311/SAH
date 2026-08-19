@@ -1,0 +1,252 @@
+schema: h2spec/1.0
+system_prompt: |
+  Erdos C5 minimization: Find h: [0,2]->[0,1] with integral(h)=1 minimizing max_k integral h(x)(1-h(x+k))dx.
+  
+  CURRENT BEST: c5_bound ≈ 0.381 (combined_score = 1.0). Goal: c5_bound < 0.38092303510845016 (combined_score > 1.0).
+  
+  KEY INSIGHT: Seed has 15 patterns but optimizer may not escape local optima. Need NEW initialization patterns, not hyperparameter tuning.
+  
+  SEARCH STRATEGY:
+  1. Use generate_variants to create 5 new initialization patterns (Golomb-7, tri-modal, bipartite, multi-peak, Golomb-5-shifted)
+  2. For each variant: check integral constraint, then call probe_solution
+  3. Evaluate ANY candidate with probe c5_bound < 0.375
+  4. If no success after 5 variants, try: num_intervals=400 or penalty_strength=100
+  5. NEVER just tweak learning rate - these rarely help without new initializations
+  6. USE probe_solution for ALL screening - only 30 evals total
+  7. After evaluation, propose STRUCTURED edits (new pattern parameters, not hyperparameters)
+
+skill_description: |
+  Generate structural initialization variants for Erdos C5. Use generate_variants to create 5 new patterns (Golomb-7, tri-modal, bipartite, multi-peak, Golomb-5-shifted). Check integral constraint and probe c5_bound for each. Evaluate only if probe c5_bound < 0.375. Budget: 1 generate call + up to 5 probes + 3 evals max.
+skill_body: |
+  # Structured Search for Erdos C5
+  
+  ## Core Strategy
+  
+  Seed optimizer uses 15 fixed patterns. To beat C5 ≤ 0.381, need NEW patterns, not hyperparameter tuning.
+  
+  ## Step 1: Generate Structural Variants
+  
+  CALL generate_variants() once. Returns 5 candidates with pattern_type, integral check, c5_bound (approximate).
+  Patterns: Golomb-7 (7 marks), Golomb-5-shifted, tri-modal (3 peaks), bipartite (variant), multi-peak (4 peaks).
+  
+  ## Step 2: Filter by Probe
+  
+  For each candidate:
+  - Check integral ≈ 1.0 (skip if not close)
+  - Call probe_solution to get actual c5_bound
+  - Keep if probe c5_bound < 0.375
+  
+  ## Step 3: Evaluate Top Candidates
+  
+  Call evaluate_solution on best 1-2 candidates with lowest probe scores.
+  
+  ## Step 4: If Stuck
+  
+  Try num_intervals=400, penalty_strength=100, num_steps=80000.
+  
+  ## Why This Works
+  
+  - Structural variants explore different regions of initialization space
+  - Golomb patterns: equally-spaced marks minimize pairwise overlap
+  - Probe solution: cheap screening saves evaluation budget
+  
+  ## Key Metrics
+  
+  - c5_bound target: < 0.375
+  - combined_score target: > 1.0
+  - Evals used: ≤ 20 out of 30
+tool_descriptions:
+  edit_solution: |
+    Modify EVOLVE-BLOCK to generate NEW initialization patterns.
+    
+    STRUCTURED pattern changes (preferred):
+    - Golomb-7: marks = [0.0, 0.33, 0.66, 1.0, 1.33, 1.66, 1.99]
+    - Tri-modal: peaks = [0.3, 1.0, 1.7] with width=0.12
+    - Bipartite variant: step at a=0.45 or a=0.66
+    - Multi-peak 4: peaks at [0.25, 0.65, 1.05, 1.45]
+    
+    HYPERPARAMETER changes (last resort):
+    - num_intervals: 400 (coarser), 3200 (finer)
+    - penalty_strength: 80, 120 (stricter integral=1)
+    
+    KEY: Propose COMPLETE pattern definitions, not parameter tweaks.
+  evaluate_solution: |
+    Full 59000-step optimization. Returns combined_score = 0.38092303510845016 / c5_bound.
+    
+    Only call after probe_solution confirms c5_bound < 0.375.
+    combined_score > 1.0 means new record.
+  probe_solution: |
+    Fast approximate evaluation (500 intervals, analytical c5). Uses separate probe budget (30 available).
+    
+    Call for EVERY candidate from generate_variants.
+    Filter: keep if probe c5_bound < 0.375.
+    Avoids wasting full evaluations on poor candidates.
+  finish: |
+    Submit when combined_score > 1.0 (c5_bound < 0.38092303510845016).
+sampling:
+  temperature: 0.8
+  top_p: 0.9
+  top_k: 15
+  max_tokens: 12000
+agent:
+  max_iterations: 25
+middleware:
+  budget_reminder_from_left: 8
+  long_tool_output_max_chars: 8000
+new_tools:
+  - name: generate_variants
+    description: |
+      Generate 5 structurally diverse initialization patterns for Erdos C5 optimization. Returns 5 candidates with h (latent vector, sigmoid-scaled [0,1]), pattern_type, integral, and c5_bound (approximate max overlap via analytical FFT).
+      
+      Pattern designs: Golomb-7 (7 marks at [0.0, 0.33, 0.66, 1.0, 1.33, 1.66, 1.99]), Tri-modal-3 (3 Gaussians at [0.3, 1.0, 1.7], width=0.12), Bipartite-var (step at a=0.45), Multi-peak-4 (4 peaks at [0.25, 0.65, 1.05, 1.45]), Golomb-5-shifted (5 marks at [0.1, 0.5, 0.9, 1.3, 1.7]).
+      
+      All use domain=[0,2], N=800. Integral normalized to 1.0 via normalization. Usage: Call ONCE at start. Use probe_solution for screening.
+    input_schema:
+      type: object
+      properties: {}
+    implementation_py: |
+      def run(ctx, args):
+          import numpy as np
+          N = 800
+          domain = 2.0
+          dx = domain / N
+          
+          def sigmoid_normalize(latent):
+              h = 1.0 / (1.0 + np.exp(-latent))
+              integral = np.sum(h) * dx
+              if integral > 0:
+                  h = h / integral
+              h = np.clip(h, 0.01, 1.0)
+              h = h / np.sum(h) * (1.0 / dx)
+              return h
+          
+          def compute_c5(h):
+              j_val = 1.0 - h
+              h_padded = np.pad(h, (0, N))
+              j_padded = np.pad(j_val, (0, N))
+              corr_fft = np.fft.fft(h_padded) * np.conj(np.fft.fft(j_padded))
+              correlation = np.fft.ifft(corr_fft).real
+              c5 = np.max(correlation * dx)
+              return c5
+          
+          # Candidate 1: Golomb-7
+          marks1 = np.array([0.0, 0.333, 0.666, 1.0, 1.333, 1.666, 1.999])
+          latent1 = np.zeros(N)
+          for m in marks1:
+              w = N * 0.08
+              idx = np.clip(np.round(m * N).astype(int), 0, N-1)
+              latent1[idx] = 4.0
+          latent1 = latent1 - 2.0
+          h1 = sigmoid_normalize(latent1)
+          c5_1 = compute_c5(h1)
+          
+          # Candidate 2: Tri-modal-3
+          peaks2 = np.array([0.3, 1.0, 1.7])
+          latent2 = np.zeros(N)
+          for p in peaks2:
+              center_idx = np.clip(np.round(p * N).astype(int), 0, N-1)
+              start = max(0, center_idx - 30)
+              end = min(N, center_idx + 30)
+              latent2[start:end] = 5.0
+          latent2 = latent2 - 3.0
+          h2 = sigmoid_normalize(latent2)
+          c5_2 = compute_c5(h2)
+          
+          # Candidate 3: Bipartite-var
+          a3 = 0.45
+          idx_cut3 = int(a3 * N)
+          latent3 = np.where(np.arange(N) < idx_cut3, 4.0, -2.0)
+          h3 = sigmoid_normalize(latent3)
+          c5_3 = compute_c5(h3)
+          
+          # Candidate 4: Multi-peak-4
+          peaks4 = np.array([0.25, 0.65, 1.05, 1.45])
+          latent4 = np.zeros(N)
+          for p in peaks4:
+              center_idx4 = np.clip(np.round(p * N).astype(int), 0, N-1)
+              latent4[center_idx4 - 20: center_idx4 + 20] = 4.5
+          latent4 = latent4 - 2.5
+          h4 = sigmoid_normalize(latent4)
+          c5_4 = compute_c5(h4)
+          
+          # Candidate 5: Golomb-5-shifted
+          marks5 = np.array([0.1, 0.5, 0.9, 1.3, 1.7])
+          latent5 = np.zeros(N)
+          for m in marks5:
+              w = N * 0.08
+              idx = np.clip(np.round(m * N).astype(int), 0, N-1)
+              latent5[idx] = 4.0
+          latent5 = latent5 - 2.0
+          h5 = sigmoid_normalize(latent5)
+          c5_5 = compute_c5(h5)
+          
+          candidates = [
+              {"h": h1.tolist(), "pattern_type": "golomb_7", "integral": float(np.sum(h1) * dx), "c5_bound": float(c5_1)},
+              {"h": h2.tolist(), "pattern_type": "tri_modal_3", "integral": float(np.sum(h2) * dx), "c5_bound": float(c5_2)},
+              {"h": h3.tolist(), "pattern_type": "bipartite_var", "integral": float(np.sum(h3) * dx), "c5_bound": float(c5_3)},
+              {"h": h4.tolist(), "pattern_type": "multi_peak_4", "integral": float(np.sum(h4) * dx), "c5_bound": float(c5_4)},
+              {"h": h5.tolist(), "pattern_type": "golomb_5_shifted", "integral": float(np.sum(h5) * dx), "c5_bound": float(c5_5)}
+          ]
+          return {"candidates": candidates, "num_candidates": 5}
+new_skills:
+  - name: structural-pattern-search
+    description: |
+      Use generate_variants to create 5 completely new initialization patterns.
+      Check integral constraint and probe c5_bound for each. Evaluate only if probe c5_bound < 0.375.
+      If no success, try structural hyperparameter changes (num_intervals=400, penalty_strength=100).
+    body: |
+      # Structural Pattern Search for Erdos C5
+      
+      ## Why Structural Variants Work
+      
+      The seed has 15 fixed patterns but they may all be in the same basin of attraction.
+      We need structurally different initializations.
+      
+      ## Workflow
+      
+      1. CALL generate_variants() ONCE at start
+      
+      2. For each of 5 candidates:
+         - Check integral ≈ 1.0 (skip if not close)
+         - CALL probe_solution to get actual c5_bound
+         - Keep if probe c5_bound < 0.375 (safety margin)
+      
+      3. CALL evaluate_solution on the BEST 1-2 candidates (lowest probe scores)
+      
+      4. If no improvement after 3 evals:
+         - Try num_intervals=400 (coarser grid)
+         - Try num_restarts=5 (more diversity)
+         - Try penalty_strength=100 (stricter integral=1)
+      
+      ## Pattern Types Explained
+      
+      - golomb_7: 7 equally-spaced marks minimize pairwise overlap
+      - tri_modal_3: 3 narrow peaks distribute mass at [0.3, 1.0, 1.7]
+      - bipartite_var: step function with a=0.45
+      - multi_peak_4: 4 peaks at [0.25, 0.65, 1.05, 1.45]
+      - golomb_5_shifted: 5 marks shifted to [0.1, 0.5, 0.9, 1.3, 1.7]
+      
+      ## Budget Discipline
+      
+      - 1 generate_variants call
+      - Up to 5 probe_solution calls
+      - Max 3 evaluate_solution calls
+      - Total evals: ≤ 9 (well under 30 budget)
+      
+      ## Success Criteria
+      
+      - c5_bound < 0.375 from probe → likely to beat seed on full eval
+      - combined_score > 1.0 on full eval
+      - If stuck after all patterns, try structural hyperparameter changes
+sampling:
+  temperature: 0.8
+  top_p: 0.9
+  top_k: 15
+  max_tokens: 12000
+agent:
+  max_iterations: 25
+middleware:
+  budget_reminder_from_left: 8
+  long_tool_output_max_chars: 8000
+remove_tools:
+  []

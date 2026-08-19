@@ -1,0 +1,265 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are an expert algorithm engineer optimizing a C++ program for a geometric fish-capture task.
+  
+  **Task**: Construct an axis-aligned polygon to maximize (mackerels_inside - sardines_inside + 1).
+  - N=5000 mackerels, N=5000 sardines at coordinates (0,0) to (100000,100000)
+  - Polygon constraints: ≤1000 vertices, perimeter ≤400000, integer coordinates, no self-intersection
+  - Score: max(0, mackerels - sardines + 1)
+  
+  **Your job**: Iteratively improve the C++ code in the EVOLVE-BLOCK region to achieve higher scores.
+  
+  **Method**:
+  1. Call analyze_fish_distribution ONCE at start to understand spatial patterns.
+  2. Use the distribution insights to guide polygon construction strategies.
+  3. Try MULTIPLE different polygon approaches (rectangle, L-shape, multiple lobes, etc.).
+  4. For each approach, generate variants and use probe_solution to quickly rank them.
+  5. Only call evaluate_solution on the best probe-ranked variant from each approach.
+  6. When you've exhausted promising approaches, call finish.
+  
+  **Time limit**: The C++ program must complete within 1.95 seconds (0.05s safety margin from 2.0s).
+  **Search strategy**: Implement an active search loop inside main(), not just a greedy construction.
+
+skill_description: |
+  Geometric optimization harness for axis-aligned polygon construction. Load this skill to implement
+  spatial analysis-driven polygon design with multi-strategy exploration and probe-based filtering.
+skill_body: |
+  # Geometric Polygon Optimization for Fish Capture
+
+  ## Task Understanding
+  You're constructing an axis-aligned polygon to capture mackerels while avoiding sardines.
+  Score = max(0, mackerels_inside - sardines_inside + 1).
+  
+  ## Strategy 1: Spatial Analysis
+  Call analyze_fish_distribution FIRST. It returns:
+  - Grid cells with mackerel/sardine counts
+  - High-density mackerel regions to target
+  - Low-density/sardine-poor regions to expand
+  
+  ## Strategy 2: Multi-Approach Search
+  Implement this structure in your C++ main():
+  
+  ```cpp
+  int best_score = -1;
+  std::vector<Point> best_poly;
+  
+  // Try multiple strategies:
+  auto strategy_rectangles = make_rectangles();      // Simple bounding boxes
+  auto strategy_lobes = make_multiple_lobes();       // L-shaped, U-shaped polygons
+  auto strategy_gaps = expand_around_gaps();         // Grow around empty regions
+  
+  for (auto& strategy : {rectangles, lobes, gaps}) {
+      // Generate variants
+      for (auto& poly : strategy.generate_variants(max_time_remaining)) {
+          // Validate constraints
+          if (!valid(poly)) continue;
+          
+          // Score internally with efficient counting
+          int score = score_polygon(poly);
+          if (score > best_score) {
+              best_score = score;
+              best_poly = poly;
+          }
+      }
+  }
+  
+  // Output best polygon
+  ```
+  
+  ## Key Constraints
+  - Vertices: ≤1000, all distinct, integer coords in [0, 100000]
+  - Perimeter: ≤400000
+  - Edges: strictly axis-aligned (horizontal or vertical)
+  - No self-intersection
+  
+  ## Performance Tips
+  - Use KD-tree (already in seed) for fast fish point queries
+  - Process fish in O(log N) per point for each polygon edge
+  - Internal scoring should be fast: O(vertices × log N) or better
+  - Stay well within 1.95s time limit
+  
+  ## When to Use Tools
+  - analyze_fish_distribution: ONCE at start, before any editing
+  - edit_solution: After each strategy iteration, or when a new approach is promising
+  - evaluate_solution: ONCE per promising final candidate (budget is precious!)
+  - probe_solution: For ranking multiple variants before full evaluation
+  - finish: When you've tried multiple strategies and can't improve
+  
+  **Remember**: The C++ program must implement its OWN search loop! Don't just output one hardcoded polygon.
+tool_descriptions:
+  edit_solution: |
+    Change code in EVOLVE-BLOCK region. Use SEARCH/REPLACE diffs for targeted edits.
+    After editing, call evaluate_solution to score. Best version is automatically kept.
+  evaluate_solution: |
+    Run the C++ program and return combined_score (higher is better), validity, errors, best_so_far, and evaluations_left.
+    Budget: 30 evaluations. Be conservative!
+  probe_solution: |
+    Cheap approximate scoring on first ~2000 rows. Use to RANK multiple variants before calling evaluate_solution.
+    Does NOT consume evaluation budget. Scores are approximate but relative ranking is usually correct.
+  finish: |
+    End the session. Submit the best-scoring program automatically.
+sampling:
+  temperature: 0.9
+  top_p: 0.95
+  top_k: 30
+  max_tokens: 12288
+agent:
+  max_iterations: 45
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 12000
+new_tools:
+  - name: analyze_fish_distribution
+    description: |
+      Analyze the fish point cloud to find density patterns. Returns a binned histogram showing
+      mackerel and sardine counts in grid cells, identifies high-mackerel regions, low-sardine gaps,
+      and overall density gradients. Use this to inform polygon construction strategy.
+      Call ONCE at the start of the agent's first turn.
+    input_schema: {type: object, properties: {}}
+    implementation_py: |
+      def run(ctx, args):
+          import collections
+          import math
+          
+          # Read all mackerels and sardines
+          mackerels = []
+          sardines = []
+          names = ctx.list_task_inputs()
+          if not names:
+              return {"note": "no inputs"}
+          
+          # Process each input file
+          for fname in names:
+              df = ctx.read_input_df(fname, nrows=10000)  # Read up to 10000 points
+              if len(df) == 0:
+                  continue
+              
+              # Determine if mackerels or sardines (first N are mackerels in typical format)
+              # For this task, we know N=5000 each, but we read all and sort
+              points = df[['x', 'y']].values.tolist()
+              mackerels.extend([(p[0], p[1]) for p in points[:5000]])
+              sardines.extend([(p[0], p[1]) for p in points[5000:]])
+          
+          mackerels = list(set(mackerels))
+          sardines = list(set(sardines))
+          
+          # Create grid for density analysis
+          grid_size = 20000  # 20000x20000 grid
+          grid = collections.defaultdict(lambda: {"mackerel": 0, "sardine": 0})
+          
+          # Bin points
+          for mx, my in mackerels:
+              gx = min(grid_size - 1, max(0, int(mx / grid_size * grid_size)))
+              gy = min(grid_size - 1, max(0, int(my / grid_size * grid_size)))
+              grid[(gx, gy)]["mackerel"] += 1
+          
+          for sx, sy in sardines:
+              gx = min(grid_size - 1, max(0, int(sx / grid_size * grid_size)))
+              gy = min(grid_size - 1, max(0, int(sy / grid_size * grid_size)))
+              grid[(gx, gy)]["sardine"] += 1
+          
+          # Find best regions: high mackerel, low sardine
+          best_cells = []
+          for cell, counts in grid.items():
+              if counts["mackerel"] > 0 and counts["sardine"] == 0:
+                  best_cells.append((counts["mackerel"], cell))
+          best_cells.sort(reverse=True)
+          
+          # Calculate mackerel/sardine density
+          m_total = len(mackerels)
+          s_total = len(sardines)
+          m_per_grid = m_total / (grid_size * grid_size)
+          s_per_grid = s_total / (grid_size * grid_size)
+          
+          return {
+              "grid_size": grid_size,
+              "total_cells": len(grid),
+              "mackerel_cells": sum(1 for c in grid.values() if c["mackerel"] > 0),
+              "sardine_cells": sum(1 for c in grid.values() if c["sardine"] > 0),
+              "best_mackerel_regions": [
+                  {"grid_cell": (c[1], c[2]), "mackerel_count": c[0], "sardine_count": grid[(c[1], c[2])]["sardine"]}
+                  for c in best_cells[:10]
+              ],
+              "mackerel_density": m_per_grid,
+              "sardine_density": s_per_grid,
+              "mackerel/sardine_ratio": m_total / s_total if s_total > 0 else float('inf')
+          }
+new_skills:
+  - name: geometric-search-strategy
+    description: |
+      A playbook for constructing axis-aligned polygons to capture mackerels while avoiding sardines.
+      Guides the solver to use spatial analysis, try multiple polygon shapes, and filter variants efficiently.
+    body: |
+      # Geometric Search Strategy for Fish Capture
+
+      ## Step 1: Analyze the Fish Distribution
+      Call analyze_fish_distribution ONCE before making any edits.
+      This tells you:
+      - Where mackerels cluster (target these regions)
+      - Where sardines are sparse (expand these regions)
+      - The overall density ratio (helps gauge potential score)
+
+      ## Step 2: Choose Polygon Construction Strategies
+      Try MULTIPLE approaches, not just one:
+
+      ### Approach A: Rectangular Grid Cells
+      - Create rectangles around high-density mackerel regions
+      - Start small, grow until hitting sardine density > threshold
+      - Example: Find a 200x200 cell with 50 mackerels, 0 sardines
+
+      ### Approach B: L-Shaped / U-Shaped Polygons
+      - Capture mackerels in multiple clusters with one connected polygon
+      - Use the "elbow" to avoid sardine-rich corridors
+      - Example: Two rectangles connected by a thin bridge
+
+      ### Approach C: Gap Expansion
+      - Find sardine-poor corridors between mackerel clusters
+      - Expand a polygon to fill these gaps
+      - Example: Start with one mackerel cluster, grow to adjacent low-sardine areas
+
+      ### Approach D: Multiple Small Polygons
+      - Create several small polygons in isolated mackerel regions
+      - Connect them if beneficial, otherwise output separately
+      - Note: The evaluator expects ONE polygon, so connect them
+
+      ## Step 3: Implement Efficient Internal Scoring
+      Inside your C++ program, implement O(vertices × log N) scoring:
+      - Use KD-tree to query points inside each polygon edge
+      - For each edge, count fish in the strip
+      - For complex polygons, use inclusion-exclusion or sweep-line
+
+      ## Step 4: Use Probe-Based Filtering
+      When generating multiple variants of a strategy:
+      1. Generate 5-10 variants
+      2. Use probe_solution to quickly rank them (no full eval budget spent)
+      3. Call evaluate_solution only on the top 1-2 variants
+      4. If none improve, try a different strategy
+
+      ## Step 5: Respect Time Limits
+      - The C++ program must complete in <1.95 seconds
+      - Use early termination: stop generating variants if time runs low
+      - Prefer simple constructions over complex ones initially
+
+      ## Step 6: Output the Best Variant
+      When done:
+      - Choose the variant with highest (mackerels - sardines + 1)
+      - Ensure it meets all constraints (vertices ≤1000, perimeter ≤400000, no self-intersection)
+      - Output in format: m, then m lines of coordinates
+new_middlewares:
+  - name: probe_before_eval
+    hook: before_tool
+    description: |
+      Remind the solver to use probe_solution before evaluate_solution when comparing multiple variants.
+      This prevents wasting evaluation budget on unpromising candidates.
+    implementation_py: |
+      def before_tool(hook_input):
+          current_tool = hook_input.get("current_tool", "")
+          if current_tool == "evaluate_solution":
+              # Check if we've just edited
+              history = hook_input.get("history", [])
+              recent_edits = [h for h in history[-3:] if h.get("action") == "edit"]
+              if len(recent_edits) >= 1:
+                  # Check how many probes we've used recently (if available)
+                  # For now, just add a gentle reminder
+                  return " REMINDER: Before full evaluation, consider generating 2-3 variants and using probe_solution to rank them. Only evaluate the top candidate."
+          return None

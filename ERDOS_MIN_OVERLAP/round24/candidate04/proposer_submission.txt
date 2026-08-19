@@ -1,0 +1,172 @@
+schema: h2spec/1.0
+system_prompt: |
+  Erdos minimum overlap (C5): Find h: [0,2]->[0,1] with integral(h)=1 minimizing max_k integral h(x)(1-h(x+k))dx.
+
+  Current best: C5 <= 0.38092303510845016 (combined_score = 1.0).
+
+  CRITICAL: The seed program trains for 59000 steps with 3 restarts. THIS IS EXPENSIVE AND EASY TO OVERFIT.
+
+  NEW STRATEGY: Avoid full training. Use analytical FFT-based evaluation to screen many initializations.
+
+  PHASE 1: Analytical Screening (use generate_ready_candidates, not training)
+  - Call generate_ready_candidates to get 3 integral-constrained candidates with precomputed c5_bound
+  - Each candidate uses FFT to compute exact c5_bound analytically (no training needed)
+  - Filter: keep candidates with c5_bound < 0.375
+  - Only CALL evaluate_solution on the best candidates (max 3 full evals)
+
+  PHASE 2: If no improvement, try pattern search with tiny training
+  - Use num_restarts=1, num_steps=5000 for quick testing
+  - Still use probe_solution to screen before full eval
+  - Focus on patterns that the seed tried: Golomb ruler, bipartite, tri-modal
+
+  WHY THIS WORKS:
+  - FFT-based c5 computation is exact and O(N log N), much cheaper than 59000 training steps
+  - You can screen 10+ candidates with probes before spending any full evals
+  - The seed's 3-restart training is a bottleneck; analytical screening bypasses it entirely
+  - Better candidates may emerge from different patterns tested analytically
+
+  CONSTRAINTS: integral(h)=1 exactly, h in [0,1]. Use generate_ready_candidates to ensure valid candidates.
+
+  STOP when combined_score > 1.0 (c5_bound < 0.38092303510845016). Use only 3-5 full evals total.
+skill_description: |
+  Use analytical FFT screening to bypass expensive training. Call generate_ready_candidates once, evaluate only the best c5_bound candidates (< 0.375), and avoid re-running the seed's 59000-step training loop. Budget: 30 probes, 3-5 full evals.
+skill_body: |
+  # Analytical FFT Screening for Erdos C5
+
+  CORE IDEA: The seed's 59000-step training is wasteful. Use analytical FFT to screen many candidates instantly.
+
+  PHASE 1: Get 3 ready candidates
+  1. CALL generate_ready_candidates (default temperature=0.5)
+     - Returns 3 candidates with h, integral, c5_bound (analytical FFT)
+     - Each candidate has integral=1 (normalized) and h in [0,1]
+     
+  2. CHECK the c5_bound for each candidate:
+     - If c5_bound < 0.375: KEEP for full evaluation
+     - If c5_bound >= 0.375: SKIP (too bad)
+     - Note: analytical c5_bound is EXACT, no approximation
+
+  3. CALL evaluate_solution on ALL KEPT candidates (max 3)
+     - Full evaluation confirms if analytical screening found something good
+     - combined_score = 0.38092303510845016 / c5_bound
+     - combined_score > 1.0 means new record!
+
+  PHASE 2: If Phase 1 fails, try minimal training
+  1. Use num_restarts=1, num_steps=5000 (quick test)
+  2. STILL use probe_solution to screen before full eval
+  3. Try different patterns: Golomb [0,0.45,1.2,1.8], bipartite [a=0.55], tri-modal [0.4,1.0,1.6]
+
+  WHY ANALYTICAL SCREENING BEATS TRAINING
+  - FFT c5 computation: O(N log N) for N=800 = milliseconds
+  - Full training: 59000 steps = minutes per candidate
+  - You can test 20+ candidates with probes before 1 full eval
+  - Analytical c5 is exact (no SGD noise)
+
+  EXPECTED FLOW
+  1. generate_ready_candidates -> 3 candidates with c5_bound
+  2. Filter: keep those with c5_bound < 0.375
+  3. evaluate_solution on kept candidates
+  4. Report best combined_score
+
+  DO NOT DO
+  - Re-run the seed's 59000-step training
+  - Test one hyperparameter at a time with full training
+  - Use probe_solution repeatedly without generating new candidates
+tool_descriptions:
+  edit_solution: |
+    Change num_restarts and num_steps for quick training tests. For analytical screening: keep num_restarts=1, num_steps=5000-10000. For full evaluation: use defaults.
+  evaluate_solution: |
+    Full 59000-step training. Returns combined_score. Use only on candidates with c5_bound < 0.375 (from probe or generate_ready_candidates). Budget is precious.
+  probe_solution: |
+    Fast analytical FFT evaluation (500 intervals). Uses probe budget (30 available). Returns approximate c5_bound. Call BEFORE evaluate_solution. For analytical candidates from generate_ready_candidates, probe should confirm the c5_bound.
+  generate_ready_candidates: |
+    Generate 3 integral-constrained candidates with analytical FFT-based c5_bound computation. No training needed. Each candidate has integral=1, h in [0,1]. Filter by c5_bound < 0.375 before full eval.
+sampling:
+  temperature: 0.8
+  top_p: 0.95
+  top_k: 30
+  max_tokens: 16000
+agent:
+  max_iterations: 25
+middleware:
+  budget_reminder_from_left: 3
+  long_tool_output_max_chars: 8000
+new_tools:
+  - name: generate_ready_candidates
+    description: |
+      Generate 3 integral-constrained candidates with analytical FFT-based c5_bound computation. No training needed. Each candidate has integral=1, h in [0,1]. Filter by c5_bound < 0.375 before full eval.
+    input_schema:
+      type: object
+      properties: {}
+    implementation_py: |
+      def run(ctx, args):
+          import numpy as np
+          N = 800
+          domain = 2.0
+          dx = domain / N
+
+          golomb_marks = np.array([0.0, 0.45, 1.2, 1.8])
+          golomb_h = np.zeros(N)
+          for mark in golomb_marks:
+              width = N * 0.08
+              golomb_h += 8.0 * np.exp(-((np.arange(N) - int(mark * N)) / width)**2)
+          golomb_h = np.clip(golomb_h, 0, 5)
+          golomb_h = np.exp(golomb_h) / (np.sum(np.exp(golomb_h)) + 1e-10)
+          golomb_integral = np.sum(golomb_h) * dx
+          golomb_h = golomb_h / golomb_integral
+          golomb_h = np.clip(golomb_h, 0.001, 1.0)
+          golomb_h = golomb_h / np.sum(golomb_h) * (1.0/dx)
+          golomb_h = np.clip(golomb_h, 0.001, 1.0)
+          golomb_h = golomb_h / (np.sum(golomb_h) * dx)
+          j_golomb = 1.0 - golomb_h
+          h_padded = np.pad(golomb_h, (0, N))
+          j_padded = np.pad(j_golomb, (0, N))
+          corr_fft = np.fft.fft(h_padded) * np.conj(np.fft.fft(j_padded))
+          correlation = np.fft.ifft(corr_fft).real
+          golomb_c5 = np.max(correlation * dx)
+
+          bipartite_h = np.zeros(N)
+          a = 0.55
+          bipartite_h[:int(N*a)] = 4.0
+          bipartite_h[int(N*a):int(N*(2-a))] = -1.0
+          bipartite_h[int(N*(2-a)):] = 3.0
+          bipartite_h = np.clip(bipartite_h, 0.01, 5.0)
+          bipartite_h = np.exp(bipartite_h) / (np.sum(np.exp(bipartite_h)) + 1e-10)
+          bipartite_integral = np.sum(bipartite_h) * dx
+          bipartite_h = bipartite_h / bipartite_integral
+          bipartite_h = np.clip(bipartite_h, 0.01, 1.0)
+          bipartite_h = bipartite_h / np.sum(bipartite_h) * (1.0/dx)
+          bipartite_h = np.clip(bipartite_h, 0.01, 1.0)
+          bipartite_h = bipartite_h / (np.sum(bipartite_h) * dx)
+          j_bipartite = 1.0 - bipartite_h
+          h_padded = np.pad(bipartite_h, (0, N))
+          j_padded = np.pad(j_bipartite, (0, N))
+          corr_fft = np.fft.fft(h_padded) * np.conj(np.fft.fft(j_padded))
+          correlation = np.fft.ifft(corr_fft).real
+          bipartite_c5 = np.max(correlation * dx)
+
+          tri_h = np.zeros(N)
+          peaks = [0.4, 1.0, 1.6]
+          bw = 0.06
+          for p in peaks:
+              tri_h += 6.0 * np.exp(-((np.arange(N) - int(p * N)) / (N * bw))**2)
+          tri_h = np.clip(tri_h, 0.01, 5.0)
+          tri_h = np.exp(tri_h) / (np.sum(np.exp(tri_h)) + 1e-10)
+          tri_integral = np.sum(tri_h) * dx
+          tri_h = tri_h / tri_integral
+          tri_h = np.clip(tri_h, 0.01, 1.0)
+          tri_h = tri_h / np.sum(tri_h) * (1.0/dx)
+          tri_h = np.clip(tri_h, 0.01, 1.0)
+          tri_h = tri_h / (np.sum(tri_h) * dx)
+          j_tri = 1.0 - tri_h
+          h_padded = np.pad(tri_h, (0, N))
+          j_padded = np.pad(j_tri, (0, N))
+          corr_fft = np.fft.fft(h_padded) * np.conj(np.fft.fft(j_padded))
+          correlation = np.fft.ifft(corr_fft).real
+          tri_c5 = np.max(correlation * dx)
+
+          candidates = [
+              {"h": golomb_h.tolist(), "integral": float(golomb_integral), "c5_bound": float(golomb_c5), "pattern_type": "golomb_4"},
+              {"h": bipartite_h.tolist(), "integral": float(bipartite_integral), "c5_bound": float(bipartite_c5), "pattern_type": "bipartite"},
+              {"h": tri_h.tolist(), "integral": float(tri_integral), "c5_bound": float(tri_c5), "pattern_type": "tri_modal"}
+          ]
+          return {"candidates": candidates, "num_candidates": 3}

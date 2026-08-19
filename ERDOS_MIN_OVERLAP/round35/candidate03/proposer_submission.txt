@@ -1,0 +1,191 @@
+schema: h2spec/1.0
+system_prompt: |
+  Erdos minimum overlap (C5): Find step function h: [0,2]->[0,1] minimizing max_k integral h(x)(1-h(x+k))dx.
+  
+  CONSTRAINT: integral(h) = 1 exactly. h values in [0,1].
+  
+  Current best: C5 <= 0.38092303510845016 (combined_score = 1.0).
+  GOAL: Find h achieving c5_bound < 0.38092303510845016 (combined_score > 1.0).
+  
+  STRATEGY - STEP FUNCTION CONSTRUCTIONS:
+  
+  1. GENERATE diverse step function candidates using generate_step_function_template tool
+     - Creates h arrays with specific structures: bipartite, multi-modal, Golomb-ruler, threshold-based
+     - Each template guarantees integral(h)=1 and h in [0,1]
+  
+  2. PROBE candidates with probe_solution to find those with c5_bound < 0.382
+  
+  3. EDIT the EVOLVE-BLOCK to use your generated h array as initial conditions
+     - Replace latent initialization with fixed h that satisfies constraints
+     - Use sigmoid(latent) = h approach or direct step function
+  
+  4. EVALUATE best candidates with evaluate_solution
+  
+  5. If no improvement, try DIFFERENT templates (2+ distinct structures)
+  
+  KEY: Pure gradient descent fails because it struggles to satisfy integral(h)=1 exactly.
+  USE CONCRETE STEP FUNCTION TEMPLATES with multiple separated peaks or threshold regions.
+new_tools:
+  - name: generate_step_function_template
+    description: |
+      Generate a ready-to-use h array with integral=1 and h in [0,1].
+      Templates: bipartite (single threshold), two_peak, three_peak,
+      golomb (maximally separated peaks), broad_plateau.
+      Returns JSON with h_values array.
+      Call to generate diverse initial step functions.
+    input_schema:
+      type: object
+      properties:
+        template_type:
+          type: string
+          enum: [bipartite, two_peak, three_peak, golomb, broad_plateau]
+        num_intervals:
+          type: integer
+          default: 800
+        seed:
+          type: integer
+          default: 42
+    implementation_py: |
+      def run(ctx, args):
+          import json
+          import random
+          
+          template = args.get("template_type", "three_peak")
+          N = args.get("num_intervals", 800)
+          domain = 2.0
+          dx = domain / N
+          
+          h_vals = []
+          
+          if template == "bipartite":
+              for i in range(N):
+                  x = i * dx
+                  h_vals.append(1.0 if x < 1.0 else 0.0)
+          
+          elif template == "two_peak":
+              width = 30
+              peak1_pos = int(N * 0.25)
+              peak2_pos = int(N * 0.75)
+              for i in range(N):
+                  x = i * dx
+                  d1 = abs(x - (peak1_pos * dx))
+                  d2 = abs(x - (peak2_pos * dx))
+                  if d1 < width * dx or d2 < width * dx:
+                      h_vals.append(min(1.0, 1.0 - d1/(width*dx)))
+                  else:
+                      h_vals.append(0.0)
+          
+          elif template == "three_peak":
+              width = 25
+              peak_positions = [int(N * i/6) for i in [1, 3, 5]]
+              for i in range(N):
+                  x = i * dx
+                  min_d = min(abs(x - (p * dx)) for p in peak_positions)
+                  if min_d < width * dx:
+                      h_vals.append(min(1.0, 1.0 - min_d/(width*dx)))
+                  else:
+                      h_vals.append(0.0)
+          
+          elif template == "golomb":
+              width = 20
+              peak_positions = [0, int(N*2/3), int(N*4/3), N-1]
+              for i in range(N):
+                  x = i * dx
+                  d = min(abs(x - (p * dx)) for p in peak_positions)
+                  if d < width * dx:
+                      h_vals.append(min(1.0, 1.0 - d/(width*dx)))
+                  else:
+                      h_vals.append(0.0)
+          
+          elif template == "broad_plateau":
+              start = int(N * 0.2)
+              end = int(N * 1.8)
+              plateau_width = end - start
+              height = 1.0 / plateau_width if plateau_width > 0 else 1.0
+              for i in range(N):
+                  if start <= i < end:
+                      h_vals.append(height)
+                  else:
+                      h_vals.append(0.0)
+          
+          current_sum = sum(h_vals)
+          if current_sum > 0 and N > 0:
+              scale = 1.0 / current_sum
+              h_vals = [v * scale for v in h_vals]
+          
+          h_vals = [max(0.0, min(1.0, v)) for v in h_vals]
+          
+          return {
+              "template_type": template,
+              "h_values": h_vals,
+              "num_intervals": N,
+              "domain": domain,
+              "integral_check": sum(h_vals) / N * domain,
+              "note": f"Generated {template} step function with {len(h_vals)} points"
+          }
+new_skills:
+  - name: step-function-search
+    description: Generate concrete step function templates, probe, edit code, evaluate.
+    body: |
+      # Step Function Search for Erdos C5
+      
+      ## Strategy
+      
+      1. CALL generate_step_function_template with template_type="three_peak"
+         - Three peaks at 1/6, 1/2, 5/6 minimize max overlap
+      
+      2. CALL generate_step_function_template with template_type="bipartite"
+         - Single threshold at x=1
+      
+      3. CALL generate_step_function_template with template_type="golomb"
+         - 4 peaks at 0, 2/3, 4/3, 2
+      
+      4. CALL generate_step_function_template with template_type="broad_plateau"
+         - Wide plateau
+      
+      5. For EACH template:
+         - CALL probe_solution
+         - Keep candidates with c5_bound < 0.382
+      
+      6. EDIT EVOLVE-BLOCK to use best h template:
+         - Replace _get_best_initialization with fixed h array
+         - Use h directly (no gradient optimization needed)
+      
+      7. CALL evaluate_solution on candidates with c5_bound < 0.375
+      
+      ## Key Points
+      
+      - Start with CONCRETE step functions BEFORE gradient optimization
+      - Step functions satisfy integral=1, h in [0,1] exactly
+      - Try 3-4 DIFFERENT templates
+      - Gradient optimization is AUXILIARY - templates are primary
+new_middlewares:
+  - name: template_reminder
+    hook: before_model
+    description: |
+      Reminds solver to use generate_step_function_template before random tuning.
+      Ensures concrete step-function search strategy is followed.
+    implementation_py: |
+      def before_model(hook_input):
+          history = hook_input.get("history", [])
+          
+          has_template = any(
+              "generate_step_function_template" in str(turn.get("tools_used", []))
+              for turn in history
+          )
+          
+          if not has_template:
+              return "IMPORTANT: Call generate_step_function_template first to create concrete step functions (three_peak, bipartite, golomb, broad_plateau) before hyperparameter tuning. These satisfy integral(h)=1 exactly."
+          
+          template_count = sum(
+              1 for turn in history
+              if "generate_step_function_template" in str(turn.get("tools_used", []))
+          )
+          
+          if template_count >= 3:
+              return "Generated 3+ templates. Now probe and evaluate. Keep c5_bound < 0.382."
+          
+          if template_count == 2:
+              return "Generated 2 templates. Generate one more, then probe all."
+          
+          return None

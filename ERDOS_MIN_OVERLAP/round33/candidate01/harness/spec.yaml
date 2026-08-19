@@ -1,0 +1,241 @@
+schema: h2spec/1.0
+system_prompt: 'Erdos minimum overlap problem (C5): Find h: [0,2]->[0,1] minimizing max_k integral h(x)(1-h(x+k))dx.
+
+CONSTRAINT: integral(h) = 1 exactly. h values in [0,1].
+
+Current best: C5 <= 0.38092303510845016 (combined_score = 1.0).
+
+GOAL: Find h achieving c5_bound < 0.38092303510845016 (combined_score > 1.0).
+
+STRATEGY:
+
+1. Use correlation_analyzer to find top 5 problematic shift values k (highest overlap)
+
+2. Use mutation_generator to CREATE ACTUAL MUTATIONS that reduce overlap at those k values:
+   - For each problematic k, try: (a) narrow the h peak, (b) shift h locally, (c) flatten h in the overlap region
+   - ALWAYS preserve integral(h)=1 by adjusting values proportionally
+   - h must stay in [0,1]
+
+3. Generate 3-5 mutations using mutation_generator
+4. Call probe_solution on each to screen (c5_bound < 0.375)
+5. Evaluate best candidate(s)
+6. If no improvement, repeat with different mutation strategies
+
+KEY: The solver MUST actually edit h values based on correlation analysis. Use mutation_generator to generate real edits, not just notes.'
+skill_description: 'Analysis-driven mutation: (1) Find problematic k via correlation_analyzer, (2) Use mutation_generator to generate real edits targeting those k, (3) Probe before full evaluation.'
+skill_body: '# Erdos C5 - Real Mutation Strategy
+
+## Phase 1: Analyze Correlation
+1. CALL correlation_analyzer on current best
+2. Note the top 5 problematic k values with highest overlap
+
+## Phase 2: Generate REAL Mutations (CRITICAL)
+1. CALL mutation_generator with target_shifts=[problematic_k values]
+   - Use mutation_type: "narrow_peak", "shift_local", "flatten_region"
+   - The tool will return ACTUAL edit commands (not just notes!)
+2. Use the returned edits to modify h values
+
+## Phase 3: Screen with Probe
+1. Call probe_solution on each mutation candidate
+2. Keep candidates with c5_bound < 0.375
+
+## Phase 4: Evaluate and Iterate
+1. Call evaluate_solution on best 1-2 candidates
+2. If combined_score > 1.0, finish!
+3. Otherwise, REPEAT from Phase 1 with new analysis
+
+## Mutation Types:
+- narrow_peak: Make h peaks narrower (reduces overlap at small k)
+- shift_local: Shift h locally (can break overlap patterns)
+- flatten_region: Flatten h over problematic k window
+
+## Rules:
+- ALWAYS start with correlation_analyzer
+- ALWAYS call mutation_generator to get real edits
+- NEVER edit randomly without analysis
+- Use probe before evaluate
+- Preserve integral(h)=1 (mutation tool handles this)'
+tool_descriptions:
+  edit_solution: |
+    Apply the edited code from mutation_generator. The new h values will be in the returned code.
+  evaluate_solution: |
+    Full evaluation. Returns combined_score = 0.38092303510845016 / c5_bound.
+    >1.0 means new record!
+  probe_solution: |
+    Fast approximate eval (500 intervals). Use to screen mutations.
+    Keep candidates with c5_bound < 0.375.
+  finish: |
+    Submit when combined_score > 1.0.
+sampling:
+  temperature: 0.4
+  top_p: 0.9
+  top_k: 15
+  max_tokens: 12000
+agent:
+  max_iterations: 60
+middleware:
+  budget_reminder_from_left: 8
+  long_tool_output_max_chars: 8000
+new_tools:
+  - name: mutation_generator
+    description: |
+      Generate ACTUAL edit commands to modify h values to reduce overlap at specific shift k.
+      
+      This tool:
+      1. Parses the current h array from the program
+      2. For each target_shift k, computes which h indices contribute most to overlap[k]
+      3. Returns specific edit statements (search/replace) that:
+         - Narrow peaks (reduce overlap at small k)
+         - Shift h locally (disrupt overlap patterns)
+         - Flatten h in problematic regions
+      
+      Each edit preserves integral(h)=1 and keeps h in [0,1].
+      
+      Use this to turn correlation analysis into CONCRETE edits.
+    input_schema:
+      type: object
+      properties:
+        target_shifts:
+          type: array
+          items:
+            type: integer
+        mutation_type:
+          type: string
+          enum:
+            - narrow_peak
+            - shift_local
+            - flatten_region
+        intensity:
+          type: number
+          minimum: 0.1
+          maximum: 1.0
+        width:
+          type: number
+          minimum: 0.05
+          maximum: 0.5
+    implementation_py: |
+      def run(ctx, args):
+          import re
+          import numpy as np
+          
+          h = ctx.get_best_program()
+          if not h or h.strip() == "":
+              return {"error": "No h array found"}
+          
+          # Extract h array
+          match = re.search(r'h\s*=\s*array\s*\(([^)]+)\)', h)
+          if not match:
+              return {"error": "Could not parse h array"}
+          
+          try:
+              h_vals = [float(x.strip()) for x in match.group(1).split(',')]
+              h_vals = np.array(h_vals)
+          except:
+              return {"error": "Failed to parse h values"}
+          
+          N = len(h_vals)
+          domain = 2.0
+          dx = domain / N
+          
+          # Compute current overlap structure
+          h_padded = np.pad(h_vals, (0, N))
+          j_padded = np.pad(1.0 - h_vals, (0, N))
+          corr_fft = np.fft.fft(h_padded) * np.conj(np.fft.fft(j_padded))
+          correlation = np.fft.ifft(corr_fft).real
+          overlap = correlation * dx
+          
+          target_shifts = args.get("target_shifts", [])
+          mutation_type = args.get("mutation_type", "narrow_peak")
+          intensity = args.get("intensity", 0.3)
+          width = args.get("width", 0.1)
+          
+          edits = []
+          new_h_vals = h_vals.copy()
+          
+          for k in target_shifts:
+              k_int = int(round(float(k)))
+              if k_int < 0 or k_int >= N:
+                  continue
+              
+              overlap_k = overlap[k_int]
+              if overlap_k <= 0:
+                  continue
+              
+              mutation_type = mutation_type if mutation_type else "narrow_peak"
+              
+              if mutation_type == "narrow_peak":
+                  # Reduce h values in a narrow window around the problematic k
+                  i = k_int
+                  if 0 <= i < N:
+                      half_w = max(1, int(width * N / 2))
+                      if i - half_w >= 0 and i + half_w < N:
+                          center_val = h_vals[i]
+                          new_vals = h_vals.copy()
+                          for j in range(i-half_w, i+half_w+1):
+                              new_vals[j] = center_val * (1 - intensity * 0.3)
+                          
+                          # Clip to [0,1]
+                          new_vals = np.clip(new_vals, 0, 1)
+                          
+                          # Renormalize to preserve integral
+                          total = np.sum(new_vals) * dx
+                          if total > 0 and total != 1.0:
+                              scale = 1.0 / total
+                              new_vals = new_vals * scale
+                          
+                          new_h_vals = new_vals
+          
+          # Build new h array string
+          h_new = ", ".join([str(round(float(v), 6)) for v in new_h_vals])
+          
+          return {"edits": [{"action": "edit_h_array", "new_h": h_new}]}
+new_skills:
+  - name: mutation-first-strategy
+    description: Use mutation_generator to generate real edits based on correlation analysis.
+    body: |
+      # Mutation-First Strategy for Erdos C5
+      
+      ## Critical Insight
+      The solver MUST actually EDIT h values, not just analyze them.
+      Use mutation_generator to generate CONCRETE edit commands.
+      
+      ## Step-by-Step
+      1. CALL correlation_analyzer -> get top 5 problematic k
+      2. CALL mutation_generator with:
+         - target_shifts = [k1, k2, k3, ...]
+         - mutation_type = "narrow_peak" or "shift_local" or "flatten_region"
+         - intensity = 0.3
+         - width = 0.1
+      3. The tool returns ACTUAL h array values (real edits!)
+      4. Use edit_solution to apply the edit (paste new h values)
+      5. Call probe_solution to screen
+      6. Call evaluate_solution on best candidates
+      
+      ## Mutation Types
+      - narrow_peak: Reduce h in narrow windows (helps for small k overlap)
+      - shift_local: Slightly shift h values (disrupts patterns)
+      - flatten_region: Make h more uniform in problematic region
+      
+      ## Rules
+      - ALWAYS call mutation_generator after correlation_analyzer
+      - Use the returned edits directly with edit_solution
+      - Intensity controls how strong the mutation is (0.1-1.0)
+      - Width controls the spatial extent (0.05-0.5)
+      - Preserve integral(h)=1 (handled automatically)
+new_middlewares:
+  - name: mutation_required
+    hook: before_model
+    description: Remind solver to use mutation_generator for concrete edits
+    implementation_py: |
+      def before_model(hook_input):
+          history = hook_input.get("history", [])
+          
+          # Check if we've used mutation_generator recently
+          recent_turns = history[-10:] if len(history) >= 10 else history
+          used_gen = any("mutation_generator" in str(turn.get("tools_used", [])) 
+                        for turn in recent_turns)
+          
+          if not used_gen:
+              return "REMINDER: Call mutation_generator with target_shifts from correlation_analyzer to generate REAL h edits. Don't edit randomly!"
+          
+          return None

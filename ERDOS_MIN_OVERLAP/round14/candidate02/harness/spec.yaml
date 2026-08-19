@@ -1,0 +1,160 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are solving the Erdos minimum overlap problem: minimize max_k integral h(x)(1-h(x+k)) dx for a step function h: [0,2] -> [0,1] with integral(h)=1.
+  
+  Current best bound: C5 <= 0.38092303510845016
+  
+  CRITICAL INSIGHT: The seed's 12 initialization patterns are all smooth Gaussian/sigmoid shapes. The optimal solution is likely a TRULY DISCRETE step function (piecewise constant with sharp breakpoints), not a smooth curve.
+  
+  STRATEGY:
+  
+  1. Use analyze_and_replace_init to REPLACE the entire _get_best_initialization method with a custom piecewise-constant construction.
+  
+  2. The tool will suggest concrete breakpoints and amplitude values based on the current bound.
+  
+  3. Set num_restarts=1 and num_steps=59000 to fully optimize THAT single discrete structure.
+  
+  4. Do NOT try to "improve" the Gaussian initializations—they are structurally wrong.
+  
+  5. Call analyze_and_replace_init ONCE at the start to get a new piecewise-constant init, then EDIT the seed to use it.
+  
+  6. If the new init gives combined_score > 0.999888, keep refining that direction.
+  
+  Key insight: We need to REPLACE the initialization method, not just select from existing patterns.
+skill_description: Replace the smooth Gaussian initialization with piecewise-constant constructions using analyze_and_replace_init.
+skill_body: |
+  # Piecewise-Constant Initialization Strategy
+  
+  ## Why the Seed Fails
+  
+  The seed's 12 patterns are all smooth (Gaussian, sinusoidal, threshold curves). For the Erdos problem, we need SHARP piecewise-constant functions.
+  
+  ## Workflow
+  
+  1. CALL analyze_and_replace_init ONCE to get a new piecewise-constant initialization pattern.
+  
+  2. EDIT the seed to:
+     - Replace _get_best_initialization with the tool's suggested code
+     - Set num_restarts=1 (we already have the good initialization)
+     - Set seed_start=0 (use the first/new initialization)
+  
+  3. Call evaluate_solution on the edited seed.
+  
+  4. If score improves, analyze which piecewise structure worked and explore variations.
+  
+  5. If no improvement, call analyze_and_replace_init again for a different piecewise pattern.
+  
+  ## Expected New Patterns
+  
+  The tool will suggest constructions like:
+  - 3-step: high on [0,a], medium on [a,b], low on [b,2]
+  - 5-step: alternating high/medium/low regions
+  - Symmetric: high on [0,a] U [2-a,2], medium on [a,2-a]
+  
+  Success means c5_bound < 0.375 (combined_score > 1.01).
+tool_descriptions:
+  edit_solution: |
+    Replace the _get_best_initialization method with custom code, or change hyperparameters.
+    To replace the method: delete the entire class method and insert the tool's suggested code.
+    Set num_restarts=1 after replacing to use the single initialization.
+  evaluate_solution: |
+    Run full evaluation, returns combined_score.
+  probe_solution: |
+    Quick approximate evaluation (500 intervals, 10s runtime). Use sparingly since we need to evaluate the full structure.
+  finish: |
+    Submit when combined_score > 1.0.
+sampling:
+  temperature: 1.3
+  top_p: 0.95
+  top_k: 30
+  max_tokens: 16384
+agent:
+  max_iterations: 60
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 10000
+new_tools:
+  - name: analyze_and_replace_init
+    description: Replace _get_best_initialization with a piecewise-constant step function.
+      Analyzes the current bound and generates a 3-5 level piecewise-constant initialization
+      using greedy breakpoint optimization to minimize overlap.
+    input_schema:
+      type: object
+      properties:
+        current_best_score:
+          type: number
+    implementation_py: |
+      def run(ctx, args):
+          import numpy as np
+          current_bound = args.get("current_best_score", 0.38092303510845016)
+          N = 800
+          domain = 2.0
+          dx = domain / N
+          
+          # Greedy piecewise-constant construction with 3 steps
+          best_overlap = float("inf")
+          a_found, b_found, c_found = None, None, None
+          
+          for a in np.linspace(0.2, 0.9, 20):
+              for b in np.linspace(a, 1.0, 15):
+                  c = 2.0 - b
+                  h_vals = np.zeros(N)
+                  h_vals[:int(N*a)] = 2.0
+                  h_vals[int(N*a):int(N*c)] = 1.0
+                  h_vals[int(N*c):] = 0.0
+                  h = h_vals * (N * dx)
+                  h = h / (np.sum(h) * dx + 1e-10) * 1.0
+                  h = np.clip(h, 0, 1)
+                  h_padded = np.pad(h, (0, N))
+                  j_padded = np.pad(1.0 - h, (0, N))
+                  corr = np.fft.fft(h_padded) * np.conj(np.fft.fft(j_padded))
+                  overlap = np.fft.ifft(corr).real
+                  max_overlap = np.max(overlap * dx)
+                  if max_overlap < best_overlap:
+                      best_overlap = max_overlap
+                      a_found, b_found, c_found = a, b, c
+          
+          a, b, c = a_found, b_found, c_found
+          code = "def _get_best_initialization(seed: int) -> jnp.ndarray:\n"
+          code += "    N = self.hypers.num_intervals\n"
+          code += "    x = jnp.linspace(0, 2, N)\n"
+          code += f"    h = jnp.where(x < a, 1.5, jnp.where(x >= 2-a, 1.5, 0.5))\n"
+          code += f"    h = h / (jnp.sum(h) * {dx})\n"
+          code += "    return h\n"
+          
+          return {
+              "new_method_code": code,
+              "breakpoints": {"a": float(a), "b": float(b), "c": float(c)},
+              "estimated_bound": float(best_overlap),
+              "instruction": "Replace _get_best_initialization with this code and set num_restarts=1"
+          }
+new_skills:
+  - name: piecewise-constant-optimization
+    description: Replace smooth initializations with piecewise-constant step functions.
+    body: |
+      # Piecewise-Constant Optimization for Erdos Problem
+      
+      ## Why Replace the Initialization?
+      
+      The seed's 12 patterns are smooth (Gaussian, sinusoidal). The Erdos problem rewards SHARP step functions.
+      
+      ## What to Replace
+      
+      DELETE the entire _get_best_initialization method and replace with a 3-5 level piecewise-constant function.
+      
+      ## How to Edit
+      
+      1. Find the _get_best_initialization class method in the seed code.
+      
+      2. Delete all lines from "def _get_best_initialization" to the next method.
+      
+      3. Insert the new piecewise-constant code from analyze_and_replace_init.
+      
+      4. Set num_restarts=1 (no need to try 12 patterns when you have a good one).
+      
+      5. Set seed_start=0 to use the new initialization.
+      
+      ## Success Pattern
+      
+      Look for smooth+sharp contrasts: high values (1.2-1.5) on disjoint intervals, low values (0.3-0.6) elsewhere.
+new_middlewares: []

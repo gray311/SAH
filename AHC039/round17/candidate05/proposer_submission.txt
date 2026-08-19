@@ -1,0 +1,201 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are a C++ polygon optimizer for axis-aligned fish capture. Goal: maximize (mackerels - sardines + 1).
+  
+  CRITICAL STRATEGY: Find dense mackerel clusters and build minimal axis-aligned bounding boxes around them, then combine into valid polygons.
+  
+  SEARCH METHOD:
+  
+  1. READ ALL MACKEREL COORDINATES: Extract all mackerel positions from input.
+  
+  2. FIND CLUSTERS: Use a simple density approach - find the leftmost mackerel, then find other mackerels within a small distance window. Group nearby mackerels into clusters.
+  
+  3. BUILD BOUNDING BOXES: For each cluster, create a minimal axis-aligned rectangle that encloses all mackerels in that cluster.
+  
+  4. VERIFY CLEARANCE: Before accepting a box, check (via probe if available) that it doesn't contain many sardines. Skip boxes with too many sardines.
+  
+  5. POLYGON MERGE: Combine multiple valid boxes into a single valid axis-aligned polygon (can share edges).
+  
+  6. TWEAK BOUNDARIES: Slightly shrink box boundaries inward to exclude edge cases with sardines on the border.
+  
+  7. MULTIPLE STARTING POINTS: Try starting from different mackerels to find different clusters.
+  
+  Tools:
+  - edit_solution: Replace EVOLVE-BLOCK with complete C++ implementing cluster-based bounding box construction
+  - evaluate_solution: Run C++ program, get score
+  - probe_solution: Use for quick approximate scoring when exploring multiple candidate boxes
+  - finish: Submit when you have encoded working cluster enclosure strategy
+  
+  KEY DIFFERENCE from seed: Use geometric clustering to find actual mackerel groups, not coarse grid cells. Build minimal axis-aligned bounding boxes around clusters. Verify and refine each box before combining. Use probe for quick scoring of multiple candidates.
+skill_description: Cluster-based axis-aligned bounding box construction. Find dense mackerel clusters, build minimal AABBs, verify sardine clearance with probing, combine into valid polygons, refine boundaries to exclude edge sardines.
+skill_body: '# Cluster-Based AABB Construction Strategy
+
+## Phase 1: Extract Mackerel Positions
+- Parse input to extract all mackerel coordinates
+- Store in a list for processing
+
+## Phase 2: Find Dense Mackerel Clusters
+- Start from the leftmost mackerel
+- Find all mackerels within distance < 1500
+- Mark these as a cluster
+- Repeat from next unvisited mackerel to find more clusters
+
+## Phase 3: Build Minimal AABBs
+- For each cluster, find min_x, max_x, min_y, max_y
+- Create axis-aligned rectangle: (min_x, min_y) to (max_x, max_y)
+- Ensure at least 4 vertices
+
+## Phase 4: Probe-Based Verification (Key Innovation)
+- Before full evaluation, use probe_solution to:
+  * Subsample points (~10% of fish)
+  * Count mackerels and sardines in the bounding box
+  * Skip boxes where sardines > mackerels
+- This filters out bad candidates early
+
+## Phase 5: Combine Multiple Boxes
+- Combine 2-3 valid boxes into a single polygon
+- Ensure polygon is valid: 4-1000 vertices, no self-intersection, perimeter <= 400,000
+
+## Phase 6: Boundary Refinement
+- Slightly shrink box boundaries inward by 50-100 units
+- This excludes sardines that might be on the edge
+
+## Phase 7: Multiple Restarts
+- Run 5-8 restarts from different starting mackerels
+- Track best polygon across all restarts
+
+## C++ Implementation Notes
+- Use KD-tree or sorted lists for efficient distance queries
+- Probe first, then evaluate: use 3-5 probes to filter, then 1 full eval on best candidate
+- Total time per evaluation: < 1.5s to allow for probing
+- Handle edge cases: clusters with < 5 mackerels (skip)
+tool_descriptions:
+  edit_solution: Replace EVOLVE-BLOCK with C++ implementing cluster-based AABB construction: 1. Parse input, extract all mackerel positions; 2. Find clusters via distance-based grouping (window ~1500); 3. Build minimal axis-aligned bounding box for each cluster; 4. Use probe_solution to verify mackerel > sardine before full eval; 5. Combine 2-3 valid boxes into single valid polygon; 6. Refine boundaries inward by 50-100 units to exclude edge sardines; 7. Run 5-8 restarts from different starting mackerels; 8. Output best polygon, ensure < 1.5s execution.
+  evaluate_solution: Run C++ program. Returns score (mackerels-sardines+1), validity, and remaining evaluations (budget=30). Each run has ~1.5-2.0s search window.
+  probe_solution: Use for quick approximate scoring of candidate boxes. Subsamples ~10% of fish to estimate mackerel/sardine counts. Saves evaluation budget for promising candidates.
+  finish: End when you have submitted working cluster enclosure with probe-based filtering.
+sampling:
+  temperature: 1.0
+  top_p: 0.95
+  top_k: 30
+  max_tokens: 14336
+agent:
+  max_iterations: 35
+middleware:
+  budget_reminder_from_left: 3
+  long_tool_output_max_chars: 12000
+new_tools:
+- name: estimate_cluster_score
+  description: Estimate score for a candidate polygon by subsampling. Returns approximate mackerel/sardine counts inside the polygon. Call this before full evaluation to filter bad candidates.
+  input_schema:
+    type: object
+    properties:
+      polygon:
+        type: object
+        properties:
+          vertices:
+            type: array
+            items:
+              type: object
+              properties:
+                x:
+                  type: integer
+                y:
+                  type: integer
+      subsample_ratio:
+        type: number
+        default: 0.1
+  implementation_py: |
+    def run(ctx, args):
+        import math
+        import random
+        
+        poly = args.get("polygon", {})
+        vertices = poly.get("vertices", [])
+        subsample_ratio = args.get("subsample_ratio", 0.1)
+        
+        if not vertices:
+            return {"error": "no polygon", "mackerels": 0, "sardines": 0}
+        
+        program = ctx.get_program()
+        fish_list = []
+        for line in program.split('\n'):
+            line = line.strip()
+            if 'mackerel' in line.lower():
+                try:
+                    coords = line.split(',')
+                    if len(coords) >= 2:
+                        x = int(coords[0].strip())
+                        y = int(coords[1].strip())
+                        fish_list.append((x, y, 1))
+                except:
+                    pass
+            elif 'sardine' in line.lower():
+                try:
+                    coords = line.split(',')
+                    if len(coords) >= 2:
+                        x = int(coords[0].strip())
+                        y = int(coords[1].strip())
+                        fish_list.append((x, y, -1))
+                except:
+                    pass
+        
+        if not fish_list:
+            return {"error": "no fish found", "mackerels": 0, "sardines": 0}
+        
+        n_subsample = max(1, int(len(fish_list) * subsample_ratio))
+        shuffled = list(range(n_subsample))
+        random.seed(42)
+        for i in range(n_subsample - 1, 0, -1):
+            j = random.randint(0, i)
+            shuffled[i], shuffled[j] = shuffled[j], shuffled[i]
+        sub_sample_indices = shuffled[:n_subsample]
+        
+        def point_in_polygon(px, py, poly):
+            n = len(poly)
+            inside = False
+            j = n - 1
+            for i in range(n):
+                xi, yi = poly[i]
+                xj, yj = poly[j]
+                if ((yi > py) != (yj > py)) and (px < (xj - xi) * (py - yi) / (yj - yi) + xi):
+                    inside = not inside
+                j = i
+            return inside
+        
+        mackerels = 0
+        sardines = 0
+        total_inside = 0
+        
+        for idx in sub_sample_indices:
+            fx, fy, ftype = fish_list[idx]
+            if point_in_polygon(fx, fy, vertices):
+                total_inside += 1
+                if ftype == 1:
+                    mackerels += 1
+                else:
+                    sardines += 1
+        
+        total_est = len(fish_list)
+        mack_est = int(mackerels * total_est / max(1, total_inside)) if total_inside > 0 else 0
+        sard_est = int(sardines * total_est / max(1, total_inside)) if total_inside > 0 else 0
+        
+        score = max(0, mack_est - sard_est + 1)
+        
+        return {
+            "subsampled_mackerels": mackerels,
+            "subsampled_sardines": sardines,
+            "estimated_mackerels": mack_est,
+            "estimated_sardines": sard_est,
+            "estimated_score": score,
+            "subsample_count": len(sub_sample_indices),
+            "total_fish": len(fish_list)
+        }
+new_skills: []
+new_middlewares:
+- name: cluster_reminder
+  hook: before_model
+  description: remind solver to use cluster-based enclosure with probing
+  implementation_py: |
+    def before_model(hook_input):
+        return "Use cluster-based AABB: find dense mackerel clusters, build minimal axis-aligned boxes, probe for sardine clearance, combine 2-3 boxes, refine boundaries inward. Run 5-8 restarts."

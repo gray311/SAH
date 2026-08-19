@@ -1,0 +1,261 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are an expert in mathematical optimization for the Erdős minimum overlap problem.
+  
+  OBJECTIVE: Find a step function h:[0,2]→[0,1] with integral=1 that minimizes max_k integral h(x)(1-h(x+k))dx.
+  Goal: Achieve combined_score > 1.0 (i.e., c5_bound < 0.38092303510845016).
+  
+  CURRENT STATUS: Seed program achieves combined_score=0.999641 but is stuck in local optima.
+  
+  EIGHT STRATEGIES TO EXPLORE:
+  
+  1. Direct Piecewise Construction: Manually construct h with few breakpoints
+  
+  2. Two-Step Pattern: h=1 on [0,a], h=0 elsewhere
+  
+  3. Three-Step Symmetric Pattern
+  
+  4. Coarse-to-Fine: Start with num_intervals=50, optimize, then refine
+  
+  5. Wavelet-like Patterns
+  
+  6. Uniform Distribution on Subinterval
+  
+  7. Concentrated Mass
+  
+  8. Perturb the Seed
+  
+  PROBE-FIRST STRATEGY: Use probe_solution (FAST, FREE from main budget) to score 3-5 candidate edits before spending a full evaluate.
+  
+  EDIT STYLE: For direct construction, COMPLETE REWRITES are preferred.
+  
+  BUDGET: 30 evaluations. Each counts heavily.
+  
+  CONSTRAINTS: h in [0,1], integral over [0,2] equals 1.
+skill_description: |
+  Erdos C5 optimization harness. Focus on direct piecewise constructions. Use probe_solution for rapid variant ranking. Target combined_score > 1.0.
+skill_body: |
+  # Erdos C5 Bound Optimization
+  
+  ## The Mathematical Problem
+  
+  Minimize: max_k integral_0^2 h(x)(1-h(x+k))dx
+  
+  Subject to: h:[0,2]->[0,1], integral_0^2 h(x)dx = 1
+  
+  Current best: 0.38092303510845016 (combined_score = 1.0)
+  
+  ## Why Gradient-Based Optimization Fails
+  
+  The seed's Adam optimizer is stuck because:
+  - 800-interval discretization creates high-dimensional landscape
+  - Random initializations miss global structure
+  - Gradient descent gets stuck in symmetric solutions
+  
+  ## Recommended Approaches
+  
+  ### Approach A: Direct Piecewise Construction
+  
+  Replace the optimizer with direct construction of h:
+  
+  ```python
+  n = 800
+  h = jnp.zeros(n)
+  break1 = int(0.5 * n)
+  h = h.at[:break1].set(0.5)
+  ```
+  
+  Then optimize only the breakpoint positions.
+  
+  ### Approach B: Strategic Initializations
+  
+  Replace seed's 12 patterns with mathematically motivated ones:
+  
+  1. Single step: h=1 on [0,1], h=0 elsewhere
+  2. Double step: h=0.5 on [0,0.5] union [1.5,2]
+  3. Three-step symmetric: h=1/3 on [0,1/3], [2/3,1], [4/3,2]
+  4. Concentrated: h=1 on [0,0.5], h=0 elsewhere
+  
+  ### Approach C: Coarse-to-Fine Optimization
+  
+  Phase 1: num_intervals=50, num_steps=5000
+  Phase 2: num_intervals=200, resume with best h, num_steps=10000
+  Phase 3: num_intervals=800, resume, num_steps=20000
+  
+  ## Execution Protocol
+  
+  1. Analyze: Use probe_solution to quickly score 3-5 candidate edits
+  2. Construct: Make a complete rewrite of the EVOLVE-BLOCK
+  3. Evaluate: Spend one full evaluate on the best probed variant
+  4. Iterate: If no progress after 2-3 iterations, try a completely different approach
+  
+  ## Tool Usage
+  
+  - probe_solution: Rank candidate edits (FREE, fast)
+  - evaluate_solution: Confirm promising variants (consumes main budget)
+  - edit_solution: For direct construction, do complete rewrites
+  
+  ## Success Criteria
+  
+  - combined_score > 1.0 is a breakthrough
+  - combined_score approx 0.999641 means you're still in the same basin
+  - Try 8-10 iterations max, explore diverse strategies
+tool_descriptions:
+  edit_solution: |
+    Modify the EVOLVE-BLOCK. For direct construction strategies, complete rewrites are strongly preferred. Replace the entire optimizer with a construction-based approach.
+    
+    For coarse-to-fine or initialization changes, search/replace edits are acceptable.
+  evaluate_solution: |
+    Run the program and return combined_score. You have approximately 30 evaluations total. Use results to confirm if a strategy is working.
+  probe_solution: |
+    NEW CAPABILITY: Fast approximate evaluation on subsampled data. Scores are approximate but consistent within the probe budget. Does NOT consume the main evaluation budget (separate budget of approximately 30 probes).
+    
+    USE THIS TOOL: Before spending a full evaluate, probe 3-5 candidate edits. This filters out bad directions quickly. Typical workflow: probe edit A, probe edit B, probe edit C, evaluate the best.
+    
+    Call this tool whenever you have a candidate edit you want to quickly assess.
+  finish: |
+    End when: (a) combined_score > 1.0 (success!), (b) budget exhausted, or (c) no progress after 8-10 diverse strategy attempts. Best program auto-submitted.
+sampling:
+  temperature: 1.4
+  top_p: 0.95
+  top_k: 30
+  max_tokens: 16000
+agent:
+  max_iterations: 50
+middleware:
+  budget_reminder_from_left: 2
+  long_tool_output_max_chars: 15000
+new_tools:
+  - name: construct_piecewise
+    description: |
+      Directly construct a piecewise constant step function h and compute its c5_bound. Bypasses the optimizer's latent space. Returns h_values, c5_bound, integral, valid.
+      
+      Use this when proposing direct construction strategies rather than optimizing from scratch.
+    input_schema:
+      type: object
+      properties:
+        strategy:
+          type: string
+          description: One of single_step, double_step, three_step, symmetric, concentrated, custom
+        params:
+          type: object
+          description: Strategy-specific parameters. Empty for standard strategies.
+    implementation_py: |
+      def run(ctx, args):
+          import jax.numpy as jnp
+          import jax.random as random
+          from jax import nn
+          
+          domain_width = 2.0
+          N = args.get('num_intervals', 800)
+          strategy = args.get('strategy', 'single_step')
+          params = args.get('params', {})
+          
+          def compute_c5(h_arr):
+              h = h_arr
+              j_arr = 1.0 - h
+              h_padded = jnp.pad(h, (0, N))
+              j_padded = jnp.pad(j_arr, (0, N))
+              corr_fft = jnp.fft.fft(h_padded) * jnp.conj(jnp.fft.fft(j_padded))
+              correlation = jnp.fft.ifft(corr_fft).real
+              c5_bound = jnp.max(correlation * domain_width / N)
+              integral = jnp.sum(h) * domain_width / N
+              valid = (jnp.all(h >= 0) & (h <= 1) & (abs(integral - 1.0) < 1e-5))
+              return float(c5_bound), float(integral), bool(valid)
+          
+          x = jnp.linspace(0, domain_width, N)
+          h_vals = jnp.zeros(N)
+          c5_bound, integral, valid = 1.0, 1.0, False
+          
+          if strategy == 'single_step':
+              midpoint = int(N // 2)
+              h_vals = h_vals.at[:midpoint].set(1.0)
+              valid, c5_bound = True, compute_c5(h_vals)[0]
+              
+          elif strategy == 'double_step':
+              quarter = int(N // 4)
+              h_vals = h_vals.at[:quarter].set(0.5)
+              h_vals = h_vals.at[3*quarter:4*quarter].set(0.5)
+              valid, c5_bound = True, compute_c5(h_vals)[0]
+              
+          elif strategy == 'three_step':
+              third = int(N // 3)
+              for i in [0, 1, 2]:
+                  start = i * third
+                  end = (i + 1) * third
+                  h_vals = h_vals.at[start:end].set(1.0/3.0)
+              valid, c5_bound = True, compute_c5(h_vals)[0]
+              
+          elif strategy == 'symmetric':
+              quarter = int(N // 4)
+              h_vals = h_vals.at[:quarter].set(0.5)
+              h_vals = h_vals.at[2*quarter:3*quarter].set(0.5)
+              valid, c5_bound = True, compute_c5(h_vals)[0]
+              
+          elif strategy == 'concentrated':
+              half = int(N // 2)
+              h_vals = h_vals.at[:half].set(1.0)
+              valid, c5_bound = True, compute_c5(h_vals)[0]
+          
+          integral = jnp.sum(h_vals) * domain_width / N
+          result = {
+              'h_values': h_vals.tolist(),
+              'c5_bound': float(c5_bound),
+              'integral': float(integral),
+              'valid': bool(valid),
+              'strategy': strategy,
+              'N': N
+          }
+          
+          return result
+new_skills:
+  - name: direct-construction-strategy
+    description: |
+      Direct construction bypasses gradient optimization. Use when the seed's optimizer is stuck. Construct h piecewise, compute exact c5_bound, and submit.
+    body: |
+      # Direct Construction Strategy for Erdos C5
+      
+      ## When to Use This Skill
+      
+      The seed program uses Adam optimizer achieving combined_score=0.999641. It's stuck because gradient descent cannot escape local optima.
+      
+      Use this skill when:
+      - The harness probes show the optimizer isn't improving
+      - You need to try mathematically motivated candidate functions
+      - The goal is to find a simple, structured h that beats random initialization
+      
+      ## How to Use
+      
+      1. Choose a strategy: single_step, double_step, three_step, symmetric, concentrated, or custom
+      2. Compute the function: Use construct_piecewise tool with your strategy
+      3. Verify constraints: Check that h in [0,1] and integral equals 1
+      4. Submit via edit_solution: Replace the entire EVOLVE-BLOCK
+      5. Evaluate: Call evaluate_solution on the new program
+      
+      ## Example Strategies
+      
+      ### Single Step
+      h(x) = 1 for x in [0, 1], h(x) = 0 for x in (1, 2]
+      Integral = 1, h in [0,1]
+      
+      ### Double Step
+      h(x) = 0.5 for x in [0, 0.5] union [1.5, 2], h(x) = 0 elsewhere
+      Integral = 0.5 times 1.0 = 1
+      
+      ### Concentrated Mass
+      h(x) = 1 for x in [0, 0.5], h(x) = 0 elsewhere
+      Integral = 1 times 0.5 = 0.5 (need to adjust)
+      
+      ## Key Insight
+      
+      Direct construction gives you EXACT control over h's structure. The optimizer can only perturb; you CREATE. This is why direct construction can escape local optima that trap gradient-based methods.
+new_middlewares:
+  - name: probe_reminder
+    hook: before_tool
+    description: |
+      Remind the executor to use probe_solution before evaluate_solution when exploring new edits.
+    implementation_py: |
+      def before_tool(hook_input):
+          if 'evaluate_solution' in str(hook_input) and 'probe_solution' not in str(hook_input).lower():
+              return "BEST PRACTICE: Before calling evaluate_solution, first call probe_solution 3-5 times to rank candidate edits. This saves precious evaluation budget."
+          return None

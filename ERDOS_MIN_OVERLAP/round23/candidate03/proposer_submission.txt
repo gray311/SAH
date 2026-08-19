@@ -1,0 +1,112 @@
+schema: h2spec/1.0
+system_prompt: |
+  Erdos minimum overlap: find h: [0,2]->[0,1] minimizing max_k integral h(x)(1-h(x+k))dx.
+  
+  Constraints: h in [0,1], integral(h) = 1.
+  Current best: C5 <= 0.38092303510845016 (combined_score > 1.0 is record).
+  
+  CRITICAL STRATEGY:
+  1. EDIT the seed optimizer to ADD new initialization patterns or tune hyperparameters
+  2. Use c5_analyze_candidate to QUICKLY rank candidates with analytical FFT-based c5
+  3. Only call evaluate_solution on the TOP 1-2 best analytical candidates (c5 < 0.38)
+  4. If still stuck at seed, edit to CHANGE the optimizer structure (e.g., num_intervals, learning rate patterns)
+  
+  The seed optimizer already has 15 patterns. Focus on adding BETTER patterns (e.g., different Golomb marks, tri-modal with different peak positions, asymmetric patterns).
+budget_reminder_from_left: 2
+long_tool_output_max_chars: 10000
+new_tools:
+  - name: c5_analyze_candidate
+    description: |
+      Compute analytical c5 bound for a step function h using FFT.
+      Returns c5_bound = max_k integral h(x)(1-h(x+k))dx.
+      Call this after editing a candidate to quickly rank before full evaluation.
+      Input: h array (latent values, will be sigmoided internally).
+    input_schema:
+      type: object
+      properties:
+        h:
+          type: array
+          description: latent array (N=800)
+    implementation_py: |
+      def run(ctx, args):
+          import numpy as np
+          h_raw = np.array(args.get('h', []))
+          N = len(h_raw)
+          domain = 2.0
+          dx = domain / N
+          
+          # Sigmoid to get h in [0,1]
+          h = 1.0 / (1.0 + np.exp(-h_raw))
+          
+          # Compute j = 1 - h
+          j = 1.0 - h
+          
+          # Pad to avoid edge effects
+          h_padded = np.pad(h, (0, N), mode='constant')
+          j_padded = np.pad(j, (0, N), mode='constant')
+          
+          # FFT-based correlation
+          corr_fft = np.fft.fft(h_padded) * np.conj(np.fft.fft(j_padded))
+          correlation = np.fft.ifft(corr_fft).real
+          
+          c5_bound = float(np.max(correlation) * dx)
+          
+          return {"h": h.tolist(), "c5_bound": c5_bound, "integral": float(np.sum(h) * dx)}
+new_skills:
+  - name: pattern-augmentation
+    description: |
+      Augment the seed optimizer with new initialization patterns for Erdos optimization.
+    body: |
+      # Pattern Augmentation Strategy
+      
+      ## Problem
+      The seed optimizer has 15 patterns but gets stuck at seed score. We need BETTER patterns.
+      
+      ## Solution: Add NEW initialization patterns to _get_best_initialization()
+      
+      ## Recommended New Patterns:
+      
+      1. **Asymmetric Bipartite**: h high on [0,a), low on [a,2] with a != 0.5
+         - Try a = 0.3, 0.4, 0.6, 0.7
+         - Pattern: h = 1.0 for x < a, h = 0.0 for x >= a (then sigmoid+normalize)
+      
+      2. **Quasi-periodic**: h = sin(2*pi*x/period) shifted to [0,1]
+         - Try different periods: 0.8, 1.0, 1.2
+         - Pattern: h = 0.5 + 0.5*sin(2*pi*x/period)
+      
+      3. **Dual-peaked**: two narrow Gaussian peaks
+         - Try peak separations: 0.5, 0.8, 1.2
+         - Pattern: h = exp(-((x-p1)/bw)^2) + exp(-((x-p2)/bw)^2), normalize
+      
+      4. **Staircase**: step function with 2-3 steps
+         - Try 2 steps: h = 1 on [0,a), 0 on [a,2]
+         - Try 3 steps: h = 1 on [0,b), 0.5 on [b,c), 0 on [c,2]
+      
+      ## How to Add Patterns
+      In _get_best_initialization(), add new pattern cases (15-20) before the random noise.
+      Call sigmoid after constructing latent: h = sigmoid(latent + gaussian_noise).
+      
+      ## Validation Flow
+      1. Edit EVOLVE-BLOCK to add new patterns
+      2. Call c5_analyze_candidate on the result
+      3. If c5_bound < 0.38, call evaluate_solution
+      4. Compare combined_score
+new_middlewares:
+  - name: remind_eval_wisely
+    hook: before_model
+    description: Remind solver to only evaluate top analytical candidates
+    implementation_py: |
+      def before_model(hook_input):
+          state = hook_input.get("state", {})
+          evals_left = state.get("evals_left", 0)
+          c5_analyzed = state.get("c5_analyzed", [])
+          
+          if len(c5_analyzed) == 0:
+              return None
+          
+          # Sort by c5_bound (lower is better)
+          c5_analyzed_sorted = sorted(c5_analyzed, key=lambda x: x.get("c5_bound", 999))
+          top_c5 = c5_analyzed_sorted[0].get("c5_bound", 999)
+          
+          if top_c5 < 0.38 and evals_left >= 1:
+              return f"Top analytical c5 = {top_c5:.5f}. Call evaluate_solution on this candidate. Only 1 eval left: pick the best!"

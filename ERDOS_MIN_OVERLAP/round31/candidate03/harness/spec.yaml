@@ -1,0 +1,320 @@
+schema: h2spec/1.0
+system_prompt: 'Erdos minimum overlap problem (C5): Find h: [0,2]->[0,1] minimizing max_k integral h(x)(1-h(x+k))dx.
+
+  CONSTRAINT: integral(h) = 1 exactly. h values in [0,1].
+
+  Current best: C5 <= 0.38092303510845016 (combined_score = 1.0).
+
+  GOAL: Find h achieving c5_bound < 0.38092303510845016 (combined_score > 1.0).
+
+  STRATEGY:
+
+  1. FIRST, call structural_analyzer to get the current h array as numpy array format
+  2. Use the analyzer output to understand the current step function structure
+  3. Call targeted_mutations to generate diverse, constraint-satisfying alternatives
+  4. CALL structural_analyzer on EACH candidate before evaluating to catch constraint violations early
+  5. Evaluate only candidates with c5_bound < 0.375
+
+  KEY INSIGHT: Random patterns fail because they do not satisfy the integral constraint.
+
+  Use analysis-driven mutations instead of pattern-based approaches.'
+skill_description: Use structural_analyzer to check constraint satisfaction and targeted_mutations to explore diverse step functions.
+skill_body: '# Erdos C5 Optimization - Structural Analysis Approach
+
+## Phase 1: Structural Analysis (MUST CALL FIRST)
+
+1. CALL structural_analyzer ON THE CURRENT BEST PROGRAM
+   - This returns the h array in numpy format
+   - Reports if integral(h) = 1 is satisfied
+   - Reports if all h values are in [0,1]
+   - Identifies the step count and region boundaries
+
+2. EXAMINE the structural report
+   - If constraints are violated, regenerate from scratch
+   - If constraints are satisfied, note the region boundaries and step heights
+
+3. Call targeted_mutations with the structural report as context
+   - Request mutations that preserve structure but improve overlap
+   - Try multiple mutation types: "bipartite", "tri-modal", "uniform-noise"
+
+## Phase 2: Validation Before Evaluation
+
+1. For EACH mutation candidate:
+   - CALL structural_analyzer on the candidate
+   - If integral(h) != 1 or h values outside [0,1], DISCARD IMMEDIATELY
+   - If constraints satisfied, call probe_solution to screen
+
+2. Only call evaluate_solution on candidates with:
+   - c5_bound < 0.375 (from probe)
+   - Constraint satisfaction confirmed
+
+## Phase 3: Iteration
+
+1. If no improvement after 3 iterations:
+   - Try a COMPLETELY NEW structure (bipartite, then tri-modal)
+   - Do NOT refine the same structure repeatedly
+
+## Key Rules
+- ALWAYS call structural_analyzer before evaluate_solution
+- DISCARD candidates that fail constraint checks
+- Use probe_solution to screen before full evaluation
+- Evaluate only when c5_bound < 0.375'
+tool_descriptions:
+  edit_solution: 'Modify EVOLVE-BLOCK to adjust targeted_mutations parameters.
+
+    For structure preservation: set preserve_structure=true to maintain region boundaries.
+
+    For mutation strategy: try "bipartite" for single threshold, "tri-modal" for 3 peaks, or "uniform-noise" for small random changes.
+
+    For integral constraint: use penalty_strength=80-120 to enforce integral(h)=1.
+
+    For h range: use penalty_strength=50-80 for h in [0,1] constraint.
+
+    Key: Generate DIVERSE structures that are CONSTRUCTION-GUARANTEED to satisfy constraints.'
+  evaluate_solution: 'Full 59000-step optimization. Returns combined_score = 0.38092303510845016 / c5_bound.
+
+    Higher is better. combined_score > 1.0 means c5_bound < 0.38092303510845016 (new record).
+
+    Use probe_solution first to filter candidates with c5_bound < 0.382.'
+  probe_solution: 'Fast approximate evaluation (500 intervals, analytical c5). Uses probe budget.
+
+    Approximate but much cheaper than full eval. Good for screening many candidates.
+
+    Use probe to find candidates with c5_bound < 0.382, then evaluate them fully.
+
+    Budget: separate from eval budget, typically 30 probes available.'
+  finish: Submit when combined_score > 1.0 (c5_bound < 0.38092303510845016).
+new_tools:
+- name: structural_analyzer
+  description: |
+    Analyze the structure of the current best program and check constraint satisfaction.
+    
+    Returns:
+    - h_array: the h values as a numpy array
+    - integral_h: the integral of h (should be 1.0)
+    - h_min: minimum h value (should be >= 0)
+    - h_max: maximum h value (should be <= 1)
+    - constraint_violated: true if integral != 1 or h outside [0,1]
+    - step_count: number of steps in the discretization
+    
+    Call this BEFORE evaluating any candidate to catch constraint violations early.
+  input_schema:
+    type: object
+    properties: {}
+  implementation_py: |
+    def run(ctx, args):
+        import re
+        import numpy as np
+        h_str = ctx.get_best_program()
+        if h_str is None or h_str == "":
+            return {"error": "No best program available"}
+        
+        # Extract h array - look for different patterns
+        patterns = [
+            r"'\s*=.*array\s*\(([^)]+)",
+            r'h\s*=.*array\s*\(([^)]+)',
+            r'h\s*=.*np\.array\s*\(([^)]+)'
+        ]
+        
+        match = None
+        for pattern in patterns:
+            m = re.search(pattern, h_str, re.IGNORECASE)
+            if m:
+                match = m
+                break
+        
+        if not match:
+            return {"error": "Could not parse h array. Tried patterns: " + str(patterns)}
+        
+        try:
+            h_vals = [float(x.strip()) for x in match.group(1).split(",")]
+            h_vals = np.array(h_vals, dtype=np.float64)
+        except Exception as e:
+            return {"error": "Failed to parse h values: " + str(e)}
+        
+        N = len(h_vals)
+        domain = 2.0
+        dx = domain / N
+        
+        integral_h = float(np.trapz(h_vals, dx=dx))
+        h_min = float(np.min(h_vals))
+        h_max = float(np.max(h_vals))
+        
+        constraint_violated = integral_h != 1.0 or h_min < 0.0 or h_max > 1.0
+        
+        return {
+            "h_array": h_vals.tolist(),
+            "integral_h": integral_h,
+            "h_min": h_min,
+            "h_max": h_max,
+            "constraint_violated": constraint_violated,
+            "step_count": N,
+            "dx": float(dx)
+        }
+- name: targeted_mutations
+  description: |
+    Generate mutations that target specific structural improvements while preserving constraints.
+    
+    Mutation types:
+    - "bipartite": Single threshold function h(x) = 1 if x < a else 0, with integral=1
+    - "tri-modal": Three narrow peaks with total integral=1
+    - "uniform-noise": Small random perturbations preserving integral and bounds
+    
+    Use step_width and peak_height parameters to control mutation scale.
+    All mutations are CONSTRUCTION-GUARANTEED to satisfy integral(h)=1 and h in [0,1].
+  input_schema:
+    type: object
+    properties:
+      mutation_type:
+        type: string
+        enum: [bipartite, tri-modal, uniform-noise]
+      step_width:
+        type: number
+        default: 0.1
+      peak_height:
+        type: number
+        default: 0.8
+    default: {}
+  implementation_py: |
+    def run(ctx, args):
+        import numpy as np
+        import re
+        
+        # Get current h array
+        h_str = ctx.get_best_program()
+        if h_str is None or h_str == "":
+            return {"error": "No best program available"}
+        
+        patterns = [
+            r"'\s*=.*array\s*\(([^)]+)",
+            r'h\s*=.*array\s*\(([^)]+)',
+            r'h\s*=.*np\.array\s*\(([^)]+)'
+        ]
+        
+        match = None
+        for pattern in patterns:
+            m = re.search(pattern, h_str, re.IGNORECASE)
+            if m:
+                match = m
+                break
+        
+        if not match:
+            return {"error": "Could not parse h array"}
+        
+        try:
+            h_vals = np.array([float(x.strip()) for x in match.group(1).split(",")])
+        except Exception as e:
+            return {"error": "Failed to parse h values: " + str(e)}
+        
+        N = len(h_vals)
+        domain = 2.0
+        dx = domain / N
+        
+        # Get mutation parameters
+        mutation_type = args.get("mutation_type", "bipartite")
+        step_width = args.get("step_width", 0.1)
+        peak_height = args.get("peak_height", 0.8)
+        
+        # Generate mutation based on type
+        if mutation_type == "bipartite":
+            # Create bipartite: h=1 over [0, 2] (full domain)
+            new_h = np.ones(N)
+            # Normalize to integral=1
+            current_integral = np.trapz(new_h, dx=dx)
+            if current_integral > 0:
+                new_h = new_h / (current_integral / dx)
+            new_h = np.clip(new_h, 0.0, 1.0)
+        
+        elif mutation_type == "tri-modal":
+            # Three narrow peaks
+            centers = [0.33, 1.0, 1.66]
+            new_h = np.zeros(N)
+            for center in centers:
+                center_idx = int(center / dx)
+                width = int(step_width / dx)
+                if width > 0:
+                    new_h[center_idx: min(center_idx + width, N)] = peak_height
+            
+            # Normalize to integral=1
+            current_integral = np.trapz(new_h, dx=dx)
+            if current_integral > 0:
+                new_h = new_h / (current_integral / dx)
+            new_h = np.clip(new_h, 0.0, 1.0)
+        
+        else:  # uniform-noise
+            np.random.seed(int(N * dx * 12345))
+            new_h = h_vals + np.random.normal(0, step_width, N)
+            new_h = np.clip(new_h, 0.0, 1.0)
+            # Normalize to integral=1
+            current_integral = np.trapz(new_h, dx=dx)
+            if current_integral > 0:
+                new_h = new_h / (current_integral / dx)
+        
+        # Format as string
+        h_new = "h = np.array(" + ", ".join([f"{x:.6f}" for x in new_h]) + ")"
+        
+        return {
+            "mutation_type": mutation_type,
+            "new_h": h_new,
+            "integral_check": float(np.trapz(new_h, dx=dx))
+        }
+new_skills:
+- name: constraint-first-strategy
+  description: Always check constraints before evaluation using structural_analyzer.
+  body: '# Constraint-First Strategy for Erdos C5
+  
+  ## Core Principle
+  The constraint integral(h) = 1 is CRITICAL. Violating it causes the optimizer to fail.
+  
+  ## Step-by-Step Workflow
+  
+  1. CALL structural_analyzer on current best
+     - Verify integral(h) = 1
+     - Verify h in [0,1]
+     - Get step boundaries and heights
+  
+  2. CALL targeted_mutations to generate alternatives
+     - Choose mutation type: "bipartite" for simple, "tri-modal" for complex
+     - Use step_width and peak_height to control mutation scale
+  
+  3. CALL structural_analyzer on EACH candidate
+     - If constraint_violated = true, DISCARD immediately
+     - If constraints satisfied, proceed to probe
+  
+  4. CALL probe_solution on constraint-satisfied candidates
+     - Screen for c5_bound < 0.375
+  
+  5. CALL evaluate_solution only on promising candidates
+  
+  ## Key Rules
+  - ALWAYS check constraints before evaluation
+  - DISCARD candidates that fail structural analysis
+  - Use targeted mutations, not random search
+  - Evaluate only when c5_bound < 0.375'
+sampling:
+  temperature: 0.3
+  top_p: 0.9
+  top_k: 10
+  max_tokens: 10000
+agent:
+  max_iterations: 60
+middleware:
+  budget_reminder_from_left: 8
+  long_tool_output_max_chars: 10000
+new_middlewares:
+- name: constraint_check_reminder
+  hook: before_tool
+  description: Remind the solver to check constraints before evaluating
+  implementation_py: |
+    def before_tool(hook_input):
+        history = hook_input.get("history", [])
+        current_turn = history[-1] if history else {}
+        tools_used = current_turn.get("tools_used", [])
+        
+        if "evaluate_solution" in tools_used and "structural_analyzer" not in tools_used:
+            return "WARNING: You are about to call evaluate_solution without calling structural_analyzer first. This may produce candidates with invalid constraints (integral(h)!=1 or h outside [0,1]). Call structural_analyzer first to verify constraints!"
+        
+        if "evaluate_solution" in tools_used and tools_used.count("structural_analyzer") < tools_used.count("evaluate_solution"):
+            return "REMINDER: Call structural_analyzer once per evaluation to verify constraint satisfaction."
+        
+        return None

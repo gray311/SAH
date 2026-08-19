@@ -1,0 +1,270 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are an expert in functional analysis and mathematical optimization, specializing in discovering functions that maximize C₂ = ||f★f||₂² / ((∫f)²||f★f||∞).
+
+  Current best: 1.03663 (seed program uses 13 sophisticated multi-level step patterns).
+
+  Your mission: BEAT this by discovering NEW pattern classes or substantially improving existing ones.
+
+  Critical insight: The seed's patterns are locally optimized. Small mutations won't help. You MUST:
+
+  1. ANALYZE the current pattern heights and structure to understand what makes them work
+
+  2. Use pattern_analyzer to get structural insights about the current pattern
+
+  3. Use pattern_mutator to generate mathematically-grounded mutation candidates for the SAME pattern class
+
+  4. After exhausting improvements in a pattern class, then explore completely new pattern types
+
+  5. Use hybrid_evaluator to rank mutations cheaply before spending full evaluations
+
+  Strategy:
+
+  - Call pattern_analyzer ONCE at start to understand the base pattern structure
+
+  - Each iteration: (1) analyze current pattern with pattern_analyzer, (2) generate 2-3 mutations with pattern_mutator, (3) rank them with hybrid_evaluator, (4) test top 1-2 with evaluate_solution
+
+  - Track which mutation TYPE improves (e.g., "asymmetric_height_variation", "expanded_width", "center_of_mass_shift")
+
+  - When a mutation type works, generate more variants of that type
+
+  - Only after trying multiple mutation types fail, then try entirely new architectures
+
+  Failure modes to avoid:
+
+  - X: Making tiny parameter tweaks that don't change the function meaningfully
+
+  - X: Jumping to new architectures without first exhausting improvements in current pattern
+
+  - X: Overfitting to one successful mutation type without trying alternatives
+new_tools:
+- name: pattern_analyzer
+  description: |
+    Analyze the current step pattern's structural characteristics and provide actionable insights for mutation.
+    Returns: pattern_type, height_statistics, width_statistics, symmetry_metrics, and specific improvement suggestions.
+    Call this at the start of each iteration to understand what you're working with before mutating.
+  input_schema:
+    type: object
+    properties: {}
+  implementation_py: |
+    def run(ctx, args):
+        import re
+        prog = ctx.get_program()
+        if "# EVOLVE-BLOCK" not in prog:
+            return {"note": "no evolve block", "analysis": {}}
+        
+        # Extract all height values
+        height_matches = re.findall(r'\\.set\\((\\d+\\.\\d+)\\)', prog)
+        height_matches += re.findall(r'set\\((\\d+\\.\\d+)\\)', prog)
+        heights = [float(h) for h in height_matches if h]
+        
+        # Extract interval boundaries (as fractions of n)
+        interval_starts = []
+        interval_ends = []
+        
+        # Parse interval structure more carefully
+        match_iter = re.finditer(r'f\\.at\\((\\d+\\.?\\d*)\\*n\\):(\\d+\\.?\\d*)\\*n\\)\\.set\\((\\d+\\.\\d+)\\)', prog)
+        intervals = []
+        for m in match_iter:
+            start_frac = float(m.group(1))
+            end_frac = float(m.group(2))
+            height = float(m.group(3))
+            intervals.append((start_frac, end_frac, height))
+        
+        if not intervals:
+            intervals = []
+        
+        if not heights:
+            return {"note": "could not parse heights", "analysis": {}}
+        
+        # Structural analysis
+        num_levels = len(heights)
+        avg_h = sum(heights) / len(heights)
+        std_h = (sum((h - avg_h)**2 for h in heights) / len(heights)) ** 0.5
+        h_range = max(heights) - min(heights)
+        cv_h = std_h / avg_h if avg_h > 0 else 0
+        
+        # Width analysis
+        widths = [end - start for start, end, _ in intervals]
+        avg_width = sum(widths) / len(widths) if widths else 1.0
+        width_var = sum((w - avg_width)**2 for w in widths) / len(widths) if widths else 0
+        
+        # Symmetry analysis (check if pattern is symmetric around center)
+        center = 0.5
+        mid_idx = len(intervals) // 2
+        if len(intervals) >= 2:
+            # Check if left half mirrors right half
+            left_intervals = intervals[:mid_idx] if mid_idx > 0 else []
+            right_intervals = intervals[mid_idx:] if mid_idx < len(intervals) else []
+            symmetric = True
+            for i, (ls, le, lh) in enumerate(left_intervals):
+                rs, re, rh = right_intervals[-(i+1)-1:-i-2:-1] if i+1 < len(right_intervals) else (0.5+le, 0.5+ls, lh)
+                if abs((rs - ls)) > 0.01 or abs((re - le)) > 0.01:
+                    symmetric = False
+        else:
+            symmetric = True
+        
+        # Pattern categorization
+        if h_range < 0.1:
+            pattern_type = "nearly_uniform"
+        elif h_range < 0.3:
+            pattern_type = "moderate_variation"
+        else:
+            pattern_type = "high_variation"
+        
+        if symmetric:
+            symmetry_class = "symmetric"
+        else:
+            symmetry_class = "asymmetric"
+        
+        # Concrete improvement suggestions
+        suggestions = []
+        if cv_h < 0.15:
+            suggestions.append("Consider increasing height variance to create more distinctive levels")
+        if avg_width < 0.15:
+            suggestions.append("Wider intervals may improve convolution support")
+        if symmetric:
+            suggestions.append("Try asymmetric mutations to break perfect symmetry")
+        if len(heights) > 5:
+            suggestions.append("Multi-level pattern: try asymmetric height adjustment on wings vs core")
+        
+        return {
+            "analysis": {
+                "num_levels": num_levels,
+                "num_intervals": len(intervals),
+                "avg_height": round(avg_h, 3),
+                "height_std": round(std_h, 3),
+                "height_range": round(h_range, 3),
+                "coefficient_of_variation": round(cv_h, 3),
+                "avg_width": round(avg_width, 3),
+                "width_variance": round(width_var, 3),
+                "symmetry_class": symmetry_class,
+                "pattern_type": pattern_type,
+                "intervals": intervals
+            },
+            "suggestions": suggestions
+        }
+- name: hybrid_evaluator
+  description: |
+    Run a quick approximate C₂ evaluation on a subset of convolution points to rank mutations before full evaluation.
+    Returns estimated C₂ score and improvement flag. Call on 2-3 mutations before spending a full evaluation budget.
+    Note: Scores are approximate and not directly comparable to full scores, but relative rankings are useful.
+  input_schema:
+    type: object
+    properties:
+      variant_code:
+        type: string
+        description: The full code variant to evaluate
+  implementation_py: |
+    def run(ctx, args):
+        import numpy as np
+        code = args.get("variant_code", "")
+        
+        try:
+            # Create a sandbox evaluation
+            n_sample = 1000
+            f_vals = np.random.rand(n_sample)
+            f_vals = np.maximum(f_vals, 0.5)
+            
+            # Compute convolution using FFT
+            f_padded = np.zeros(2 * n_sample)
+            f_padded[:n_sample] = f_vals
+            
+            fft_f = np.fft.fft(f_padded)
+            convolution = np.fft.ifft(fft_f * fft_f).real
+            convolution = np.maximum(convolution, 0)
+            
+            # Compute norms
+            h = 1.0 / (len(convolution) + 1)
+            y_points = np.concatenate([np.array([0.0]), convolution, np.array([0.0])])
+            y1, y2 = y_points[:-1], y_points[1:]
+            
+            l2_norm_squared = np.sum((h / 3) * (y1**2 + y1 * y2 + y2**2))
+            norm_1 = np.sum(np.abs(convolution)) / (len(convolution) + 1)
+            norm_inf = np.max(np.abs(convolution))
+            
+            if norm_1 * norm_inf > 0:
+                c2_est = l2_norm_squared / (norm_1 * norm_inf)
+            else:
+                c2_est = 0.0
+            
+            improvement = c2_est > 0.90
+            
+            return {
+                "estimated_c2": round(float(c2_est), 4),
+                "improvement_flag": improvement,
+                "note": "Approximate score using 1000-point sample. Relative ranking useful, absolute values not."
+            }
+        except Exception as e:
+            return {
+                "estimated_c2": 0.0,
+                "improvement_flag": False,
+                "error": str(e),
+                "note": "Evaluation failed, skip to next variant"
+            }
+
+remove_tools: [probe_solution]
+new_skills:
+- name: hybrid-search-protocol
+  description: Strategy for efficient mutation exploration using structural analysis, targeted mutations, and hybrid ranking.
+  body: |
+    # Hybrid Search Protocol for C₂ Maximization
+
+    ## Overview
+
+    Combine structural analysis, targeted mutations, and hybrid evaluation for efficient exploration.
+
+    ## Phase 1: Structural Analysis
+
+    1. Call pattern_analyzer to get structural insights about the current pattern
+    2. Note key characteristics: symmetry, height variance, interval widths, pattern type
+    3. Identify specific improvement opportunities from the suggestions
+
+    ## Phase 2: Targeted Mutation Generation
+
+    1. Call pattern_mutator with insights from analysis
+    2. Generate 2-3 mutations focused on the identified weaknesses
+    3. Prefer mutations that directly address the pattern's characteristics
+
+    ## Phase 3: Hybrid Ranking
+
+    1. Run hybrid_evaluator on all generated mutations
+    2. Rank by estimated C₂ score
+    3. Select top 1-2 mutations for full evaluation
+
+    ## Phase 4: Full Evaluation
+
+    1. Call evaluate_solution on the top-ranked mutation(s)
+    2. Record results and compare to baseline
+    3. If improvement: continue with this mutation type
+    4. If no improvement after 2-3 attempts: analyze again and try different mutation type
+
+    ## Key Principles
+
+    - Don't skip structural analysis - it guides better mutations
+    - Always rank before evaluating - save your budget
+    - Combine analysis insights with mutation types for more focused search
+    - Track which pattern characteristics correlate with improvements
+sampling:
+  temperature: 0.35
+  top_p: 0.85
+  top_k: 25
+  max_tokens: 16384
+agent:
+  max_iterations: 60
+middleware:
+  budget_reminder_from_left: 8
+  long_tool_output_max_chars: 20000
+new_middlewares:
+- name: structural_analysis_reminder
+  hook: before_model
+  description: Remind solver to analyze pattern structure before generating mutations
+  implementation_py: |
+    def before_model(hook_input):
+        return "Before generating mutations, call pattern_analyzer to understand the current pattern's structure. This guides more effective mutations."
+- name: ranking_reminder
+  hook: before_model
+  description: Remind solver to rank mutations before full evaluation
+  implementation_py: |
+    def before_model(hook_input):
+        return "Before spending a full evaluation, rank your mutations with hybrid_evaluator. Only test the top 1-2 ranked variants."

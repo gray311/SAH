@@ -1,0 +1,275 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are optimizing a C++ program that constructs an orthogonal polygon to maximize (mackerels - sardines) inside.
+  
+  TASK OBJECTIVE:
+  - Maximize score = max(0, mackerels_inside - sardines_inside + 1)
+  - Polygon must have axis-aligned edges (parallel to x or y axis)
+  - Max 1000 vertices, max perimeter 400000
+  - Input: N=5000 mackerels, N=5000 sardines at integer coordinates
+  
+  SEARCH STRATEGY (execute as bounded internal search inside each evaluation):
+  1. Use analyze_fish_distribution once to understand spatial patterns
+  2. Generate multiple polygon candidates using different strategies
+     - Convex hull of mackerel-rich regions
+     - Grid-based sweeping with orthogonal edges
+     - Greedy expansion from high-density mackerel clusters
+  3. For each candidate, use probe_solution to cheaply score (do NOT call evaluate_solution yet)
+  4. Select top 3 candidates by probe score, then call evaluate_solution on the best one
+  5. Iterate: use feedback from evaluate to refine the winning strategy
+  
+  CRITICAL: You have 30 evaluation calls total. Each evaluate_solution consumes 1 call.
+  Use probe_solution freely (30 probes available) to rank candidates before spending eval calls.
+  
+  TOOL USAGE ORDER:
+  1. analyze_fish_distribution (call once at start)
+  2. Multiple edits to generate candidates
+  3. probe_solution to rank candidates (FREE, does not consume eval budget)
+  4. evaluate_solution on best candidate (consumes 1 eval)
+  5. finish when score plateaus or budget low
+  
+  Always call analyze_fish_distribution first. Use SEARCH/REPLACE diffs for edits.
+skill_description: |
+  Optimize orthogonal polygon construction for NP-hard heuristic problem. Use analyze_fish_distribution, probe for cheap scoring, then evaluate best variant. Bounded internal search inside each eval.
+skill_body: |
+  # Orthogonal Polygon Optimization for NP-hard Heuristic Problem
+  
+  ## Problem Understanding
+  - Maximize: max(0, mackerels - sardines + 1)
+  - Build orthogonal polygon (edges parallel to x/y axis)
+  - Constraints: <=1000 vertices, <=400000 perimeter, coords 0-100000
+  
+  ## Bounded Internal Search Strategy
+  
+  Within EACH evaluation, run a systematic search:
+  
+  ### Step 1: Analyze Distribution
+  Call analyze_fish_distribution() ONCE to get:
+  - Count of mackerels/sardines per grid region
+  - Density hotspots
+  - Spread statistics
+  
+  ### Step 2: Generate Candidates
+  Implement 3-5 different polygon construction strategies:
+  
+  Strategy A: Convex Hull of Dense Regions
+  - Identify top 20 dense mackerel clusters (20x20 grid cells)
+  - Compute convex hull of cluster centers
+  - Snap to integer coords, ensure orthogonality
+  
+  Strategy B: Grid Sweeping
+  - Sweep a rectangle from min_x to max_x, min_y to max_y
+  - Iteratively refine edges to capture mackerels, avoid sardines
+  - Use orthogonal divisions
+  
+  Strategy C: Greedy Expansion
+  - Start with minimal valid polygon
+  - Expand edges one unit at a time
+  - Accept expansion if delta score > 0 (use probe to check)
+  
+  ### Step 3: Probe-Based Ranking
+  For each candidate:
+  - Use probe_solution to get approximate score
+  - Track which strategy wins
+  - Keep best 3 by probe score
+  
+  ### Step 4: Full Evaluation
+  Call evaluate_solution ONCE on the probe-best candidate
+  
+  ### Step 5: Strategy Refinement
+  If score improves:
+  - Preserve the winning strategy
+  - Try refinements (edge tuning, region merging)
+  - If fails: revert to last good strategy, try different approach
+  
+  ## Critical Constraints
+  - KEEP program valid at every step
+  - Use SEARCH/REPLACE diffs for small changes
+  - Time limit: 1.95s per eval (internal search must complete well before)
+  - Safety margin: 0.05s
+  
+  ## Tool Call Sequence Example
+  1. analyze_fish_distribution() -> store results
+  2. edit_solution() -> add/modify Strategy A
+  3. probe_solution() -> score candidates
+  4. edit_solution() -> keep best, refine
+  5. probe_solution() -> verify refinement
+  6. evaluate_solution() -> full score
+  7. Repeat from step 2 or 3-6 until plateau
+tool_descriptions:
+  edit_solution: |
+    Change the EVOLVE-BLOCK region containing the C++ polygon constructor.
+    PREFERRED: Use targeted SEARCH/REPLACE diffs to modify specific functions.
+    Full rewrites allowed for major strategy changes.
+    Keep the fixed entry function and imports outside the block unchanged.
+    Each call generates one candidate version for subsequent probing/evaluation.
+  evaluate_solution: |
+    Run the current program on ALL 150 test cases. Returns combined_score (average per test, higher=better),
+    validity (1=valid output, 0=invalid/error), error message, best_so_far score, and evals_remaining.
+    CONSUMES 1 evaluation call from your 30-call budget.
+    Use sparingly - rank candidates with probe_solution first.
+  probe_solution: |
+    Run the current program on a subsampled version (~2000 of 5000 fish points) for FAST approximate scoring.
+    Takes ~10s vs minutes for full eval. Does NOT consume evaluation budget (30 probes available).
+    Scores are approximate and NOT comparable to full eval scores, but EXCELLENT for ranking candidates.
+    Use to rank 3-5 candidates before spending a full evaluate_solution call.
+  finish: |
+    End the session. Submit the best-scoring program discovered.
+    Call when: (a) score plateaued at best_so_far for 3+ iterations, or (b) evals_remaining approx 0.
+sampling:
+  temperature: 0.3
+  top_p: 0.8
+  top_k: 10
+  max_tokens: 12288
+agent:
+  max_iterations: 50
+middleware:
+  budget_reminder_from_left: 2
+  long_tool_output_max_chars: 12000
+new_tools:
+  - name: analyze_fish_distribution
+    description: |
+      Analyze the spatial distribution of mackerels and sardines from input data.
+      Returns grid-cell density statistics, identifying hotspot regions for polygon construction.
+      Call ONCE at the start to inform strategy selection.
+    input_schema: {type: object, properties: {}}
+    implementation_py: |
+      def run(ctx, args):
+          names = ctx.list_task_inputs()
+          if not names:
+              return {"note": "no task inputs"}
+          try:
+              first_line = ctx.read_input_sample(names[0], nrows=1)
+              N = int(first_line.strip())
+              all_lines = ctx.read_input_sample(names[0], nrows=10001)
+              coords = []
+              for line in all_lines.strip().split("\\n")[1:]:
+                  if line:
+                      x, y = map(int, line.split())
+                      coords.append((x, y))
+              
+              mackerels = coords[:N]
+              sardines = coords[N:2*N]
+              
+              GRID_SIZE = 100
+              cell_size = 100000 // GRID_SIZE
+              
+              mackerel_counts = {}
+              sardine_counts = {}
+              
+              for (x, y) in mackerels:
+                  cx, cy = x // cell_size, y // cell_size
+                  mackerel_counts[(cx, cy)] = mackerel_counts.get((cx, cy), 0) + 1
+              
+              for (x, y) in sardines:
+                  cx, cy = x // cell_size, y // cell_size
+                  sardine_counts[(cx, cy)] = sardine_counts.get((cx, cy), 0) + 1
+              
+              hotspot_cells = sorted(mackerel_counts.items(), key=lambda v: v[1], reverse=True)[:20]
+              
+              return {
+                  "total_mackerels": N,
+                  "total_sardines": N,
+                  "grid_size": GRID_SIZE,
+                  "hotspot_cells": [{"grid_x": c[0], "grid_y": c[1], "count": cnt} for c, cnt in hotspot_cells],
+                  "max_mackerel_density": hotspot_cells[0][1] if hotspot_cells else 0,
+                  "recommendation": "Focus polygon construction on top 20 mackerel hotspot cells"
+              }
+          except Exception as e:
+              return {"error": str(e)}
+new_skills:
+  - name: orthogonal-polygon-search
+    description: |
+      Method for bounded internal search to construct orthogonal polygons. Combines distribution analysis with probe-based ranking.
+    body: |
+      # Orthogonal Polygon Construction via Bounded Internal Search
+      
+      ## Overview
+      This skill guides the executor to implement a systematic search inside EACH evaluation:
+      1. Analyze fish distribution once
+      2. Generate 3-5 candidate polygons using different strategies
+      3. Rank candidates with probe_solution (cheap, ~10s)
+      4. Evaluate best candidate (expensive, ~5-60s, consumes budget)
+      5. Refine winning strategy or try new approach
+      
+      ## Strategy Library
+      
+      ### A. Convex Hull of Dense Regions
+      1. Divide space into 100x100 grid cells
+      2. Count mackerels per cell
+      3. Select top 20 cells by mackerel count
+      4. Compute centroid of each selected cell
+      5. Build convex hull of centroids
+      6. Snap vertices to integers, ensure orthogonality (axis-aligned edges only)
+      
+      ### B. Grid-Based Sweeping
+      1. Define bounding box of all mackerels
+      2. Start with minimal rectangle enclosing 80% of mackerels
+      3. Expand/contract edges one unit at a time
+      4. At each step, use probe to check if delta score > 0
+      5. Accept only improvements
+      
+      ### C. Greedy Cluster Expansion
+      1. Find highest mackerel-density cell
+      2. Start minimal polygon around it
+      3. Find adjacent cells with net positive mackerel - sardine gain
+      4. Expand polygon to include such cells
+      5. Repeat until no beneficial expansion available
+      
+      ### D. Dual-Region Intersection
+      1. Build two separate rectangles: one for mackerels, one avoiding sardines
+      2. Compute their intersection
+      3. Refine intersection boundaries to capture more mackerels
+      4. Ensure orthogonality and vertex count <= 1000
+      
+      ## Execution Protocol
+      
+      For each evaluation budget cycle:
+      
+      1. CALL analyze_fish_distribution() ONCE
+         - Store hotspot cells, density stats
+         - This informs which strategy to prioritize
+      
+      2. GENERATE 3-5 CANDIDATES
+         - Implement ALL strategies in parallel (do not commit to one yet)
+         - Use edit_solution to add/modify strategy functions
+         - Keep candidates as separate data structures
+      
+      3. RANK WITH probe_solution (x3-5 calls, FREE)
+         - For each candidate, stage its code and call probe_solution
+         - Record approximate scores
+         - Discard bottom candidates
+      
+      4. EVALUATE BEST WITH evaluate_solution (1 call)
+         - Stage the probe-winner's code
+         - Call evaluate_solution
+         - Record actual score
+         - This is your only "real" score per iteration
+      
+      5. REFINE OR RESTART
+         - If score improved: keep strategy, try refinements
+         - If score regressed: revert to previous best strategy, try different approach
+         - Never call evaluate_solution twice in a row without probing first
+      
+      ## Timing Budget
+      - Per evaluation: hard limit 1.95s (2.0s - 0.05s safety margin)
+      - Internal operations must complete WELL BEFORE this deadline
+      - Use efficient data structures (KD-tree, spatial hashing)
+      - Avoid O(N^2) loops; aim for O(N log N) or O(N)
+      
+      ## Pitfalls to Avoid
+      - Do NOT call analyze_fish_distribution more than once per eval (reads all input)
+      - Do NOT call evaluate_solution on unpromising candidates (wastes budget)
+      - Do NOT generate candidate code that causes runtime errors (validity=0)
+      - Do NOT exceed 1000 vertices or 400000 perimeter in output
+      - Remember: probe scores are approximate, use them for ranking only, not as truth
+new_middlewares:
+  - name: remind_probe_before_eval
+    hook: before_model
+    description: |
+      Forces executor to use probe_solution before spending a full evaluation, preventing budget waste.
+    implementation_py: |
+      def before_model(hook_input):
+          if hook_input.get("evaluations_left", 0) > 0:
+              return "You have limited evaluations remaining. MUST use probe_solution to rank 3-5 candidates first, then evaluate only the best one with evaluate_solution. Never call evaluate_solution directly without probing."
+          return None

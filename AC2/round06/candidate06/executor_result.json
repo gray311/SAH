@@ -1,0 +1,206 @@
+{
+  "task_id": "eft__math__second_autocorr_ineq",
+  "source": "eft",
+  "best_score": 1.0292105718590043,
+  "seed_score": 1.0287207504545426,
+  "best_metrics": {
+    "c2": 0.9224607938699445,
+    "combined_score": 1.0292105718590043,
+    "loss": -0.9224610328674316,
+    "n_points": 300,
+    "eval_time": 46.52359127998352
+  },
+  "best_program": "# EVOLVE-BLOCK-START\nimport jax\nimport jax.numpy as jnp\nimport optax\nimport numpy as np\nfrom dataclasses import dataclass\nfrom typing import Tuple\n\n\n@dataclass\nclass OptimizerHyperparameters:\n    \"\"\"Slightly increased steps and learning rate.\"\"\"\n    num_intervals: int = 300\n    learning_rate: float = 0.135\n    num_steps: int = 38000\n    warmup_steps: int = 3800\n    best_c2: float = 0.0\n    stagnation_window: int = 100\n    reinit_fraction: float = 0.14\n    reinit_std: float = 0.032\n    reinit_interval: int = 155\n\n\nclass C2Optimizer:\n    def __init__(self, hypers: OptimizerHyperparameters):\n        self.hypers = hypers\n        self.best_f = None\n        self.best_c2 = hypers.best_c2\n\n    def _objective_fn(self, f_values: jnp.ndarray) -> jnp.ndarray:\n        f_non_negative = jax.nn.relu(f_values)\n        N = self.hypers.num_intervals\n        padded_f = jnp.pad(f_non_negative, (0, N))\n        fft_f = jnp.fft.fft(padded_f)\n        convolution = jnp.fft.ifft(fft_f * fft_f).real\n\n        num_conv_points = len(convolution)\n        h = 1.0 / (num_conv_points + 1)\n        y_points = jnp.concatenate([jnp.array([0.0]), convolution, jnp.array([0.0])])\n        y1, y2 = y_points[:-1], y_points[1:]\n        l2_norm_squared = jnp.sum((h / 3) * (y1**2 + y1 * y2 + y2**2))\n\n        norm_1 = jnp.sum(jnp.abs(convolution)) / (len(convolution) + 1)\n        norm_inf = jnp.max(jnp.abs(convolution))\n        denominator = norm_1 * norm_inf\n        c2_ratio = l2_norm_squared / denominator\n        return -c2_ratio\n\n    def _create_optimized_step(self, n, pattern_idx):\n        \"\"\"Optimized step patterns.\"\"\"\n        f = jnp.zeros(n)\n        midpoint = n // 2\n        \n        if pattern_idx == 0:\n            # Two blocks - key working pattern\n            f = f.at[100:200].set(1.0)\n            f = f.at[240:300].set(1.0)\n            \n        elif pattern_idx == 1:\n            # Tall central - slightly adjusted\n            f = f.at[midpoint-72:midpoint+72].set(1.42)\n            \n        elif pattern_idx == 2:\n            # Offset tapered\n            f = f.at[midpoint-68:midpoint+68].set(1.35)\n            f = f.at[midpoint:midpoint+32].mul(0.81)\n            \n        elif pattern_idx == 3:\n            # Three clusters\n            f = f.at[118:182].set(1.0)\n            f = f.at[185:225].set(1.0)\n            f = f.at[230:288].set(1.0)\n            \n        elif pattern_idx == 4:\n            # Overlapping tall\n            f = f.at[midpoint-52:midpoint+52].set(1.33)\n            f = f.at[midpoint-57:midpoint+57].set(1.53)\n            \n        elif pattern_idx == 5:\n            # Central tall\n            f = f.at[midpoint-47:midpoint+47].set(1.57)\n            \n        elif pattern_idx == 6:\n            # Wide with center\n            f = f.at[98:252].set(1.28)\n            f = f.at[midpoint-37:midpoint+37].set(1.54)\n            \n        elif pattern_idx == 7:\n            # Block with spike\n            f = f.at[148:252].set(1.37)\n            f = f.at[midpoint-4:midpoint+4].set(1.61)\n            \n        elif pattern_idx == 8:\n            # Gap asymmetric\n            f = f.at[128:168].set(0.86)\n            f = f.at[197:237].set(1.67)\n            \n        else:\n            f = f.at[midpoint-63:midpoint+63].set(1.27)\n        \n        return f\n\n    def _create_multi_start(self, num_starts=9):\n        initializations = []\n        for i in range(num_starts):\n            key = jax.random.PRNGKey(42 + i * 100)\n            init = self._create_optimized_step(self.hypers.num_intervals, i)\n            initializations.append((init, key))\n        return initializations\n\n    def _local_reinitialization(self, f_values: jnp.ndarray, key) -> jnp.ndarray:\n        n = len(f_values)\n        num_reinit = int(self.hypers.reinit_fraction * n)\n        key, subkey = jax.random.split(key)\n        reinit_indices = jax.random.permutation(subkey, n)[:num_reinit]\n        perturbation = jax.random.normal(subkey, f_values.shape) * self.hypers.reinit_std\n        f_new = f_values.at[reinit_indices].set(f_values[reinit_indices] + perturbation[reinit_indices])\n        f_new = jax.nn.relu(f_new)\n        return f_new\n\n    def _check_stagnation(self, c2_history: list, step_count: int) -> bool:\n        if step_count < self.hypers.stagnation_window:\n            return False\n        recent_c2s = c2_history[-self.hypers.stagnation_window:]\n        improvement = recent_c2s[-1] - recent_c2s[0]\n        if improvement > 1e-6:\n            return False\n        return True\n\n    def _train_step(self, f_values: jnp.ndarray, opt_state, optimizer) -> Tuple:\n        loss, grads = jax.value_and_grad(self._objective_fn)(f_values)\n        updates, opt_state = optimizer.update(grads, opt_state, f_values)\n        f_values = optax.apply_updates(f_values, updates)\n        return f_values, opt_state, loss, grads\n\n    def run_optimization(self) -> Tuple:\n        initializations = self._create_multi_start(num_starts=9)\n        best_f = None\n        best_c2 = 0.0\n        \n        for idx, (init_f, seed_key) in enumerate(initializations):\n            print(f\"\\n=== Starting optimized {idx + 1}/9 ===\")\n            schedule1 = optax.warmup_cosine_decay_schedule(\n                init_value=0.0,\n                peak_value=self.hypers.learning_rate * 1.4,\n                warmup_steps=self.hypers.warmup_steps,\n                decay_steps=self.hypers.num_steps // 2 - self.hypers.warmup_steps,\n                end_value=self.hypers.learning_rate * 0.15,\n            )\n            optimizer1 = optax.adam(learning_rate=schedule1, eps=1e-8)\n            key = jax.random.PRNGKey(42 + idx * 100)\n            f_values = init_f + 0.05 * jax.random.normal(key, init_f.shape)\n            opt_state = optimizer1.init(f_values)\n            reinit_key = jax.random.PRNGKey(42 + idx * 1000)\n            c2_history = []\n            \n            train_step_jit1 = jax.jit(lambda fv, os: self._train_step(fv, os, optimizer1))\n            for step in range(self.hypers.num_steps // 2):\n                f_values, opt_state, loss, grads = train_step_jit1(f_values, opt_state)\n                step_count = step + 1\n                current_c2 = -loss\n                c2_history.append(float(current_c2))\n                if self._check_stagnation(c2_history, step_count):\n                    if step_count % self.hypers.reinit_interval == 0:\n                        f_values = self._local_reinitialization(f_values, reinit_key)\n                        reinit_key, _ = jax.random.split(reinit_key)\n                if float(current_c2) > float(best_c2):\n                    best_c2 = current_c2\n                    best_f = f_values.copy()\n                if step % 5000 == 0 or step == self.hypers.num_steps // 2 - 1:\n                    print(f\"  Step {step:5d} | C2 \u2248 {-loss:.8f} | Best: {best_c2:.8f}\")\n            \n            schedule2 = optax.warmup_cosine_decay_schedule(\n                init_value=0.0,\n                peak_value=self.hypers.learning_rate * 0.35,\n                warmup_steps=500,\n                decay_steps=self.hypers.num_steps // 2 - 500,\n                end_value=self.hypers.learning_rate * 1e-4,\n            )\n            optimizer2 = optax.adam(learning_rate=schedule2, eps=1e-8)\n            key = jax.random.PRNGKey(43 + idx * 100)\n            f_values = best_f + 0.04 * jax.random.normal(key, best_f.shape)\n            opt_state = optimizer2.init(f_values)\n            \n            print(f\"\\n=== Phase 2 fine-tuning for optimized {idx + 1} ===\")\n            train_step_jit2 = jax.jit(lambda fv, os: self._train_step(fv, os, optimizer2))\n            step_count = 0\n            reinit_key = jax.random.PRNGKey(43 + idx * 1000)\n            c2_history = []\n            \n            for step in range(self.hypers.num_steps // 2):\n                f_values, opt_state, loss, grads = train_step_jit2(f_values, opt_state)\n                step_count = step + 1\n                current_c2 = -loss\n                c2_history.append(float(current_c2))\n                if self._check_stagnation(c2_history, step_count):\n                    if step_count % self.hypers.reinit_interval == 0:\n                        f_values = self._local_reinitialization(f_values, reinit_key)\n                        reinit_key, _ = jax.random.split(reinit_key)\n                if float(current_c2) > float(best_c2):\n                    best_c2 = current_c2\n                    best_f = f_values.copy()\n                if step % 5000 == 0 or step == self.hypers.num_steps // 2 - 1:\n                    print(f\"  Step {step:5d} | C2 \u2248 {-loss:.8f} | Best: {best_c2:.8f}\")\n\n        return jax.nn.relu(best_f), best_c2 if best_f is not None else 0.0\n\n\ndef run():\n    hypers = OptimizerHyperparameters(best_c2=0.8962799441554086)\n    optimizer = C2Optimizer(hypers)\n    optimized_f, final_c2_val = optimizer.run_optimization()\n    f_values_np = np.array(optimized_f)\n    return f_values_np, float(final_c2_val), float(-final_c2_val), hypers.num_intervals\n# EVOLVE-BLOCK-END",
+  "stop_reason": "completed",
+  "ledger": {
+    "max_evaluator_calls": 20,
+    "evaluator_calls": 15,
+    "max_probe_calls": 30,
+    "probe_calls": 0,
+    "edit_calls": 15,
+    "llm_input_tokens": 0,
+    "llm_output_tokens": 0,
+    "llm_calls": 32,
+    "sandbox_seconds": 1048.7610399723053
+  },
+  "steps": [
+    {
+      "step": 0,
+      "kind": "seed",
+      "edit_mode": "seed",
+      "edit_note": "seed program",
+      "combined_score": 1.0287207504545426,
+      "validity": 1.0,
+      "error": null,
+      "wall_s": 47.085402488708496,
+      "is_new_best": true
+    },
+    {
+      "step": 1,
+      "kind": "full_rewrite",
+      "edit_mode": "full_rewrite",
+      "edit_note": "spliced new EVOLVE-BLOCK",
+      "combined_score": 1.007084487882468,
+      "validity": 1.0,
+      "error": null,
+      "wall_s": 103.06302881240845,
+      "is_new_best": false
+    },
+    {
+      "step": 2,
+      "kind": "full_rewrite",
+      "edit_mode": "full_rewrite",
+      "edit_note": "spliced new EVOLVE-BLOCK",
+      "combined_score": 1.009336084637451,
+      "validity": 1.0,
+      "error": null,
+      "wall_s": 137.70393323898315,
+      "is_new_best": false
+    },
+    {
+      "step": 3,
+      "kind": "full_rewrite",
+      "edit_mode": "full_rewrite",
+      "edit_note": "spliced new EVOLVE-BLOCK",
+      "combined_score": 1.0075358465378534,
+      "validity": 1.0,
+      "error": null,
+      "wall_s": 85.04362559318542,
+      "is_new_best": false
+    },
+    {
+      "step": 4,
+      "kind": "full_rewrite",
+      "edit_mode": "full_rewrite",
+      "edit_note": "spliced new EVOLVE-BLOCK",
+      "combined_score": 0.9826205031509204,
+      "validity": 1.0,
+      "error": null,
+      "wall_s": 92.04194569587708,
+      "is_new_best": false
+    },
+    {
+      "step": 5,
+      "kind": "full_rewrite",
+      "edit_mode": "full_rewrite",
+      "edit_note": "spliced new EVOLVE-BLOCK",
+      "combined_score": 1.0082170445925893,
+      "validity": 1.0,
+      "error": null,
+      "wall_s": 71.91038036346436,
+      "is_new_best": false
+    },
+    {
+      "step": 6,
+      "kind": "full_rewrite",
+      "edit_mode": "full_rewrite",
+      "edit_note": "spliced new EVOLVE-BLOCK",
+      "combined_score": 1.0239178235559887,
+      "validity": 1.0,
+      "error": null,
+      "wall_s": 54.66061592102051,
+      "is_new_best": false
+    },
+    {
+      "step": 7,
+      "kind": "full_rewrite",
+      "edit_mode": "full_rewrite",
+      "edit_note": "spliced new EVOLVE-BLOCK",
+      "combined_score": 1.001771499054559,
+      "validity": 1.0,
+      "error": null,
+      "wall_s": 119.38391208648682,
+      "is_new_best": false
+    },
+    {
+      "step": 8,
+      "kind": "full_rewrite",
+      "edit_mode": "full_rewrite",
+      "edit_note": "spliced new EVOLVE-BLOCK",
+      "combined_score": 1.0239178235559887,
+      "validity": 1.0,
+      "error": null,
+      "wall_s": 47.83134913444519,
+      "is_new_best": false
+    },
+    {
+      "step": 9,
+      "kind": "full_rewrite",
+      "edit_mode": "full_rewrite",
+      "edit_note": "spliced new EVOLVE-BLOCK",
+      "combined_score": 1.0049896402388085,
+      "validity": 1.0,
+      "error": null,
+      "wall_s": 40.870619773864746,
+      "is_new_best": false
+    },
+    {
+      "step": 10,
+      "kind": "full_rewrite",
+      "edit_mode": "full_rewrite",
+      "edit_note": "spliced new EVOLVE-BLOCK",
+      "combined_score": 0.0,
+      "validity": 0.0,
+      "error": "cannot access local variable 'midpoint' where it is not associated with a value",
+      "wall_s": 2.1964221000671387,
+      "is_new_best": false
+    },
+    {
+      "step": 11,
+      "kind": "full_rewrite",
+      "edit_mode": "full_rewrite",
+      "edit_note": "spliced new EVOLVE-BLOCK",
+      "combined_score": 1.02848755027308,
+      "validity": 1.0,
+      "error": null,
+      "wall_s": 37.069745779037476,
+      "is_new_best": false
+    },
+    {
+      "step": 12,
+      "kind": "full_rewrite",
+      "edit_mode": "full_rewrite",
+      "edit_note": "spliced new EVOLVE-BLOCK",
+      "combined_score": 1.0063985586103061,
+      "validity": 1.0,
+      "error": null,
+      "wall_s": 61.702165365219116,
+      "is_new_best": false
+    },
+    {
+      "step": 13,
+      "kind": "full_rewrite",
+      "edit_mode": "full_rewrite",
+      "edit_note": "spliced new EVOLVE-BLOCK",
+      "combined_score": 1.0135868596805924,
+      "validity": 1.0,
+      "error": null,
+      "wall_s": 46.28242564201355,
+      "is_new_best": false
+    },
+    {
+      "step": 14,
+      "kind": "full_rewrite",
+      "edit_mode": "full_rewrite",
+      "edit_note": "spliced new EVOLVE-BLOCK",
+      "combined_score": 1.02848755027308,
+      "validity": 1.0,
+      "error": null,
+      "wall_s": 53.73799204826355,
+      "is_new_best": false
+    },
+    {
+      "step": 15,
+      "kind": "full_rewrite",
+      "edit_mode": "full_rewrite",
+      "edit_note": "spliced new EVOLVE-BLOCK",
+      "combined_score": 1.0292105718590043,
+      "validity": 1.0,
+      "error": null,
+      "wall_s": 48.177475929260254,
+      "is_new_best": true
+    }
+  ],
+  "trajectory": null,
+  "error": null
+}

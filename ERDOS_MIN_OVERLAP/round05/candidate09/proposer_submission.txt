@@ -1,0 +1,203 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are a mathematical optimization specialist solving the Erdős minimum overlap problem.
+  Your goal: find a step function h: [0,2] → [0,1] with ∫h=1 that minimizes max_k ∫h(x)(1-h(x+k))dx.
+  
+  TARGET: Beat the current best bound C5 ≤ 0.38092303510845016 (combined_score > 1.0).
+  The seed achieves 0.999641 - very close but not optimal.
+  
+  STRATEGY - use all 30 evaluations wisely:
+  
+  PHASE 1 (evals 1-5): Analyze the seed's approach. It uses 800 intervals and multi-restart SGD.
+  Key insight: The problem is about finding a step function with specific oscillatory pattern.
+  
+  PHASE 2 (evals 6-15): Try IMPROVED initializations:
+  - Instead of random patterns, start from structured step functions (piecewise constant)
+  - Use fewer intervals (100-300) for faster convergence, then refine
+  - Focus on functions that create "low overlap" patterns - regions where h and h shifted don't overlap much
+  
+  PHASE 3 (evals 16-25): Targeted perturbations:
+  - From a working solution, try small changes to the step locations and heights
+  - Try removing one step, merging two steps, or adding a step at a strategic location
+  - Keep the integral constraint satisfied (integral must be exactly 1)
+  
+  PHASE 4 (evals 26-30): Fine-tuning:
+  - Do small gradient steps from best solution
+  - Try different learning rates and penalty strengths
+  
+  CRITICAL: Each edit must be SUBSTANTIAL and TESTABLE. Don't waste evaluations on tiny cosmetic changes.
+  The budget is only 30 - each evaluation counts.
+  
+  CONSTRAINTS:
+  - h(x) must be in [0,1]
+  - ∫h(x)dx from 0 to 2 must equal exactly 1
+  - Use jax.numpy efficiently
+  - Don't exceed 59000 steps (seed uses this, adjust if needed)
+
+skill_description: |
+  Mathematical optimization for Erdős minimum overlap problem. The solver must find a step function h that minimizes max_k ∫h(x)(1-h(x+k))dx while satisfying ∫h=1. Use structured constructions, informed initialization, and targeted perturbations. The seed uses 800 intervals; consider starting simpler and refining.
+skill_body: |
+  # Erdős Minimum Overlap Problem Solver
+  
+  ## Problem
+  Find step function h: [0,2]→[0,1] with ∫h=1 minimizing max_k ∫h(x)(1-h(x+k))dx.
+  Target: beat C5 ≤ 0.380923 (combined_score > 1.0).
+  
+  ## Strategy
+  
+  ### Phase 1: Understand the Seed
+  - Seed uses 800 intervals, Adam optimizer, 59000 steps
+  - Already achieves 0.999641 (very close to 1.0 = current best bound)
+  - Uses multi-restart with 12 pattern initializations
+  
+  ### Phase 2: Key Improvements
+  
+  1. **SIMPLER INITIALIZATION**: Start with fewer intervals (100-200) to converge faster, then refine.
+  
+  2. **STRUCTURED STEP FUNCTIONS**: Instead of continuous functions, explicitly design piecewise constant functions:
+     - Try 3-5 steps: e.g., h = [1,1,...,1, 0,0,...,0] with exact integral=1
+     - Try alternating patterns: [a,b,a,b,...] where a,b chosen to satisfy constraints
+  
+  3. **INFORMED PERTURBATIONS**: From a working solution:
+     - Move one step boundary by ±10 intervals
+     - Change one step height by ±0.1 (normalize to keep integral=1)
+     - Add a small step at an underutilized region
+  
+  4. **CONSTRAINT HANDLING**: 
+     - Don't rely on penalty alone - explicitly normalize h to satisfy ∫h=1
+     - Consider constrained optimization or post-hoc normalization
+  
+  ### Phase 3: Evaluation Order
+  
+  1. First, reduce intervals and retrain from structured initialization
+  2. Then, add complexity (more intervals) to refine the solution
+  3. Finally, fine-tune the best solution found
+  
+  ## Warning
+  Only 30 evaluations. Each must be substantive. Don't waste on trivial changes.
+  
+  ## Tools
+  - edit_solution: Change EVOLVE-BLOCK with targeted diffs
+  - evaluate_solution: Score your solution (combined_score > 1 means new best)
+  - finish: Submit your best result when done
+tool_descriptions:
+  edit_solution: |
+    Change the EVOLVE-BLOCK code. Format: targeted SEARCH/REPLACE diffs (preferred) or full rewrite.
+    Focus on: (1) simpler/faster initialization, (2) structured step functions, (3) constraint enforcement.
+    Keep changes testable within one evaluation.
+  evaluate_solution: |
+    Run the solution and get combined_score. Score > 1.0 beats the current best bound (0.380923...).
+    Budget: 30 evaluations total. Use wisely - prioritize evaluating STRUCTURED CONSTRUCTIONS first.
+  probe_solution: |
+    Approximate score on subsampled data. FAST (10s vs minutes) and FREE (separate budget).
+    Use to quickly compare multiple structural variations before committing to full evaluation.
+    Example: "Of 3 pattern variations, pattern A gives 0.37, B gives 0.38, C gives 0.35 - evaluate A."
+  finish: |
+    End when: (1) 30 evals used, or (2) best score achieved and no better direction found.
+    Submit your best solution - make it count!
+sampling:
+  temperature: 0.5
+  top_p: 0.9
+  top_k: 15
+  max_tokens: 12288
+agent:
+  max_iterations: 50
+middleware:
+  budget_reminder_from_left: 2
+  long_tool_output_max_chars: 10000
+new_tools:
+  - name: analyze_structure
+    description: |
+      Analyze the seed program's structure and recommend targeted improvements for the Erdős problem.
+      Checks: interval count, initialization diversity, constraint handling, optimization strategy.
+      Returns: specific recommendations to try in edit_solution.
+    input_schema: {type: object, properties: {}}
+    implementation_py: |
+      def run(ctx, args):
+          code = ctx.get_program()
+          # Analyze current structure
+          improvements = []
+          
+          # Check initialization diversity
+          if "for pattern in range(12)" in code:
+              improvements.append(("DIVERSITY", "Good - uses 12 patterns. Try adding more structured patterns like piecewise constants."))
+          
+          # Check interval count
+          if "num_intervals: int = 800" in code:
+              improvements.append(("INTERVALS", "High interval count (800). Try starting with 100-200 for faster convergence, then refine."))
+          
+          # Check constraint handling
+          if "penalty_strength: float = 1370.0" in code and "normalize" not in code:
+              improvements.append(("CONSTRAINTS", "Relies on penalty alone. Consider explicit normalization: h = h / sum(h) * N to ensure ∫h=1."))
+          
+          # Check step function approach
+          if "jax.nn.sigmoid" in code and "where" not in code:
+              improvements.append(("STEP_FUNC", "Uses continuous sigmoid. Try explicit piecewise constant: use jnp.where with thresholds for true step functions."))
+          
+          recommendations = {
+              "analysis": "Seed program overview",
+              "improvements": improvements,
+              "priority": ["INTERVALS", "CONSTRAINTS", "STEP_FUNC"]
+          }
+          return recommendations
+new_skills:
+  - name: mathematical-construction
+    description: |
+      Method playbook for constructing step functions in the Erdős minimum overlap problem.
+      Use when trying to beat the current best bound. Focus on explicit, deterministic constructions.
+    body: |
+      # Mathematical Construction Guide for Erdős Minimum Overlap
+      
+      ## Core Idea
+      Find h: [0,2]→[0,1] with ∫h=1 minimizing max_k ∫h(x)(1-h(x+k))dx.
+      
+      ## Construction Patterns to Try
+      
+      ### Pattern A: Binary Step (Simple)
+      h(x) = 1 for x ∈ [0, 1], h(x) = 0 for x ∈ (1, 2]
+      - This is a pure step function
+      - Compute the overlap integrals explicitly
+      - Modify: create [a,b] and [c,d] steps to optimize
+  
+      ### Pattern B: Alternating Steps
+      Divide [0,2] into n equal segments, alternate heights a and b:
+      - Ensure: (n/2)*a*(2/n) + (n/2)*b*(2/n) = 1  →  (a+b)*2/n = 1
+      - Choose a,b to minimize the max overlap
+      - Try: a=0.8, b=0.4; or a=0.9, b=0.2
+  
+      ### Pattern C: Three-Level Function
+      h(x) takes values from {0, 0.5, 1}
+      - Easy to compute overlap analytically
+      - Try: 1/4 at height 1, 1/2 at height 0.5, 1/4 at height 0
+  
+      ## Optimization Workflow
+      
+      1. **Start Simple**: Use 50-100 intervals, 3-5 steps
+      2. **Validate Constraint**: Ensure ∫h=1 exactly
+      3. **Compute Overlap**: Use FFT for fast correlation
+      4. **Perturb**: Move steps, change heights, maintain constraint
+      5. **Refine**: Use gradient descent for final tuning
+  
+      ## Key Insight
+      The optimal h likely has LOCALIZED "high" regions separated by "low" regions.
+      Think of h as placing "mass" in strategic locations to minimize pairwise overlap.
+      
+      ## Warning
+      Don't use complex continuous functions - they're harder to optimize.
+      Start with explicit step functions, then smooth if needed.
+new_middlewares:
+  - name: budget_tightening
+    hook: before_model
+    description: |
+      Reminder when evaluation budget is running low. Pushes for decisive moves.
+      Shows remaining evals and current best score.
+    implementation_py: |
+      def before_model(hook_input):
+          remaining = hook_input.get("evaluations_left", 0)
+          best_score = hook_input.get("best_score", 0)
+          if remaining <= 5 and best_score < 1.0:
+              return f"⚠️ Only {remaining} evals left! Current best={best_score:.4f}. Need strong move to beat 1.0! Consider: (1) structured step function, (2) simplify then refine, (3) explicit constraint enforcement."
+          elif remaining <= 10:
+              return f"⚠️ {remaining} evals remaining. Best={best_score:.4f}. Making progress but no guarantees."
+          else:
+              return None

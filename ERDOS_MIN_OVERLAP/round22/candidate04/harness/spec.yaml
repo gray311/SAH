@@ -1,0 +1,180 @@
+schema: h2spec/1.0
+system_prompt: |
+  Erdos minimum overlap problem: find a step function h: [0,2]->[0,1] minimizing max_k integral h(x)(1-h(x+k))dx.
+
+  Current best: C5 <= 0.38092303510845016.
+  Goal: Beat seed score by finding c5_bound < 0.380923.
+
+  CRITICAL: The seed uses continuous gradient descent. Instead, try DISCRETE STEP FUNCTION CONSTRUCTIONS -
+  define h as piecewise constant with few intervals, heights optimized to satisfy integral(h)=1.
+
+  METHOD:
+  1. Start with few intervals (30-50) and DISCRETE step heights (0, 1, or simple fractions).
+  2. Use probe_solution to rank many discrete constructions (50-100 cheap evals).
+  3. Only call evaluate_solution on top 3-5 candidates.
+  4. If discrete fails, try seed's continuous approach with LOW penalty_strength (5-15) and FIXED num_intervals=100.
+
+  CONSTRAINT: integral(h)=1.0 exactly. For discrete: sum(heights * interval_width) = 1.0.
+
+  BUDGET: Use 20-25 probes for ranking, 5-7 full evaluations.
+skill_description: |
+  Search for discrete step functions that directly satisfy constraints.
+
+  Generate candidates as piecewise constant functions with integer/simple fractional heights.
+  Each candidate has precomputed integral and c5_bound (analytical, no training).
+
+  Strategy: Create 50-100 discrete candidates with varying intervals (30-80),
+  patterns (bipartite, tri-modal, Golomb, wave). Filter by integral=1.0 (within 1%), c5_bound < 0.37.
+  Expected: Discrete constructions find valid solutions faster than gradient descent.
+skill_body: |
+  # Discrete Step Function Search
+
+  ## Strategy
+  The Erdos minimum overlap problem benefits from DIRECT step function construction
+  rather than gradient-based optimization. Construct h as piecewise constant with few intervals,
+  assign heights directly, and verify constraints.
+
+  ## Candidate Generation
+  1. Choose N in [30, 80] intervals
+  2. Choose pattern: bipartite (split domain), tri-modal (3 regions), Golomb (optimal spacing), wave
+  3. Assign heights, then NORMALIZE so integral(h) = 1.0
+  4. Precompute c5_bound using analytical formula (FFT)
+  5. Filter: keep if c5_bound < 0.37
+
+  ## Workflow
+  1. Generate 100 candidates with varying N, patterns, seeds
+  2. Precompute integral and c5 for each
+  3. Filter to |integral-1.0|<0.01 AND c5_bound < 0.37
+  4. Evaluate top 5 with evaluate_solution
+  5. If no improvement, try N in [100, 200]
+
+  ## Example
+  Bipartite N=50: set 25 intervals to height=2, 25 to height=0
+  integral = 25*2*dx + 25*0*dx = 50*dx = 1.0 ✓ (with dx=0.04)
+  This DIRECTLY constructs valid step functions without training.
+tool_descriptions:
+  edit_solution: |
+    Edit EVOLVE-BLOCK for discrete step function approach.
+    OPTION 1: Replace ErdosOptimizer with direct step construction:
+    def optimize_discrete(N=50, pattern="bipartite", seed=0):
+        domain, dx = 2.0, 2.0/N
+        h = np.zeros(N)
+        if pattern == "bipartite":
+            m = N // 4
+            h[:m] = 2.0; h[m:] = 0.0
+        elif pattern == "tri_modal":
+            peaks = [0.2+np.random.rand()*0.4, 0.6+np.random.rand()*0.4, 1.0+np.random.rand()*0.4]
+            for p in peaks: h += 5.0 * jnp.exp(-((jnp.linspace(0, 2, N) - p) / 0.2)**2)
+        h = h / jnp.sum(h) * 1.0 / dx
+        return h
+    OPTION 2: Tuning seed optimizer:
+    - num_intervals: 100
+    - penalty_strength: 5.0
+    - num_steps: 20000
+    - num_restarts: 10
+  evaluate_solution: |
+    Run full optimization. Returns combined_score = 0.38092303510845016 / c5_bound.
+    Higher is better. combined_score > 1.0 means new record.
+  probe_solution: |
+    Cheap approximate evaluation (500 intervals, ~10s). Uses probe budget (30 total).
+    Call this before evaluate_solution to rank candidates.
+    STRATEGY: Generate 50-100 candidates, probe all, evaluate top 3-5.
+  finish: |
+    Submit when combined_score > 1.0.
+sampling:
+  temperature: 1.5
+  top_p: 0.9
+  top_k: 50
+  max_tokens: 16384
+agent:
+  max_iterations: 60
+middleware:
+  budget_reminder_from_left: 8
+  long_tool_output_max_chars: 15000
+new_tools:
+  - name: generate_discrete_candidates
+    description: |
+      Generate 50 discrete step function candidates with patterns: bipartite, tri-modal, golomb.
+      Precomputed integral and c5_bound (analytical).
+    input_schema:
+      type: object
+      properties: {}
+    implementation_py: |
+      def run(ctx, args):
+          import numpy as np
+          import jax.numpy as jnp
+          domain = 2.0
+          dx = domain / 50
+          def compute_c5(h, N):
+              j_val = 1.0 - h
+              h_pad = jnp.pad(h, (0, N))
+              corr = jnp.fft.ifft(jnp.fft.fft(h_pad) * jnp.conj(jnp.fft.fft(j_pad := jnp.pad(1.0-h, (0, N))))).real
+              return float(jnp.max(corr * dx))
+          def normalize(h): return h / float(jnp.sum(h) * dx)
+          candidates = []
+          for N_int in [30, 50, 70]:
+              dx_int = domain / N_int
+              # Bipartite
+              for seed in range(10):
+                  np.random.seed(seed)
+                  h = np.zeros(N_int); m = N_int // 4
+                  h[:m] = 2.0; h[m:] = 0.0
+                  h = normalize(h)
+                  candidates.append({"h": h.tolist(), "integral": float(jnp.sum(h) * dx_int),
+                      "c5_bound": compute_c5(h, N_int), "pattern": "bipartite", "N": N_int})
+              # Tri-modal
+              for seed in range(10):
+                  np.random.seed(seed)
+                  peaks = [0.2+np.random.rand()*0.4, 0.6+np.random.rand()*0.4, 1.0+np.random.rand()*0.4]
+                  peaks = [max(0.1, min(1.9, p)) for p in peaks]
+                  h = np.zeros(N_int)
+                  for p in peaks:
+                      h += 5.0 * jnp.exp(-((jnp.linspace(0, 2, N_int) - p) / 0.2)**2)
+                  h = normalize(np.clip(h, 0.01, 5.0))
+                  candidates.append({"h": h.tolist(), "integral": float(jnp.sum(h) * dx_int),
+                      "c5_bound": compute_c5(h, N_int), "pattern": "tri_modal", "N": N_int, "peaks": peaks})
+          return {"candidates": candidates, "num_candidates": len(candidates)}
+new_skills:
+  - name: discrete-search
+    description: |
+      Search using discrete step functions with analytical screening.
+      Generate candidates, precompute scores, evaluate best.
+    body: |
+      # Discrete Step Function Search
+
+      ## Core Idea
+      DIRECTLY construct step functions satisfying integral constraint by design,
+      bypassing gradient descent training loop.
+
+      ## Method
+      1. Choose N in [30, 100] intervals
+      2. Choose pattern: bipartite (split), tri-modal (3 regions), golomb (optimal), wave
+      3. Assign heights, NORMALIZE so integral=1.0
+      4. Precompute c5_bound analytically (FFT)
+      5. Filter: |integral-1.0|<0.02 AND c5_bound<0.37
+      6. Evaluate top 3-5 with evaluate_solution
+
+      ## Advantages
+      - No training loop - direct construction
+      - Integral satisfied by normalization
+      - Many candidates screened cheaply
+      - Explores architectures gradient descent misses
+
+      ## Expected
+      With 50+ candidates, find 3-5 with c5_bound<0.36, evaluate them. Some should beat seed.
+new_middlewares:
+  - name: probe_first
+    hook: before_model
+    description: |
+      Enforce probing before full evaluation. Remind agent to use probe_solution to
+      rank candidates before calling evaluate_solution.
+    implementation_py: |
+      def before_model(hook_input):
+          state = hook_input.get('state', {})
+          evals_left = state.get('evals_left', 0)
+          probes_left = state.get('probes_left', 30)
+          if evals_left >= 5 and probes_left >= 10:
+              return '5+ evals, 10+ probes: Generate 50 discrete candidates. Probe all. Evaluate top 3-5.'
+          elif evals_left >= 3:
+              return f'{evals_left} evals left. Probe before full evaluation. Seek c5_bound < 0.35.'
+          return None

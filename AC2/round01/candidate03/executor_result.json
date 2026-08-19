@@ -1,0 +1,261 @@
+{
+  "task_id": "eft__math__second_autocorr_ineq",
+  "source": "eft",
+  "best_score": 0.9806351325668374,
+  "seed_score": 0.9550495052953716,
+  "best_metrics": {
+    "c2": 0.8789236018538368,
+    "combined_score": 0.9806351325668374,
+    "loss": -0.8827117681503296,
+    "n_points": 50,
+    "eval_time": 2.0401859283447266
+  },
+  "best_program": "# EVOLVE-BLOCK-START\nimport jax\nimport jax.numpy as jnp\nimport optax\nimport numpy as np\nfrom dataclasses import dataclass\n\n\n@dataclass\nclass Hyperparameters:\n    \"\"\"Hyperparameters for symmetric step optimization.\"\"\"\n\n    num_intervals: int = 50\n    learning_rate: float = 0.01\n    num_steps: int = 20000\n    warmup_steps: int = 1000\n\n\nclass C2Optimizer:\n    \"\"\"\n    Optimizes using symmetric step-function approximation.\n    The record-holder might benefit from symmetric (even) functions.\n    \"\"\"\n\n    def __init__(self, hypers: Hyperparameters):\n        self.hypers = hypers\n\n    def _construct_symmetric_step(self, N: int, key) -> jnp.ndarray:\n        \"\"\"\n        Constructive initialization: symmetric step around center.\n        High in two central regions, low at edges.\n        \"\"\"\n        center = N // 2\n        \n        # High plateau in center region\n        plateau_start = N // 4\n        plateau_end = 3 * N // 4\n        \n        # Create symmetric pattern\n        pattern = jnp.zeros(N)\n        pattern = pattern.at[plateau_start:plateau_end].set(1.0)\n        \n        # Very small noise\n        perturbation = 0.01 * jax.random.normal(key, (N,))\n        pattern = pattern + perturbation\n        \n        # Ensure positivity\n        pattern = jax.nn.softplus(pattern - 0.3)\n        \n        return pattern\n\n    def _construct_centered_bump(self, N: int, key) -> jnp.ndarray:\n        \"\"\"\n        Constructive initialization: centered bump with flat top.\n        Similar to a plateau function.\n        \"\"\"\n        center = N // 2\n        plateau_width = N // 2\n        \n        # Flat top in center, sloped edges\n        left_width = plateau_width // 2\n        plateau_start = center - left_width\n        plateau_end = center + left_width\n        \n        left_slope = jnp.linspace(0, 1, plateau_start)\n        plateau = jnp.ones(plateau_end - plateau_start)\n        right_slope = jnp.linspace(1, 0, N - plateau_end)\n        \n        f_values = jnp.concatenate([left_slope, plateau, right_slope])\n        \n        # Small noise\n        perturbation = 0.02 * jax.random.normal(key, (N,))\n        f_values = f_values + perturbation\n        \n        return f_values\n\n    def _objective_fn(self, f_values: jnp.ndarray) -> jnp.ndarray:\n        \"\"\"\n        Computes the objective function using the unitless norm calculation.\n        \"\"\"\n        f_non_negative = jax.nn.relu(f_values)\n\n        # Unscaled discrete autoconvolution using FFT\n        N = len(f_values)\n        padded_f = jnp.pad(f_non_negative, (0, N))\n        fft_f = jnp.fft.fft(padded_f)\n        convolution = jnp.fft.ifft(fft_f * fft_f).real\n\n        # Calculate L2-norm squared of the convolution (trapezoidal rule)\n        conv_real = convolution.real\n        h = 1.0 / len(conv_real)\n        l2_norm_squared = jnp.sum(h * (conv_real ** 2))\n\n        # Calculate L1-norm of the convolution\n        norm_1 = jnp.sum(jnp.abs(conv_real)) * h\n\n        # Calculate infinity-norm of the convolution\n        norm_inf = jnp.max(jnp.abs(conv_real))\n\n        # Calculate C2 ratio\n        denominator = norm_1 * norm_inf\n        c2_ratio = l2_norm_squared / denominator\n\n        # We want to MAXIMIZE C2, so the optimizer must MINIMIZE its negative.\n        return -c2_ratio\n\n    def train_step(self, f_values: jnp.ndarray, opt_state: optax.OptState) -> tuple:\n        \"\"\"Performs a single training step.\"\"\"\n        loss, grads = jax.value_and_grad(self._objective_fn)(f_values)\n        updates, opt_state = self.optimizer.update(grads, opt_state, f_values)\n        f_values = optax.apply_updates(f_values, updates)\n        return f_values, opt_state, loss\n\n    def run_optimization(self):\n        \"\"\"Sets up and runs the full optimization process.\"\"\"\n        schedule = optax.warmup_cosine_decay_schedule(\n            init_value=0.001,\n            peak_value=self.hypers.learning_rate,\n            warmup_steps=self.hypers.warmup_steps,\n            decay_steps=self.hypers.num_steps - self.hypers.warmup_steps,\n            end_value=self.hypers.learning_rate * 1e-4,\n        )\n        self.optimizer = optax.adam(learning_rate=schedule)\n\n        key = jax.random.PRNGKey(42)\n        \n        # Try symmetric step initialization\n        N = self.hypers.num_intervals\n        f_values = self._construct_symmetric_step(N, key)\n\n        opt_state = self.optimizer.init(f_values)\n        print(\n            f\"Number of intervals (N): {self.hypers.num_intervals}, Steps: {self.hypers.num_steps}\"\n        )\n        train_step_jit = jax.jit(self.train_step)\n\n        loss = jnp.inf\n        for step in range(self.hypers.num_steps):\n            f_values, opt_state, loss = train_step_jit(f_values, opt_state)\n            if step % 2000 == 0 or step == self.hypers.num_steps - 1:\n                print(f\"Step {step:5d} | C2 \u2248 {-loss:.8f}\")\n\n        final_c2 = -self._objective_fn(f_values)\n        print(f\"Final C2 lower bound found: {final_c2:.8f}\")\n        return jax.nn.relu(f_values), final_c2\n\n\ndef run():\n    \"\"\"Entry point for running the optimization.\"\"\"\n    hypers = Hyperparameters()\n    optimizer = C2Optimizer(hypers)\n    optimized_f, final_c2_val = optimizer.run_optimization()\n\n    loss_val = -final_c2_val\n    f_values_np = np.array(optimized_f)\n\n    return f_values_np, float(final_c2_val), float(loss_val), hypers.num_intervals\n\n\n# EVOLVE-BLOCK-END\n# EVOLVE-BLOCK-END",
+  "stop_reason": "completed",
+  "ledger": {
+    "max_evaluator_calls": 20,
+    "evaluator_calls": 20,
+    "max_probe_calls": 30,
+    "probe_calls": 0,
+    "edit_calls": 20,
+    "llm_input_tokens": 0,
+    "llm_output_tokens": 0,
+    "llm_calls": 42,
+    "sandbox_seconds": 86.70124459266663
+  },
+  "steps": [
+    {
+      "step": 0,
+      "kind": "seed",
+      "edit_mode": "seed",
+      "edit_note": "seed program",
+      "combined_score": 0.9550495052953716,
+      "validity": 1.0,
+      "error": null,
+      "wall_s": 5.283143758773804,
+      "is_new_best": true
+    },
+    {
+      "step": 1,
+      "kind": "full_rewrite",
+      "edit_mode": "full_rewrite",
+      "edit_note": "spliced new EVOLVE-BLOCK",
+      "combined_score": 0.0,
+      "validity": 0.0,
+      "error": "xp and fp must be one-dimensional arrays of equal size",
+      "wall_s": 2.6180381774902344,
+      "is_new_best": false
+    },
+    {
+      "step": 2,
+      "kind": "full_rewrite",
+      "edit_mode": "full_rewrite",
+      "edit_note": "spliced new EVOLVE-BLOCK",
+      "combined_score": 0.9572293080974079,
+      "validity": 1.0,
+      "error": null,
+      "wall_s": 3.3695037364959717,
+      "is_new_best": true
+    },
+    {
+      "step": 3,
+      "kind": "full_rewrite",
+      "edit_mode": "full_rewrite",
+      "edit_note": "spliced new EVOLVE-BLOCK",
+      "combined_score": 0.0,
+      "validity": 0.0,
+      "error": "parameter without a default follows parameter with a default (candidate.py, line 53)",
+      "wall_s": 0.11534976959228516,
+      "is_new_best": false
+    },
+    {
+      "step": 4,
+      "kind": "full_rewrite",
+      "edit_mode": "full_rewrite",
+      "edit_note": "spliced new EVOLVE-BLOCK",
+      "combined_score": 0.9803996461814328,
+      "validity": 1.0,
+      "error": null,
+      "wall_s": 5.473245143890381,
+      "is_new_best": true
+    },
+    {
+      "step": 5,
+      "kind": "full_rewrite",
+      "edit_mode": "full_rewrite",
+      "edit_note": "spliced new EVOLVE-BLOCK",
+      "combined_score": 0.978205739902059,
+      "validity": 1.0,
+      "error": null,
+      "wall_s": 3.7698683738708496,
+      "is_new_best": false
+    },
+    {
+      "step": 6,
+      "kind": "full_rewrite",
+      "edit_mode": "full_rewrite",
+      "edit_note": "spliced new EVOLVE-BLOCK",
+      "combined_score": 0.9654152317196358,
+      "validity": 1.0,
+      "error": null,
+      "wall_s": 4.019535779953003,
+      "is_new_best": false
+    },
+    {
+      "step": 7,
+      "kind": "full_rewrite",
+      "edit_mode": "full_rewrite",
+      "edit_note": "spliced new EVOLVE-BLOCK",
+      "combined_score": 0.9536388727210716,
+      "validity": 1.0,
+      "error": null,
+      "wall_s": 3.470414400100708,
+      "is_new_best": false
+    },
+    {
+      "step": 8,
+      "kind": "full_rewrite",
+      "edit_mode": "full_rewrite",
+      "edit_note": "spliced new EVOLVE-BLOCK",
+      "combined_score": 0.9773896955672604,
+      "validity": 1.0,
+      "error": null,
+      "wall_s": 3.669433116912842,
+      "is_new_best": false
+    },
+    {
+      "step": 9,
+      "kind": "full_rewrite",
+      "edit_mode": "full_rewrite",
+      "edit_note": "spliced new EVOLVE-BLOCK",
+      "combined_score": 0.9781060021996385,
+      "validity": 1.0,
+      "error": null,
+      "wall_s": 4.121447801589966,
+      "is_new_best": false
+    },
+    {
+      "step": 10,
+      "kind": "full_rewrite",
+      "edit_mode": "full_rewrite",
+      "edit_note": "spliced new EVOLVE-BLOCK",
+      "combined_score": 0.0,
+      "validity": 0.0,
+      "error": "Incompatible types for broadcasting: input type=float32[2] and requested type=float32[12]",
+      "wall_s": 1.7670457363128662,
+      "is_new_best": false
+    },
+    {
+      "step": 11,
+      "kind": "full_rewrite",
+      "edit_mode": "full_rewrite",
+      "edit_note": "spliced new EVOLVE-BLOCK",
+      "combined_score": 0.9806351325668374,
+      "validity": 1.0,
+      "error": null,
+      "wall_s": 3.570538282394409,
+      "is_new_best": true
+    },
+    {
+      "step": 12,
+      "kind": "full_rewrite",
+      "edit_mode": "full_rewrite",
+      "edit_note": "spliced new EVOLVE-BLOCK",
+      "combined_score": 0.0,
+      "validity": 0.0,
+      "error": "parameter without a default follows parameter with a default (candidate.py, line 28)",
+      "wall_s": 0.16788411140441895,
+      "is_new_best": false
+    },
+    {
+      "step": 13,
+      "kind": "full_rewrite",
+      "edit_mode": "full_rewrite",
+      "edit_note": "spliced new EVOLVE-BLOCK",
+      "combined_score": 0.9490148617761205,
+      "validity": 1.0,
+      "error": null,
+      "wall_s": 7.175112009048462,
+      "is_new_best": false
+    },
+    {
+      "step": 14,
+      "kind": "full_rewrite",
+      "edit_mode": "full_rewrite",
+      "edit_note": "spliced new EVOLVE-BLOCK",
+      "combined_score": 0.9793601290698731,
+      "validity": 1.0,
+      "error": null,
+      "wall_s": 4.471376657485962,
+      "is_new_best": false
+    },
+    {
+      "step": 15,
+      "kind": "full_rewrite",
+      "edit_mode": "full_rewrite",
+      "edit_note": "spliced new EVOLVE-BLOCK",
+      "combined_score": 0.9806351325668374,
+      "validity": 1.0,
+      "error": null,
+      "wall_s": 20.09509515762329,
+      "is_new_best": false
+    },
+    {
+      "step": 16,
+      "kind": "full_rewrite",
+      "edit_mode": "full_rewrite",
+      "edit_note": "spliced new EVOLVE-BLOCK",
+      "combined_score": 0.0,
+      "validity": 0.0,
+      "error": "parameter without a default follows parameter with a default (candidate.py, line 29)",
+      "wall_s": 0.11502408981323242,
+      "is_new_best": false
+    },
+    {
+      "step": 17,
+      "kind": "full_rewrite",
+      "edit_mode": "full_rewrite",
+      "edit_note": "spliced new EVOLVE-BLOCK",
+      "combined_score": 0.0,
+      "validity": 0.0,
+      "error": "parameter without a default follows parameter with a default (candidate.py, line 29)",
+      "wall_s": 0.11518001556396484,
+      "is_new_best": false
+    },
+    {
+      "step": 18,
+      "kind": "full_rewrite",
+      "edit_mode": "full_rewrite",
+      "edit_note": "spliced new EVOLVE-BLOCK",
+      "combined_score": 0.9758331488711737,
+      "validity": 1.0,
+      "error": null,
+      "wall_s": 3.9709057807922363,
+      "is_new_best": false
+    },
+    {
+      "step": 19,
+      "kind": "full_rewrite",
+      "edit_mode": "full_rewrite",
+      "edit_note": "spliced new EVOLVE-BLOCK",
+      "combined_score": 0.9769440508416783,
+      "validity": 1.0,
+      "error": null,
+      "wall_s": 4.2214930057525635,
+      "is_new_best": false
+    },
+    {
+      "step": 20,
+      "kind": "full_rewrite",
+      "edit_mode": "full_rewrite",
+      "edit_note": "spliced new EVOLVE-BLOCK",
+      "combined_score": 0.9781302300540018,
+      "validity": 1.0,
+      "error": null,
+      "wall_s": 5.121609687805176,
+      "is_new_best": false
+    }
+  ],
+  "trajectory": null,
+  "error": null
+}

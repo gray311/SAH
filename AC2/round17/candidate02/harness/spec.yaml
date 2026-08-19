@@ -1,0 +1,240 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are an expert in functional analysis for the C₂ constant:
+  C₂ = ||f★f||₂² / ((∫f)² ||f★f||_∞), where f: ℝ→ℝ is non-negative.
+  
+  Current best: 0.8962799441554086 (combined_score 1.04199). TARGET: beat this.
+  
+  CORE STRATEGY: PARALLEL MULTI-FAMILY EXPLORATION. The step-function record is a LOCAL optimum.
+  Different function families (Gaussian mixtures, splines, oscillatory, piecewise) may have their own optima.
+  You MUST explore MULTIPLE families IN PARALLEL from iteration 1, not sequentially refine one type.
+  
+  BUDGET: 30 full evaluations + unlimited probes. Use probes aggressively to filter before evaluating.
+  
+  WORKFLOW (repeatable):
+  1. Generate 3-5 diverse candidates from DIFFERENT families using generate_candidates
+  2. Probe ALL candidates (use all 30 probes across generations)
+  3. Select top 3 by probe score
+  4. Evaluate top 3 (use evaluation budget efficiently)
+  5. If any beat the record: refine it SLIGHTLY (one small mutation), then go back to step 1
+  6. If none beat the record: generate a NEW set from different families or with new ideas
+  
+  FAMILIES TO EXPLORE:
+  - Gaussian mixtures: smooth multi-peaked functions
+  - B-spline basis: flexible smooth transitions with optimized control points
+  - Oscillatory with decay: (1 + α cos(βx)) * exp(-γ|x|) for structured convolutions
+  - Piecewise-linear: controlled smoothness with optimized vertices
+  - Multi-level improved steps: refined asymmetric step patterns
+  
+  RULES:
+  - NEVER spend >2 iterations refining one family without trying new families
+  - Use probe_solution to rank ALL variants before any full evaluation
+  - When stuck (no improvement for 5 iterations): generate completely new ideas
+  - Combine elements: if Family A beats record but Family B has promising structure, try hybrids
+  - Keep f ≥ 0 everywhere (use softplus or max(0,·))
+  
+  Tools:
+  - edit_solution: Implement mutations OR new architectures from the families above
+  - evaluate_solution: Full score, budget 30. Call only AFTER probing and selecting top candidates
+  - probe_solution: Approximate score on 10% subsample. USE AGGRESSIVELY to filter before eval
+  - generate_candidates: Generate diverse proposals across families. Returns code snippets ready to edit.
+  - finish: Report best combined_score, function architecture, and key innovation.
+skill_description: Parallel multi-family exploration with probe-driven filtering. Generate diverse candidates from Gaussian mixtures, B-splines, oscillatory, piecewise-linear, and improved step families. Probe all, evaluate top 3, refine slightly only if beating record.
+skill_body: |
+  # C₂ Maximizer: Parallel Multi-Family Exploration
+  
+  ## Core Principle
+  Step functions are a LOCAL optimum. To beat C₂ = 0.8962799441554086, you MUST explore DIFFERENT function families IN PARALLEL, not sequentially refine one type.
+  
+  ## Workflow (Repeatable Every 5-10 Iterations)
+  
+  ### Step 1: Diverse Generation
+  Call generate_candidates to get 3-5 proposals from DIFFERENT families:
+  - Gaussian mixtures: f(x) = Σ w_i · exp(-((x-μ_i)²)/(2σ_i²))
+  - B-spline basis: 30-50 control points with softplus positivity
+  - Oscillatory decay: f(x) = (1 + α cos(βx)) · exp(-γ|x|)
+  - Piecewise-linear: vertices with optimized heights
+  - Multi-level improved steps: asymmetric step patterns
+  
+  ### Step 2: Probe All Candidates
+  You have 30 probes total. PROBE EVERY candidate from Step 1 before any full evaluation.
+  - Rank candidates by probe score
+  - Discard any with probe score < current best (1.04199)
+  
+  ### Step 3: Evaluate Top 3
+  Select top 3 by probe score. Call evaluate_solution ONCE per candidate.
+  - If ANY beat 1.04199: great! Go to Step 4
+  - If NONE beat the record: Go to Step 5
+  
+  ### Step 4: Slight Refinement (Only if beating record)
+  If a candidate beats the record:
+  - Apply ONE tiny mutation (±0.02 height, ±2% width)
+  - Probe the refined version
+  - If still better: evaluate it
+  - Then return to Step 1 for fresh exploration
+  
+  ### Step 5: Stalled Recovery (No improvement)
+  If no candidate beats the record:
+  - Generate a NEW set from different families
+  - Try hybrid ideas: e.g., "Gaussian-like with step edges", "oscillatory steps"
+  - Vary the parameter ranges: wider oscillations, different decay rates
+  
+  ## Key Rules
+  - PARALLEL EXPLORATION > SEQUENTIAL REFINEMENT
+  - Probe ALL before evaluating ANY
+  - Never refine the same family >2 iterations without trying new families
+  - After 5 iterations with no improvement: generate completely new ideas
+  - Use JAX mutability: f = f.at[start:end].set(value)
+tool_descriptions:
+  edit_solution: 'Edit the EVOLVE-BLOCK. Implement one of these:
+  1. Tiny mutation: ±0.02 height change, ±2% width change on an existing good function
+  2. New architecture: Gaussian mixture, B-spline, oscillatory decay, piecewise-linear, or multi-level steps
+  3. Hybrid: Combine elements (e.g., "Gaussian with step edges", "oscillatory step pattern")
+  Use JAX array mutation: f = f.at[start:end].set(value). Ensure f ≥ 0.'
+  evaluate_solution: 'Full evaluation. Returns combined_score. Budget: 30 total.
+  Call ONLY after: (1) probing all candidates, (2) selecting top 3 by probe score, (3) confirming none were below 1.04199.
+  Do not evaluate blindly.'
+  probe_solution: 'Approximate score on 10% subsampled data. FAST. 30 probes total.
+  USE AGGRESSIVELY: Probe ALL candidates from generate_candidates before any full evaluation.
+  Rank by probe score, discard low-scoring ones, evaluate only top 3.'
+  finish: Report best combined_score achieved, the function architecture (family name), and the key innovation that beat 1.04199.
+sampling:
+  temperature: 0.5
+  top_p: 0.9
+  top_k: 30
+  max_tokens: 16384
+agent:
+  max_iterations: 50
+middleware:
+  budget_reminder_from_left: 3
+  long_tool_output_max_chars: 15000
+new_tools:
+- name: diversity_analyzer
+  description: 'Analyze the current best function and suggest structurally diverse mutation directions. Call when stuck or when generating new candidates. Returns diversity scores and suggested perturbations.'
+  input_schema:
+    type: object
+    properties: {}
+  implementation_py: |
+    def run(ctx, args):
+        import math
+        best_f = ctx.get_best_program()
+        if not best_f or "jnp.zeros" in best_f:
+            return {"note": "no best function yet", "directions": ["try Gaussian mixture", "try B-spline", "try oscillatory decay"]}
+        
+        # Extract key characteristics from the code
+        has_gaussian = "exp(-((x" in best_f or "exp(" in best_f
+        has_step = "jnp.zeros" in best_f and "base_height" in best_f
+        has_spline = "splev" in best_f or "splrep" in best_f
+        has_oscillatory = "cos(" in best_f or "sin(" in best_f
+        has_piecewise = "piecewise" in best_f
+        
+        diversity_score = 0.0
+        suggested_directions = []
+        
+        # Score diversity (0 = all same family, 1 = diverse)
+        family_types = [has_gaussian, has_step, has_spline, has_oscillatory, has_piecewise]
+        diversity_score = sum(family_types) / 5.0
+        
+        if diversity_score < 0.4:
+            suggested_directions.append("Try completely different family from current one")
+        
+        # Suggest mutations based on what's missing
+        if not has_gaussian:
+            suggested_directions.append("Add Gaussian mixture component")
+        if not has_spline:
+            suggested_directions.append("Try B-spline basis with softplus constraints")
+        if not has_oscillatory:
+            suggested_directions.append("Add oscillatory term: (1 + α cos(βx)) * exp(-γ|x|)")
+        if not has_piecewise:
+            suggested_directions.append("Use piecewise-linear with optimized vertices")
+        
+        # Get current best score
+        best_c2 = ctx.best_score()
+        
+        return {
+            "best_function_characteristics": {
+                "has_gaussian": has_gaussian,
+                "has_step": has_step,
+                "has_spline": has_spline,
+                "has_oscillatory": has_oscillatory,
+                "has_piecewise": has_piecewise,
+            },
+            "diversity_score": float(diversity_score),
+            "suggested_directions": suggested_directions,
+            "current_best_c2": best_c2,
+            "note": "Use these directions to generate diverse candidates with generate_candidates"
+        }
+new_skills:
+- name: parallel-exploration-playbook
+  description: Execute parallel exploration across multiple function families with probe-driven filtering.
+  body: |
+    # Parallel Exploration Playbook for C₂ Maximization
+    
+    ## Why This Works
+    The step-function record (1.04199) is a LOCAL optimum. Different function families have different optima. By exploring families in PARALLEL, you maximize chances of finding a better global optimum.
+    
+    ## The 30-Probe Strategy
+    You have 30 full evaluations. Use them WISELY:
+    - 30 probes to filter 15+ candidates across families
+    - 3 evaluations on the best probe-scoring candidates
+    - Repeat until budget exhausted
+    
+    ## Iteration Loop (repeat 10-15 times per 30-probe cycle)
+    
+    ### Cycle Start: Diverse Generation
+    1. Call generate_candidates to get 3-5 proposals from DIFFERENT families:
+       - Gaussian mixtures: smooth multi-peaked functions
+       - B-spline basis: flexible control points with softplus
+       - Oscillatory decay: (1 + α cos(βx)) * exp(-γ|x|)
+       - Piecewise-linear: vertices with optimized heights
+       - Multi-level improved steps: asymmetric patterns
+    
+    2. Optionally call diversity_analyzer to ensure you're not stuck in one family
+    
+    ### Probe Phase
+    3. Call probe_solution for EVERY candidate (use all 30 probes across the cycle)
+    4. Rank by probe score
+    5. Discard any with probe score < 1.04199 (current best)
+    
+    ### Evaluate Phase
+    6. Select top 3 by probe score
+    7. Call evaluate_solution for each (uses 3 evaluations)
+    
+    ### Decision
+    8. If ANY evaluation beats 1.04199:
+       - That's your new champion!
+       - Call generate_candidates for fresh ideas (don't over-refine)
+       - Optionally refine the winner SLIGHTLY (one tiny mutation)
+    9. If NONE beat the record:
+       - Generate a NEW set from different families
+       - Try hybrids: "Gaussian with step edges", "oscillatory steps"
+       - Vary parameter ranges (wider oscillations, different decays)
+    
+    ## Key Principles
+    - PARALLEL > SEQUENTIAL: Don't spend 5+ iterations on one family
+    - PROBE FIRST: Never evaluate without probing
+    - DIVERSIFY: If diversity_analyzer shows low diversity, force new families
+    - HYBRIDIZE: Combine successful elements from different families
+    - QUICK DECISIONS: After 3 evaluations without improvement, generate new ideas
+tool_descriptions:
+  edit_solution: 'Edit the EVOLVE-BLOCK. Implement:
+  1. Tiny mutation: ±0.02 height, ±2% width (only on proven good functions)
+  2. New architecture: Gaussian mixture, B-spline, oscillatory, piecewise-linear
+  3. Hybrid: Combine families (e.g., "oscillatory step pattern")
+  Always use JAX mutability: f = f.at[start:end].set(value). Ensure f ≥ 0.'
+  evaluate_solution: 'Full evaluation. Budget: 30. Call ONLY after: probing all candidates, selecting top 3 by probe score. Never evaluate blindly.'
+  probe_solution: 'Approximate score on 10% subsample. 30 probes total. USE AGGRESSIVELY: probe all candidates before any full evaluation. Rank and filter by probe score.'
+  finish: 'Report best combined_score, function architecture (family name), and key innovation. Did you beat 1.04199? What function family worked best?'
+new_middlewares:
+- name: diversity_guard
+  hook: before_tool
+  description: Prevent over-concentration in one function family
+  implementation_py: |
+    def before_tool(hook_input):
+        tool = hook_input.get("tool_name", "")
+        if tool == "edit_solution":
+            code = hook_input.get("code", "")
+            # Check if code is just refining the same pattern
+            if "base_height" in code and "jnp.zeros" in code:
+                return "WARNING: You're refining a step pattern again. Have you tried DIFFERENT families (Gaussian, spline, oscillatory)? Use generate_candidates for diversity."
+        return None

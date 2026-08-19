@@ -1,0 +1,97 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are solving the Erdos minimum overlap problem: minimize max_k integral h(x)(1-h(x+k)) dx
+  for a step function h: [0,2] -> [0,1] with integral(h)=1.
+  
+  Current best bound: C5 <= 0.38092303510845016
+  Goal: Find h with c5_bound < 0.380923 (combined_score > 1.0).
+  
+  KEY INSIGHT: The seed optimizer uses gradient descent on latent space, which may get stuck in local minima. 
+  Instead of just tuning its hyperparameters, you should DIRECTLY CONSTRUCT diverse candidate step functions
+  and test them. The optimal h is likely a specific step-function shape, not a smooth sigmoid transformation.
+  
+  STRATEGY:
+  1. FIRST: Call construct_structured_init to generate 5-10 diverse step function candidates
+  2. Use probe_solution to quickly screen each candidate (check constraint satisfaction and approximate score)
+  3. Evaluate the top 3 candidates with evaluate_solution (this costs real eval budget)
+  4. If none improve, try editing the seed's _get_best_initialization() to add NEW structural patterns
+  5. If still no improvement, consider editing num_intervals (try 400, 1600, 3200) for coarser/finer discretization
+  6. Use ALL 30 evals strategically: probe many variants cheaply, evaluate only the best few
+  
+  DO NOT just tune hyperparameters - the seed optimizer is already configured. Focus on FINDING BETTER INITIAL SHAPES.
+  
+  Focus: Direct structural search with probe screening.
+skill_description: Direct structural search for step functions with probe-based screening and diverse candidate generation.
+skill_body: |
+  # Erdos Minimum Overlap - Direct Structural Search
+  
+  ## Problem Understanding
+  Find step function h: [0,2] -> [0,1] with integral(h)=1 that minimizes:
+  max_k ∫ h(x)(1-h(x+k)) dx
+  
+  Current best: C5 <= 0.380923 (need combined_score > 1.0)
+  
+  ## Why Direct Construction Works
+  The seed optimizer transforms latent vectors through sigmoid to get h, then optimizes.
+  But the optimal h might be a STEP FUNCTION with sharp transitions, not a smooth sigmoid.
+  We should CONSTRUCT diverse step-function shapes directly and test them.
+  
+  ## Strategy
+  
+  ### Phase 1: Direct Candidate Generation (Use probe_solution extensively)
+  1. Call construct_structured_init to generate 5-10 diverse step functions
+  2. For each candidate:
+     - Check integral constraint via probe (quick ~10s)
+     - If constraint satisfied, get approximate c5 score
+     - If constraint violated, discard
+  3. Track top 3 candidates by approximate score
+  
+  ### Phase 2: Full Evaluation (Budget: 30 evals total)
+  4. Call evaluate_solution on top 3 candidates
+  5. If ANY has combined_score > 1.0, SUCCESS
+  
+  ### Phase 3: If Phase 2 Fails
+  If no direct candidates beat seed:
+  1. Edit _get_best_initialization() to add MORE structural patterns:
+     - More bimodal patterns with different peak positions
+     - Triangular/trapezoidal step patterns
+     - Multi-peak patterns (3-4 peaks)
+     - Asymmetric patterns
+  2. Test these with the optimizer but with DIRECTED searches
+  
+  ### Phase 4: Structural Experiments
+  If still stuck, try:
+  - num_intervals = 400 (coarser, faster)
+  - num_intervals = 1600 (finer, more precise)
+  - Different penalty strengths to enforce integral=1 more strictly
+  
+  ## Success Criteria
+  - combined_score > 1.0 (c5_bound < 0.380923)
+  - If not achievable, document the best structural insight gained
+  
+  ## Key Tool: construct_structured_init
+  Generates step functions directly (not via latent optimization):
+  - Bimodal: two sharp peaks
+  - Triangular: three-level steps
+  - Multi-peak: 3-5 narrow peaks
+  - Golomb-like: optimal spacing patterns
+  All candidates satisfy sigmoid(h) -> [0,1] and we check integral(h)=1.
+tool_descriptions:
+  edit_solution: Modify EVOLVE-BLOCK to change hyperparameters or add new initialization patterns to _get_best_initialization().
+  evaluate_solution: Full evaluation, returns combined_score. Costs 1 eval from budget.
+  probe_solution: Quick ~10s check of constraint and approximate score. Separate budget of 30 probes. Use extensively to screen candidates.
+  finish: Submit when combined_score > 1.0 or after exhausting strategies.
+sampling:
+  temperature: 0.7
+  top_p: 0.8
+  top_k: 15
+  max_tokens: 10000
+agent:
+  max_iterations: 50
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 8000
+new_tools: []
+remove_tools: []
+new_skills: []
+new_middlewares: []

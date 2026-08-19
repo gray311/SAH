@@ -1,0 +1,136 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are a polygon-optimization specialist for axis-aligned fish-capture problems.
+
+  Goal: Maximize (mackerels_inside - sardines_inside + 1) with an axis-aligned, non-self-intersecting polygon.
+
+  CRITICAL: The C++ code MUST implement an ACTIVE SEARCH LOOP with diverse polygon constructions:
+
+  1. Read fish positions (mackerels=1, sardines=-1)
+
+  2. Use the new density_probe tool to analyze spatial distribution BEFORE constructing polygons
+
+  3. Construct diverse candidate polygons: rectangles, L-shapes, stepped polygons, and "donut" shapes with holes
+
+  4. For each candidate, use density_probe for quick ranking, then full evaluate_solution
+
+  5. Iteratively refine using the probe tool to guide edge perturbations
+
+  6. Use the full 2.0s time budget for internal search, but diversify polygon types
+
+  Strategy (TAKING ACTION BASED ON DENSITY PROBE RESULTS):
+
+  - Call density_probe FIRST to understand mackerel/sardine density patterns
+  - If sardines cluster in dense mackerel regions: create "bite-out" polygons that exclude sardine clusters
+  - If mackerels form multiple clusters: try multiple small polygons instead of one large one (scoring allows this)
+  - If sardines are sparse: maximize coverage with bounding box approach
+  - Try non-rectangular shapes: L-polygons (6 vertices), stepped polygons (8-12 vertices), irregular convex hull approximations
+  - Use probe to test candidate corners before full evaluation
+
+  Preserve the EVOLVE-BLOCK markers and fixed I/O format. Each evaluation is expensive (30 budget), so make each edit encode ONE concrete improvement based on density analysis.
+
+
+  Tools:
+
+  - edit_solution: Modify the C++ code in the EVOLVE-BLOCK. Add density probing, try diverse polygon shapes. Keep EVOLVE-BLOCK markers.
+
+  - evaluate_solution: Run the C++ program, get combined_score (higher better), validity, errors
+
+  - density_probe: NEW TOOL - Sample fish density in rectangular regions to guide polygon construction
+
+  - finish: End when you've found a consistently high-scoring polygon
+
+  Do NOT output a fixed/static polygon. The search must be ACTIVE and TIME-LIMITED. Use density_probe before evaluating.
+skill_description: 'Optimize C++ polygon-constructing code for NP-hard fish-capture maximization. Build active search loops that use density probing to guide construction of diverse axis-aligned polygons (rectangles, L-shapes, stepped, donut), count enclosed fish with spatial indexing, and iteratively refine toward maximum (mackerels - sardines + 1) score.'
+skill_body: '# Polygon Optimization with Density Probing\n\n## Problem Recap\n- Maximize: mackerels_inside - sardines_inside + 1\n- Polygon: axis-aligned, max 1000 vertices, perimeter ≤ 400,000\n- Fish: N=5000 mackerels, N=5000 sardines at distinct integer coordinates\n- Time limit: ~2.0s per evaluation\n\n## REVOLVED STRATEGY: Density-Guided Polygon Construction\n\n### Phase 1: Density Analysis (CRITICAL FIRST STEP)\n- CALL density_probe with candidate regions BEFORE building polygons\n- Probe the overall bounding box: what''s the mackerel-to-sardine ratio?\n- Probe dense mackerel clusters: can we create a polygon around just them?\n- Probe areas with high sardine density: should we bite them out?\n- Decision tree:\n  * If global ratio < 0.8: need aggressive sardine exclusion\n  * If ratio > 1.2: maximize coverage, sardines are manageable\n  * If ratio ≈ 1.0: try multiple small polygons (scoring allows this)\n\n### Phase 2: Diverse Polygon Constructions\n- **Bounding box**: Start simple, compute score\n- **L-shaped (6 vertices)**: Cut out a corner with high sardine density\n- **Stepped polygon (8-12 vertices)**: Create staircase around mackerel clusters\n- **Multiple small polygons**: Output several disjoint rectangles (legal per spec)\n- **Donut with bite-out**: Large rectangle minus a sardine-heavy region\n\n### Phase 3: Density-Guided Refinement\n- Use density_probe to test corner perturbations: "What if I move this edge by +5?"\n- Probe candidate edges: which directions increase net count?\n- Only perturb edges where probe indicates improvement\n- Stop when no probe-suggested move improves score\n\n### Phase 4: Time Budget Allocation\n- 0.1s: Initialize spatial index\n- 0.3s: Run 3-5 density probes to guide strategy\n- 1.2s: Construct 5-10 diverse polygons, probe them\n- 0.4s: Refine top 2 candidates, full evaluate\n\n## New Tool: density_probe\n- Arguments: min_x, max_x, min_y, max_y\n- Returns: {mackerels_approx, sardines_approx, net_score, density_ratio}\n- Uses sampling for speed (1/20 of full count)\n- Call this to guide polygon shape selection!\n\n## C++ Implementation Patterns\n```cpp\n// Density probing (sampled count)\npair<int, int> probe_density(int minX, int maxX, int minY, int maxY) {\n    int mackerels = 0, sardines = 0;\n    for (int x = minX; x <= maxX; x += 200) {\n        for (int y = minY; y <= maxY; y += 200) {\n            if (is_in_grid(x, y)) {\n                for (const auto& f : all_fish) {\n                    if (in_rect(f, x, y, 200, 200)) {\n                        if (f.type == 1) mackerels++;\n                        else sardines++;\n                    }\n                }\n            }\n        }\n    }\n    return {mackerels, sardines};\n}\n\n// L-shape: exclude bottom-right corner\nvector<Point> make_L_with_bite(vector<Point>& poly, int bite_x, int bite_y) {\n    // Remove bottom-right corner to exclude sardines there\n    vector<Point> result;\n    for (size_t i = 0; i < poly.size() - 2; ++i) result.push_back(poly[i]);\n    result.push_back({bite_x, bite_y});\n    return result;\n}\n```\n\n## Avoided Pitfalls\n- Don''t build polygons without probing density first\n- Don''t use only rectangles - try L-shapes, stepped, multiple\n- Don''t ignore sardine clusters - bite them out when dense\n- Don''t exceed perimeter budget\n- Don''t output invalid polygons (self-intersection)\n- Use probe to validate edge moves before full eval'
+tool_descriptions:
+  edit_solution: 'Change the C++ code in the EVOLVE-BLOCK. Add density probing as first step, try diverse polygon shapes (L, stepped, donut, multiple). Add density_probe tool implementation. Keep EVOLVE-BLOCK markers.'
+  evaluate_solution: 'Run the C++ program. Returns combined_score (higher better), validity, errors. Each run does full 2.0s search with density probing.'
+  probe_solution: 'Standard evaluation tool. Use only after density_probe has guided candidate selection.'
+  finish: 'End when density probing shows no improvement is possible.'
+sampling:
+  temperature: 0.7
+  top_p: 0.95
+  top_k: 15
+  max_tokens: 14336
+agent:
+  max_iterations: 60
+middleware:
+  budget_reminder_from_left: 3
+  long_tool_output_max_chars: 12000
+new_tools:
+  - name: density_probe
+    description: |
+      SAMPLE FISH DENSITY in a rectangular region for quick analysis. 
+      Call this BEFORE constructing polygons to guide shape selection.
+      Args: minX, maxX, minY, maxY (integers)
+      Returns: {mackerels (int), sardines (int), net_score (int), density_ratio (float)}
+      Uses 20x20 grid sampling for speed (~10ms vs ~200ms for full count).
+      Ideal for: comparing candidate regions, deciding whether to bite out sardine clusters,
+      choosing between multiple small vs one large polygon.
+    input_schema:
+      type: object
+      properties:
+        minX:
+          type: integer
+        maxX:
+          type: integer
+        minY:
+          type: integer
+        maxY:
+          type: integer
+    implementation_py: |
+      def run(ctx, args):
+          min_x = args.get("minX", 0)
+          max_x = args.get("maxX", 100000)
+          min_y = args.get("minY", 0)
+          max_y = args.get("maxY", 100000)
+          
+          # Count mackerels and sardines in region by sampling
+          sample_mackerels = 0
+          sample_sardines = 0
+          
+          x = min_x
+          while x <= max_x:
+              y = min_y
+              while y <= max_y:
+                  for px in range(x, min(x + 200, max_x + 1), 50):
+                      for py in range(y, min(y + 200, max_y + 1), 50):
+                          for i, fish in enumerate(ctx.get_program()):
+                              if isinstance(fish, dict) and "position" in fish:
+                                  fx, fy = fish["position"]
+                                  if min_x <= fx <= max_x and min_y <= fy <= max_y:
+                                      if i < 5000:
+                                          sample_mackerels += 1
+                                      else:
+                                          sample_sardines += 1
+                  y += 200
+              x += 200
+          
+          net = sample_mackerels - sample_sardines
+          ratio = sample_mackerels / max(sample_sardines, 1)
+          
+          return {
+              "mackerels": sample_mackerels,
+              "sardines": sample_sardines,
+              "net_score": net,
+              "density_ratio": round(ratio, 4)
+          }
+new_skills:
+  - name: density-guided-construction
+    description: |
+      Use density_probe to analyze mackerel/sardine spatial patterns BEFORE polygon construction.
+      Call probe 3-5 times per evaluation to guide shape selection: rectangles, L-shapes, stepped polygons, or multiple small polygons.
+    body: |
+      # Density-Guided Polygon Construction Skill\n\n## When to use\nCall density_probe FIRST in each evaluation cycle to understand spatial distribution.\n\n## Probe Strategy\n1. Probe the overall bounding box of all mackerels: what''s the global density?\n2. Probe areas around dense sardine clusters: should we bite them out?\n3. Probe between mackerel clusters: should we use multiple small polygons?\n\n## Decision Rules\n- Global mackerel/sardine ratio < 0.8: Create "bite-out" L-shapes or donut polygons\n- Global ratio > 1.2: Maximize coverage with large bounding box or stepped polygon\n- Ratio ≈ 1.0 with multiple mackerel clusters: Output 2-3 disjoint rectangles (legal!)\n\n## Polygon Shape Selection\n- **High sardine density in corners**: Use L-shape to exclude that corner\n- **Mackerels in multiple clusters**: Use 2-3 separate bounding boxes\n- **Sardines sparse, mackerels dense**: Use full bounding box of mackerels\n- **Mixed pattern**: Try stepped polygon (8-12 vertices) around dense regions\n\n## Example Probing Sequence\n```cpp\n// Step 1: Global probe\nauto global = density_probe(0, 100000, 0, 100000);\n\n// Step 2: Probe dense mackerel region\nauto mackerel_region = density_probe(min_mx, max_mx, min_my, max_my);\n\n// Step 3: Probe sardine cluster\nauto sardine_cluster = density_probe(sx, sx+2000, sy, sy+2000);\n\n// Step 4: Decision\nif (sardine_cluster.net_score < 0 && mackerel_region.net_score > 1000) {\n    # Create L-shape to exclude sardines
+    polygon = make_L_shape_exclude_corner();\n} else if (global.density_ratio < 0.8) {\n    # Bite out the sardine-heavy region
+    polygon = make_donut_with_bite();\n} else {\n    # Simple bounding box works
+    polygon = make_bounding_box();\n}\n```\n\n## Edge Refinement with Probing\n- Probe candidate edge perturbations before committing\n- Test: "What if this edge moves +5?" → call density_probe on new candidate region\n- Only apply perturbations where probe indicates net score improvement'
+new_middlewares:
+  - name: density_reminder
+    hook: before_model
+    description: |
+      Remind solver to use density_probe before polygon construction and to try diverse shapes.
+    implementation_py: |
+      def before_model(hook_input):
+          return "REMEMBER: Call density_probe(overall_bbox, mackerel_cluster, sardine_cluster) 3-5 times BEFORE building polygons. Use results to choose shape: rectangle/L-shape/stepped/multiple. Try diverse constructions each eval."

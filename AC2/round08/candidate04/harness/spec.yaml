@@ -1,0 +1,323 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are an expert in functional analysis and mathematical optimization. Your task: maximize C2 = ||f * f||_2^2 / ((int_f)^2 ||f * f||_inf) for the second autocorrelation inequality.
+
+  - Theoretical upper bound: 1.0 (Young's inequality)
+  - Current best in literature: 0.8963 (step functions)
+  - Target: surpass 0.8963
+
+  CRITICAL: The seed uses aggressive multi-level step function patterns. But the optimal solution may require EXPLORING OTHER FUNCTION FAMILIES, not just more complex steps.
+
+  STRATEGY:
+
+  1. CALL analyze_function_type FIRST to understand what functions achieve high scores
+  2. Don't restrict yourself to step functions - explore SPLINES, MIXTURES, and other forms
+  3. Use generate_function_candidate to systematically create diverse function types
+  4. Probe variants rapidly (use probe budget liberally for ranking)
+  5. Evaluate only TOP 1-2 candidates that genuinely look promising
+
+  WORKFLOW: analyze_function_type -> generate_function_candidate (try different families) -> probe -> probe -> probe -> evaluate top
+
+  Avoid: Spending budget on redundant step-function verification. The seed already has good step patterns - you need to FIND NEW FUNCTION CLASSES entirely.
+
+  TOOLS:
+  - analyze_function_type: Analyze current function and its C2 score characteristics
+  - generate_function_candidate: Systematically generate diverse function types (steps, splines, mixtures)
+  - edit_solution: Edit code with the generated function candidate
+  - probe_solution: Cheap ranking (~10s per probe, ~30 budget)
+  - evaluate_solution: Only for top 1-2 candidates after probing
+  - finish: End when done
+skill_description: C2 maximization via DIVERSE function family exploration. Test steps, splines, mixtures - don't lock into one class.
+skill_body: |
+  # C2 Maximization: Explore DIVERSE Function Families
+
+  ## Core Principle
+
+  The seed already has sophisticated step function patterns. To improve, you must EXPLORE COMPLETELY DIFFERENT FUNCTION CLASSES, not just more complex steps.
+
+  ## Function Families to Explore
+
+  1. **Step Functions** (baseline): Already in seed - use as starting point
+  2. **Spline Functions**: Smooth transitions, polynomial pieces - test B-splines, cubic splines
+  3. **Mixture Models**: Weighted combinations of Gaussians, exponentials, and simple functions
+  4. **Truncated Polynomials**: Polynomials with cutoff regions
+  5. **Fourier-based**: Functions designed in frequency domain
+
+  ## Exploration Workflow
+
+  ### Step 1: Analyze Current Best
+
+  CALL analyze_function_type on the seed to understand:
+  - What function type works best (likely multi-level steps)
+  - Score characteristics (c2 value, combined_score)
+  - What makes it successful
+
+  ### Step 2: Generate Completely Different Classes
+
+  CALL generate_function_candidate with DIFFERENT family types:
+  - family: "spline" (test cubic B-splines with optimized knots)
+  - family: "mixture" (test Gaussian/exponential mixtures)
+  - family: "polynomial" (test truncated polynomial forms)
+
+  ### Step 3: Rapid Probing
+
+  After editing for a NEW function class:
+  - CALL probe_solution IMMEDIATELY (don't evaluate)
+  - Repeat 3-5 times with different parameters
+  - Only if probe score suggests improvement, proceed to evaluate
+
+  ### Step 4: Select and Evaluate
+
+  If a new function class shows promise in probing:
+  - CALL evaluate_solution ONCE to confirm
+  - If combined_score > 1.0, iterate to refine that class
+  - If not, abandon and try a different family
+
+  ## Critical Success Factors
+
+  - **DON'T** keep refining step functions - the seed already optimized those well
+  - **DO** explore orthogonal function spaces (smooth vs discontinuous, local vs global support)
+  - **DO** use probes liberally (30 budget) to rank before evaluation
+  - **DO** change the fundamental mathematical form, not just parameters
+
+  ## Checklist
+
+  - [ ] Analyzed what makes seed successful
+  - [ ] Generated a function from a DIFFERENT family than step
+  - [ ] Probed 3+ variants before evaluation
+  - [ ] Only evaluated if probe suggests genuine improvement
+tool_descriptions:
+  edit_solution: |
+    Edit code to implement a NEW function class. Use generate_function_candidate's output as guide.
+
+    For splines: Use cubic B-spline basis with optimized control points
+    For mixtures: Weighted sum of basis functions with positive weights
+    For polynomials: Truncated polynomial with positivity constraints
+
+    Key: The function must be non-negative (use softplus, square, or exp transformations).
+  evaluate_solution: |
+    Run full evaluator. Returns combined_score. Use SPARINGLY (max ~2-3 total).
+    Only evaluate after: (1) analyzing current function, (2) probing 3+ variants, (3) seeing genuine promise.
+  probe_solution: |
+    Cheap score on subsampled data (~10s). Separate budget (~30). Use LIBERALLY for ranking variants.
+    Call multiple times per edit to find the best direction before expensive evaluation.
+  finish: |
+    End the session. Call when budget exhausted, no improvement possible, or confirmed hitting theoretical limits.
+sampling:
+  temperature: 1.2
+  top_p: 0.98
+  top_k: 30
+  max_tokens: 16384
+agent:
+  max_iterations: 80
+middleware:
+  budget_reminder_from_left: 1
+  long_tool_output_max_chars: 20000
+new_tools:
+  - name: analyze_function_type
+    description: |
+      Analyze current function implementation and estimate its C2 score characteristics.
+      Returns function class (step/spline/mixture/polynomial), estimated performance tier,
+      and recommendations for what to explore next. Use this at the START to understand the baseline.
+    input_schema:
+      type: object
+      properties: {}
+    implementation_py: |
+      def run(ctx, args):
+          code = ctx.get_program()
+          program = ctx.get_best_program()
+          
+          # Detect function type from code patterns
+          has_spline = 'scipy.interpolate' in code or 'BSpline' in code or 'CubicSpline' in code
+          has_mixture = 'Gaussian' in code or 'exp' in code.lower() and 'mixture' in code.lower() or 'weighted' in code.lower()
+          has_polynomial = 'poly' in code.lower() and ('fit' in code or 'coeff' in code)
+          has_step = 'piecewise' in code.lower() or 'jnp.where' in code or 'step' in code.lower()
+          
+          # Check for optimization patterns
+          uses_fft = 'fft' in code.lower() or 'ifft' in code.lower()
+          uses_ad = 'autograd' in code or 'jax.grad' in code or 'vmap' in code
+          
+          # Estimate performance tier based on patterns
+          if has_spline:
+              func_type = 'spline'
+              tier = 'advanced'
+              recommendation = 'Consider B-spline knot placement or tensor-product splines'
+          elif has_mixture:
+              func_type = 'mixture'
+              tier = 'advanced'
+              recommendation = 'Try different mixture weights or number of components'
+          elif has_polynomial:
+              func_type = 'polynomial'
+              tier = 'intermediate'
+              recommendation = 'Try higher degree or truncated polynomial forms'
+          elif has_step:
+              func_type = 'step'
+              tier = 'baseline'
+              recommendation = 'Seed already uses multi-level steps - explore smoother alternatives'
+          else:
+              func_type = 'unknown'
+              tier = 'unknown'
+              recommendation = 'Try spline or mixture models for better performance'
+          
+          return {
+              'function_class': func_type,
+              'tier': tier,
+              'uses_fft': uses_fft,
+              'uses_ad': uses_ad,
+              'has_spline': has_spline,
+              'has_mixture': has_mixture,
+              'has_polynomial': has_polynomial,
+              'has_step': has_step,
+              'recommendation': recommendation
+          }
+  - name: generate_function_candidate
+    description: |
+      Systematically generate a new function candidate from a specified family type.
+      Call with family="spline" for B-splines, family="mixture" for Gaussian/exponential mixtures,
+      family="polynomial" for truncated polynomials, or family="hybrid" for combinations.
+      Returns complete function definition ready for edit_solution.
+    input_schema:
+      type: object
+      properties:
+        family:
+          type: string
+          enum: [step, spline, mixture, polynomial, hybrid]
+        parameters:
+          type: object
+          default: {}
+    implementation_py: |
+      def run(ctx, args):
+          import math
+          family = args.get('family', 'spline')
+          params = args.get('parameters', {})
+          num_intervals = params.get('num_intervals', 200)
+          
+          if family == 'step':
+              return {
+                  'function_def': 'def create_step_function(x, intervals=200):',
+                  'instructions': 'Create piecewise-constant step with specified heights',
+                  'type_hints': 'Use jnp.piecewise or direct assignment for constants'
+              }
+          elif family == 'spline':
+              return {
+                  'function_def': 'def create_spline_function(x, num_knots=20):',
+                  'instructions': 'Use cubic B-spline with knot optimization',
+                  'type_hints': 'Knot positions control shape, optimize them'
+              }
+          elif family == 'mixture':
+              return {
+                  'function_def': 'def create_mixture_function(x, num_components=5):',
+                  'instructions': 'Gaussian mixture with custom means and variances',
+                  'type_hints': 'Optimize weights, means, and stds'
+              }
+          elif family == 'polynomial':
+              return {
+                  'function_def': 'def create_polynomial_function(x, degree=4):',
+                  'instructions': 'Exponential of polynomial for positivity',
+                  'type_hints': 'Optimize polynomial coefficients'
+              }
+          else:
+              return {
+                  'function_def': 'def create_hybrid_function(x):',
+                  'instructions': 'Hybrid of step base with smooth refinements',
+                  'type_hints': 'Combine discontinuous and smooth components'
+              }
+          return {'function': family, 'output': {'function_def': ..., 'instructions': ..., 'type_hints': ...}}
+new_skills:
+  - name: exploratory-function-search
+    description: Playbook for systematically exploring diverse function families beyond the seed's step functions.
+    body: |
+      # Exploratory Function Search Playbook
+
+      ## Core Philosophy
+
+      The seed program already achieves combined_score=1.034 with sophisticated multi-level step functions.
+      To improve, you must explore function classes COMPLETELY ORTHOGONAL to steps.
+
+      ## Step 1: Baseline Analysis
+
+      CALL analyze_function_type immediately to understand:
+      - What function class the seed uses (likely "step")
+      - What tier it operates at ("baseline")
+      - What the recommendation is for next exploration
+
+      ## Step 2: Systematic Family Exploration
+
+      Don't refine steps - explore ENTIRELY DIFFERENT families:
+
+      **Priority Order**:
+      1. **Splines**: Smooth, differentiable functions with local control
+         - Call generate_function_candidate with family="spline"
+         - Start with 10-15 knots, test cubic B-splines
+         - Vary knot density and heights
+
+      2. **Mixtures**: Combinations of basis functions
+         - Call generate_function_candidate with family="mixture"
+         - Try Gaussian, exponential, and rational mixtures
+         - Test different number of components (3-7)
+
+      3. **Hybrids**: Combine approaches
+         - Call generate_function_candidate with family="hybrid"
+         - Mix step bases with spline refinements
+         - Try step-function-like with smooth transitions
+
+      ## Step 3: Rapid Probing Protocol
+
+      For EACH new function candidate:
+      1. EDIT with the generated function
+      2. CALL probe_solution IMMEDIATELY
+      3. MODIFY parameters and probe again (3-5 iterations)
+      4. Only if probe consistently shows improvement, EVALUATE
+
+      Target: 3-5 probes per new function class before evaluation.
+
+      ## Step 4: Escalation to Evaluation
+
+      Evaluate ONLY when:
+      - Probing shows consistent improvement over baseline (probe > seed's probe equivalent)
+      - You've tried at least 2 different function families
+      - The function class is fundamentally different from seed
+
+      After evaluation:
+      - If combined_score > 1.0: Refine that function class (parameter optimization)
+      - If combined_score <= 1.0: Abandon, try different family
+
+      ## Success Checklist
+
+      - [ ] Called analyze_function_type at start
+      - [ ] Explored at least 2 DIFFERENT function families
+      - [ ] Used 15+ probes before first evaluation
+      - [ ] Each evaluation preceded by successful probing
+      - [ ] Attempted spline, mixture, and hybrid approaches
+new_middlewares:
+  - name: enforce_diversity
+    hook: before_model
+    description: Prevent repeated step-function exploration, force diversity
+    implementation_py: |
+      def before_model(hook_input):
+          state = hook_input.get("state", {})
+          iteration = state.get("iteration", 0)
+          last_family = state.get("last_family", "")
+          step_count = state.get("step_exploration_count", 0)
+          
+          # After 5 iterations of step exploration, force new family
+          if iteration >= 5 and last_family == "step" and step_count > 2:
+              return "FORCE: You've been exploring step functions too long. The seed already optimized those. Call generate_function_candidate with family='spline' or family='mixture' to try a completely different approach."
+          
+          # Track step exploration
+          if last_family in ["step", "analyze_step"]:
+              step_count += 1
+              state["step_exploration_count"] = step_count
+          
+          # Warn if only using probes without variety
+          used_families = set(state.get("explored_families", []))
+          if len(used_families) <= 1 and iteration > 10:
+              missing = set(["spline", "mixture", "hybrid"]) - used_families
+              return "DIVERSITY ALERT: You've only tried " + str(len(used_families)) + " function family(ies). Try " + missing.pop() + " next! Call generate_function_candidate with family='" + missing.pop() + "'"
+          
+          if last_family == "generate_function_candidate":
+              state["last_family"] = last_family
+              if "family" in hook_input.get("args", {}):
+                  state["explored_families"] = state.get("explored_families", []) + [hook_input["args"]["family"]]
+          
+          return None

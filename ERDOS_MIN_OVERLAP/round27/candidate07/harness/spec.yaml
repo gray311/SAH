@@ -1,0 +1,117 @@
+schema: h2spec/1.0
+system_prompt: |
+  Erdos minimum overlap problem (C5): Find h: [0,2]->[0,1] minimizing max_k integral h(x)(1-h(x+k))dx.
+
+  CONSTRAINT: integral(h) = 1 exactly. h values in [0,1].
+
+  Current best: C5 <= 0.38092303510845016 (combined_score = 1.0).
+
+  GOAL: Find h achieving c5_bound < 0.38092303510845016 (combined_score > 1.0).
+
+  STRATEGY: The seed program uses 15 pattern initializations but trains only one at a time.
+  FAILED APPROACHES: Single hyperparameter sweeps waste budget; the optimizer converges to poor local optima.
+  
+  NEW APPROACH: 1. Generate diverse initializations using seed patterns 12 (Golomb), 14 (tri-modal), 5 (bipartite)
+     with DIFFERENT SEEDS (0, 1, 2, 3, 4) - this explores 15 initializations per run
+  2. If all have c5_bound >= 0.385, INCREASE penalty_strength to 120 (enforce integral=1 better)
+  3. If still stuck, INCREASE num_intervals to 1600 (finer grid may capture better structure)
+  4. NEVER use num_restarts=1 with short training - use num_restarts=3 with num_steps=100000 for best candidate
+  
+  KEY INSIGHT: The seed has 15 pattern variations that the harness IGNORES. Focus on making the executor
+  generate multiple diverse initializations in one evaluation rather than tweaking hyperparameters.
+skill_description: |
+  Diverse initialization search for Erdos C5 minimization. Focus on exploring the 15 seed patterns
+  with different random seeds rather than hyperparameter sweeps. Use generate_ready_candidates for pre-scorings.
+  Increase penalty_strength if integral constraint violated. Increase num_intervals for finer search.
+skill_body: |
+  # Diverse Initialization Search for Erdos Problem
+  
+  ## Core Strategy
+  
+  The seed program has 15 pattern-based initializations (patterns 0-14). The current harness wastes budget testing single hyperparameter changes.
+  
+  ## Correct Approach:
+  
+  ### Step 1: Leverage Existing Pattern Diversity
+  
+  The seed's `_get_best_initialization` method tries 15 patterns (Golomb ruler, bipartite, tri-modal, random, etc.).
+  
+  DO THIS INSTEAD: Modify seed to use ALL 15 patterns across different seeds:
+  For seed in [0, 1, 2, 3, 4]:
+      For pattern in [12, 14, 5, 0, 8, 9]:  # Golomb, tri-modal, bipartite, random variants
+          latent = _get_best_initialization(seed + pattern)
+          h = jax.nn.sigmoid(latent)
+          Check integral, train, evaluate
+  
+  This gives 6 * 5 = 30 diverse initializations per evaluation.
+  
+  ### Step 2: Tool-Based Candidate Generation
+  
+  **Use generate_ready_candidates:** This tool generates 3 pre-scorings (Golomb, Bipartite, Tri-modal) with computed c5_bound.
+  - If c5_bound < 0.375, call evaluate_solution
+  - If c5_bound >= 0.375, discard (waste of budget)
+  
+  ### Step 3: Escalation Strategy
+  
+  If diverse initialization fails (all c5_bound > 0.385):
+  
+  1. Increase penalty_strength to 120 - Current seed uses 60, which may not enforce integral=1 tightly
+  2. Increase num_intervals to 1600 - Finer grid captures more structure
+  3. Use num_steps=100000 - Longer training from better initializations
+  
+  ## Workflow
+  
+  1. Call generate_ready_candidates once
+  2. Evaluate candidates with c5_bound < 0.375
+  3. If no improvement, edit seed to use patterns 12, 14, 5, 0, 8 with seeds 0,1,2,3,4
+  4. Use num_restarts=3, num_steps=100000, penalty_strength=120
+  5. If still no progress, increase num_intervals to 1600
+  
+  ## Why This Works
+  
+  - Explores 15+ diverse initializations (vs seed's single best)
+  - Uses pre-scorings to avoid wasting evals on bad candidates
+  - Enforces integral constraint more strictly if needed
+  - Searches finer grid if structure is missed
+tool_descriptions:
+  edit_solution: |
+    Edit seed to use MULTIPLE pattern initializations in ONE evaluation.
+  
+    CURRENT FAILURE: Testing num_restarts=1 with single pattern wastes diversity.
+  
+    CORRECT EDIT: Modify _get_best_initialization to TRY ALL patterns, not just return best:
+  
+    For pattern in [12, 14, 5, 0, 8, 9]:  # Key patterns
+        latent = _get_best_initialization(seed + pattern)
+        h = jax.nn.sigmoid(latent)
+        Train each latent separately, evaluate all
+  
+    Use num_restarts=3, num_steps=100000 for each candidate.
+  evaluate_solution: |
+    Full 59000-step optimization with sigmoid initialization.
+  
+    Returns combined_score = 0.38092303510845016 / c5_bound.
+  
+    combined_score > 1.0 means c5_bound < 0.380923 (new record).
+  
+    Only call AFTER pre-screening with probe_solution or generate_ready_candidates.
+  probe_solution: |
+    Fast approximate evaluation (500 intervals). Use to screen candidate initializations.
+  
+    Budget: 30 probes. Call BEFORE evaluate_solution.
+  
+    Threshold: c5_bound < 0.375 worth of full eval; c5_bound >= 0.385 discard.
+  finish: |
+    Submit when combined_score > 1.0 (c5_bound < 0.38092303510845016).
+sampling:
+  temperature: 0.3
+  top_p: 0.85
+  top_k: 10
+  max_tokens: 8000
+agent:
+  max_iterations: 15
+middleware:
+  budget_reminder_from_left: 3
+  long_tool_output_max_chars: 8000
+new_tools: []
+new_skills: []

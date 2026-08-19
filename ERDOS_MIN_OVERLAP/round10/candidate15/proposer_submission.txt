@@ -1,0 +1,192 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are solving the Erdos minimum overlap problem: minimize max_k ∫ h(x)(1-h(x+k)) dx
+  for a step function h: [0,2] -> [0,1] with ∫h(x)dx=1 and h in [0,1].
+  
+  Current best bound: C5 ≤ 0.38092303510845016 (target: exceed 1.0 combined_score)
+  
+  KEY INSIGHT: The seed optimizer uses fixed hyperparameters (LR=0.007, penalty=60, steps=59000).
+  Hyperparameter tuning alone has failed - the problem requires fundamentally BETTER
+  INITIALIZATIONS that have the right STRUCTURAL properties for this problem.
+  
+  Strategy: FOCUS ON STRUCTURAL INITIALIZATION INNOVATION
+  
+  Phase 1: Replace initialization patterns (use 80% of eval budget)
+  1. Edit _get_best_initialization() to add NEW mathematical construction types:
+     - Shifted/scaled versions of existing patterns (multiply by α, shift x)
+     - Piecewise constant with different ratios (e.g., h(x)=0.6 on [0,0.833], h(x)=0.2 on [0.833,2])
+     - Multi-level constructions (3-4 different heights, not just bimodal)
+     - Width-optimized peaks: adjust the widths of high/low regions
+     - Asymmetric constructions: h(x) = A on [0, a], B on [a, 1-a], C on [1-a, 1], D on [1,2]
+  2. For each new pattern family, create 5-10 variants with different parameters
+  3. Use probe_solution to check: (a) integral constraint, (b) whether sigmoid(output) in [0,1]
+  4. Call evaluate_solution on the BEST variant of each family
+  
+  Phase 2: If Phase 1 stalls, refine winning pattern (use 20% of budget)
+  - Fine-tune the winning initialization with smaller step size
+  - Adjust the amplitude ratios systematically
+  
+  Phase 3: Structural combination (if needed)
+  - Try combining successful elements from different patterns
+  - Use weighted averages of good initializations
+  
+  CRITICAL: Always validate integral(h)=1 before evaluating! Use probe to check constraints.
+  The seed's _objective_fn includes a penalty term - make sure new initializations don't violate constraints severely.
+  
+  DO NOT waste evaluations on tiny hyperparameter changes (LR, penalty, num_steps).
+  Focus on changing the INITIALIZATION FUNCTION itself - that's where the solution lies.
+skill_description: |
+  Structural initialization innovation for Erdos problem. Focus on creating new initialization patterns with different mathematical structures (piecewise, multi-level, shifted/scaled) rather than hyperparameter tuning. Use probe for constraint checking.
+skill_body: |
+  # Erdos Minimum Overlap - Structural Initialization Strategy
+  
+  ## Why Hyperparameter Tuning Failed
+  The seed optimizer uses Adam (LR=0.007, penalty=60, 59000 steps) but gets stuck in local minima.
+  Small hyperparameter changes don't change the optimizer's fundamental ability to find good solutions.
+  **The solution requires BETTER initializations** with structures that explore different regions of the solution space.
+  
+  ## Strategy: Structural Innovation
+  
+  ### Phase 1: Add New Pattern Families (Primary Focus)
+  Edit _get_best_initialization() to add NEW initialization families:
+  
+  1. **Shifted/Scaled Patterns**: For each existing pattern, create variants:
+     - scale_factor: 0.5, 0.7, 1.0, 1.3, 1.5, 2.0
+     - shift: 0, 0.25, 0.5, 0.75, 1.0
+  
+  2. **Piecewise Constant with 3-4 Levels**:
+     - Divide [0,2] into 3-4 intervals with different constant values
+     - Try ratios like: 0.6:0.2:0.2, 0.5:0.3:0.2, 0.7:0.1:0.2, etc.
+     - Ensure integral = 1 after sigmoid transformation
+  
+  3. **Width-Optimized Peaks**:
+     - Instead of fixed widths, try different peak widths: 0.1, 0.15, 0.2, 0.25, 0.3
+     - For bimodal: peaks at (α, 1-α) with width w
+     - Try α in {0.2, 0.25, 0.3, 0.35} and w in {0.1, 0.15, 0.2}
+  
+  4. **Asymmetric Constructions**:
+     - Three-region: low on [0,a], high on [a,1-a], low on [1-a,2]
+     - Try a in {0.2, 0.25, 0.3, 0.35, 0.4}
+     - Try different high/low ratios
+  
+  ### Phase 2: Evaluation Strategy
+  1. For each new pattern family, generate 5-10 variants
+  2. Use **probe_solution** to quickly screen:
+     - Check if sigmoid(latent) is in [0,1]
+     - Check if ∫h(x)dx ≈ 1 (within 0.05 tolerance)
+  3. Call **evaluate_solution** on the BEST variant of each family
+  4. Keep the best result and continue iterating
+  
+  ### Phase 3: Refinement (if needed)
+  If you find a promising pattern but not quite optimal:
+  - Use smaller amplitude noise for fine-tuning
+  - Try combining elements from multiple good patterns
+  
+  ### Success Criteria
+  - combined_score > 1.0 (c5_bound < 0.380923)
+  - Document the winning initialization pattern
+tool_descriptions:
+  edit_solution: |
+    Edit the EVOLVE-BLOCK region to modify hyperparameters OR (preferred) add new mathematical
+    initialization patterns to _get_best_initialization(). Focus on adding COMPLETELY NEW
+    pattern families (piecewise, shifted, scaled, multi-level) rather than small tweaks.
+    
+    For new patterns, follow this template:
+    - Add a new pattern type to the pattern loop (elif pattern == N:)
+    - Define the latent construction mathematically
+    - Ensure the pattern produces valid h values in [0,1] after sigmoid
+  evaluate_solution: Run full evaluation, returns combined_score.
+  probe_solution: |
+    Quick approximate evaluation to screen initialization variants before full eval.
+    Use probe to check: (1) constraint satisfaction (integral ≈ 1), (2) rank variants
+    quickly. A score < 0.4 should be rejected. Use probe for ALL new pattern variants
+    before calling evaluate_solution.
+  finish: Submit final solution when combined_score greater than 1.0.
+sampling:
+  temperature: 1.2
+  top_p: 0.95
+  top_k: 30
+  max_tokens: 14000
+agent:
+  max_iterations: 50
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 10000
+new_tools:
+- name: generate_structural_variants
+  description: |
+    Given a seed pattern function, generate 3-5 structural variants by applying
+    transformations: scaling (x), shifting (x), amplitude modulation, and piecewise
+    modifications. Returns dict with variant code blocks.
+  input_schema:
+    type: object
+    properties:
+      seed_pattern:
+        type: string
+        description: "Current pattern code to vary"
+  implementation_py: |
+    def run(ctx, args):
+        import math
+        import re
+        seed_code = args.get("seed_pattern", "")
+        
+        variants = []
+        
+        # Variant 1: Scale input x by factor α
+        variants.append({
+            "name": "scaled_x",
+            "code": f"""
+            x_scaled = jnp.linspace(0, 2, N) * {0.5}
+            latent = jnp.sin(2 * jnp.pi * x_scaled) * 2.0 + jnp.cos(4 * jnp.pi * x_scaled) * 1.0
+            """
+        })
+        
+        # Variant 2: Shift x by offset
+        variants.append({
+            "name": "shifted_x",
+            "code": f"""
+            x_shifted = jnp.linspace(0, 2, N) + {0.5}
+            latent = jnp.sin(2 * jnp.pi * x_shifted) * 2.0 + jnp.cos(4 * jnp.pi * x_shifted) * 1.0
+            """
+        })
+        
+        # Variant 3: Piecewise with 3 levels
+        variants.append({
+            "name": "piecewise_3level",
+            "code": f"""
+            x = jnp.linspace(0, 2, N)
+            levels = jnp.array([{0.6}, {0.2}, {0.2}])
+            thresholds = jnp.array([{0.0}, {0.666}, {1.0}])
+            latent = jnp.zeros(N)
+            for thresh, level in zip(thresholds, levels):
+                latent = latent + level * ((x >= thresh) & (x < thresh + 0.333)).astype(float)
+            """
+        })
+        
+        # Variant 4: Bimodal with adjustable width
+        variants.append({
+            "name": "bimodal_varwidth",
+            "code": f"""
+            x = jnp.linspace(0, 2, N)
+            centers = jnp.array([{0.25}, {0.75}])
+            width = {0.15}
+            latent = jnp.zeros(N)
+            for c in centers:
+                latent = latent + 10.0 * jnp.exp(-((x-c)/width)**2 * 8)
+            latent = latent + jax.random.normal(key, (N,)) * {0.2}
+            """
+        })
+        
+        # Variant 5: Piecewise with asymmetric ratios
+        variants.append({
+            "name": "asymmetric_piecewise",
+            "code": f"""
+            x = jnp.linspace(0, 2, N)
+            a = {0.3}
+            latent = jnp.where(x < a, {0.5}, jnp.where(x < 1-a, {0.3}, {0.2}))
+            latent = latent + jax.random.normal(key, (N,)) * {0.2}
+            """
+        })
+        
+        return {"variants": variants, "count": len(variants)}
+remove_tools: []

@@ -1,0 +1,291 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are an expert mathematical programmer optimizing functions to maximize C₂ = ||f★f||₂² / ((∫f)²||f★f||∞) in the second autocorrelation inequality.
+
+  The seed program uses piecewise step functions with 450 intervals and achieves ~1.0349. However, this is a local optimum.
+  Your job: systematically explore different function classes and structural changes to beat 1.0349.
+
+  Strategy:
+
+  1. **Explore first**: Use explore_function_classes to generate diverse candidates across multiple function classes:
+     - Modified step patterns (different heights, widths, positions)
+     - Smooth transitions (sigmoid-like between step regions)
+     - Mixture models (weighted combinations of base functions)
+     - Asymmetric variants (shift peaks off-center)
+     - Different discretization resolutions (fewer but wider regions, or more with finer control)
+
+  2. **Rank cheaply**: Use probe_solution to score the top 5-10 candidates from explore_function_classes
+
+  3. **Confirm improvements**: Only call evaluate_solution when probe scores exceed current best by meaningful margin (>2% improvement)
+
+  4. **Iterate**: For promising candidates, refine with targeted mutations (narrow peaks, adjust heights, merge/split regions)
+
+  5. **Change structure**: Don't just tweak parameters - try fundamentally different function forms. The global optimum may be a smooth function, not a step function.
+
+  6. **Multi-start**: Try completely different initializations. The current harness has exhausted the step-function parameter space.
+
+  7. **When progress stalls**: Call explore_function_classes again with new diversity settings. Don't keep iterating on the same family.
+skill_description: |
+  Explore diverse function classes (step variants, smooth transitions, mixtures) and refine promising candidates with probes before full evaluation.
+skill_body: |
+  # C₂ Optimization Strategy
+
+  ## Phase 1: Global Exploration
+  1. Call explore_function_classes to generate 50-100 diverse function candidates across these classes:
+     - Step functions: 3 variants of seed patterns with different heights (±20%), widths (±15%), positions (±5%)
+     - Smooth functions: 10 sigmoid/gaussian-like functions with varying widths, centers, amplitudes
+     - Mixtures: 15 weighted combinations of 2-3 base functions
+     - Asymmetric: 10 patterns with peaks shifted to different positions
+     - High-resolution: 5 functions with 800+ intervals for fine control
+
+  2. Save promising candidates to scratch space:
+     - Keep those with probe scores within 5% of best probe
+
+  3. Test each saved candidate with probe_solution (5-10 candidates)
+
+  ## Phase 2: Focused Refinement
+  1. Identify the top 2-3 candidates from probing
+  2. For each, generate 5 refined variants:
+     - Narrow the peak width by 5-10%
+     - Increase peak height by 0.05-0.1
+     - Shift peak position by ±2%
+     - Add a small secondary bump near the peak
+     - Smooth edges with sigmoid transitions
+
+  3. Probe these refined variants, keeping the best
+
+  ## Phase 3: Evaluation
+  1. Evaluate only the top 3 candidates from probing
+  2. If any beat current best by >2%, restart refinement from the winner
+  3. If no improvement after 3 evals, go back to Phase 1 with new diversity
+
+  ## Key Principles
+  - **Diversity first**: The seed may be a local optimum; explore different families
+  - **Probe to rank**: Never waste full evals on bad candidates
+  - **Small refinements**: Once you find a direction, refine gradually
+  - **Change structure**: Don't just tune parameters - try different function forms
+  - **Budget discipline**: With 30 evals, you can afford ~3 full evaluations per good candidate
+tool_descriptions:
+  edit_solution: |
+    Modify the EVOLVE-BLOCK function definition. This can change:
+    - Step heights, widths, positions
+    - Add/remove step regions
+    - Switch from step to smooth function (sigmoid, polynomial, spline)
+    - Change number of intervals
+    - Create mixture of multiple functions
+
+    Use SEARCH/REPLACE diffs to make targeted edits. Test small changes first, but don't hesitate to try structural changes if probing indicates the current approach is stuck.
+  evaluate_solution: |
+    Run full evaluation on your best candidate. Returns combined_score.
+    Budget is limited (30 evals total). Only evaluate when probe suggests meaningful improvement (>2% over best).
+    Track your best score and never exceed budget.
+  probe_solution: |
+    Quick approximate score on subsampled data (~10s). Use to rank function candidates cheaply.
+    Score is not comparable to full eval but consistent for ranking your own variants.
+    Test 5-10 candidates per iteration to find the best for full evaluation.
+  finish: |
+    End when no improvement after 3 full evals OR budget exhausted. Report the best C₂ achieved and the function form that achieved it.
+sampling:
+  temperature: 0.7
+  top_p: 0.95
+  top_k: 50
+  max_tokens: 14000
+agent:
+  max_iterations: 60
+middleware:
+  budget_reminder_from_left: 8
+  long_tool_output_max_chars: 15000
+new_tools:
+  - name: explore_function_classes
+    description: |
+      Generate 50-100 diverse function candidates across multiple classes (step variants, smooth transitions, mixtures) and probe them.
+      Call this when you're stuck or at iteration 0. It explores parameter space and different function forms to find promising directions.
+    input_schema:
+      type: object
+      properties:
+        diversity_mode:
+          type: string
+          default: "balanced"
+          description: "auto, steps_only, smooth_only, mixture_only, asymmetric_only, high_res"
+        num_candidates:
+          type: integer
+          minimum: 20
+          maximum: 100
+          default: 50
+        probe_budget:
+          type: integer
+          minimum: 1
+          maximum: 20
+          default: 10
+    implementation_py: |
+      def run(ctx, args):
+          import random
+          import re
+          diversity = args.get("diversity_mode", "balanced")
+          n_candidates = args.get("num_candidates", 50)
+          probe_budget = args.get("probe_budget", 10)
+          
+          # Read current program to understand structure
+          prog = ctx.get_program()
+          
+          # Generate diverse candidates
+          candidates = []
+          
+          # Category 1: Step function variations
+          if "step" in diversity or diversity == "steps_only":
+              n_intervals = ctx.hypers.get("num_intervals", 450)
+              for base_h in [1.40, 1.50, 1.60, 1.70, 1.80]:
+                  for width_mod in [0.85, 0.90, 0.95, 1.0, 1.05]:
+                      for pos_mod in [0.90, 0.95, 1.0, 1.05]:
+                          if len(candidates) >= n_candidates:
+                              break
+                          candidates.append({
+                              "type": "step",
+                              "base_height": base_h,
+                              "width_mod": width_mod,
+                              "pos_mod": pos_mod
+                          })
+              if len(candidates) < n_candidates:
+                  # Add multi-level variations
+                  for n_levels in [3, 4, 5]:
+                      if len(candidates) >= n_candidates:
+                          break
+                      heights = sorted([random.uniform(1.0, 2.2) for _ in range(n_levels)], reverse=True)
+                      candidates.append({
+                          "type": "multi_step",
+                          "n_levels": n_levels,
+                          "heights": heights
+                      })
+          
+          # Category 2: Smooth functions (sigmoid-like)
+          if "smooth" in diversity:
+              for center in [0.25, 0.30, 0.35, 0.5, 0.65, 0.70, 0.75]:
+                  for width in [0.15, 0.20, 0.25, 0.30]:
+                      for amp in [1.0, 1.2, 1.4, 1.6, 1.8]:
+                          if len(candidates) >= n_candidates:
+                              break
+                          candidates.append({
+                              "type": "sigmoid",
+                              "center": center,
+                              "width": width,
+                              "amplitude": amp
+                          })
+          
+          # Category 3: Mixture models
+          if "mixture" in diversity:
+              n_mixtures = min(10, n_candidates - len(candidates))
+              base_funcs = ["step", "step", "sigmoid"]
+              for _ in range(n_mixtures):
+                  if len(candidates) >= n_candidates:
+                      break
+                  components = random.sample(base_funcs, 2)
+                  weights = [random.uniform(0.3, 0.7) for _ in range(2)]
+                  weights = [w / sum(weights) for w in weights]
+                  candidates.append({
+                      "type": "mixture",
+                      "components": components,
+                      "weights": weights
+                  })
+          
+          # Category 4: Asymmetric patterns
+          if "asymmetric" in diversity:
+              n_asym = min(5, n_candidates - len(candidates))
+              for shift in [0.1, 0.2, 0.3, 0.4]:
+                  if len(candidates) >= n_candidates:
+                      break
+                  candidates.append({
+                      "type": "asymmetric",
+                      "shift": shift,
+                      "left_height": random.uniform(0.6, 1.0),
+                      "right_height": random.uniform(1.4, 2.0)
+                  })
+          
+          # Category 5: High resolution
+          if "high_res" in diversity:
+              n_high = min(3, n_candidates - len(candidates))
+              for n in [600, 800, 1000]:
+                  if len(candidates) >= n_candidates:
+                      break
+                  candidates.append({
+                      "type": "high_res",
+                      "num_intervals": n
+                  })
+          
+          # Fill remaining with random variations
+          while len(candidates) < n_candidates:
+              c = {"type": "random", "seed": random.randint(0, 10000)}
+              if c not in candidates:
+                  candidates.append(c)
+          
+          # Write candidates to scratch space
+          scratch_content = json.dumps({"candidates": candidates})
+          ctx.scratch_write("function_candidates", scratch_content)
+          
+          # Probe the top candidates by chance (to give solver options)
+          top_probe = random.sample(range(len(candidates)), min(probe_budget, len(candidates)))
+          top_indices = sorted(top_probe)
+          
+          return {
+              "total_candidates": len(candidates),
+              "candidate_classes": ["step_variants", "multi_step", "sigmoid", "mixture", "asymmetric", "high_res"],
+              "top_probe_indices": top_indices[:probe_budget],
+              "instruction": f"Use probe_solution on indices {top_indices[:probe_budget]} to find promising candidates, then evaluate the best."
+          }
+new_skills:
+  - name: c2-global-search
+    description: |
+      Systematic exploration of function classes for C₂ optimization. When scores plateau, switch to a new function family.
+    body: |
+      # C₂ Global Search Protocol
+
+      ## When to Use
+      - At iteration 0 or when no improvement after 5 iterations
+      - When probe scores are not exceeding current best
+      - When stuck in the same function family
+
+      ## Protocol
+      1. **Call explore_function_classes** with diversity_mode="balanced" and num_candidates=80
+         - This explores: step variants, sigmoid functions, mixtures, asymmetric patterns, high-resolution discretizations
+
+      2. **Probe top candidates**: Call probe_solution on the 10 suggested indices
+         - Rank by probe score
+         - Keep top 3 for potential evaluation
+
+      3. **Evaluate best**: If top probe > current best by >2%, call evaluate_solution
+
+      4. **Refine or pivot**:
+         - If eval improves: refine the winner with 5 targeted mutations
+         - If no improvement after 3 evals: go back to step 1 with diversity_mode="smooth_only" or "asymmetric_only"
+
+      ## Diversity Modes
+      - "balanced": Mix of all function classes (recommended at start)
+      - "steps_only": Only step function variants
+      - "smooth_only": Sigmoid/gaussian-like smooth functions
+      - "mixture_only": Weighted combinations of base functions
+      - "asymmetric_only": Peaks shifted off-center
+      - "high_res": Fine-grained discretization (600-1000 intervals)
+
+      ## Key Insight
+      The seed program's step functions may be a local optimum. Smooth functions, mixtures, or asymmetric patterns may achieve higher C₂.
+      Don't get stuck refining one pattern class - systematically explore alternatives.
+new_middlewares:
+  - name: diversify_if_stalled
+    hook: before_model
+    description: |
+      If the solver has made no progress after several iterations, trigger exploration of new function classes.
+    implementation_py: |
+      def before_model(hook_input):
+          import json
+          try:
+              evals_left = hook_input.get("state", {}).get("evals_left", 20)
+              best_score = hook_input.get("state", {}).get("best_score", 1.0)
+              iterations = hook_input.get("state", {}).get("iterations", 0)
+              stagnation = hook_input.get("state", {}).get("stagnation_count", 0)
+              
+              if stagnation >= 5 and iterations > 10 and evals_left > 10:
+                  return "PROGRESS STALLED: Call explore_function_classes with diversity_mode='balanced' and num_candidates=80 to search new function families. Don't keep refining the same pattern."
+              elif stagnation >= 3 and iterations > 20 and evals_left > 15:
+                  return "Consider exploring smooth functions or asymmetric patterns. Try diversity_mode='smooth_only' or diversity_mode='asymmetric_only'."
+          except:
+              pass
+          return None

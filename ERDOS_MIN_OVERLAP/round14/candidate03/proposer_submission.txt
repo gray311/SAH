@@ -1,0 +1,177 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are solving the Erdos minimum overlap problem: minimize max_k integral h(x)(1-h(x+k)) dx for h: [0,2] -> [0,1] with integral(h)=1.
+
+  Current best bound: C5 <= 0.38092303510845016
+
+  KEY INSIGHT: The optimal solution is likely a SIMPLE step function with only 2-4 segments. The seed program uses 800 intervals which is too fine - you should try COARSER discretizations or DIRECT piecewise definitions first.
+
+  STRATEGY:
+  1. Try 2-3 segment step functions FIRST (before optimizing 800-interval functions)
+  2. Use create_piecewise_init to generate simple 2-4 segment candidates
+  3. For each candidate, set num_intervals=10-20 in the seed to match the simplicity
+  4. Call probe_solution to quickly check c5_bound < 0.37
+  5. Only call evaluate_solution on the best probe candidate
+  6. If no simple function works, then try the seed optimizer with diverse init
+skill_description: Find simple piecewise constant step functions to achieve low C5 bounds.
+skill_body: |
+  # Simple Step Function Strategy for Erdos Optimizer
+
+  ## Key Insight
+  The optimal C5 minimizer is likely a SIMPLE step function with 2-4 segments, not a complex 800-interval function.
+
+  ## Strategy
+
+  ### Phase 1: Try Simple 2-3 Segment Functions (DO THIS FIRST)
+
+  Use create_piecewise_init to generate candidates with 2-4 segments. For each candidate:
+  1. EDIT the seed to use num_intervals=10-20
+  2. EDIT _get_best_initialization to return ONLY that piecewise function
+  3. Call probe_solution to check c5_bound < 0.37
+  4. Call evaluate_solution if probe passes
+
+  ### Phase 2: If No Simple Solution, Try Seed Optimizer
+
+  If all simple functions fail, try the seed optimizer with diverse init using num_intervals=50-100.
+
+  ## Why Simple Functions Work
+  - Fewer segments = less overlap between h(x) and h(x+k)
+  - Disjoint support minimizes the integral
+  - The FFT-based evaluator rewards sparsity and separation
+tool_descriptions:
+  edit_solution: |
+    Modify the EVOLVE-BLOCK to change hyperparameters or the initialization.
+
+    TO CREATE A SIMPLE STEP FUNCTION:
+    - Set num_intervals=10-20 (not 800!)
+    - Replace _get_best_initialization with a simple piecewise definition
+    - Set base_learning_rate=0.01, num_steps=5000-10000
+
+    Never change the EVOLVE-BLOCK markers or evaluator code.
+  evaluate_solution: |
+    Run full evaluation, returns combined_score.
+  probe_solution: |
+    Quick approximate evaluation. Returns c5_bound estimate.
+  finish: |
+    Submit when combined_score > 1.0.
+sampling:
+  temperature: 0.7
+  top_p: 0.9
+  top_k: 15
+  max_tokens: 12000
+agent:
+  max_iterations: 60
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 10000
+new_tools:
+  - name: create_piecewise_init
+    description: |
+      Generate simple piecewise constant step functions with 2-10 segments.
+      Each function satisfies integral(h)=1 over [0,2] and is passed through sigmoid to get h in [0,1].
+      Use these as the ONLY initialization - they are structurally different from the seed's Gaussian patterns.
+    input_schema:
+      type: object
+      properties: {}
+    implementation_py: |
+      def run(ctx, args):
+          import numpy as np
+          N = 800
+          domain = 2.0
+          dx = domain / N
+          
+          constructions = {}
+          
+          # 2-segment: h=5 on [0,1], h=0 on [1,2]
+          h2_seg = np.zeros(N)
+          h2_seg[:int(N)] = 5.0
+          constructions['seg2_1half'] = h2_seg
+          
+          # 3-segment patterns
+          h3_seg = np.zeros(N)
+          h3_seg[:int(N*0.4)] = 5.0
+          h3_seg[int(N*0.4):int(N*1.0)] = 2.0
+          constructions['seg3_04_1'] = h3_seg
+          
+          h3b = np.zeros(N)
+          h3b[:int(N*0.5)] = 5.0
+          h3b[int(N*0.5):int(N*1.5)] = 2.0
+          constructions['seg3_05_15'] = h3b
+          
+          # 4-segment asymmetric
+          h4 = np.zeros(N)
+          h4[:int(N*0.3)] = 5.0
+          h4[int(N*0.3):int(N*0.7)] = 3.0
+          h4[int(N*0.7):int(N*1.2)] = 1.5
+          h4[int(N*1.2):] = 0.0
+          constructions['seg4_asym'] = h4
+          
+          # 4-segment more balanced
+          h4b = np.zeros(N)
+          h4b[:int(N*0.25)] = 5.0
+          h4b[int(N*0.25):int(N*0.5)] = 3.0
+          h4b[int(N*0.5):int(N*1.5)] = 1.5
+          h4b[int(N*1.5):int(N*1.75)] = 0.5
+          h4b[int(N*1.75):] = 0.0
+          constructions['seg4_balanced'] = h4b
+          
+          # Single peak
+          peak_idx = int(N * 0.5)
+          h_peak = np.zeros(N)
+          for i in range(N):
+              h_peak[i] = 5.0 * np.exp(-abs(i - peak_idx) / (N * 0.1))
+          constructions['peak_half'] = h_peak
+          
+          return {"constructions": constructions, "num_constructions": len(constructions)}
+new_skills:
+  - name: simple-step-strategy
+    description: Find low-C5 solutions using simple 2-4 segment step functions before complex optimizations.
+    body: |
+      # Simple Step Function Strategy
+      
+      ## The Key Insight
+      
+      The optimal C5 minimizer is likely a VERY SIMPLE step function with 2-4 segments, not a complex 800-interval function learned by Adam optimization.
+      
+      ## Action Plan
+      
+      1. IMMEDIATELY use create_piecewise_init to generate 2-4 segment functions
+      
+      2. For EACH candidate from create_piecewise_init:
+         - EDIT the seed to use ONLY that candidate (replace _get_best_initialization)
+         - Set num_intervals=10-20 (simple function needs simple discretization)
+         - Set num_steps=2000-5000 (no need for long optimization)
+         - Set num_restarts=1
+         
+         3. Call probe_solution to check:
+            - c5_bound < 0.37
+            - integral(h) approx 1 (should be satisfied by construction)
+         
+         4. Call evaluate_solution on the best 1-2 probe candidates
+      
+      5. If no success after trying all simple candidates, THEN try the seed optimizer with diverse init
+      
+      ## Why Simple Functions Work
+      
+      - Fewer segments = less overlap between h(x) and h(x+k)
+      - Disjoint support (h and 1-h don't overlap much) minimizes the integral
+      - The FFT-based evaluator rewards sparsity and separation
+new_middlewares:
+  - name: simple_first
+    hook: before_model
+    description: |
+      Remind the agent to try simple step functions before complex optimizations.
+    implementation_py: |
+      def before_model(hook_input):
+          state = hook_input.get("state", {})
+          probes_left = state.get("probes_left", 0)
+          evals_left = state.get("evals_left", 0)
+          
+          if probes_left > 10 and (evals_left > 3 or "simple" not in hook_input.get("last_action", "")):
+              return (
+                  "NOTICE: You have many probes left. HAVE YOU TRIED SIMPLE 2-3 SEGMENT STEP FUNCTIONS YET?\\n"
+                  "Before optimizing 800-interval functions, create and test simple piecewise functions using create_piecewise_init.\\n"
+                  "Use num_intervals=10-20 for simple functions, not 800.\\n"
+                  "Only after exhausting all simple candidates should you try the seed optimizer."
+              )
+          return None

@@ -1,0 +1,141 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are solving an NP-hard fish-capture polygon optimization problem.
+
+  Goal: Maximize (mackerels_inside - sardines_inside + 1) with an axis-aligned, non-self-intersecting polygon.
+
+  CRITICAL CODE REQUIREMENTS:
+  1. Build a GRID INDEX (100x100 cells, 1000x1000 units each) for O(1) fish counting
+  2. Implement THREE polygon constructors: simple_rect(), l_shape_top_right(), stepped_enclose()
+  3. Implement iterative refinement: perturb each vertex by ±1 to ±10, keep best
+  4. Use time-budgeted search: run for ~1.8s, always output valid polygon on exit
+  5. Sardine avoidance is CRITICAL - indent edges near sardine clusters
+
+  SEARCH LOOP (must be in main()):
+  - t0: Build grid index from all fish (~0.05s)
+  - t1: Generate 20 random seed polygons (~0.3s)
+  - t2: For each of top 10, try 50 refinements (~0.7s)
+  - t3: Try 5 L-shapes and 5 stepped polygons (~0.4s)
+  - t4: Final polish with greedy edge moves (~0.35s)
+  - Always stop before 2.0s, output valid polygon
+
+  Grid indexing pattern:
+  ```cpp
+  int CELL_SIZE = 1000;
+  int GRID_SIZE = 100;
+  struct GridCell { int mackerels = 0, sardines = 0; };
+  GridCell grid[GRID_SIZE][GRID_SIZE];
+
+  void build_grid() {
+      for (int i = 0; i < 2*N; i++) {
+          int cx = min(all_fish[i].x / CELL_SIZE, GRID_SIZE - 1);
+          int cy = min(all_fish[i].y / CELL_SIZE, GRID_SIZE - 1);
+          if (all_fish[i].type == 1) grid[cx][cy].mackerels++;
+          else grid[cx][cy].sardines++;
+      }
+  }
+
+  int count_in_rect(int minX, int maxX, int minY, int maxY) {
+      int cx0 = minX / CELL_SIZE, cy0 = minY / CELL_SIZE;
+      int cx1 = max((maxX+1)/CELL_SIZE - 1, 0), cy1 = max((maxY+1)/CELL_SIZE - 1, 0);
+      int m=0, s=0;
+      for (int cx = cx0; cx <= cx1; cx++) for (int cy = cy0; cy <= cy1; cy++) {
+          m += grid[cx][cy].mackerels; s += grid[cx][cy].sardines;
+      }
+      return m - s;
+  }
+  ```
+
+  Output format: m vertices, each "x y", all distinct, axis-aligned edges, non-self-intersecting, perimeter <= 400000.
+
+  DO NOT output a fixed/static polygon. The code must actively search within time limits.
+new_tools:
+  - name: quick_fish_count
+    description: |
+      Count fish in a rectangle using the grid index built in C++ code. Returns (mackerel_count, sardine_count) for the given rectangle.
+    input_schema: {type: object, properties: {minX: {type: integer}, maxX: {type: integer}, minY: {type: integer}, maxY: {type: integer}}}
+    implementation_py: |
+      def run(ctx, args):
+          minX, maxX, minY, maxY = args.get("minX", 0), args.get("maxX", 100000), args.get("minY", 0), args.get("maxY", 100000)
+          return {"note": "Use count_in_rect() in C++ code with grid index. This tool shows what query to add.", "query": "count_in_rect(minX, maxX, minY, maxY)"}
+sampling:
+  temperature: 1.2
+  top_p: 0.95
+  top_k: 30
+  max_tokens: 14336
+agent:
+  max_iterations: 60
+middleware:
+  budget_reminder_from_left: 3
+  long_tool_output_max_chars: 12000
+tool_descriptions:
+  edit_solution: 'Edit the C++ EVOLVE-BLOCK. Add grid-based fish counting, implement rect/l_shape/stepped polygon constructors, add iterative refinement loop. Preserve EVOLVE-BLOCK markers and I/O format. Each edit should add ONE concrete improvement: e.g. "add grid index", "add l_shape function", "add refinement loop". Start with the simplest working solution, then iteratively improve.'
+  evaluate_solution: 'Run the C++ program. Returns combined_score (higher is better), validity (0 if invalid), and remaining evals (budget=30). Each run has ~2.0s time limit for internal search. Use feedback to guide next edit.'
+  probe_solution: 'NOT available for this task. Use evaluate_solution only.'
+  finish: 'End when score consistently improves or after 30 evaluations. The last evaluated score counts.'
+new_skills:
+  - name: grid-search-polygon
+    description: 'Use grid-based indexing and diverse polygon shapes to maximize fish capture score.'
+    body: |
+      # Grid-Based Polygon Search for Fish Capture
+      
+      ## Overview
+      We have 5000 mackerels and 5000 sardines on a 100000x100000 plane.
+      Build a 100x100 grid where each cell is 1000x1000 units.
+      Each cell stores (mackerel_count, sardine_count).
+      
+      ## Grid Index Construction
+      1. Initialize 100x100 grid with zeros
+      2. For each fish at (x, y):
+           - cell_x = min(x // 1000, 99)
+           - cell_y = min(y // 1000, 99)
+           - grid[cell_x][cell_y].mackerels += (fish.type == 1)
+           - grid[cell_x][cell_y].sardines += (fish.type == -1)
+      
+      ## Grid Query (O(number of cells crossed))
+      To count fish in rectangle [minX, maxX] x [minY, maxY]:
+      - cell_min_x = minX // 1000, cell_max_x = maxX // 1000
+      - cell_min_y = minY // 1000, cell_max_y = maxY // 1000
+      - Sum grid cells from (cell_min_x, cell_min_y) to (cell_max_x, cell_max_y)
+      
+      ## Polygon Constructors
+      1. **simple_rect()**: Axis-aligned rectangle. Pick 4 corners from grid cells with many mackerels and few sardines.
+      
+      2. **l_shape_top_right(minX, maxX, minY, maxY, indentX, indentY)**: 
+         - Rectangle [minX, maxX] x [minY, maxY] minus bottom-left corner
+         - Helps avoid sardine clusters in one corner while keeping mackerels
+         - 6 vertices
+      
+      3. **stepped_enclose()**: Create staircase pattern around dense mackerel regions
+         - Start at left edge, alternate right/up moves
+         - Can tightly enclose mackerel clusters while excluding sardines
+      
+      ## Iterative Refinement
+      For each vertex (x, y), try moves:
+      - x' = x + delta where delta in [-10, -5, -1, 0, 1, 5, 10]
+      - y' = y + delta where delta in [-10, -5, -1, 0, 1, 5, 10]
+      - Keep move only if score increases AND perimeter doesn't exceed 400000
+      - Try 50 refinements per polygon
+      
+      ## Sardine Avoidance Strategy
+      - Before finalizing polygon, check if any sardines are near edges
+      - If sardine at (sx, sy) is within 50 units of edge, indent edge by 10-20 units away
+      - This may lose some mackerels but saves many sardines
+      
+      ## Time Budget Allocation (2.0s total)
+      - Grid build: 0.05s
+      - Generate 20 seed polygons: 0.3s
+      - Refine top 10: 0.7s
+      - Try 5 L-shapes + 5 stepped: 0.4s
+      - Final polish: 0.35s
+      - Safety margin: 0.2s (stop at 1.8s)
+new_middlewares:
+  - name: sardine_check
+    hook: before_model
+    description: 'Remind solver to check sardine positions before finalizing polygon'
+    implementation_py: |
+      def before_model(hook_input):
+          code = hook_input.get("code", "")
+          if "l_shape" in code or "stepped" in code or "rect" in code:
+              return "IMPORTANT: Check sardines near polygon edges and indent if needed. Score = mackerels - sardines + 1, so avoiding sardines is as important as including mackerels."
+          return None

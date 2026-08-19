@@ -1,0 +1,190 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are a C++ optimizer for axis-aligned orthogonal polygons capturing fish.
+  Goal: maximize (mackerels_inside - sardines_inside + 1).
+  
+  SEARCH STRATEGY: Iterative polygon refinement through vertex perturbation
+  
+  PHASE 1: STARTING POLYGON
+  - Begin with minimal valid polygon (4 vertices) covering the centroid region
+  - Or start with bounding box of all mackerel locations
+  - Ensure valid polygon (no self-intersection, perimeter ≤400000, vertices ≤1000)
+  
+  PHASE 2: GRADIENT-BASED VERTEX EXPANSION
+  For each vertex, try perturbations:
+  - Δx = ±1, ±2, ±4, ±8, ±16 units (doubling step sizes for efficiency)
+  - Δy = ±1, ±2, ±4, ±8, ±16 units
+  - Only try if: new position is integer in [0,100000], doesn't increase perimeter by >5%
+  - Use local density estimation: count fish in small squares around the vertex
+  
+  PHASE 3: EDGE PROTRUSION ADDITION
+  - For each edge, check if extending it outward could capture more fish
+  - Try adding rectangular protrusions: extend edge by 50-500 units
+  - Calculate gain: (new_mackerels - new_sardines) for the added region
+  - Keep if net positive gain
+  
+  PHASE 4: BAY/INSET REMOVAL
+  - Identify internal corners where sardine density is high
+  - Try cutting inward to remove sardines while losing few mackerels
+  
+  PHASE 5: MULTI-SCALE REFINEMENT
+  - Coarse: Δ = ±100 to explore large shape changes
+  - Medium: Δ = ±10 to fine-tune boundaries
+  - Fine: Δ = ±1 to precisely align with fish locations
+  
+  PHASE 6: RANDOM LOCAL SEARCH
+  - Occasionally make random vertex moves (10% of iterations)
+  - Accept worse solutions with probability exp(-Δ_score / temperature)
+  
+  CONSTRAINTS:
+  - Keep perimeter ≤ 400,000 throughout
+  - Keep vertices ≤ 1,000
+  - All coordinates integers in [0, 100000]
+  - No self-intersection (validate before accepting)
+  - Total time < 2.0 seconds per evaluation
+  
+  Tools:
+  - edit_solution: Replace EVOLVE-BLOCK with complete C++ implementing iterative refinement
+  - evaluate_solution: Get score
+  - finish: Submit best polygon
+sampling:
+  temperature: 0.3
+  top_p: 0.95
+  top_k: 50
+agent:
+  max_iterations: 80
+middleware:
+  budget_reminder_from_left: 10
+  long_tool_output_max_chars: 20000
+new_tools:
+  - name: estimate_local_density
+    description: |
+      Estimate fish density in a small region around a point. Returns counts of mackerels and sardines
+      within a search radius, enabling local optimization decisions. Call before deciding to perturb
+      a vertex or edge to understand the fish distribution nearby.
+    input_schema:
+      type: object
+      properties:
+        center_x:
+          type: integer
+        center_y:
+          type: integer
+        radius:
+          type: integer
+          default: 200
+    implementation_py: |
+      def run(ctx, args):
+          center_x = args.get("center_x", 0)
+          center_y = args.get("center_y", 0)
+          radius = args.get("radius", 200)
+          
+          # Parse fish positions from program
+          fish = {"mackerel": [], "sardine": []}
+          program = ctx.get_program()
+          
+          for line in program.split('\n'):
+              line = line.strip()
+              if 'fish' in line and '[' in line:
+                  try:
+                      # Extract coordinate
+                      if 'mackerel' in line.lower():
+                          parts = line.split(',')
+                          if len(parts) >= 2:
+                              fish["mackerel"].append((int(parts[0]), int(parts[1])))
+                      elif 'sardine' in line.lower():
+                          parts = line.split(',')
+                          if len(parts) >= 2:
+                              fish["sardine"].append((int(parts[0]), int(parts[1])))
+                  except:
+                      continue
+          
+          # Count fish in radius
+          def in_radius(pt, cx, cy, r):
+              return (pt[0] - cx)**2 + (pt[1] - cy)**2 <= r**2
+          
+          m_count = sum(1 for p in fish["mackerel"] if in_radius(p, center_x, center_y, radius))
+          s_count = sum(1 for p in fish["sardine"] if in_radius(p, center_x, center_y, radius))
+          
+          return {
+              "mackerel_count": m_count,
+              "sardine_count": s_count,
+              "density": m_count - s_count,
+              "total_count": m_count + s_count
+          }
+new_skills:
+  - name: iterative-refinement-guide
+    description: |
+      Iterative vertex perturbation for axis-aligned polygon optimization. Use gradient-based expansion,
+      edge protrusions, and multi-scale refinement to find high-scoring polygons.
+    body: |
+      # Iterative Polygon Refinement Guide
+      
+      ## Strategy Overview
+      
+      This approach treats polygon optimization as a continuous local search problem.
+      Instead of grid-based or corridor methods, we directly perturb vertices to find
+      better shapes.
+      
+      ## Phase 1: Initialization
+      
+      Choose a starting polygon:
+      - Option A: Bounding box of all mackerel locations
+      - Option B: A rectangle centered at the centroid with size ≈ average mackerel spacing
+      - Ensure it's valid (4-1000 vertices, proper perimeter constraint)
+      
+      ## Phase 2: Gradient-Based Vertex Perturbation
+      
+      For each vertex (x, y):
+      1. For each axis (x-only, y-only):
+         - Try shifts: ±1, ±2, ±4, ±8, ±16 (doubling pattern)
+         - Estimate local fish density after shift using estimate_local_density
+         - Keep shift if it improves (mackerels - sardines) locally
+      2. Check perimeter constraint before accepting
+      
+      ## Phase 3: Edge Protrusion
+      
+      For each horizontal/vertical edge:
+      1. Determine outward normal direction
+      2. Try extending by d ∈ {50, 100, 200, 400, 800} units
+      3. Use density estimation to predict fish gain/loss
+      4. Add protrusion if net positive expected gain and within perimeter budget
+      
+      ## Phase 4: Bay Removal
+      
+      At concave corners:
+      1. Check sardine density inside the "bay"
+      2. If sardine density > threshold, try cutting the bay inward
+      3. Accept if net gain is positive
+      
+      ## Phase 5: Multi-Scale Refinement
+      
+      Run refinement in three passes:
+      - Pass 1 (coarse): Δ ∈ {±100, ±200} to explore large shape changes
+      - Pass 2 (medium): Δ ∈ {±10, ±20, ±30} to tune boundaries
+      - Pass 3 (fine): Δ ∈ {±1, ±2} to align with fish locations
+      
+      ## Phase 6: Simulated Annealing
+      
+      Every 50 iterations:
+      - Try random vertex moves (uniform random in [-50, 50])
+      - Accept worse solutions with probability: exp(-Δ_score / T)
+      - Decay temperature: T ← T × 0.95
+      
+      ## Implementation Tips
+      
+      - Use efficient counting: pre-sort fish by coordinate, use prefix sums
+      - Validate polygon validity after each major change
+      - Cache density estimates to avoid recomputation
+      - Track best polygon seen, not just current
+new_middlewares:
+  - name: exploration_reminder
+    hook: before_model
+    description: |
+      Before generating edits, check if current iteration is in exploration phase (<30)
+      or exploitation phase (>=30). Use larger perturbations in exploration, finer
+      adjustments in exploitation.
+    implementation_py: |
+      def before_model(hook_input):
+          # Check iteration number from context if available
+          # Otherwise provide general guidance
+          return "Current phase: if iteration < 30, try large perturbations (Δ=100+). If iteration >= 30, focus on fine adjustments (Δ≤10). Use estimate_local_density before major moves."

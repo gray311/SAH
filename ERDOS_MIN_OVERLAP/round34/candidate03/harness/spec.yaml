@@ -1,0 +1,76 @@
+schema: h2spec/1.0
+system_prompt: 'Erdos minimum overlap problem (C5): Find h: [0,2]->[0,1] minimizing max_k integral h(x)(1-h(x+k))dx.
+
+CONSTRAINT: integral(h) = 1 exactly. h values in [0,1].
+
+Current best: C5 <= 0.38092303510845016 (combined_score = 1.0).
+
+GOAL: Find h achieving c5_bound < 0.38092303510845016 (combined_score > 1.0).
+
+STRATEGY:
+
+1. GENERATE diverse initial h functions using VARIED patterns (not just sigmoid of latents):
+   - Uniform h = 0.5 everywhere
+   - Bipartite (single threshold at various x in [0,2])
+   - Multi-modal (2-5 narrow peaks at different positions)
+   - Golomb ruler-like (sparse marks at specific x)
+   - Sinusoidal (sin/cos combinations)
+   For each pattern, ensure integral(h)=1 by scaling appropriately.
+
+2. For EACH candidate, compute c5_bound analytically or via FFT
+3. SELECT top 3 candidates with LOWEST c5_bound
+4. Slightly PERTURB these top candidates (narrow/shift/reshape peaks)
+5. Evaluate the perturbed candidates
+6. Iterate: analyze results, generate new patterns, perturb best
+
+KEY INSIGHT: The seed uses sigmoid(latent) with random patterns, which is too smooth and doesn''t explore discrete step-function space well.
+
+Try SHARPER, MORE STRUCTURED h functions first (perfect steps), not smooth sigmoids.
+
+Then refine by perturbing peak positions/heights.'
+skill_description: Generate diverse step-function candidates (uniform, bipartite, multi-modal, Golomb-ruler), select best 3, perturb, evaluate. Use sharp step functions, not smooth sigmoids.
+skill_body: '# Erdos C5 Optimization - Diverse Step-Function Search\n\n## Core Idea\nThe problem seeks a STEP FUNCTION h: [0,2]->[0,1] with integral=1 that minimizes max_k overlap.\nSmooth sigmoids are TOO SMOOTH - try PERFECT STEPS first!\n\n## Phase 1: Generate Diverse Initial Candidates\n\nGenerate h functions with DIFFERENT STRUCTURES:\n\n### Pattern A: Uniform\nh(x) = 0.5 everywhere (integral = 0.5*2 = 1 ✓)\nc5_bound will be high (lots of overlap)\n\n### Pattern B: Bipartite (Single Threshold)\nh(x) = 1 for x < t, h(x) = 0 for x >= t\nChoose t so integral = 1: t*1 + (2-t)*0 = 1 => t = 1\nSo h(x) = 1 if x < 1, else 0\n\n### Pattern C: Multi-modal (Multiple Narrow Peaks)\nh(x) = 1 at narrow intervals around x1, x2, ..., xk\nSet widths so integral = 1\nExample: three peaks of width 0.3 each at x=0.4, 1.0, 1.6\n  Total integral = 0.3*3 = 0.9 (not enough!)\n  Need widths summing to 1, e.g., three peaks of width 1/3\n\n### Pattern D: Golomb Ruler (Sparse Marks)\nh(x) = 1 at very narrow intervals around marks m1, m2, ...\nExample: marks at 0.0, 0.4, 0.8, 1.2, 1.6 with width 0.2 each\n  Total integral = 0.2*5 = 1.0 ✓\n\n### Pattern E: Sinusoidal-like (but SHARP)\nh(x) = step function approximating sin/cos shapes\nUse multiple narrow peaks at peaks of sine wave\n\n## Phase 2: Evaluate and Select\n\nFor each candidate:\n1. Compute c5_bound (lower is better)\n2. Check integral(h) ≈ 1 (adjust if needed)\n3. Select TOP 3 candidates with LOWEST c5_bound\n\n## Phase 3: Perturb and Refine\n\nFor each top candidate:\n1. SHIFT peaks slightly (±0.1)\n2. NARROW peaks (reduce width by 0.05)\n3. SPLIT peaks (one peak into two)\n4. MERGE peaks (combine two adjacent peaks)\n\nGenerate 2-3 perturbed variants of each top candidate.\n\n## Phase 4: Evaluate Perturbations\n\nEvaluate all perturbed candidates.\nKeep those with c5_bound < best_so_far.\n\n## Phase 5: Iterate\n\nRepeat Phases 1-4 with new perturbations.\n\n## Key Rules\n- START with SHARP step functions, NOT smooth sigmoids\n- ENSURE integral(h) = 1 exactly (scale appropriately)\n- TRY MANY DIFFERENT STRUCTURES (uniform, bipartite, multi-modal, Golomb)\n- PERTURB top candidates, don''t start fresh\n- Evaluate only candidates with potential for improvement'
+tool_descriptions:
+  edit_solution: 'Modify EVOLVE-BLOCK to change h(x) definition.\n\nTry DIFFERENT PATTERNS:\n- "uniform": h = 0.5\n- "bipartite": h = 1 if x < t else 0 (t=1 for integral=1)\n- "multi_modal": multiple narrow peaks, e.g., three peaks of width 1/3\n- "golomb": narrow marks at [0.0, 0.4, 0.8, 1.2, 1.6] with width 0.2\n- "sinusoidal_peak": peaks at sin(2πx) maxima\n\nConstraints: h in [0,1], integral(h)=1.'
+  evaluate_solution: 'Full 59000-step optimization. Returns combined_score = 0.38092303510845016 / c5_bound.\nHigher is better. combined_score > 1.0 means c5_bound < 0.38092303510845016 (new record).'
+  probe_solution: 'Fast approximate evaluation (500 intervals, analytical c5). Uses probe budget.\nApproximate but much cheaper than full eval. Good for screening many candidates.'
+  finish: Submit when combined_score > 1.0 (c5_bound < 0.38092303510845016).
+sampling:
+  temperature: 1.2
+  top_p: 0.9
+  top_k: 15
+  max_tokens: 12000
+agent:
+  max_iterations: 80
+middleware:
+  budget_reminder_from_left: 8
+  long_tool_output_max_chars: 10000
+new_tools:
+- name: generate_diverse_steps
+  description: 'Generate diverse step-function candidates for Erdos C5 problem.\n\nThis tool creates H functions with different STRUCTURES:\n- "uniform": h=0.5 everywhere\n- "bipartite": single threshold at t=1\n- "multi_modal": k narrow peaks with total width=1\n- "golomb": 5 narrow marks at [0,0.4,0.8,1.2,1.6] width=0.2 each\n- "sinusoidal": peaks at sin(2πx) maxima\n\nAll candidates have integral(h)=1 and h in [0,1].\nUse this to generate initial diverse candidates instead of sigmoid(latent) approach.'
+  input_schema:
+    type: object
+    properties:
+      num_candidates:
+        type: integer
+        default: 5
+      pattern_types:
+        type: array
+        items:
+          type: string
+          enum:
+          - uniform
+          - bipartite
+          - multi_modal
+          - golomb
+          - sinusoidal
+  implementation_py: 'def run(ctx, args):\n    import numpy as np\n    num_candidates = args.get("num_candidates", 5)\n    pattern_types = args.get("pattern_types", ["uniform", "bipartite", "multi_modal", "golomb", "sinusoidal"])\n    \n    candidates = []\n    \n    for i in range(min(num_candidates, len(pattern_types))):\n        pattern = pattern_types[i]\n        N = 800\n        x = np.linspace(0, 2, N+1)[1:]  # 800 intervals, 800 points\n        \n        if pattern == "uniform":\n            h = np.full(N, 0.5)  # 0.5*2 = 1.0 integral\n            \n        elif pattern == "bipartite":\n            # h=1 for x<1, h=0 for x>=1\n            h = np.where(x < 1.0, 1.0, 0.0)\n            \n        elif pattern == "multi_modal":\n            # Three peaks of width 1/3 each\n            # Peak centers at 0.4, 1.0, 1.6\n            h = np.zeros(N)\n            for center in [0.4, 1.0, 1.6]:\n                half_width = 1/9  # 1/3 divided into 3 peaks\n                mask = (x >= center - half_width) & (x < center + half_width)\n                h[mask] = 1.0\n            \n        elif pattern == "golomb":\n            # 5 marks at [0.0, 0.4, 0.8, 1.2, 1.6] with width 0.2 each\n            marks = np.array([0.0, 0.4, 0.8, 1.2, 1.6])\n            half_width = 0.1\n            h = np.zeros(N)\n            for m in marks:\n                mask = (x >= m - half_width) & (x < m + half_width)\n                h[mask] = 1.0\n            \n        elif pattern == "sinusoidal":\n            # Peaks at maxima of sin(2πx): x = 0.25, 0.75, 1.25, 1.75\n            peaks = np.array([0.25, 0.75, 1.25, 1.75])\n            half_width = 0.15  # Adjust to get integral=1\n            h = np.zeros(N)\n            for p in peaks:\n                mask = (x >= p - half_width) & (x < p + half_width)\n                h[mask] = 1.0\n            \n        # Normalize to ensure integral=1\n        h = np.clip(h, 0.0, 1.0)\n        integral = np.sum(h) * (2.0 / N)\n        if abs(integral - 1.0) > 1e-4:\n            h = h / integral\n        \n        h = np.array([float(x) for x in h])\n        candidates.append(h)\n    \n    return {"candidates": [c.tolist() for c in candidates]}'
+new_skills:
+- name: step-function-search
+  description: Generate diverse sharp step functions, select best, perturb, evaluate. Avoid smooth sigmoids.
+  body: '# Step-Function Search for Erdos C5\n\n## Problem: Find h: [0,2]->[0,1] with integral=1 minimizing max_k overlap\n\n## Why Step Functions?\nThe optimal h may be a TRUE STEP FUNCTION (perfect 0/1 values), not a smooth sigmoid.\nSmooth sigmoids waste "mass" in transition regions.\n\n## Strategy\n\n### Step 1: Generate Diverse Sharp Candidates\nCreate h with DIFFERENT STRUCTURES:\n- Uniform: h=0.5 (integral=1)\n- Bipartite: h=1 for x<1, h=0 otherwise\n- Multi-modal: 3-5 narrow peaks (total width=1)\n- Golomb-ruler: sparse marks at [0,0.4,0.8,1.2,1.6]\n- Sinusoidal peaks: at sin(2πx) maxima\n\n### Step 2: Evaluate All Candidates\nCompute c5_bound for each.\nSelect TOP 3 with LOWEST c5_bound.\n\n### Step 3: Perturb Top Candidates\nFor each top candidate, create variants:\n- SHIFT: move all peaks by ±0.1\n- NARROW: reduce peak widths by 10%\n- SPLIT: divide one peak into two\n- MERGE: combine two adjacent peaks\n- REORDER: rearrange peak positions\n\n### Step 4: Evaluate Perturbations\nKeep any with c5_bound < best_so_far.\n\n### Step 5: Iterate\nRepeat with new perturbations.\n\n## Key Rules\n- Use SHARP steps (0 or 1), NOT smooth sigmoids\n- Always normalize integral(h)=1\n- Explore MANY structures before refining\n- Perturb, don''t restart from scratch'
+new_middlewares:
+- name: structure_reminder
+  hook: before_model
+  description: 'Remind solver to use diverse step-function structures and perturb top candidates.'
+  implementation_py: 'def before_model(hook_input):\n    history = hook_input.get("history", [])\n    has_diverse_structures = False\n    has_perturbed = False\n    \n    for turn in history:\n        tools = str(turn.get("tools_used", []))\n        if "generate_diverse_steps" in tools or "bipartite" in tools.lower() or "multi_modal" in tools.lower():\n            has_diverse_structures = True\n        if "perturb" in tools.lower() or "shift" in tools.lower() or "narrow" in tools.lower():\n            has_perturbed = True\n    \n    if not has_diverse_structures:\n        return "Start with DIVERSE step-function structures (uniform, bipartite, multi-modal, golomb-ruler). Avoid smooth sigmoids."\n    \n    if not has_perturbed:\n        return "After generating diverse candidates, PERTURB the top 3 (shift, narrow, split, merge peaks). Don''t restart from scratch."\n    \n    return None'

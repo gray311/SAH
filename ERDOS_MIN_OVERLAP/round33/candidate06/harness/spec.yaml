@@ -1,0 +1,277 @@
+schema: h2spec/1.0
+system_prompt: |
+  Erdos C5 optimization: Find a step function h: [0,2] -> [0,1] minimizing max_k integral h(x)(1-h(x+k))dx.
+  
+  CONSTRAINT: integral(h) = 1 exactly. h values in [0,1].
+  Current best: C5 <= 0.38092303510845016 (combined_score = 1.0).
+  GOAL: Find h achieving combined_score > 1.0.
+  
+  STRATEGY: Direct construction of step functions from mathematical families.
+  
+  Approach:
+  1. Use construct_step_function to generate complete candidate programs from known families:
+     - Threshold functions (single cut at position p)
+     - Multi-threshold functions (multiple steps)
+     - Symmetric functions (centered around x=1.0)
+     - Periodic-like patterns
+  
+  2. For each family, vary the key parameters systematically (threshold positions, heights)
+  
+  3. Use probe_solution to quickly screen candidates
+  4. Evaluate the best probe candidates
+  
+  Key insight: Optimal solutions are simple step functions. Don't try to analyze and perturb the current solution - construct better solutions from scratch.
+skill_description: |
+  Systematically construct step functions from mathematical families (threshold, multi-threshold, symmetric patterns) and screen them with probe_solution before full evaluation.
+skill_body: |
+  # Direct Construction Strategy for Erdos C5
+  
+  ## Core Principle
+  Optimal solutions are simple step functions. Construct candidates directly from mathematical families instead of analyzing and perturbing the current solution.
+  
+  ## Step 1: Generate Candidates via construct_step_function
+  
+  Call construct_step_function with one strategy:
+  - "threshold": Single step function with cutoff at position p
+  - "two_threshold": Two steps creating a plateau
+  - "symmetric": Symmetric step function around x=1.0
+  - "multi_peak": Multiple narrow peaks
+  
+  Each call returns a COMPLETE program with the step function defined.
+  
+  ## Step 2: Parameter Search
+  
+  For threshold functions: Try different cutoff positions p in [0.3, 1.7]
+  For multi-threshold: Try different step positions and heights
+  
+  ## Step 3: Screening
+  
+  1. Generate 3-5 candidates with different strategies
+  2. Call probe_solution on each to check c5_bound
+  3. Keep candidates with c5_bound < 0.385
+  4. Call evaluate_solution on the best 1-2
+  
+  ## Step 4: Refinement
+  
+  If no improvement after trying different strategies, refine parameters:
+  - Adjust threshold positions in small increments
+  - Try symmetric variants
+  
+  ## Rules
+  - ALWAYS use construct_step_function to generate complete programs
+  - NEVER try to analyze the current solution first
+  - Focus on direct construction from simple mathematical forms
+  - Use probe_solution to screen before full evaluation
+tool_descriptions:
+  edit_solution: |
+    Not needed for this strategy. Use construct_step_function instead, which generates complete programs.
+    
+    If you must edit, change only the EVOLVE-BLOCK to modify step positions or heights.
+    But prefer construct_step_function which handles this automatically.
+  
+  evaluate_solution: |
+    Full evaluation. Returns combined_score = 0.38092303510845016 / c5_bound.
+    combined_score > 1.0 means new record (c5_bound < 0.38092303510845016).
+  
+  probe_solution: |
+    Fast approximate evaluation. Use to screen many candidates quickly.
+    Look for candidates with c5_bound < 0.385, then evaluate them fully.
+  
+  finish: |
+    Submit when combined_score > 1.0 (c5_bound < 0.38092303510845016).
+sampling:
+  temperature: 1.0
+  top_p: 0.9
+  top_k: 30
+  max_tokens: 16000
+agent:
+  max_iterations: 60
+middleware:
+  budget_reminder_from_left: 8
+  long_tool_output_max_chars: 10000
+new_tools:
+  - name: construct_step_function
+    description: |
+      Generates a complete step function program from a mathematical family.
+      
+      Strategies:
+      - "threshold": Single step at position p. h(x)=1 for x<p, h(x)=0 for x>=p, scaled to integral=1.
+      - "two_threshold": Two steps creating a plateau. h(x)=1 on [0,a] and [b,2], h(x)=0 on [a,b], scaled to integral=1.
+      - "symmetric": Symmetric step function around x=1.0, e.g., h(x)=1 on [0,a] and [2-a,2].
+      - "multi_peak": Multiple narrow peaks separated by zeros.
+      
+      The tool generates a COMPLETE Python program with the step function defined, properly normalized.
+      This bypasses the need to analyze and perturb - construct better solutions from known families.
+    input_schema:
+      type: object
+      properties:
+        strategy:
+          type: string
+          enum:
+            - threshold
+            - two_threshold
+            - symmetric
+            - multi_peak
+        position:
+          type: number
+          description: |
+            For threshold/two_threshold/symmetric: the key position(s).
+            For threshold: cutoff position p in (0,2)
+            For two_threshold: two positions a, b in (0,2) with a < b
+            For symmetric: half-width a in (0,1)
+            For multi_peak: center positions of peaks
+    implementation_py: |
+      def run(ctx, args):
+          import numpy as np
+          strategy = args.get("strategy", "threshold")
+          position = args.get("position", 0.5)
+          
+          N = 800
+          domain = 2.0
+          dx = domain / N
+          
+          if strategy == "threshold":
+              p = max(0.1, min(1.9, float(position)))
+              h = np.zeros(N)
+              h_end = int(p * N)
+              h[:h_end] = 1.0 / p
+          
+          elif strategy == "two_threshold":
+              if isinstance(position, list):
+                  a, b = min(float(position[0]), float(position[1])), max(float(position[0]), float(position[1]))
+              else:
+                  a, b = float(position) * 0.3, float(position) * 0.7
+              a, b = max(0.05, min(a, 1.5)), max(0.5, min(b, 1.95))
+              if a >= b:
+                  a, b = b, a
+              h = np.zeros(N)
+              h[:int(a * N)] = 1.0
+              h[int(b * N):] = 1.0
+              total = 2 * (a * N) + (2 - 2 * a)
+              if total > 0:
+                  scale = 1.0 / total
+                  h[:int(a * N)] *= scale
+                  h[int(b * N):] *= scale
+              else:
+                  h = np.ones(N) / N
+          
+          elif strategy == "symmetric":
+              a = max(0.1, min(0.9, float(position)))
+              h = np.zeros(N)
+              left_end = int(a * N)
+              right_start = int((2 - a) * N)
+              h[:left_end] = 1.0
+              h[right_start:] = 1.0
+              mass = left_end + (N - right_start)
+              if mass > 0:
+                  h = h / mass
+              else:
+                  h = np.ones(N) / N
+          
+          elif strategy == "multi_peak":
+              h = np.zeros(N)
+              if isinstance(position, (int, float)):
+                  pk1, pk2 = position - 0.3, position + 0.3
+              else:
+                  pk1, pk2 = position[0], position[1]
+              for pk in [pk1, pk2]:
+                  left = max(0, int((pk - 0.2) * N))
+                  right = min(N, int((pk + 0.2) * N))
+                  h[left:right] = 1.0
+              mass = np.sum(h) * dx
+              if mass > 0:
+                  h = h / (mass / 2.0)
+                  h = np.clip(h, 0, 1)
+              else:
+                  h = np.ones(N) / N
+          
+          program_lines = []
+          program_lines.append('import jax')
+          program_lines.append('import jax.numpy as jnp')
+          program_lines.append('from dataclasses import dataclass')
+          program_lines.append('')
+          program_lines.append('N = ' + str(N))
+          program_lines.append('dx = 2.0 / N')
+          program_lines.append('')
+          program_lines.append('h = jnp.array(' + str(h.tolist()) + ')')
+          program_lines.append('total = float(jnp.sum(h) * dx)')
+          program_lines.append('if abs(total - 1.0) > 0.01:')
+          program_lines.append('    h = h * (1.0 / total)')
+          program_lines.append('    h = jnp.clip(h, 0, 1)')
+          program_lines.append('')
+          program_lines.append('print(f"Integral check: {{total:.4f}}")')
+          program_lines.append('print(f"h range: [{{h.min():.4f}}, {{h.max():.4f}}]")')
+          program_lines.append('')
+          program_lines.append('h_padded = jnp.pad(h, (0, N))')
+          program_lines.append('j_val = jnp.pad(1.0 - h, (0, N))')
+          program_lines.append('corr_fft = jnp.fft.fft(h_padded) * jnp.conj(jnp.fft.fft(j_val))')
+          program_lines.append('correlation = jnp.fft.ifft(corr_fft).real')
+          program_lines.append('c5_bound = float(jnp.max(correlation * dx))')
+          program_lines.append('print(f"c5_bound: {{c5_bound:.8f}}")')
+          program_lines.append('')
+          program_lines.append('print("Step function constructed successfully")')
+          
+          return {"program": "\n".join(program_lines), "strategy": strategy, "position": position}
+new_skills:
+  - name: direct-construction-strategy
+    description: |
+      Construct step functions directly from mathematical families. Don't analyze and perturb - create better solutions from scratch.
+    body: |
+      # Direct Construction for Erdos C5
+      
+      ## Core Principle
+      Optimal solutions are simple step functions. Construct candidates directly instead of analyzing and mutating the current solution.
+      
+      ## Strategy 1: Threshold Function
+      - Single step at position p: h(x)=1 for x<p, 0 otherwise
+      - Scale to integral=1: h(x)=1/p for x<p
+      - Try p in [0.3, 1.7] to explore different cutoffs
+      
+      ## Strategy 2: Two-Threshold (Plateau)
+      - High on [0,a] and [b,2], low on [a,b]
+      - Scale to integral=1
+      - Try different plateau widths and positions
+      
+      ## Strategy 3: Symmetric
+      - Symmetric around x=1.0
+      - h(x)=1 on [0,a] and [2-a,2]
+      - Try different half-widths a in [0.2, 0.8]
+      
+      ## Strategy 4: Multi-Peak
+      - Multiple narrow peaks separated by zeros
+      - Good for reducing overlap at specific shifts
+      - Try 2-3 peaks at strategic positions
+      
+      ## Workflow
+      1. Call construct_step_function with different strategies
+      2. Probe each candidate
+      3. Evaluate the best
+      4. Refine promising candidates
+      
+      ## Rules
+      - Always use construct_step_function for complete programs
+      - Focus on direct construction, not analysis-based mutation
+      - Use probe_solution to screen before full evaluation
+new_middlewares:
+  - name: construction_reminder
+    hook: before_model
+    description: |
+      Remind the solver to use direct construction instead of analysis-based mutation.
+    implementation_py: |
+      def before_model(hook_input):
+          history = hook_input.get("history", [])
+          if not history:
+              return "Start with construct_step_function: generate threshold, symmetric, and two_threshold candidates. Probe all, evaluate the best."
+          
+          last_turn = history[-1]
+          tools_used = last_turn.get("tools_used", [])
+          
+          if "construct_step_function" not in tools_used:
+              return "Reminder: Use construct_step_function to generate complete step function candidates. Don't try to analyze the current solution first."
+          
+          if len(history) > 1:
+              prev_turn = history[-2]
+              if "construct_step_function" not in prev_turn.get("tools_used", []) and "probe_solution" not in prev_turn.get("tools_used", []) and "evaluate_solution" not in prev_turn.get("tools_used", []):
+                  return "You haven't generated any candidates yet. Call construct_step_function first to create step function programs."
+          
+          return None

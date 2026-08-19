@@ -1,0 +1,262 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are a C++ polygon optimizer for axis-aligned fish capture. Goal: maximize (mackerels - sardines + 1).
+  
+  CRITICAL STRATEGY CHANGE: Instead of just fine-tuning bounding boxes, you MUST explore fundamentally different polygon constructions:
+  
+  PHASE 1: Adaptive Cell-Based Construction
+  - Build a 100x100 cell grid (cell_size=1000) over [0,100000]x[0,100000]
+  - For each cell, compute density_gradient = (mackerel_count - sardine_count) / total_fish
+  - Identify "high-gradient boundaries" where density changes sharply
+  - These boundaries suggest optimal polygon edges
+  
+  PHASE 2: Multiple Polygon Pattern Families
+  For EACH high-gradient region, generate polygons from DIFFERENT families:
+  
+  Family A: Multi-Component Union
+  - Identify 3-5 spatially separated dense mackerel clusters
+  - Create separate small polygons (4-6 vertices each) around each cluster
+  - Union them into one output (concatenate vertices, ensure no self-intersection)
+  
+  Family B: Spiral/Stepped Wrapping
+  - Start from a high-density mackerel cluster
+  - Build a spiral that winds around nearby sardine clusters, capturing mackerels while excluding sardines
+  - Use alternating indentations: for each sardine near edge, create a 2-3 step detour
+  
+  Family C: Adaptive Rectangle Growth
+  - Start with a small rectangle around a mackerel cluster
+  - Iteratively expand in 4 directions, but STOP expanding when you'd include a sardine
+  - Instead of expanding, create a "bulge" outward in non-sardine directions
+  
+  PHASE 3: Structure Search with Restart
+  - Run 15 random restarts, each choosing a different "seed mackerel cluster"
+  - For each restart, try ALL 3 families, keep best
+  - Total time: use full 2.0s budget
+  
+  PHASE 4: Edge Refinement with Global View
+  - After selecting best polygon, do global edge refinement:
+    - For each edge, try shifts that exclude nearby sardines while keeping mackerels
+    - Use grid queries for fast scoring
+  - Output refined polygon
+  
+  Tools:
+  - edit_solution: Modify C++ EVOLVE-BLOCK with adaptive multi-family search
+  - evaluate_solution: Run program, get score
+  - probe_solution: Use for rapid family ranking before full eval
+  - finish: Submit when you've encoded diverse polygon families
+  
+  Each edit encodes ONE complete search with multiple polygon families.
+skill_description: |
+  Optimize C++ polygon using multi-family search: adaptive cell-based construction, multi-component unions, spiral wrapping, and adaptive rectangle growth. Explore diverse geometric shapes beyond simple bounding boxes.
+skill_body: |
+  # Multi-Family Polygon Optimization
+  
+  ## Core Idea: Explore fundamentally different polygon shapes, not just fine-tune one
+  
+  ### Phase 1: Adaptive Cell-Based Analysis
+  - Grid: 100x100 cells, cell_size=1000
+  - For each cell: m_count, s_count, density_gradient = (m-s)/(m+s)
+  - Find regions with |density_gradient| > threshold (high purity zones)
+  - Also find "transition zones" where gradient changes sharply
+  
+  ### Phase 2: Three Polygon Families
+  
+  **Family A: Multi-Component Union**
+  - Find 3-5 spatially separated high-gradient mackerel clusters
+  - Create tight polygons (4-6 vertices) around each
+  - Combine into one output (list all vertices sequentially)
+  - Benefit: Can capture multiple isolated mackerel patches
+  
+  **Family B: Spiral Wrapping**
+  - Start from dense mackerel cluster
+  - Build spiral that winds around sardine clusters
+  - For each sardine within 400 units: create 2-3 step detour around it
+  - Use alternating left/right indentations
+  - Result: 10-20 vertex polygon that avoids sardines
+  
+  **Family C: Adaptive Rectangle Growth**
+  - Start small rectangle around mackerel cluster
+  - Try expanding each edge by 100, 200, 400, 800 units
+  - Stop expanding if you'd include sardines
+  - Instead, create "bulges" in directions away from sardines
+  - Result: Irregular polygon that hugs mackerel clusters
+  
+  ### Phase 3: Structure Search
+  - 15 random restarts, each:
+    1. Pick random seed mackerel cluster
+    2. Generate one polygon from EACH family
+    3. Score all with grid query
+    4. Keep best
+  - Track global best across all restarts
+  
+  ### Phase 4: Global Edge Refinement
+  - For best polygon, for each edge:
+    - Try shifts ±50, ±100, ±150
+    - Check if shift excludes nearby sardines
+    - Keep improving shift
+  - Output refined polygon
+  
+  ### Implementation Notes
+  - Use 100x100 grid for fast O(1) rectangle queries
+  - Precompute all grid scores at startup
+  - Multi-component union: ensure vertices are sorted and polygon is simple
+  - Spiral: use a consistent winding direction (e.g., clockwise around sardines)
+  - Time budget: ~0.15s per family per restart, total <2.0s
+total_score: |
+    def run(ctx, args):
+        # Compute grid
+        cell_size = 1000
+        grid_size = 100
+        grid = [[{'m': 0, 's': 0} for _ in range(grid_size)] for _ in range(grid_size)]
+        
+        for fish in ctx.get_program().strip().split('\n'):
+            if 'fish[' not in fish:
+                continue
+            try:
+                parts = fish.replace('fish[', '').replace(']', '').split(',')
+                if len(parts) >= 2:
+                    x, y, fish_type = int(parts[0]), int(parts[1]), 1 if 'mackerel' in fish else -1
+                    cx, cy = x // cell_size, y // cell_size
+                    if 0 <= cx < grid_size and 0 <= cy < grid_size:
+                        grid[cy][cx]['m' if fish_type == 1 else 's'] += 1
+            except:
+                continue
+        
+        # Find high-gradient regions
+        regions = []
+        for cy in range(grid_size):
+            for cx in range(grid_size):
+                m, s = grid[cy][cx]['m'], grid[cy][cx]['s']
+                if m + s > 5:  # Only consider cells with significant fish
+                    gradient = (m - s) / (m + s)
+                    regions.append((cx, cy, m, s, gradient))
+        
+        regions.sort(key=lambda r: r[4], reverse=True)
+        top_regions = regions[:20]
+        
+        # Generate polygons from each family
+        candidates = []
+        for i, (cx, cy, m, s, grad) in enumerate(top_regions[:5]):
+            # Get mackerel coordinates in this region
+            mackerels = []
+            for j in range(500):
+                for k in range(500):
+                    if 0 <= j < 100000 and 0 <= k < 100000:
+                        # Check if in region
+                        if abs(j - cx * cell_size) < 500 and abs(k - cy * cell_size) < 500:
+                            mackerels.append((j, k))
+            
+            if len(mackerels) < 5:
+                continue
+            
+            # Family A: Multi-component
+            if i % 3 == 0:
+                # ... generate multi-component polygon
+                pass
+            
+            # Family B: Spiral
+            if i % 3 == 1:
+                # ... generate spiral polygon
+                pass
+            
+            # Family C: Adaptive rectangle
+            if i % 3 == 2:
+                # ... generate adaptive rectangle
+                pass
+        
+        return {"regions": top_regions, "num_candidates": len(candidates)}
+sampling:
+  temperature: 1.2
+  top_p: 0.98
+  top_k: 50
+  max_tokens: 12288
+agent:
+  max_iterations: 50
+middleware:
+  budget_reminder_from_left: 3
+  long_tool_output_max_chars: 15000
+new_tools:
+- name: probe_multi_family
+  description: |
+    Rapidly rank 3 polygon families (multi-component, spiral, adaptive-rectangle) for a seed cluster using grid queries. Returns approximate scores for each family, enabling selection of best family before full eval.
+  input_schema:
+    type: object
+    properties:
+      seed_cluster:
+        type: object
+        properties:
+          cx:
+            type: integer
+            description: Center cell x
+          cy:
+            type: integer
+            description: Center cell y
+          m_count:
+            type: integer
+            description: Mackerel count in cell
+          s_count:
+            type: integer
+            description: Sardine count in cell
+  implementation_py: |
+    def run(ctx, args):
+        cell_size = 1000
+        grid_size = 100
+        grid = [[{'m': 0, 's': 0} for _ in range(grid_size)] for _ in range(grid_size)]
+        
+        for fish in ctx.get_program().strip().split('\n'):
+            if 'fish[' not in fish:
+                continue
+            try:
+                parts = fish.replace('fish[', '').replace(']', '').split(',')
+                if len(parts) >= 2:
+                    x, y, fish_type = int(parts[0]), int(parts[1]), 1 if 'mackerel' in fish else -1
+                    cx, cy = x // cell_size, y // cell_size
+                    if 0 <= cx < grid_size and 0 <= cy < grid_size:
+                        grid[cy][cx]['m' if fish_type == 1 else 's'] += 1
+            except:
+                continue
+        
+        seed = args.get('seed_cluster', {})
+        seed_cx, seed_cy = seed.get('cx', 50), seed.get('cy', 50)
+        seed_m, seed_s = seed.get('m_count', 0), seed.get('s_count', 0)
+        
+        # Define bounding box around seed cluster
+        min_x, max_x = max(0, seed_cx * cell_size - 200), min(100000, seed_cx * cell_size + 200)
+        min_y, max_y = max(0, seed_cy * cell_size - 200), min(100000, seed_cy * cell_size + 200)
+        
+        # Family A: Multi-component - approximate by checking nearby clusters
+        score_a = seed_m - seed_s
+        # Check adjacent cells for additional mackerels
+        for dcx in range(-2, 3):
+            for dcy in range(-2, 3):
+                cx, cy = seed_cx + dcx, seed_cy + dcy
+                if 0 <= cx < grid_size and 0 <= cy < grid_size:
+                    m, s = grid[cy][cx]['m'], grid[cy][cx]['s']
+                    score_a += m - s
+        
+        # Family B: Spiral - approximate by excluding sardines in extended region
+        score_b = seed_m - seed_s
+        for dcx in range(-3, 4):
+            for dcy in range(-3, 4):
+                cx, cy = seed_cx + dcx, seed_cy + dcy
+                if 0 <= cx < grid_size and 0 <= cy < grid_size:
+                    m, s = grid[cy][cx]['m'], grid[cy][cx]['s']
+                    score_b += m - 0.5 * s  # Spiral may exclude some sardines
+        
+        # Family C: Adaptive rectangle - grow until hitting sardines
+        score_c = seed_m - seed_s
+        for step in [100, 200, 400, 800]:
+            cx, cy = seed_cx, seed_cy
+            if 0 <= cx + step // cell_size < grid_size:
+                m, s = grid[cy][cx + step // cell_size]['m'], grid[cy][cx + step // cell_size]['s']
+                score_c += max(0, m - s)  # Adaptive growth
+        
+        return {
+            "family_a_score": score_a,
+            "family_b_score": score_b,
+            "family_c_score": score_c,
+            "best_family": "A" if score_a == max(score_a, score_b, score_c) else "B" if score_b == max(score_a, score_b, score_c) else "C"
+        }
+remove_tools: []
+new_skills: []
+new_middlewares: []

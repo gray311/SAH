@@ -1,0 +1,185 @@
+schema: h2spec/1.0
+system_prompt: "You are a C++ polygon optimizer for axis-aligned fish capture. Goal: maximize (mackerels - sardines + 1).\n\nCORE STRATEGY: Coordinate-focused rectangle packing.\n\nSEARCH METHOD (encodes in EVOLVE-BLOCK C++ code):\n\n1. SEED ANALYSIS:\n   - Parse input to extract all fish coordinates\n   - Build a sparse spatial index (e.g., quadtree or grid of cell_size=100) for fast region queries\n   - Count mackerels and sardines in each cell\n\n2. CANDIDATE GENERATION - Rectangle Packing:\n   - For cells with high mackerel density (M >= 3 and S = 0 or S <= 1):\n     * Try creating axis-aligned rectangles covering that cell and neighbors\n     * Rectangle sides aligned to grid lines at multiples of 100 for efficiency\n     * Ensure perimeter <= 400,000 and vertex count 4-1000\n     * Check coordinates in [0, 100000]\n\n3. MULTI-RECTANGLE COMBINATION:\n   - Combine 2-10 non-overlapping rectangles that together capture many mackerels\n   - Use union of rectangles as single polygon (axis-aligned union)\n   - Or create a single large polygon encompassing multiple clusters\n\n4. LOCAL SEARCH / HILL CLIMBING:\n   - For each candidate polygon, try perturbations:\n     * Shift entire polygon by small amounts (±50, ±100)\n     * Add/remove cells from the polygon boundary\n     * Split large polygons into smaller rectangles\n     * Merge adjacent rectangles\n   - Use spatial index for fast region scoring during search\n\n5. DIVERSIFIED RESTARTS:\n   - Run 20-30 restarts with different seeds\n   - Each restart: pick random high-density cells, build rectangle candidates\n   - Combine all candidates, keep best by full evaluation\n\n6. VALIDATION:\n   - Ensure output is valid axis-aligned polygon\n   - Check no self-intersections\n   - Perimeter constraint satisfied\n\nTools:\n- edit_solution: Replace EVOLVE-BLOCK with complete C++ implementing coordinate-focused rectangle packing\n- evaluate_solution: Run C++ program, get score (mackerels-sardines+1)\n- probe_solution: Use for quick variant ranking if evaluator allows\n- finish: Submit when you have encoded a working rectangle packing strategy"
+skill_description: Coordinate-focused rectangle packing. Parse fish coordinates, find dense mackerel cells, try axis-aligned rectangles around clusters, combine multiple rectangles, local search refinement, 20-30 restarts.
+skill_body: "# Coordinate-Focused Rectangle Packing Strategy\n\n## Phase 1: Input Analysis\n- Parse all N mackerel and N sardine coordinates from input\n- Build sparse spatial index (grid cell_size=100 or quadtree)\n- Count M and S in each cell, compute density metrics\n\n## Phase 2: Candidate Rectangle Generation\nFor each cell with high mackerel density:\n- Try rectangles of various sizes covering the cell\n- Prefer rectangles where M >> S (ideally S=0 in or on boundary)\n- Rectangle dimensions: vary from small (covering 1 cell) to large (multiple cells)\n- Ensure: integer coords, perimeter <= 400,000, 4-1000 vertices\n\n## Phase 3: Multi-Rectangle Combination\n- Combine 2-10 disjoint rectangles into a single polygon\n- Option A: Union rectangles into complex axis-aligned polygon\n- Option B: Create single enclosing rectangle for multiple clusters\n- Option C: Create multi-holed polygon (outer boundary + inner holes for sardine clusters)\n\n## Phase 4: Local Search Refinement\nFor each candidate:\n- Shift polygon centroid by ±50, ±100 units\n- Expand/contract individual edges by multiples of 100\n- Try splitting large polygons into smaller components\n- Try merging nearby polygons\n- Use spatial index for O(1) or O(log n) scoring during search\n\n## Phase 5: Multiple Restarts\n- Run 20-30 restarts with different random seeds\n- Each restart: independently generate 50-100 rectangle candidates\n- Evaluate top 10-20 candidates per restart\n- Track global best across all restarts\n\n## Phase 6: Output\n- Format: m (vertices), then m lines of coordinates\n- Clockwise or counterclockwise order\n- Ensure valid output even on failures (fallback to seed or simple polygon)"
+tool_descriptions:
+  edit_solution: 'Replace EVOLVE-BLOCK with C++ implementing coordinate-focused rectangle packing:
+
+    1. Parse fish coordinates, build spatial index (grid cell_size=100)
+
+    2. Find high-density mackerel cells (M>=3, S<=1)
+
+    3. Generate axis-aligned rectangle candidates around these cells
+
+    4. Combine multiple rectangles into valid polygons
+
+    5. Local search: shift edges, merge/split rectangles
+
+    6. 20-30 restarts, evaluate top candidates
+
+    Ensure <2.0s execution, valid output format.'
+  evaluate_solution: Run C++ program. Returns score (mackerels-sardines+1), validity, and remaining evaluations (budget=30). Each run has ~2.0s search window.
+  probe_solution: Use for quick variant ranking if evaluator allows; otherwise rely on full evaluation.
+  finish: End when you have encoded a working rectangle packing strategy with spatial indexing and local search.
+sampling:
+  temperature: 0.9
+  top_p: 0.85
+  top_k: 15
+  max_tokens: 12288
+agent:
+  max_iterations: 40
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 15000
+new_tools:
+- name: find_dense_rectangles
+  description: 'Find dense mackerel regions and generate candidate axis-aligned rectangles around them. Returns list of rectangles with their M, S counts and estimated scores.'
+  input_schema:
+    type: object
+    properties:
+      min_mackerels:
+        type: integer
+        default: 2
+      max_sardines:
+        type: integer
+        default: 1
+      max_perimeter:
+        type: integer
+        default: 400000
+  implementation_py: |
+    def run(ctx, args):
+        import json
+        min_m = args.get("min_mackerels", 2)
+        max_s = args.get("max_sardines", 1)
+        max_perim = args.get("max_perimeter", 400000)
+        
+        # Parse program to get fish coordinates
+        prog = ctx.get_program()
+        fish_m = []
+        fish_s = []
+        
+        for line in prog.split('\\n'):
+            line = line.strip()
+            if line.startswith('fish['):
+                try:
+                    content = line.replace('fish[', '').replace(']', '')
+                    parts = content.split(',')
+                    if len(parts) >= 2:
+                        x, y = int(parts[0]), int(parts[1])
+                        if 'mackerel' in line.lower():
+                            fish_m.append((x, y))
+                        else:
+                            fish_s.append((x, y))
+                except:
+                    continue
+        
+        # Build grid with cell_size=100
+        cell_size = 100
+        grid = {}
+        for x, y in fish_m:
+            cx, cy = x // cell_size, y // cell_size
+            key = (cx, cy)
+            grid[key] = grid.get(key, {'m': 0, 's': 0})
+            grid[key]['m'] += 1
+        for x, y in fish_s:
+            cx, cy = x // cell_size, y // cell_size
+            key = (cx, cy)
+            grid[key] = grid.get(key, {'m': 0, 's': 0})
+            grid[key]['s'] += 1
+        
+        # Find candidate rectangles
+        candidates = []
+        
+        for (cx, cy), counts in grid.items():
+            if counts['m'] < min_m or counts['s'] > max_s:
+                continue
+            
+            for width in [1, 2, 3, 4, 5]:
+                for height in [1, 2, 3, 4, 5]:
+                    rect_x = cx * cell_size
+                    rect_y = cy * cell_size
+                    rect_w = width * cell_size
+                    rect_h = height * cell_size
+                    
+                    perim = 2 * (rect_w + rect_h)
+                    if perim > max_perim:
+                        continue
+                    
+                    est_m = width * height * (counts['m'] / max(1, counts['s'] + 1))
+                    est_s = width * height * counts['s']
+                    
+                    candidates.append({
+                        'rect_x': rect_x,
+                        'rect_y': rect_y,
+                        'rect_w': rect_w,
+                        'rect_h': rect_h,
+                        'est_score': est_m - est_s,
+                        'area': width * height
+                    })
+        
+        candidates.sort(key=lambda x: x['est_score'], reverse=True)
+        return {'candidates': candidates[:20]}
+new_skills:
+- name: rectangle-packing-guide
+  description: Use coordinate-focused rectangle packing. Find dense mackerel cells, generate axis-aligned rectangles, combine multiple rectangles, local search refinement.
+  body: |
+    # Rectangle Packing Guide for Polygon Optimization
+    
+    ## Core Idea
+    
+    Instead of grid-based corridor expansion, use coordinate-focused rectangle packing:
+    - Parse actual fish coordinates
+    - Build spatial index for fast region queries
+    - Generate axis-aligned rectangles around mackerel-dense regions
+    - Combine multiple rectangles into valid polygons
+    
+    ## Step-by-Step Method
+    
+    ### Step 1: Input Parsing and Spatial Indexing
+    - Extract all mackerel and sardine coordinates from input
+    - Build grid with cell_size=100 (or quadtree for sparse data)
+    - Count M and S in each cell
+    - Identify high-density mackerel cells (M >= 3, S <= 1 ideal)
+    
+    ### Step 2: Rectangle Candidate Generation
+    For each high-density cell:
+    - Generate rectangles of varying sizes (1x1 to 5x5 cells)
+    - Rectangle boundaries align to cell grid lines (multiples of 100)
+    - Calculate estimated score: M - S in the rectangle
+    - Prefer rectangles with high M and low S
+    - Filter by perimeter constraint (<= 400,000)
+    
+    ### Step 3: Multi-Rectangle Combination
+    Combine 2-10 rectangles:
+    - Option A: Union into complex axis-aligned polygon
+    - Option B: Create single enclosing rectangle
+    - Option C: Multi-holed polygon (outer + inner boundaries for sardines)
+    - Ensure no self-intersections and valid vertex count (4-1000)
+    
+    ### Step 4: Local Search Refinement
+    For each candidate polygon:
+    - Shift entire polygon by small amounts (±50, ±100 units)
+    - Expand/contract individual edges by multiples of 100
+    - Try splitting large polygons into smaller rectangles
+    - Try merging nearby rectangles
+    - Use spatial index for fast scoring
+    
+    ### Step 5: Multiple Restarts
+    - Run 20-30 restarts with different random seeds
+    - Each restart: generate 50-100 rectangle candidates
+    - Evaluate top 10-20 per restart using full evaluation
+    - Track global best
+    
+    ## Key Success Factors
+    - Fine-grained: Work at fish-coordinate level, not coarse grid cells
+    - Rectangle-focused: Axis-aligned rectangles are natural for this problem
+    - Combinatorial: Try combining multiple small rectangles
+    - Efficient: Use spatial index for O(1) scoring during search
+    - Diverse: Many restarts to explore different packings
+new_middlewares:
+- name: density_reminder
+  hook: before_model
+  description: Remind solver to focus on dense mackerel regions and avoid sardine clusters
+  implementation_py: |
+    def before_model(hook_input):
+        return "Focus on dense mackerel clusters (M>=3, S=0 ideally). Generate axis-aligned rectangles around these clusters, combine multiple rectangles, avoid sardine-heavy areas."

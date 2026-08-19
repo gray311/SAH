@@ -1,0 +1,163 @@
+schema: h2spec/1.0
+system_prompt: |
+  Erdos C5: Minimize max_k integral h(x)(1-h(x+k))dx over h:[0,2]->[0,1] with integral(h)=1.
+
+  Current best: C5 <= 0.38092303510845016.
+
+  STRATEGY:
+
+  1. Start from seed program's initial h
+
+  2. Call local_optimize to improve h via limited-step gradient optimization (10-20 steps)
+
+  3. If no improvement, call local_optimize again with different regularization
+
+  4. Only after exhausting local_optimize, try search_patterns for diverse initializations
+
+  5. Evaluate best candidates with c5_bound < 0.375
+
+  KEY: local_optimize modifies h directly; use it before search_patterns.
+new_tools:
+  - name: local_optimize
+    description: |
+      Perform 10-20 steps of gradient-based optimization on current h to reduce C5 bound.
+      Uses Adam optimizer with learning rate 0.01, L2 regularization to enforce smoothness.
+      Runs in ~200ms. Call this FIRST to refine seed h before trying other strategies.
+      If c5_bound doesn't improve after 2 runs, try search_patterns instead.
+    input_schema:
+      type: object
+      properties:
+        steps:
+          type: integer
+          default: 15
+        lr:
+          type: number
+          default: 0.01
+        reg:
+          type: number
+          default: 1e-4
+    implementation_py: |
+      def run(ctx, args):
+          import jax
+          import jax.numpy as jnp
+          import optax
+          
+          N = ctx.get_program()
+          if N is None:
+              return {"note": "no program"}
+          
+          from dataclasses import dataclass
+          
+          @dataclass
+          class Config:
+              num_intervals: int = 800
+              lr: float = 0.01
+              steps: int = 15
+              reg: float = 1e-4
+              penalty: float = 61.0
+          
+          class Optimizer:
+              def __init__(self, config: Config):
+                  self.config = config
+                  self.dx = 2.0 / config.num_intervals
+                  
+              def compute_c5(self, h: jnp.ndarray) -> float:
+                  h_padded = jnp.pad(h, (0, config.num_intervals))
+                  j_padded = jnp.pad(1.0 - h, (0, config.num_intervals))
+                  corr = jnp.fft.ifft(jnp.fft.fft(h_padded) * jnp.conj(jnp.fft.fft(j_padded))).real
+                  return float(jnp.max(corr * self.dx))
+              
+              def _get_params(self, h: jnp.ndarray) -> dict:
+                  return {"h": h.tolist(), "num_intervals": self.config.num_intervals}
+              
+              def _apply(self, params: dict) -> dict:
+                  h = jnp.array(params["h"])
+                  h = jnp.clip(h, 0.001, 1.0)
+                  h = h / (jnp.sum(h) * self.dx)
+                  h = jnp.clip(h, 0.001, 1.0)
+                  
+                  latent = jnp.log(h / (1.0 - h))
+                  opt = optax.adam(self.config.lr)
+                  state = opt.init(jnp.zeros_like(latent), latent)
+                  
+                  for _ in range(self.config.steps):
+                      grad = jax.grad(lambda l: self.compute_c5(jax.nn.sigmoid(l)) + self.config.reg * jnp.sum(jax.nn.relu(l)**2))(latent)
+                      latent, state = opt.update(grad, state)
+                  
+                  h_new = jax.nn.sigmoid(latent)
+                  h_new = jnp.clip(h_new, 0.001, 1.0)
+                  h_new = h_new / (jnp.sum(h_new) * self.dx)
+                  h_new = jnp.clip(h_new, 0.001, 1.0)
+                  
+                  c5 = self.compute_c5(h_new)
+                  j_val = 1.0 - h_new
+                  h_new_padded = jnp.pad(h_new, (0, self.config.num_intervals))
+                  j_new_padded = jnp.pad(j_val, (0, self.config.num_intervals))
+                  corr_fft = jnp.fft.fft(h_new_padded) * jnp.conj(jnp.fft.fft(j_new_padded))
+                  correlation = jnp.fft.ifft(corr_fft).real
+                  
+                  return {"h": h_new.tolist(), "c5_bound": float(c5), "improvement": c5 < params.get("c5_bound", jnp.inf)}
+          
+          params = ctx.get_program()
+          h = jnp.array([float(x) for x in params[1]["params"]["h"]])
+          optimizer = Optimizer(Config(lr=args.get("lr", 0.01), steps=args.get("steps", 15), reg=args.get("reg", 1e-4)))
+          result = optimizer._apply({"h": h.tolist(), "c5_bound": float(ctx.best_score())})
+          return result
+new_skills:
+  - name: local-opt-first
+    description: Always try local_optimize before search_patterns. Use gradient descent to refine h.
+    body: |
+      # Local Optimization First Strategy
+
+      ## Principle
+      The seed program's h may be close to a local optimum. Use gradient-based refinement BEFORE trying diverse patterns.
+
+      ## Workflow
+
+      1. CALL local_optimize(steps=15, lr=0.01, reg=1e-4)
+         - Runs Adam optimization on current h
+         - ~200ms, cheap
+         - May find local improvements
+
+      2. Check if c5_bound decreased
+         - If yes: CALL local_optimize again with lr=0.02 (aggressive)
+         - If no: Try lr=0.005 (conservative)
+
+      3. If STILL no improvement after 2-3 runs:
+         - CALL search_patterns(temperature=0.5)
+         - Screen with probe_solution
+         - Evaluate best candidates
+
+      4. Only after exhausting local_optimize and search_patterns:
+         - Tune hyperparameters in the EVOLVE-BLOCK
+
+      ## Why this order?
+      - local_optimize is CHEAP (10-20 steps)
+      - Diverse patterns (search_patterns) are EXPENSIVE
+      - Gradient refinement finds local optima that simple patterns miss
+tool_descriptions:
+  edit_solution: |
+    Modify hyperparameters. For local_optimize refinement: keep num_intervals=800.
+    For global search: increase num_intervals to 1600. For stronger integral constraint: penalty_strength=80-120.
+    Test ONE change at a time.
+  evaluate_solution: |
+    Full 59000-step optimization. Returns combined_score = 0.38092303510845016 / c5_bound.
+    Use only after local_optimize and probe_solution confirm c5_bound < 0.375.
+  probe_solution: |
+    Fast approximate evaluation (500 intervals). Use to screen search_patterns candidates.
+    Budget: 30 probes. Only evaluate if c5_bound < 0.375.
+  finish: |
+    Submit when combined_score > 1.0.
+sampling:
+  temperature: 0.6
+  top_p: 0.95
+  top_k: 30
+  max_tokens: 10000
+agent:
+  max_iterations: 70
+middleware:
+  budget_reminder_from_left: 6
+  long_tool_output_max_chars: 5000
+new_tools: []
+new_skills: []
+new_middlewares: []

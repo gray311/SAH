@@ -1,0 +1,268 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are optimizing mathematical functions to maximize C₂ = ||f★f||₂² / ((∫f)²||f★f||∞) in the second autocorrelation inequality.
+  
+  Current best: 1.03492 (achieved by step functions with ~450 intervals and multi-level patterns).
+  
+  Your mission: BREAK THROUGH the plateau by exploring NEW function classes, not just tweaking step parameters.
+  
+  STRATEGY:
+  1. START DIVERSE: Don't assume step functions are optimal. Try:
+     - Splines (cubic B-splines with optimized knots)
+     - Gaussian mixtures (weighted sums of Gaussians)
+     - Hybrid: step + smooth transitions
+     - Symmetric variants: force even symmetry to simplify search
+  
+  2. EXPLORE STRUCTURE, NOT JUST PARAMETERS:
+     - Change the number of intervals (200-600)
+     - Change pattern topology (single-peak, multi-peak, plateau, asymmetric)
+     - Experiment with reinit_fraction (0.1-0.3) and reinit_std (0.02-0.08)
+  
+  3. USE EVALUATOR EFFICIENTLY:
+     - Each evaluate_solution costs 1/30 of budget
+     - Make each evaluation COUNT: try one coherent class at a time
+     - If a class underperforms, abandon it quickly (don't waste 5+ evals)
+  
+  4. WHEN STALLED:
+     - Try fundamentally different initializations (not just parameter tweaks)
+     - Force symmetry constraints to reduce search space
+     - Increase interval count for finer resolution
+     - Switch to a completely different function family
+  
+  Key insight: The step function plateau may be a local optimum. Break through by exploring orthogonal directions in function space.
+skill_description: |
+  Maximize C₂ by exploring diverse function classes beyond step functions.
+  Focus on structural changes (splines, Gaussians, hybrids) and systematic pattern discovery.
+  Use evaluator efficiently: one coherent class per evaluation.
+skill_body: |
+  # C₂ Optimization: Breaking Through the Step Function Plateau
+  
+  ## Phase 1: Exploratory Diversity
+  
+  ### Try These Function Classes (in order):
+  
+  1. **Step Functions (baseline)**: 
+     - Variations on seed patterns: adjust heights by ±0.05, widths by ±5%
+     - Try 3-5 variants, pick best for full evaluation
+  
+  2. **Smoothed Steps**: 
+     - Step functions with linear transitions at boundaries
+     - Parameters: transition width (0.01-0.05 of domain), same step positions
+  
+  3. **Gaussian Mixtures**:
+     - Sum of 2-5 Gaussians: f(x) = Σ w_i * exp(-(x-μ_i)²/(2σ_i²))
+     - Parameters: means (uniform on [0,1]), sigmas (0.05-0.3), weights (sum to 1)
+     - Enforce non-negativity (automatic with Gaussians)
+  
+  4. **Cubic Splines**:
+     - B-spline basis with optimized coefficients
+     - Parameters: knot positions (quantiles of [0,1]), coefficients (non-negative)
+     - Use 20-50 knots for flexibility
+  
+  5. **Hybrid Functions**:
+     - Step core with smooth tails
+     - Parameters: step start/end positions, tail decay rates
+  
+  ## Phase 2: Structural Optimization
+  
+  Once you identify a promising class:
+  1. Fix the function family
+  2. Systematically optimize parameters using the reinit mechanism
+  3. Try different interval counts (coarse→fine or fine→coarse)
+  4. Explore symmetry: even functions (f(x)=f(-x)) reduce complexity
+  
+  ## Phase 3: Breaking Through
+  
+  If no improvement after 10 evals:
+  - Reset to completely new function class
+  - Try asymmetric patterns more aggressively
+  - Increase complexity: more peaks, more parameters
+  - Combine successful elements from multiple runs
+  
+  ## Evaluation Discipline
+  
+  - Each evaluation is precious: spend wisely
+  - If a class doesn't show promise in 2 probe attempts, abandon it
+  - Build on successes: if Gaussian mixtures beat steps, expand that search
+  - Document what works: heights that succeed, widths that matter
+  
+  ## Recovery Strategies
+  
+  - Stalled: switch function family immediately
+  - Score drops: revert to previous best, try different parameterizations
+  - Budget ending (<5 evals): commit to one promising direction or finish
+tool_descriptions:
+  edit_solution: |
+    Modify the EVOLVE-BLOCK to implement a NEW function class or significantly restructure the step function.
+    
+    For step functions: change pattern_idx, interval count, or reinit parameters.
+    For new classes: replace the entire optimization strategy (e.g., Gaussian mixture).
+    
+    Make COMPLETE changes, not incremental tweaks. Each edit should test a different hypothesis.
+  evaluate_solution: |
+    Run full evaluation. Returns combined_score.
+    
+    Budget: 30 evaluations total. Each counts heavily.
+    Only evaluate after testing 2-3 variants with probe_solution (or directly if no probes available).
+    Track which function class and parameters achieved each score.
+  probe_solution: |
+    Quick approximate score on subsampled data.
+    
+    Use to quickly rank multiple parameter sets BEFORE spending a full evaluation.
+    Test 3-5 variants, pick the best for evaluate_solution.
+    Probe scores are approximate but good for ranking your own variants.
+  finish: |
+    End when: (a) no improvement after 15 evals, (b) budget exhausted (<3 evals left),
+    or (c) you've tried 3+ diverse function classes with no gain.
+    
+    Report: best C₂ achieved, which function class won, key parameters.
+sampling:
+  temperature: 0.7
+  top_p: 0.95
+  top_k: 50
+  max_tokens: 16384
+agent:
+  max_iterations: 60
+middleware:
+  budget_reminder_from_left: 3
+  long_tool_output_max_chars: 15000
+new_tools:
+  - name: explore_function_space
+    description: |
+      Generate diverse initial function classes beyond step functions.
+      Call at start to populate search space: steps, Gaussians, splines, hybrids.
+      Return candidate parameter sets for each class.
+    input_schema:
+      type: object
+      properties: {}
+    implementation_py: |
+      def run(ctx, args):
+          import random
+          random.seed(42)
+          candidates = []
+          n_intervals = ctx.hypers.num_intervals if hasattr(ctx, 'hypers') else 450
+          
+          # Step variants
+          patterns = [
+              {"type": "step", "heights": [1.40, 1.60], "positions": [0.25, 0.75]},
+              {"type": "step", "heights": [1.1, 1.9, 1.1], "positions": [0.15, 0.40, 0.70]},
+              {"type": "symmetric", "heights": [1.3, 1.8, 1.3], "positions": [0.15, 0.4, 0.65, 0.85]},
+          ]
+          for i, p in enumerate(patterns):
+              candidates.append({
+                  "class": "step_variant",
+                  "pattern_idx": i,
+                  "params": p
+              })
+          
+          # Gaussian mixture
+          candidates.append({
+              "class": "gaussian_mixture",
+              "num_components": 3,
+              "means": [0.1, 0.5, 0.9],
+              "sigmas": [0.15, 0.25, 0.15],
+              "weights": [0.3, 0.4, 0.3]
+          })
+          
+          # Spline variant
+          candidates.append({
+              "class": "cubic_spline",
+              "num_knots": 30,
+              "knot_quantiles": [i/30 for i in range(1, 30)],
+              "initial_coeffs": [0.5 + random.random() * 0.5] * 30
+          })
+          
+          return {
+              "diversity_samples": candidates,
+              "note": "These diverse classes should be tested with evaluate_solution"
+          }
+new_skills:
+  - name: diverse-function-explorer
+    description: |
+      A playbook for exploring function space beyond the current step function optimum.
+      When to use: when step functions plateau or you need fresh ideas.
+    body: |
+      # Diverse Function Space Exploration Playbook
+      
+      ## Why Step Functions May Be a Local Optimum
+      
+      The current best (1.03492) uses multi-level step functions. This is a local optimum
+      in a restricted search space. To find better solutions, we need to:
+      1. Explore different mathematical families
+      2. Change the structural complexity
+      3. Mix successful elements from different approaches
+      
+      ## Exploration Strategy
+      
+      ### Step 1: Baseline Confirmation
+      - Verify step function parameters are truly optimized
+      - Try: finer intervals (500-600), slightly different heights (1.35-1.65)
+      - If no improvement after 3 evals, move to Step 2
+      
+      ### Step 2: Smooth Variants
+      - Add smooth transitions at step boundaries (linear ramps of width 0.02-0.05)
+      - Try: smoothed step, Gaussian-windowed step, cosine-transitioned step
+      - Compare: does smoothing hurt or help the L² norm?
+      
+      ### Step 3: Alternative Families
+      Test these in order of computational efficiency:
+      
+      **Gaussian Mixtures**:
+      - 2-5 Gaussians with random means on [0,1]
+      - Vary: num_components (2-5), sigma diversity (0.1-0.4), weight distributions
+      - Key: enforce non-negativity naturally (Gaussians are always positive)
+      
+      **Cubic Splines**:
+      - 20-50 B-spline basis functions
+      - Optimize: knot positions (use quantiles), coefficients (non-negative constraints)
+      - Key: splines can capture curvature that steps cannot
+      
+      **Hybrid Approaches**:
+      - Step core with smooth tails (e.g., step function multiplied by Gaussian envelope)
+      - Multiple peaks with smooth connections
+      - Plateau regions with asymmetric sides
+      
+      ### Step 4: Systematic Combination
+      - Take best element from each successful class
+      - Combine: e.g., Gaussian-mixture-inspired step heights, spline-like transitions
+      - Iterate: refine the hybrid, don't restart from scratch
+      
+      ## Evaluation Discipline
+      
+      - Each class: test 3-5 variants, pick best, evaluate ONCE
+      - If a class beats steps: expand search in that direction (5+ evals)
+      - If a class underperforms: abandon quickly (don't waste 5+ evals)
+      - Track: which class achieved what score, what parameters mattered
+      
+      ## Breaking Through Checklist
+      
+      [ ] Tested 3+ diverse function classes
+      [ ] Each class tested with 3-5 variants
+      [ ] At least one class outperformed step baseline
+      [ ] If none succeeded: reset to random exploration or try completely new approach
+tool_descriptions:
+  edit_solution: |
+    Modify the EVOLVE-BLOCK to implement a NEW function class or significantly restructure the step function.
+    
+    For step functions: change pattern_idx, interval count, or reinit parameters.
+    For new classes: replace the entire optimization strategy (e.g., Gaussian mixture).
+    
+    Make COMPLETE changes, not incremental tweaks. Each edit should test a different hypothesis.
+  evaluate_solution: |
+    Run full evaluation. Returns combined_score.
+    
+    Budget: 30 evaluations total. Each counts heavily.
+    Only evaluate after testing 2-3 variants with probe_solution (or directly if no probes available).
+    Track which function class and parameters achieved each score.
+  probe_solution: |
+    Quick approximate score on subsampled data.
+    
+    Use to quickly rank multiple parameter sets BEFORE spending a full evaluation.
+    Test 3-5 variants, pick the best for evaluate_solution.
+    Probe scores are approximate but good for ranking your own variants.
+  finish: |
+    End when: (a) no improvement after 15 evals, (b) budget exhausted (<3 evals left),
+    or (c) you've tried 3+ diverse function classes with no gain.
+    
+    Report: best C₂ achieved, which function class won, key parameters.
+remove_tools: []

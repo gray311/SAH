@@ -1,0 +1,202 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are an expert in numerical optimization for the Erdős minimum overlap problem.
+
+  Goal: Beat C5 <= 0.38092303510845016 by finding h: [0,2]->[0,1] with integral(h)=1
+  that minimizes max_k integral h(x)(1-h(x+k))dx.
+
+  KEY INSIGHT: The seed program already has excellent multi-pattern initialization (12 variants).
+  Your job is NOT to create new initializations, but to SYSTEMATICALLY TUNE the optimizer
+  parameters to escape local minima and find a better c5_bound.
+
+  STRATEGY: ITERATIVE HYPERPARAMETER OPTIMIZATION
+
+  1. Call hyperparameter_sweep() to get ~5 diverse optimizer configurations
+     (learning rates, penalty strengths, restart counts, step schedules)
+
+  2. For each config:
+     - Run a short test with probe_solution (1000 steps each, very cheap)
+     - Keep configs that show promise
+
+  3. For top 2-3 configs from probing, run full optimization with evaluate_solution
+
+  4. If best score improves, edit the EVOLVE-BLOCK to use the winning config
+  5. Repeat with slight variations around the winning config
+
+  What to edit in EVOLVE-BLOCK:
+  - Hyperparameters: num_intervals, base_learning_rate, num_steps, penalty_strength, num_restarts
+  - Try: num_intervals=600-1200, lr=0.001-0.02, penalty=1000-10000, num_steps=30000-70000, num_restarts=1-5
+
+  Target: combined_score > 1.0 (c5_bound < 0.38092303510845016)
+skill_description: |
+  Systematic hyperparameter optimization for Erdős problem. Uses probe_solution for cheap ranking
+  of optimizer configs, then full evaluation on promising candidates.
+skill_body: |
+  # Erdős C5 Optimization - Hyperparameter Tuning Playbook
+
+  ## Why Hyperparameter Tuning Works
+
+  The seed program's 12 initialization patterns already explore diverse starting points.
+  The real opportunity is tuning the optimizer itself: learning rate schedules, penalty
+  strengths, restart counts, and discretization resolution can make the difference
+  between finding C5~0.38 and C5~0.37.
+
+  ## Step-by-Step Workflow
+
+  ### Phase 1: Configure Sweep (call hyperparameter_sweep())
+  - Gets 5 configs varying:
+    * Learning rate: 0.001, 0.005, 0.01, 0.02
+    * Penalty: 500, 1000, 2500, 5000, 10000
+    * Steps: 30k, 50k, 70k
+    * Restarts: 1, 2, 3, 5
+    * Intervals: 600, 800, 1000
+
+  ### Phase 2: Probe & Filter
+  - For each config, run a mini-optimization (500-1000 steps) with probe_solution
+  - These are CHEAP (~10s vs ~2min for full eval)
+  - Keep configs where probe c5_bound < 0.38 (i.e., combined_score > 1.0)
+
+  ### Phase 3: Full Evaluation
+  - Take top 2-3 configs from probing
+  - Run full num_steps optimization with evaluate_solution
+  - Keep the best result
+
+  ### Phase 4: Refine
+  - If you beat 0.380923, narrow the sweep around your winning config
+  - Try: lr ± 50%, penalty ± 20%, steps ± 10%
+
+  ## Key Principles
+
+  - Use probes to filter configs BEFORE spending full evals
+  - Start broad (large hyperparameter ranges), then narrow down
+  - Remember: combined_score = 0.38092303510845016 / c5_bound, so you need c5_bound < 0.38
+  - Save your best program to scratch space between iterations
+tool_descriptions:
+  edit_solution: |
+    Modify the EVOLVE-BLOCK region. Change Hyperparameters fields:
+    - num_intervals (600-1200): discretization resolution
+    - base_learning_rate (0.001-0.02): optimizer step size
+    - num_steps (30000-70000): total training iterations
+    - penalty_strength (500-10000): constraint enforcement
+    - num_restarts (1-5): how many random starts
+    Return complete valid Python in EVOLVE-BLOCK format.
+  evaluate_solution: |
+    Run the full optimization and return combined_score = 0.38092303510845016 / c5_bound.
+    Higher is better. Score > 1.0 means you beat the current record!
+  probe_solution: |
+    Quick approximate evaluation using 1000 intervals and first 2000 steps.
+    Returns estimated combined_score. Cheap (~10s) but not exact - use to rank configs
+    before full evaluation. Separate budget of 30 probes available.
+  finish: |
+    End when you've exhausted your 30 evaluations or cannot improve past 0.38092303510845016.
+sampling:
+  temperature: 1.0
+  top_p: 0.95
+  top_k: 30
+  max_tokens: 16384
+agent:
+  max_iterations: 70
+middleware:
+  budget_reminder_from_left: 6
+  long_tool_output_max_chars: 15000
+new_tools:
+  - name: hyperparameter_sweep
+    description: |
+      Generate 5 diverse optimizer configurations for the Erdős problem.
+      Varies learning rates, penalty strengths, step counts, restarts, and discretization.
+      Call this FIRST to get configs to test with probe_solution.
+    input_schema:
+      type: object
+      properties: {}
+    implementation_py: |
+      def run(ctx, args):
+          import numpy as np
+          configs = []
+          lrs = [0.001, 0.005, 0.01, 0.02]
+          penalties = [500, 1000, 2500, 5000, 10000]
+          steps = [30000, 50000, 70000]
+          restarts = [1, 2, 3, 5]
+          intervals = [600, 800, 1000]
+          
+          for i, (lr, pen, steps, rest, ints) in enumerate(zip(
+              lrs, penalties, steps, restarts, intervals)):
+              cfg = {
+                  "num_intervals": ints,
+                  "base_learning_rate": lr,
+                  "num_steps": steps,
+                  "penalty_strength": pen,
+                  "num_restarts": rest,
+                  "config_seed": 42 + i,
+                  "description": f"Config {i+1}: lr={lr}, pen={pen}, steps={steps}, restarts={rest}, intervals={ints}"
+              }
+              configs.append(cfg)
+          
+          return {
+              "configs": configs,
+              "count": len(configs),
+              "note": "Use probe_solution with each config to rank before full eval"
+          }
+new_skills:
+  - name: hyperparameter-tuning-playbook
+    description: |
+      Systematic approach to tuning optimizer hyperparameters for the Erdős problem.
+      Use probe_solution to cheaply filter configs before full evaluation.
+    body: |
+      # Hyperparameter Tuning for Erdős C5 Problem
+
+      ## Understanding the Hyperparameters
+
+      ### Learning Rate (base_learning_rate)
+      - Too low (<0.001): Slow convergence, may not escape local minima
+      - Too high (>0.02): Unstable training, oscillations
+      - Good range: 0.005-0.015 for this problem
+
+      ### Penalty Strength
+      - Constrains integral(h) to be exactly 1
+      - Too low (<500): Constraint violations, invalid solutions
+      - Too high (>10000): Over-penalization, optimizer struggles
+      - Good range: 2000-8000
+
+      ### Number of Steps
+      - Too few (<20000): Inadequate training, stuck in local minima
+      - Too many (>80000): Diminishing returns, wastes budget
+      - Good range: 40000-60000
+
+      ### Restarts (num_restarts)
+      - Helps escape local minima by trying multiple initializations
+      - Each restart costs full evaluation budget
+      - Good range: 2-4 (balance diversity vs budget)
+
+      ### Discretization (num_intervals)
+      - More intervals = finer function representation
+      - Too few (<400): Loss of function detail
+      - Too many (>1200): Computationally expensive
+      - Good range: 600-900
+
+      ## Tuning Strategy
+
+      1. Start with BROAD sweep: test 3-5 configs spanning the ranges above
+      2. Use probe_solution for each config (1000 steps each, cheap)
+      3. Keep configs with probe c5_bound < 0.38
+      4. Run full evaluation on top 2-3
+      5. If successful, NARROW the sweep around winning config
+      6. Repeat until budget exhausted or no improvement possible
+
+      ## Common Pitfalls
+
+      - Don't change ALL hyperparameters at once - isolate what works
+      - Always check the probe_score before spending full evals
+      - Remember: you need c5_bound < 0.380923, so combined_score > 1.0
+      - Save intermediate best programs between iterations
+new_middlewares:
+  - name: probe_before_eval
+    hook: before_tool
+    description: |
+      Reminds solver to use probe_solution before evaluate_solution.
+      Prevents wasting full evaluations on unpromising configs.
+    implementation_py: |
+      def before_tool(hook_input):
+          tool_calls = hook_input.get("tool_calls", [])
+          if tool_calls and tool_calls[-1].get("name") == "evaluate_solution":
+              return "REMINDER: Use probe_solution first to rank configs! Full evaluation is expensive. Run 2-3 probes, keep top configs, then evaluate."
+          return None

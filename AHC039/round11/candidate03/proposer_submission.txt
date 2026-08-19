@@ -1,0 +1,265 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are a C++ polygon optimizer for axis-aligned fish capture (N mackerels, N sardines).
+  Goal: maximize max(0, mackerels_inside - sardines_inside + 1).
+  
+  CRITICAL GEOMETRIC INSIGHT: The optimal solution is likely a union of axis-aligned
+  bounding boxes around mackerel clusters. Each cluster should be tight (minimize perimeter
+  waste) while excluding sardines.
+  
+  SEARCH METHOD (encodes in EVOLVE-BLOCK C++ code):
+  
+  1. GEOMETRIC CLUSTER ANALYSIS:
+     - Parse all 2N fish points (first N mackerels, next N sardines)
+     - Group mackerels into clusters using distance threshold (~2000 units)
+     - For each cluster, compute tight bounding box (min_x, max_x, min_y, max_y)
+     - Count sardines inside each bounding box using coordinate search
+  
+  2. CLUSTER COMBINATION STRATEGY:
+     - Option A: Single polygon = union of all cluster bounding boxes
+       * Create L-shaped or stepped polygon to connect boxes
+       * Minimize perimeter by merging overlapping/adjacent boxes
+     - Option B: Select top k clusters by (mackerels - sardines) and union them
+     - Try both approaches, keep best
+  
+  3. SARDINE EXCLUSION:
+     - After initial union, try shrinking box edges outward by 1-5 units if no sardines hit
+     - If shrinking hits sardines, try excluding that specific sardine by cutting a notch
+     - Use KD-tree on sardines for O(log N) containment queries
+  
+  4. POLYGON VALIDATION & OPTIMIZATION:
+     - Ensure 4-1000 vertices, perimeter ≤400,000, coords in [0,100000]
+     - Use zero-crossing test for self-intersection check
+     - Output last valid polygon
+  
+  5. MULTIPLE STRATEGIES:
+     - Run 10-15 different approaches:
+       * Different distance thresholds for clustering
+       * Different k values for top clusters
+       * Different merging strategies
+     - Output best result
+  
+  6. TIME BUDGET: <2.0s per evaluation. Prioritize quick geometric analysis over deep hill climbing.
+  
+  Tools:
+  - edit_solution: Replace EVOLVE-BLOCK with complete C++ implementing geometric clustering
+  - evaluate_solution: Run C++, get score
+  - probe_solution: NOT useful - exact scoring needed
+  - finish: Submit when you have working geometric cluster union approach
+skill_description: Geometric cluster union. Group mackerels into clusters by proximity, compute bounding boxes, union them into a stepped polygon, exclude sardines by edge adjustment.
+skill_body: |
+  # Geometric Cluster Union Strategy
+  
+  ## Phase 1: Parse Input
+  - Read N from stdin
+  - Read 2N points: first N are mackerels (type=1), next N are sardines (type=-1)
+  - Store all points in vectors
+  
+  ## Phase 2: Cluster Mackerels
+  - Use Union-Find or BFS to group mackerels by proximity
+  - Distance threshold: 2000 units (tunable)
+  - For each cluster, compute bounding box:
+    * min_x = min x coordinate in cluster
+    * max_x = max x coordinate in cluster
+    * min_y = min y coordinate in cluster
+    * max_y = max y coordinate in cluster
+  - Store cluster as {min_x, max_x, min_y, max_y, mackerel_count}
+  
+  ## Phase 3: Count Sardines in Each Cluster
+  - For each cluster bounding box, count sardines inside
+  - Compute score = mackerel_count - sardine_count
+  - Sort clusters by score descending
+  
+  ## Phase 4: Union Clusters into Polygon
+  - Sort clusters by x coordinate
+  - Merge adjacent/overlapping clusters
+  - Build stepped polygon by connecting bounding boxes
+  - Ensure: 4-1000 vertices, perimeter ≤400,000
+  
+  ## Phase 5: Sardine Exclusion
+  - Check if any sardine lies on polygon edges or inside
+  - Try expanding box by 1-5 units outward if safe
+  - Use KD-tree for fast point-in-polygon queries
+  
+  ## Phase 6: Output
+  - Output m vertices followed by coordinates
+  - Try multiple strategies (different cluster thresholds, k values)
+  - Output best polygon
+  
+  ## Time Complexity
+  - Clustering: O(N log N) with sorting or O(N²) with brute force
+  - Sardine counting: O(N × number_of_clusters) with coordinate search
+  - Total should fit in 2.0s for N=5000
+new_tools:
+- name: cluster_bounding_boxes
+  description: |
+    Analyze mackerel positions, group into clusters by distance, compute bounding boxes for each cluster, count sardines inside each box. Returns list of clusters with their bbox and scores.
+  input_schema:
+    type: object
+    properties:
+      distance_threshold:
+        type: integer
+        default: 2000
+      num_clusters:
+        type: integer
+        default: -1
+  implementation_py: |
+    def run(ctx, args):
+        dist_thresh = args.get("distance_threshold", 2000)
+        max_clusters = args.get("num_clusters", -1)
+        
+        program = ctx.get_program()
+        mackerels = []
+        sardines = []
+        
+        for line in program.split('\n'):
+            line = line.strip()
+            if not line or line.startswith('//'):
+                continue
+            parts = line.split()
+            if len(parts) >= 2:
+                try:
+                    x = int(parts[0])
+                    y = int(parts[1])
+                    if 'mackerel' in line.lower():
+                        mackerels.append((x, y))
+                    elif 'sardine' in line.lower():
+                        sardines.append((x, y))
+                except:
+                    pass
+        
+        # Cluster mackerels using BFS
+        from collections import deque
+        clusters = []
+        visited = set()
+        
+        for i, (mx, my) in enumerate(mackerels):
+            if i in visited:
+                continue
+            
+            cluster_points = []
+            queue = deque([i])
+            visited.add(i)
+            
+            while queue:
+                j = queue.popleft()
+                cluster_points.append(mackerels[j])
+                xj, yj = mackerels[j]
+                
+                for k, (xk, yk) in enumerate(mackerels):
+                    if k in visited:
+                        continue
+                    dist = abs(xj - xk) + abs(yj - yk)
+                    if dist <= dist_thresh:
+                        visited.add(k)
+                        queue.append(k)
+            
+            if cluster_points:
+                min_x = min(p[0] for p in cluster_points)
+                max_x = max(p[0] for p in cluster_points)
+                min_y = min(p[1] for p in cluster_points)
+                max_y = max(p[1] for p in cluster_points)
+                
+                # Count sardines inside
+                s_count = 0
+                for sx, sy in sardines:
+                    if min_x <= sx <= max_x and min_y <= sy <= max_y:
+                        s_count += 1
+                
+                m_count = len(cluster_points)
+                score = m_count - s_count
+                clusters.append({
+                    'bbox': (min_x, max_x, min_y, max_y),
+                    'm': m_count,
+                    's': s_count,
+                    'score': score
+                })
+        
+        if max_clusters > 0 and len(clusters) > max_clusters:
+            clusters.sort(key=lambda c: c['score'], reverse=True)
+            clusters = clusters[:max_clusters]
+        
+        return {
+            'clusters': clusters,
+            'num_clusters': len(clusters),
+            'note': f'Found {len(clusters)} clusters from {len(mackerels)} mackerels'
+        }
+new_skills:
+- name: geometric-cluster-union-guide
+  description: Use geometric clustering to group mackerels into proximity clusters, compute bounding boxes, union them into polygons.
+  body: |
+    # Geometric Cluster Union Guide
+    
+    ## Core Principle
+    Group nearby mackerels into clusters, then create a polygon that is the union of bounding boxes around each cluster.
+    
+    ## Step 1: Distance-Based Clustering
+    - Use Manhattan distance threshold (typically 2000 units)
+    - Group mackerels into clusters using BFS/Union-Find
+    - Each cluster contains all mackerels within threshold distance
+    
+    ## Step 2: Compute Bounding Boxes
+    - For each cluster:
+      * min_x = minimum x coordinate
+      * max_x = maximum x coordinate
+      * min_y = minimum y coordinate
+      * max_y = maximum y coordinate
+      * mackerel_count = number of mackerels in cluster
+    - Count sardines inside each bounding box
+    
+    ## Step 3: Score Clusters
+    - score = mackerel_count - sardine_count
+    - Sort clusters by score descending
+    - Consider: should we use all clusters or top k?
+    
+    ## Step 4: Union Clusters into Polygon
+    - Sort clusters by x coordinate
+    - Merge adjacent/overlapping clusters to minimize perimeter
+    - Build stepped polygon by connecting bounding boxes
+    - Ensure: 4-1000 vertices, valid polygon (no self-intersection)
+    
+    ## Step 5: Sardine Exclusion
+    - Check if sardines lie on edges or inside polygon
+    - Try expanding boxes slightly (1-5 units) if safe
+    - Use KD-tree for fast containment queries
+    
+    ## Step 6: Multiple Strategies
+    - Try different distance thresholds (1500, 2000, 2500, 3000)
+    - Try using top k clusters (k=5, 10, 15, all)
+    - Output best polygon across all strategies
+    
+    ## Implementation Notes
+    - N=5000 mackerels, 2.0s time limit
+    - Use BFS clustering: O(N * N) worst case but typically fast
+    - Bounding box sardine count: O(N * num_clusters)
+    - Total should fit in time budget
+tool_descriptions:
+  edit_solution: 'Replace EVOLVE-BLOCK with C++ implementing geometric clustering:
+    1. Parse fish positions
+    2. Cluster mackerels by distance (~2000 units)
+    3. Compute bounding boxes for clusters
+    4. Count sardines in each box
+    5. Union boxes into stepped polygon
+    6. Try multiple thresholds and k values, output best'
+  evaluate_solution: Run C++ program, returns score (mackerels-sardines+1), validity, and remaining evaluations.
+  probe_solution: NOT useful - exact scoring needed for this geometric problem.
+  finish: Submit when you have working geometric cluster union approach with multiple strategies.
+sampling:
+  temperature: 1.2
+  top_p: 0.95
+  top_k: 25
+  max_tokens: 14000
+agent:
+  max_iterations: 60
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 16000
+new_middlewares:
+- name: geometric_hint
+  hook: before_model
+  description: Remind solver to use geometric clustering approach for this axis-aligned polygon problem.
+  implementation_py: |
+    def before_model(hook_input):
+        return "Use geometric clustering: group mackerels by proximity (~2000 units), compute bounding boxes for each cluster, union boxes into stepped polygon, try multiple distance thresholds and k values, exclude sardines carefully."
+remove_tools:
+  - probe_solution

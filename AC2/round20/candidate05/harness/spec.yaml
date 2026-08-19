@@ -1,0 +1,235 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are optimizing functions to maximize C₂ = ||f★f||₂² / ((∫f)² ||f★f||_∞), where the current best is 0.8962799441554086 (step functions).
+  
+  CRITICAL INSIGHT: Step functions are trapped in a local optimum. To escape, you must:
+  1. First, probe 3-5 DIFFERENT mutation directions from current best (width changes, height changes, symmetry breaking)
+  2. Only call evaluate_solution if probe_score > current_best_score
+  3. If all 5 probes fail to beat seed, HARD RESTART with a completely different initial pattern
+
+  SEARCH STRATEGY:
+  PHASE 1 (iterations 1-20): MUTATION EXPLORATION
+  - Analyze current best's structure: where is L2 concentrated? where is sup?
+  - Generate 5 mutations targeting specific weaknesses:
+    * Mutation A: Widen support by +/- 10% (reduce peak height proportionally)
+    * Mutation B: Narrow support by +/- 10% (increase peak height)
+    * Mutation C: Break symmetry - shift peak left/right by 5%
+    * Mutation D: Change peak height by +/- 0.15 (not 0.05 - need larger changes)
+    * Mutation E: Add a small side lobe (10% height, 15% width) on one side
+  
+  PHASE 2 (iterations 21-30): DIVERSIFIED RESTART
+  If no improvement after iteration 20:
+  - Switch to completely different initial patterns:
+    * Gaussian bimodal: two Gaussians separated by 1.0, each sigma=0.6, weights 0.5 each
+    * Bimodal step: flat 1.0 from -2 to -0.5, flat 2.0 from -0.5 to 0.5, flat 1.0 from 0.5 to 2.0
+    * Truncated exponential: exp(-alpha*|x|) for |x|<T, 0 otherwise, optimized for sharp cutoff
+  - Probe 3 variants from new class, evaluate best
+
+  RULES:
+  - Probe FIRST, evaluate SECOND. Never evaluate without probing.
+  - Each probe should test a DIFFERENT direction. Avoid similar mutations.
+  - If stuck (same probe pattern for 2 iterations): HARD RESTART with new architecture
+
+skill_description: |
+  Escape step-function local optimum by systematic mutation exploration. Target specific mathematical weaknesses (support width, peak height, symmetry) with focused probes. Hard restart when all directions exhausted.
+
+skill_body: |
+  # C2 Optimizer: Targeted Mutation Search
+  
+  ## Phase 1: Systematic Mutation Exploration
+  
+  Step 1: Diagnose Current Best
+  - Call probe_solution on current best to confirm score
+  - Note: What is the support width? What is peak height? Is it symmetric?
+  
+  Step 2: Generate 5 Targeted Mutations
+  Apply these SPECIFIC mutations to current best:
+  
+  Mutation A (Widen): Reduce peak height by 10%, extend support by 10% on each side
+  Mutation B (Narrow): Increase peak height by 10%, reduce support by 10%
+  Mutation C (Asymmetry): Shift right side 5% higher, left side unchanged
+  Mutation D (Height Spike): Increase central peak by 0.15, keep others same
+  Mutation E (Side Lobe): Add small bump (height=0.15, width=0.15*support) on one side
+  
+  For each mutation:
+  - Call probe_solution immediately
+  - Track which mutations improved probe score
+  
+  Step 3: Evaluate Promising Mutations
+  - If 2+ mutations have probe_score > seed, evaluate them
+  - If only 1 mutation improves, evaluate just that one
+  - If 0 improvements: Proceed to Phase 2
+  
+  ## Phase 2: Hard Restart (iteration 21+)
+  
+  When all mutation directions fail:
+  
+  Restart Pattern 1: Gaussian Bimodal
+  f(x) = 0.5*exp(-((x+1.0)^2)/(2*0.6^2)) + 0.5*exp(-((x-1.0)^2)/(2*0.6^2))
+  
+  Restart Pattern 2: Bimodal Step
+  f(x) = 1.0 for x in [-2,-0.5] U [0.5,2], f(x) = 2.0 for x in [-0.5,0.5]
+  
+  Restart Pattern 3: Truncated Exponential
+  f(x) = exp(-0.5*|x|) for |x| < 2.5, f(x) = 0 otherwise
+  
+  For each restart:
+  - Probe 3 variants (vary parameters slightly)
+  - Evaluate the best probe if score > seed
+  
+  ## Key Rules
+  - NEVER evaluate without probing first
+  - Each probe must test a DIFFERENT mutation direction
+  - Hard restart at iteration 20 if no improvement
+  - Target LARGE changes (0.15 height, 10% width) - small changes won't escape
+
+tool_descriptions:
+  edit_solution: |
+    Edit the EVOLVE-BLOCK. For mutations: modify step boundaries, heights, add side lobes.
+    Use f.at[start:end].set(value) for region edits.
+    For restarts: use jnp.piecewise or explicit function definitions.
+    Ensure f >= 0 everywhere using max(0,·) or jax.nn.softplus.
+  evaluate_solution: |
+    Full evaluation. Budget: 30 total. Call ONLY after probe_solution confirms promise (probe > seed).
+  probe_solution: |
+    Approximate score on 10% subsample. FAST. Use to test all 5 mutation directions before any full eval.
+    You have 30 probes - spend them to explore DIVERSE mutations, not to refine one.
+  finish: |
+    Report best combined_score, winning mutation strategy, and which restart worked if applicable.
+
+sampling:
+  temperature: 0.7
+  top_p: 0.95
+  top_k: 30
+  max_tokens: 16384
+
+agent:
+  max_iterations: 40
+
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 12000
+
+new_tools:
+  - name: mutate_step_function
+    description: |
+      Generate 5 targeted mutations of the current step function: (A) widen by 10%, (B) narrow by 10%,
+      (C) break symmetry by 5%, (D) spike peak by 0.15, (E) add side lobe. Returns code for each.
+      Call this to start Phase 1 mutation exploration.
+    input_schema:
+      type: object
+      properties: {}
+    implementation_py: |
+      def run(ctx, args):
+          current_f = ctx.get_program()
+          n = len(current_f)
+          mutations = {}
+          
+          # Parse current step function structure (simplified)
+          # Assume f has a simple pattern: flat regions at different heights
+          
+          # Mutation A: Widen - extend support, reduce height
+          f_a = current_f.copy()
+          f_a = f_a.at[:n//4].set(0.9 * f_a[:n//4]).at[n//4:n//2].set(0.8 * f_a[n//4:n//2]).at[3*n//4:].set(0.9 * f_a[3*n//4:])
+          mutations['widen'] = f_a
+          
+          # Mutation B: Narrow - reduce support, increase height
+          f_b = current_f.copy()
+          f_b = f_b.at[:n//8].set(0.0).at[7*n//8:].set(0.0).at[n//8:7*n//8].set(1.1 * f_b[n//8:7*n//8])
+          mutations['narrow'] = f_b
+          
+          # Mutation C: Asymmetry - shift right side
+          f_c = current_f.copy()
+          right_start = 0.4 * n
+          f_c = f_c.at[right_start:].set(1.05 * f_c[right_start:])
+          mutations['asymmetry'] = f_c
+          
+          # Mutation D: Height spike
+          f_d = current_f.copy()
+          center = n // 2
+          f_d = f_d.at[center-10:center+10].set(1.15 * f_d[center-10:center+10])
+          mutations['spike'] = f_d
+          
+          # Mutation E: Side lobe
+          f_e = current_f.copy()
+          lobe_start = 0.6 * n
+          lobe_end = 0.75 * n
+          f_e = f_e.at[lobe_start:lobe_end].set(0.15 * f_e.max())
+          mutations['side_lobe'] = f_e
+          
+          return {'mutations': {k: v.tolist() for k, v in mutations.items()}}
+
+new_skills:
+  - name: mutation-search-protocol
+    description: |
+      Systematically explore mutation directions to escape step-function local optimum. Target specific weaknesses with large changes.
+    body: |
+      # Mutation Search Protocol for C2 Maximization
+      
+      ## Core Strategy
+      Small mutations (5% changes) cannot escape the step-function local optimum. You MUST apply LARGE, TARGETED mutations that address specific mathematical weaknesses.
+      
+      ## Five Mutation Directions
+      
+      1. WIDEN: Extend support by 10%, reduce peak height proportionally
+         Why: Reduces ||f*f||_∞ more than ||f*f||₂²
+  
+      2. NARROW: Reduce support by 10%, increase peak height
+         Why: Concentrates L2 norm more effectively
+  
+      3. ASYMMETRY: Break left-right symmetry by 5-10%
+         Why: Current best is symmetric - asymmetry may improve ratio
+  
+      4. SPIKE: Increase central peak by 0.15 (large change!)
+         Why: Sharp peaks may improve the ratio
+  
+      5. SIDE_LOBE: Add a small bump (height 0.15, width 15% of support)
+         Why: Tests if adding structure helps
+  
+      ## Execution Flow
+  
+      Phase 1: Mutation Exploration (iterations 1-20)
+      1. Call mutate_step_function to get all 5 mutations
+      2. Probe ALL 5 mutations immediately
+      3. Evaluate only those with probe_score > seed (0.8962799441554086)
+      
+      Phase 2: Hard Restart (iteration 21+)
+      If all mutations fail:
+      - Switch to Gaussian bimodal or bimodal step patterns
+      - Probe 3 variants, evaluate best
+      
+      ## Critical Rules
+      - Apply LARGE changes (0.15, 10%) - not 0.05 or 5%
+      - Probe BEFORE evaluating
+      - If stuck after 2 iterations of same mutation pattern: HARD RESTART
+      - Each probe must test a DIFFERENT direction
+
+new_middlewares:
+  - name: enforce_probe_first
+    hook: before_tool
+    description: |
+      Enforce probing before evaluation and prevent redundant mutations.
+    implementation_py: |
+      def before_tool(hook_input):
+          tool = hook_input.get('tool_name', '')
+          iteration = hook_input.get('iteration', 0)
+          
+          if tool == 'evaluate_solution':
+              return 'CRITICAL: Must probe_solution FIRST. Never evaluate without probing. Use 30 probes to explore diverse mutations.'
+          
+          if tool == 'mutate_step_function' and iteration > 2:
+              return 'Warning: Using same mutations repeatedly? Need to try different architecture after 3 iterations.'
+          
+          return None
+  - name: large_change_enforcement
+    hook: before_model
+    description: |
+      Remind solver to make LARGE changes (0.15, 10%) to escape local optimum.
+    implementation_py: |
+      def before_model(hook_input):
+          iteration = hook_input.get('iteration', 0)
+          
+          if iteration > 0 and iteration % 3 == 0:
+              return 'REMEMBER: Apply LARGE mutations! Change height by 0.15, not 0.05. Change width by 10%, not 5%. Small changes won\'t escape the local optimum.'
+          
+          return None

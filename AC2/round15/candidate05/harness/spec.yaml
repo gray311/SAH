@@ -1,0 +1,163 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are an expert in functional analysis and mathematical optimization for the C2 constant:
+  C2 = ||f★f||2^2 / ((∫f)^2 ||f★f||_∞), where f: R→R is non-negative.
+
+  Current best: 0.8962799441554086 (step function, combined_score 1.03896).
+
+  Mission: FIND AN ENTIRELY NEW FUNCTION ARCHITECTURE that beats the step-function record.
+
+  CORE STRATEGY: Parallel diverse exploration with probe-based filtering.
+
+  1. At iteration 1, call probe_and_select to get 5-7 diverse function proposals across DIFFERENT
+     families (Gaussian mixtures, B-spline, piecewise-linear, oscillatory decay, improved multi-level steps).
+
+  2. For each proposal, call probe_solution FIRST (30 budget). Rank by probe score.
+
+  3. Call evaluate_solution ONCE for the top 2-3 probe-ranked proposals only.
+
+  4. After each eval, if no improvement: generate a NEW set of candidates from a different angle.
+
+  5. Never refine a function family that isn't beating the record after 1 probe-test.
+
+  6. Function constraints: f(x)>=0, ∫f>0, numerically stable convolution.
+
+  Tools:
+  - edit_solution: implement the chosen function from a proposal
+  - evaluate_solution: full score (budget 30, use sparingly)
+  - probe_solution: approximate score on 10% subsample (budget 30, use to RANK before evaluate)
+  - probe_and_select: get diverse proposals AND automatically call probes, return top 3 ranked by probe
+skill_description: |
+  Parallel diverse exploration protocol. Use probe_and_select to generate diverse function families, then probe_solution to rank before full evaluation. NEVER refine a family that doesn't beat the record on first probe-test.
+skill_body: |
+  # C₂ Maximizer: Parallel Diverse Exploration Protocol
+
+  ## Core Principle
+
+  Step-function record is a LOCAL optimum. To beat it, explore DIFFERENT function architectures in PARALLEL using probes to filter cheaply.
+
+  ## Phase 1: Diverse Generation (Iteration 1, every iteration if not improving)
+
+  1. Call probe_and_select to get 5-7 proposals across DIFFERENT families:
+     - Gaussian mixtures (smooth multi-peaked)
+     - B-spline basis (flexible smooth transitions)
+     - Piecewise-linear (controlled smoothness)
+     - Oscillatory with decay (structured convolutions)
+     - Multi-level improved steps (refined asymmetric steps)
+     - Convex combinations
+     - Exponential-family variations
+
+  2. probe_and_select will automatically call probe_solution on each proposal and rank them.
+
+  3. EXPECTATION: At least one proposal beats the step-function record on probe.
+
+  ## Phase 2: Probe-Based Selection
+
+  1. Review the ranked proposals from probe_and_select (top 3 by probe score).
+
+  2. For each top proposal, call evaluate_solution ONCE to confirm.
+
+  3. Track which function FAMILY beats the record.
+
+  ## Phase 3: Quick Validation or Pivot
+
+  1. If ANY proposal beats the record: refine it minimally (one small mutation), then STOP and generate new candidates.
+
+  2. If NO proposal beats the record: immediately try a COMPLETELY different set of families.
+
+  3. NEVER spend multiple evals on one family unless the first probe-test shows promise.
+
+  ## Phase 4: Stall Recovery (iteration > 10)
+
+  1. Call probe_and_select again with explicitly different families.
+
+  2. If still stuck, try combining elements from multiple families.
+
+  ## Critical Rule
+
+  PARALLEL EXPLORATION > SEQUENTIAL REFINEMENT. One probe-test per family. If it fails, abandon it immediately and try a new family.
+tool_descriptions:
+  edit_solution: |
+    Implement a function proposal from probe_and_select. Use SEARCH/REPLACE to copy the code snippet exactly as provided. Ensure f(x)>=0 via softplus or max(0, ...) transformations.
+  evaluate_solution: |
+    Full evaluation. Returns combined_score. Call ONCE per proposal AFTER probing. Budget: 30 evals total. Use only the top 2-3 probe-ranked proposals.
+  probe_solution: |
+    Approximate score on 10% subsampled data. FAST (~10s). Budget: 30 probes. Use to RANK proposals BEFORE full evaluation. Critical for filtering.
+  finish: |
+    Report best C₂ achieved and which function family produced it.
+new_tools:
+  - name: probe_and_select
+    description: |
+      Get 5-7 diverse function proposals across DIFFERENT families. Automatically calls probe_solution on each, ranks by score, and returns the top 3 ready-to-edit proposals. Use at every iteration if not improving.
+    input_schema:
+      type: object
+      properties: {}
+    implementation_py: |
+      def run(ctx, args):
+          import random
+          random.seed(42 + ctx.get_iteration())
+          proposals = []
+          
+          # Family 1: Gaussian mixtures
+          proposals.append({
+              "family": "gaussian_mixture",
+              "description": "Weighted sum of Gaussians: f(x) = sum w_i * exp(-((x-mu_i)^2)/(2*sigma_i^2))",
+              "code": "import jax.numpy as jnp\nimport jax\n\nf_values = jnp.linspace(-3, 3, 600)\nmu = jnp.array([0.0, 1.2, -1.0])\nsigma = jnp.array([0.5, 0.7, 0.6])\nweights = jnp.array([0.4, 0.3, 0.3])\nf = weights[None,:] @ jnp.exp(-((f_values[:,None] - mu)[None,:,:])**2 / (2*sigma**2[None,:]))\nf = jnp.maximum(f, 0)"
+          })
+          
+          # Family 2: B-spline basis
+          proposals.append({
+              "family": "bspline",
+              "description": "B-spline with optimized control points and knots",
+              "code": "import jax.numpy as jnp\nimport jax\nfrom scipy.interpolate import splev, splrep\n\nn_control = 50\nknots = jnp.linspace(-1, 1, 20)\ncontrols = jnp.random.uniform(0.5, 2.0, n_control)\ncontrols = jax.nn.softplus(controls)\nf_values = jnp.linspace(-3, 3, 600)\nfit = splev(f_values, knots, s=0, k=3, dx=1, w=controls)\nf = jnp.maximum(f, 0)"
+          })
+          
+          # Family 3: Piecewise-linear
+          proposals.append({
+              "family": "piecewise_linear",
+              "description": "Linear segments connecting vertices, optimized for shape",
+              "code": "import jax.numpy as jnp\n\nf_values = jnp.linspace(-3, 3, 600)\nn_vertices = 30\nvertices = jnp.linspace(-2, 2, n_vertices)\nheights = 0.5 + 0.5 * jnp.sin(jnp.linspace(0, 2*jnp.pi, n_vertices))\nf = jnp.piecewise(f_values, [(f_values <= x) for x in vertices[:-1]], \\\
+                      [lambda x: heights[i] * (x - vertices[i]) / (vertices[i+1] - vertices[i]) for i in range(n_vertices-1)])\nf = jnp.maximum(f, 0)"
+          })
+          
+          # Family 4: Oscillatory with decay
+          proposals.append({
+              "family": "oscillatory_decay",
+              "description": "f(x) = (1 + alpha * cos(beta*x)) * exp(-gamma*|x|)",
+              "code": "import jax.numpy as jnp\nimport jax\n\nf_values = jnp.linspace(-5, 5, 800)\nalpha = 0.3\nbeta = 4.0\ngamma = 0.8\nf = (1 + alpha * jnp.cos(beta * f_values)) * jnp.exp(-gamma * jnp.abs(f_values))\nf = jnp.maximum(f, 1e-6)"
+          })
+          
+          # Family 5: Multi-level improved step
+          proposals.append({
+              "family": "multi_level_improved",
+              "description": "Multi-level step with optimized heights and asymmetric structure",
+              "code": "import jax.numpy as jnp\nimport jax\n\nf_values = jnp.linspace(-3, 3, 600)\nn = len(f_values)\nlevels = [0.5, 1.2, 2.0, 1.2, 0.5]\npositions = jnp.array([0.10, 0.30, 0.50, 0.70, 0.90])\nf = f_values\nfor i in range(len(positions) - 1):\n    start = int(positions[i] * n)\n    end = int(positions[i+1] * n)\n    f = f.at[start:end].set(levels[i])\nf = jnp.maximum(f, 0)"
+          })
+          
+          # Family 6: Convex combinations
+          proposals.append({
+              "family": "convex_combo",
+              "description": "Convex combination of simple functions with optimized weights",
+              "code": "import jax.numpy as jnp\nimport jax\n\nf_values = jnp.linspace(-3, 3, 600)\ncomp1 = jnp.exp(-0.5 * jnp.abs(f_values))\ncomp2 = jnp.exp(-0.8 * jnp.abs(f_values - 0.5))\ncomp3 = jnp.exp(-0.6 * jnp.abs(f_values + 0.3))\nweights = jnp.array([0.4, 0.35, 0.25])\nf = weights[0]*comp1 + weights[1]*comp2 + weights[2]*comp3\nf = jnp.maximum(f, 0)"
+          })
+          
+          # Family 7: Exponential-family variations
+          proposals.append({
+              "family": "exponential_decay",
+              "description": "Exponential decay with varied rates and shapes",
+              "code": "import jax.numpy as jnp\nimport jax\n\nf_values = jnp.linspace(-4, 4, 700)\nrate = 0.6\noffset = 0.3\nf = jnp.exp(-rate * jnp.abs(f_values - offset)) * (1 + 0.2 * jnp.sin(3 * f_values))\nf = jnp.maximum(f, 0)"
+          })
+          
+          # Call probes and rank
+          ranked = []
+          for prop in proposals:\n              probe_score = ctx.probe()\n              ranked.append((probe_score, prop))\n          ranked.sort(key=lambda x: -x[0])\n          \n          return {\n              "ranked_proposals": ranked[:3],\n              "note": "Top 3 proposals ranked by probe score. Call evaluate_solution for each."
+sampling:
+  temperature: 0.3
+  top_p: 0.9
+  top_k: 10
+  max_tokens: 16384
+agent:
+  max_iterations: 60
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 15000

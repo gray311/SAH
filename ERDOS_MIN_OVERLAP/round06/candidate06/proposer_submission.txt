@@ -1,0 +1,240 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are solving the Erdős minimum overlap problem. Goal: Find a step function h:[0,2]→[0,1] with ∫h=1 that minimizes max_k ∫h(x)(1-h(x+k))dx.
+
+  Current best bound: 0.38092303510845016. Your score = 0.38092303510845016 / c5_bound. Beat 1.0!
+
+  **KEY INSIGHT**: The seed's gradient-based optimizer is stuck because the optimal solution likely has a specific discrete structure. You must CONSTRUCT step functions explicitly, not optimize vaguely.
+
+  **FOCUSED STRATEGY**:
+  1. Try explicit step function constructions with few breakpoints (2-5 intervals)
+  2. Use the probe_solution tool to rank ~10 candidates cheaply before full eval
+  3. Once you find c5_bound < 0.3809, refine by adjusting breakpoint positions
+  4. Common structures to try: single-block, double-block, symmetric triple-block
+
+  **CONSTRAINTS**: h∈[0,1], ∫h=1 over [0,2]. Discretize with num_intervals=800.
+
+  **USE probe_solution extensively** - it's FREE (30 probes, separate budget). Rank your constructions before spending evals.
+
+  **EDIT STYLE**: Replace the entire EVOLVE-BLOCK with a new explicit construction. Don't patch - rewrite the _get_best_initialization or main optimization loop.
+skill_description: |
+  Erdős C₅ bound optimization. Find step functions minimizing max overlap. Use explicit construction + probe ranking to beat 0.3809.
+skill_body: |
+  # Erdős C₅ Problem: Explicit Step Function Construction
+
+  ## Problem
+  Minimize: max_k ∫₀² h(x)(1-h(x+k))dx
+  Subject to: h:[0,2]→[0,1], ∫h=1
+
+  ## Why Gradient Methods Fail
+  The seed's Adam optimizer gets trapped because the optimal h has a specific discrete structure. You need to CONSTRUCT candidate solutions explicitly.
+
+  ## Strategy: Concrete Step Function Designs
+
+  ### Design 1: Single Block
+  h(x) = 1 for x∈[0,1], h(x) = 0 otherwise. But we need ∫h=1, so this works!
+  c5_bound for this: max_k ∫₀² h(x)(1-h(x+k))dx
+
+  ### Design 2: Double Block
+  Split the unit mass into two intervals. Try:
+  - h = 0.5 on [0,1], h = 0.5 on [1,2] (uniform)
+  - h = 1 on [0,0.5], h = 0 on [0.5,1.5], h = 1 on [1.5,2] (two blocks)
+
+  ### Design 3: Symmetric Triple Block
+  - h = 1 on [0,a], h = 0 on [a,2-a], h = 1 on [2-a,2] where a = 0.25
+  - Adjust a so ∫h = 1: 2a = 1 ⇒ a = 0.5
+
+  ### Design 4: Asymmetric Patterns
+  - Mass concentrated near x=0 and x=2
+  - Three blocks with different widths
+
+  ## Execution Plan
+
+  1. **Probe Phase**: Construct 5-10 explicit step functions, use probe_solution to rank them
+  2. **Refine**: Take top 2, adjust breakpoint positions, probe again
+  3. **Eval**: Once you find c5_bound < 0.3809, do full eval
+  4. **Iterate**: Try variations: different numbers of blocks, asymmetric splits
+
+  ## Implementation Template
+
+  In EVOLVE-BLOCK, replace the multi-restart optimizer with:
+  - A function that explicitly constructs step functions given breakpoint locations
+  - A search loop that tries different breakpoint configurations
+  - Use jnp.searchsorted or manual breakpoints for piecewise constant functions
+
+  ## Important
+  - Use probe_solution for cheap ranking (30 free probes!)
+  - Focus on SIMPLE structures (2-5 intervals), not complex smooth functions
+  - Always ensure ∫h=1 by choosing breakpoints appropriately
+  - If you get stuck, try: single block, double block, symmetric triple block
+tool_descriptions:
+  edit_solution: |
+    Replace the EVOLVE-BLOCK with an explicit step function constructor. 
+    Define breakpoints manually and construct h as piecewise constant.
+    Example pattern: h = 1 on [0,a], 0 on [a,2-a], 1 on [2-a,2] where a=0.5.
+    Ensure ∫h=1 and h∈[0,1].
+  evaluate_solution: |
+    Run and get combined_score. Use sparingly - you have ~30 evals.
+    Combine with probe_solution for cheap ranking.
+  probe_solution: |
+    CHEAP APPROXIMATE EVAL: Run a fast version of the objective on subsampled data.
+    Free budget of 30 probes (separate from 30 full evals). 
+    Use this to RANK candidate step functions before full evaluation.
+    Call it multiple times per iteration - don't be conservative!
+  finish: |
+    Submit when you find combined_score > 1.0 or exhaust budget.
+sampling:
+  temperature: 0.3
+  top_p: 0.95
+  top_k: 10
+  max_tokens: 8192
+agent:
+  max_iterations: 40
+middleware:
+  budget_reminder_from_left: 3
+  long_tool_output_max_chars: 5000
+new_tools:
+  - name: construct_step_function
+    description: |
+      Construct a piecewise constant step function h:[0,2]→[0,1] given breakpoint locations and heights.
+      Ensures ∫h=1 by normalizing. Returns h discretized at 800 intervals.
+      Use this to rapidly prototype candidate solutions.
+    input_schema:
+      type: object
+      properties:
+        breakpoints:
+          type: array
+          items:
+            type: number
+          description: Breakpoint positions in [0,2] (ascending, exclusive of 0, inclusive of 2)
+        heights:
+          type: array
+          items:
+            type: number
+          description: Height of h on each interval [breakpoints[i], breakpoints[i+1]]
+    implementation_py: |
+      def run(ctx, args):
+          import numpy as np
+          breakpoints = sorted(args.get("breakpoints", []))
+          heights = args.get("heights", [])
+          
+          # Add boundaries
+          bp_full = [0.0] + sorted(breakpoints) + [2.0]
+          h_vals = np.array(heights)
+          
+          # Discretize
+          N = 800
+          x = np.linspace(0, 2, N+1)
+          h = np.zeros(N)
+          
+          for i in range(len(bp_full)-1):
+              b0, b1 = bp_full[i], bp_full[i+1]
+              if i < len(h_vals):
+                  # Fraction of intervals in this bin
+                  num_intervals = int((b1 - b0) * N / 2.0 + 0.5)
+                  start = int(b0 * N / 2.0)
+                  end = start + num_intervals
+                  for j in range(start, min(end, N)):
+                      h[j] = h_vals[i]
+          
+          # Enforce [0,1] and [0,2] bounds
+          h = np.clip(h, 0.0, 1.0)
+          
+          # Normalize to ensure integral = 1
+          integral = h.sum() * 2.0 / N
+          if integral > 0:
+              h = h / integral
+          
+          # Check constraints
+          if np.min(h) < 0 or np.max(h) > 1:
+              return {"error": "Height constraints violated", "h_norm": float(np.min(h)), "max_h": float(np.max(h))}
+          
+          if abs((h * 2.0 / N).sum() - 1.0) > 0.01:
+              return {"error": "Integral constraint not met", "integral": float((h * 2.0 / N).sum())}
+          
+          return {"h": h.tolist(), "integral": float((h * 2.0 / N).sum()),
+                  "num_breaks": len(breakpoints)}
+new_skills:
+  - name: explicit-construction
+    description: |
+      Method playbook for constructing step functions with explicit breakpoints.
+      Use when gradient methods fail or when testing specific structural hypotheses.
+    body: |
+      # Explicit Step Function Construction for Erdős C₅
+
+      ## Core Idea
+      Instead of optimizing a smooth latent, CONSTRUCT h as a piecewise constant function
+      with explicit breakpoints. This lets you explore discrete structures that gradient
+      methods miss.
+
+      ## Step 1: Choose Breakpoint Structure
+
+      ### Single Block
+      - Breakpoints: none (or [1.0])
+      - h = 1 on [0,1], 0 on [1,2]
+      - Integral = 1 ✓
+
+      ### Double Block (Symmetric)
+      - Breakpoints: [0.5, 1.0, 1.5]
+      - h = 1 on [0,0.5], 0 on [0.5,1.5], 1 on [1.5,2]
+      - Integral = 1 ✓
+
+      ### Double Block (Asymmetric)
+      - Breakpoints: [a, 2-a] for some a∈(0,1)
+      - h = 1 on [0,a] and [2-a,2], 0 in between
+      - Integral = 2a = 1 ⇒ a = 0.5
+
+      ### Triple Block
+      - Breakpoints: [a, b, 2-a] with a < b < 2-a
+      - Adjust heights and positions to get ∫h = 1
+
+      ## Step 2: Construct with the Tool
+
+      Call `construct_step_function` with:
+      - breakpoints: list of positions where h changes
+      - heights: value of h on each interval
+
+      Example:
+      ```python
+      args = {
+          "breakpoints": [0.5, 1.5],
+          "heights": [1.0, 0.0, 1.0]
+      }
+      result = construct_step_function(args)
+      if "error" in result:
+          # Fix constraint violation
+          pass
+      else:
+          # Use result["h"] for evaluation
+          pass
+
+      ## Step 3: Probe Before Evaluating
+
+      Once you construct a candidate:
+      1. Call `probe_solution` with the code containing your construction
+      2. Compare c5_bound values across ~5-10 candidates
+      3. Pick top 1-2 for full `evaluate_solution`
+
+      ## Step 4: Refine
+
+      If c5_bound < 0.3809 but not great:
+      - Add more breakpoints (3→4→5)
+      - Adjust existing breakpoint positions
+      - Try asymmetric patterns
+      - Probe each variant
+
+      ## Common Pitfalls
+
+      - **Integral ≠ 1**: Normalize h after construction
+      - **Out of bounds**: Clip h to [0,1]
+      - **Too many intervals**: Start with 2-5 breakpoints, refine later
+      - **Not probing**: Use probe_solution to avoid wasting evals!
+new_middlewares:
+  - name: probe_reminder
+    hook: before_model
+    description: |
+      Remind agent to use probe_solution for candidate ranking before full eval.
+      Fires every iteration to keep probe strategy top of mind.
+    implementation_py: |
+      def before_model(hook_input):
+          return "Use probe_solution to rank 5-10 candidate step functions before spending a full evaluation!"

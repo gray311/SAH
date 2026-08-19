@@ -1,0 +1,214 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are optimizing an orthogonal polygon (edges parallel to x/y axes) that maximizes:
+  score = (mackerels inside) - (sardines inside) + 1, clamped at 0.
+  
+  Key constraints:
+  - Polygon must be non-self-intersecting
+  - Vertices must be integer coordinates in [0, 100000]
+  - Max 1000 vertices, max perimeter 400000
+  
+  STRATEGY: Use multiple short evaluations to explore candidate polygons.
+  Don't try to find the optimal polygon in one shot. Instead:
+  1. Generate several candidate polygon shapes (rectangles, L-shapes, rectangles with cuts)
+  2. Use probe_solution to quickly rank candidates on subsampled data
+  3. Pick the best candidate and run a FULL evaluate_solution
+  4. Iteratively refine: add/remove cuts, shift boundaries, merge/split regions
+  
+  Always call probe_solution FIRST to filter promising candidates before spending evaluation budget.
+  If probe says a candidate is bad, discard it immediately.
+  If you see score is plateauing, try fundamentally different shapes (e.g., if rectangles fail, try multi-region polygons).
+  
+  Track your best full score carefully. Never trust probe scores as final - always confirm with evaluate_solution.
+skill_description: |
+  Optimize orthogonal polygon construction for a fish-capture problem. Generate candidate polygons, use probe to rank them cheaply, then evaluate the best candidates fully. Focus on exploring diverse shapes rather than one long search.
+skill_body: |
+  # Orthogonal Polygon Optimization for Fish Capture
+  
+  ## Objective
+  Maximize: mackerels inside - sardines inside + 1 (clamped at 0)
+  
+  ## Strategy Overview
+  1. **Generate diverse candidate polygons**: Try multiple shapes quickly
+     - Simple rectangles
+     - Rectangles with one or two "cuts" (removing sub-rectangles)
+     - L-shaped or U-shaped polygons
+     - Multi-lobed polygons if budget allows
+  
+  2. **Use probe_solution aggressively**: 
+     - Call probe on each candidate BEFORE evaluate
+     - Probe uses ~10s on subsampled data and doesn't count against evaluation budget
+     - Filter out poor candidates early
+     - Only run full evaluate on top 3-5 candidates
+  
+  3. **Iterative refinement**:
+     - After finding a working polygon, try small modifications
+     - Move boundaries by 50-200 units
+     - Add/remove single cuts
+     - Try merging nearby regions
+  
+  4. **Exploration vs exploitation**:
+     - First 5-7 evals: explore diverse shapes (rectangles of different sizes/positions)
+     - Middle evals: refine the best shape found
+     - Last evals: try completely different approaches if plateaued
+  
+  5. **Time budget**: You have 2 seconds per full evaluation. Build your polygon generation to complete well within this limit. If generating polygons takes >1 second, simplify your approach.
+  
+  ## Concrete Implementation Steps
+  
+  Step A: Rectangle enumeration
+  - Try centering on dense mackerel regions
+  - Try corners of the coordinate space
+  - Vary size: small (100x100), medium (500x500), large (2000x2000)
+  
+  Step B: Adding cuts
+  - If a rectangle catches many sardines, try cutting out a sub-rectangle where sardines cluster
+  - Use probe to quickly test if a cut improves score
+  
+  Step C: Multi-region polygons
+  - If single rectangle fails, try disconnected regions (output as one polygon by connecting with thin corridors)
+  - Focus on regions with high mackerel-to-sardine ratio
+  
+  ## Red Flags
+  - If score hasn't improved after 3 full evaluations: try a fundamentally different shape
+  - If probe scores are very low (< 50): something is wrong with your polygon generation
+  - If you run out of evaluations: submit your best score even if not optimal
+tool_descriptions:
+  edit_solution: >
+    Change the code in the EVOLVE-BLOCK. Use targeted SEARCH/REPLACE for small changes,
+    or full rewrite for major restructurings. The fixed entry function must be preserved.
+    Only the CPP_CODE variable inside the markers can be edited.
+  evaluate_solution: >
+    Run the current program and get: combined_score (higher better), validity, error,
+    best_so_far, evaluations_left. Budget is 30 total evaluations. Use probe_solution
+    first to filter candidates, then evaluate top ones.
+  probe_solution: >
+    Cheap score on first ~2000 rows of input data. Takes ~10 seconds, doesn't consume
+    evaluation budget, scores are approximate. USE THIS TO RANK CANDIDATE POLYGONS
+    BEFORE RUNNING FULL EVALUATIONS. Call it for each new candidate design.
+  finish: >
+    End the session when budget is exhausted or no improvement is possible. Best score
+    is automatically submitted.
+sampling:
+  temperature: 0.5
+  top_p: 0.9
+  top_k: 15
+  max_tokens: 12288
+agent:
+  max_iterations: 24
+middleware:
+  budget_reminder_from_left: 2
+  long_tool_output_max_chars: 12000
+new_tools:
+  - name: analyze_input_ranges
+    description: |
+      Read the input files to determine the coordinate ranges of mackerels and sardines.
+      Returns min/max x/y for each fish type to guide polygon construction.
+      Call this ONCE at the start of optimization.
+    input_schema: {type: object, properties: {}}
+    implementation_py: |
+      def run(ctx, args):
+          names = ctx.list_task_inputs()
+          if len(names) < 2:
+              return {"note": "need at least 2 input files", "mackerel": {"x_min": 0, "x_max": 0, "y_min": 0, "y_max": 0, "count": 0},
+                      "sardine": {"x_min": 0, "x_max": 0, "y_min": 0, "y_max": 0, "count": 0}}
+          
+          df_mackerel = ctx.read_input_df(names[0], nrows=5000)
+          df_sardine = ctx.read_input_df(names[1], nrows=5000)
+          
+          m_min_x, m_max_x = df_mackerel['x'].min(), df_mackerel['x'].max()
+          m_min_y, m_max_y = df_mackerel['y'].min(), df_mackerel['y'].max()
+          m_count = len(df_mackerel)
+          
+          s_min_x, s_max_x = df_sardine['x'].min(), df_sardine['x'].max()
+          s_min_y, s_max_y = df_sardine['y'].min(), df_sardine['y'].max()
+          s_count = len(df_sardine)
+          
+          # Suggest a safe bounding box (expand slightly to capture edge cases)
+          margin = 50
+          bbox = {
+              "x_min": max(0, int(m_min_x - margin)),
+              "x_max": min(100000, int(m_max_x + margin)),
+              "y_min": max(0, int(m_min_y - margin)),
+              "y_max": min(100000, int(m_max_y + margin)),
+              "margin_expanded": True
+          }
+          
+          return {"mackerel": {"x_min": int(m_min_x), "x_max": int(m_max_x), "y_min": int(m_min_y), "y_max": int(m_max_y), "count": m_count},
+                  "sardine": {"x_min": int(s_min_x), "x_max": int(s_max_x), "y_min": int(s_min_y), "y_max": int(s_max_y), "count": s_count},
+                  "bbox": bbox,
+                  "suggestion": "Start with rectangle covering mackerel range: [" + str(int(m_min_x)) + "," + str(int(m_min_y)) + "] to [" + str(int(m_max_x)) + "," + str(int(m_max_y)) + "]"}
+new_skills:
+  - name: polygon-construction-playbook
+    description: |
+      Systematic approach to constructing candidate orthogonal polygons: enumerate rectangles, add cuts, merge regions. Use probe to filter before full evaluation.
+    body: |
+      # Systematic Polygon Construction Playbook
+      
+      ## Phase 1: Baseline Rectangle
+      Start with a simple rectangle. Best practices:
+      - Use analyze_input_ranges to find mackerel coordinate ranges
+      - Center rectangle on mackerel range, extend by margin (50-100 units)
+      - Try multiple sizes: small (100x100), medium (500x500), large (2000x2000)
+      - Try different positions relative to mackerel bounds
+      
+      ## Phase 2: Add Cuts
+      If baseline rectangle has too many sardines:
+      - Identify sardine clusters within the rectangle (use sardine ranges from analyze_input_ranges)
+      - Cut out sub-rectangles where sardines are dense
+      - Use probe to test each cut before full evaluation
+      
+      ## Phase 3: Multi-Region
+      If single region can't capture enough mackerels:
+      - Create multiple disconnected regions connected by thin corridors
+      - Focus on high-density mackerel patches
+      - Use probe to rank different region combinations
+      
+      ## Phase 4: Refinement
+      Once you have a working polygon:
+      - Try small boundary adjustments (±50-200 units)
+      - Add/remove single cuts
+      - Try merging nearby regions
+      
+      ## Budget Management
+      - Phase 1: 2-3 full evaluations
+      - Phase 2-3: Use probe for most candidates, evaluate only top 2-3
+      - Phase 4: 1-2 full evaluations if plateauing
+      
+      ## When to Change Strategy
+      - Score unchanged after 3 full evals: try a fundamentally different shape
+      - All rectangles score poorly: try multi-region approach
+      - Score is high but not optimal: fine-tune boundaries
+      - Time running out: submit best result, don't force exploration
+      
+      ## Key Insight
+      - The evaluator computes score on ALL 150 test cases - even if one fails, score is 0
+      - Your polygon must be VALID for all test cases (non-self-intersecting, integer coords)
+      - Focus on robust, simple shapes that generalize well
+tool_descriptions:
+  edit_solution: >
+    Change the code inside the EVOLVE-BLOCK region. Use targeted SEARCH/REPLACE diffs
+    (preferred) or full rewrites. Preserve the fixed entry function.
+  evaluate_solution: >
+    Run the current program and report combined_score (higher better), validity, error,
+    best_so_far, evaluations_left. Budget is 30 evaluations total. Call probe_solution
+    first to rank candidates.
+  probe_solution: >
+    Fast score on subsampled data (~10s, separate budget of 30 probes). Scores are
+    approximate but useful for ranking variants. USE BEFORE FULL EVALUATIONS.
+  finish: >
+    End the session when budget is exhausted or no further improvement is possible.
+    Best score is automatically submitted.
+new_middlewares:
+  - name: probe_before_eval
+    hook: before_model
+    description: >
+      Reminder to use probe_solution before expensive full evaluations.
+    implementation_py: |
+      def before_model(hook_input):
+          last_tool = hook_input.get("last_tool", "")
+          recent = hook_input.get("recent_tools", [])
+          if "evaluate" in last_tool.lower():
+              if not any("probe" in r for r in recent):
+                  return "Warning: You called evaluate_solution! Consider using probe_solution first to rank candidates cheaply. Probe doesn't count against your 30 evaluation budget."
+          return None

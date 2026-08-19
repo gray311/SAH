@@ -1,0 +1,309 @@
+schema: h2spec/1.0
+system_prompt: |
+  Erdos minimum overlap problem: find h: [0,2]->[0,1] minimizing max_k integral h(x)(1-h(x+k))dx.
+  
+  Constraint: integral(h) = 1 exactly.
+  
+  Current best: C5 <= 0.38092303510845016.
+  
+  Goal: Beat seed score (combined_score > 1.0, i.e., c5_bound < 0.380923).
+  
+  Strategy:
+  
+  1. Generate 10 diverse candidates with generate_10_candidates
+  
+  2. Use probe_solution to quickly rank them (cheap analytical c5)
+  
+  3. Evaluate only top 2-3 with c5 < 0.37
+  
+  4. If no improvement, try MUTATING hyperparameters:
+     - Increase num_intervals to 1000 or 1200 for better FFT accuracy
+     - Adjust learning_rate (try 0.004 or 0.01)
+     - Adjust penalty_strength (try 80-100 for stronger constraint)
+     - Reduce num_steps to 30000 (faster convergence)
+     - Increase num_restarts to 5 or 7
+  
+  5. After each eval, use analyze_results to determine which mutations to try
+  
+  6. Never waste evals on integral-violating candidates (check precomputed integral)
+  
+  7. Budget: 30 evals total. Use probes freely, save evals for best candidates.
+  
+  Key: The seed optimizer is expensive (59k steps × 3 restarts). We need to find BETTER hyperparameters, not just new initializations.
+skill_description: |
+  Generate 10 diverse initializations for Erdos optimization using pattern-based methods.
+  Each candidate has precomputed integral and c5_bound. Filter by c5_bound < 0.37.
+tool_descriptions:
+  edit_solution: |
+    Modify EVOLVE-BLOCK to change hyperparameters.
+    Try num_intervals=1000, learning_rate=0.004, penalty_strength=80, num_steps=30000, num_restarts=5.
+  evaluate_solution: |
+    Run full optimization. Returns combined_score = 0.380923/c5_bound.
+  probe_solution: |
+    Fast analytical c5 on subsampled data (500 intervals). Approximate only.
+  finish: |
+    Submit when combined_score > 1.0.
+sampling:
+  temperature: 0.8
+  top_p: 0.95
+  top_k: 30
+  max_tokens: 16384
+agent:
+  max_iterations: 80
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 10000
+new_tools:
+  - name: generate_10_candidates
+    description: |
+      Generate 10 diverse candidates: random normals, uniform, sinusoidal, threshold,
+      Golomb ruler, bipartite, tri-modal, wave patterns with varying seeds.
+      Each has precomputed integral and c5_bound. Filter by c5 < 0.37.
+    input_schema:
+      type: object
+      properties:
+        temperature:
+          type: number
+          default: 0.8
+    implementation_py: |
+      def run(ctx, args):
+          import numpy as np
+          N = 800
+          domain = 2.0
+          dx = domain / N
+          
+          def compute_c5(h):
+              j_val = 1.0 - h
+              h_padded = np.pad(h, (0, N))
+              j_padded = np.pad(j_val, (0, N))
+              corr_fft = np.fft.fft(h_padded) * np.conj(np.fft.fft(j_padded))
+              correlation = np.fft.ifft(corr_fft).real
+              return np.max(correlation * dx)
+          
+          def normalize(h):
+              integral = np.sum(h) * dx
+              return h / integral
+          
+          np.random.seed(args.get('seed', 0))
+          candidates = []
+          
+          # Patterns 0-3: Random-based
+          for seed in [0, 1, 2, 3]:
+              np.random.seed(seed)
+              latent = np.random.normal(0, 1.2, N)
+              h = np.clip(1.0 / (1.0 + np.exp(-latent)), 0.001, 1.0)
+              h = normalize(h)
+              c5 = compute_c5(h)
+              candidates.append({"h": h.tolist(), "integral": float(np.sum(h) * dx),
+                               "c5_bound": float(c5), "pattern": f"random_seed{seed}"})
+          
+          # Pattern 4: Golomb-like (optimal spacing)
+          np.random.seed(4)
+          x = np.linspace(0, 2, N)
+          marks = np.array([0.0, 0.4, 0.8, 1.2, 1.6])
+          golomb = np.zeros(N)
+          for m in marks:
+              golomb += 6.0 * np.exp(-((x - m) / 0.12)**2)
+          golomb = normalize(np.clip(golomb, 0.001, 5.0))
+          c5 = compute_c5(golomb)
+          candidates.append({"h": golomb.tolist(), "integral": float(np.sum(golomb) * dx),
+                           "c5_bound": float(c5), "pattern": "golomb_optimal"})
+          
+          # Pattern 5: Bipartite
+          np.random.seed(5)
+          x = np.linspace(0, 2, N)
+          a = 0.45
+          bipartite = np.where(x < a, 4.0, -4.0)
+          bipartite = bipartite + np.random.normal(0, 0.3, N)
+          bipartite = normalize(np.clip(1.0 / (1.0 + np.exp(-bipartite)), 0.001, 1.0))
+          c5 = compute_c5(bipartite)
+          candidates.append({"h": bipartite.tolist(), "integral": float(np.sum(bipartite) * dx),
+                           "c5_bound": float(c5), "pattern": "bipartite"})
+          
+          # Pattern 6: Tri-modal
+          np.random.seed(6)
+          x = np.linspace(0, 2, N)
+          peaks = [0.35, 1.0, 1.65]
+          tri = np.zeros(N)
+          for p in peaks:
+              tri += 5.0 * np.exp(-((x - p) / 0.1)**2)
+          tri = normalize(np.clip(tri, 0.001, 5.0))
+          c5 = compute_c5(tri)
+          candidates.append({"h": tri.tolist(), "integral": float(np.sum(tri) * dx),
+                           "c5_bound": float(c5), "pattern": "tri_modal"})
+          
+          # Pattern 7: Wave
+          np.random.seed(7)
+          x = np.linspace(0, 2, N)
+          wave = 1.2 * np.sin(2 * np.pi * x) + 0.7 * np.cos(4 * np.pi * x)
+          wave = normalize(np.clip(1.0 / (1.0 + np.exp(-wave)), 0.001, 1.0))
+          c5 = compute_c5(wave)
+          candidates.append({"h": wave.tolist(), "integral": float(np.sum(wave) * dx),
+                           "c5_bound": float(c5), "pattern": "wave"})
+          
+          # Patterns 8-9: Threshold variations
+          for t1, t2 in [(0.35, 0.65), (0.45, 0.55)]:
+              np.random.seed(8 + len([p for p in candidates]))
+              x = np.linspace(0, 2, N)
+              latent = np.where(x < t1, 3.0, -3.0)
+              latent = latent + np.random.normal(0, 0.4, N)
+              h = normalize(np.clip(1.0 / (1.0 + np.exp(-latent)), 0.001, 1.0))
+              c5 = compute_c5(h)
+              candidates.append({"h": h.tolist(), "integral": float(np.sum(h) * dx),
+                               "c5_bound": float(c5), "pattern": f"threshold_t1{t1}"})
+          
+          return {"candidates": candidates, "num_candidates": len(candidates)}
+  - name: analyze_results
+    description: |
+      Analyze previous evaluation results and suggest hyperparameter mutations.
+      Returns 3-5 suggested mutations to try next.
+    input_schema:
+      type: object
+      properties:
+        current_best_score:
+          type: number
+          description: best combined_score so far
+        eval_count:
+          type: integer
+          description: total evals used
+    implementation_py: |
+      def run(ctx, args):
+          import numpy as np
+          best_score = args.get("current_best_score", 0.999968)
+          eval_count = args.get("eval_count", 0)
+          best_c5 = 0.38092303510845016 / best_score
+          
+          current_best = ctx.get_best_program()
+          if not current_best:
+              return {"mutations": [{"mutation": "increase_intervals",
+                                     "new_value": 1000,
+                                     "reason": "Better FFT accuracy"}]}
+          
+          hints = []
+          if best_c5 > 0.375:
+              hints.append("Current best c5 > 0.375, try finer discretization")
+          
+          # Suggest hyperparameter changes based on results
+          mutations = []
+          
+          if eval_count < 5:
+              mutations.append({
+                  "mutation": "increase_intervals",
+                  "new_value": 1000,
+                  "reason": "Finer discretization for better c5 estimation"
+              })
+              mutations.append({
+                  "mutation": "increase_penalty",
+                  "new_value": 80.0,
+                  "reason": "Stronger integral constraint enforcement"
+              })
+          
+          if eval_count < 10:
+              mutations.append({
+                  "mutation": "increase_restarts",
+                  "new_value": 5,
+                  "reason": "More restarts to escape local minima"
+              })
+              mutations.append({
+                  "mutation": "reduce_steps",
+                  "new_value": 30000,
+                  "reason": "Faster convergence, try different LR"
+              })
+          
+          if eval_count < 15:
+              mutations.append({
+                  "mutation": "adjust_lr",
+                  "new_value": 0.004,
+                  "reason": "Lower learning rate for more precise optimization"
+              })
+              mutations.append({
+                  "mutation": "increase_width",
+                  "new_value": 2.5,
+                  "reason": "Wider domain might capture different patterns"
+              })
+          
+          # Select top 3-5 mutations
+          mutations = mutations[:5]
+          
+          return {"mutations": mutations,
+                  "hints": hints,
+                  "best_c5_found": best_c5,
+                  "recommendation": f"Try {len(mutations)} mutations: {', '.join([m['mutation'] for m in mutations])}"}
+new_skills:
+  - name: hyperparameter-search
+    description: |
+      Systematically explore hyperparameter space for the Erdos optimizer.
+      Focus on: num_intervals, learning_rate, penalty_strength, num_steps, num_restarts.
+    body: |
+      # Hyperparameter Search Strategy
+      
+      ## Problem
+      The seed optimizer (59k steps, 3 restarts) is expensive. We need to find better
+      hyperparameters that give lower c5_bound with the same budget.
+      
+      ## Key Hyperparameters to Tune:
+      
+      1. **num_intervals**: Current=800. Try 1000-1200 for better FFT accuracy.
+         Finer discretization may capture the optimal h(x) shape better.
+      
+      2. **learning_rate**: Current=0.0062. Try 0.004 (more precise) or 0.01 (faster).
+         Lower LR may find better minima.
+      
+      3. **penalty_strength**: Current=61.0. Try 80-120 for stronger constraint.
+         Stronger penalty ensures integral(h)=1 more strictly.
+      
+      4. **num_steps**: Current=59000. Try 30000-40000 for faster iterations.
+         More iterations per eval = more evals used, but each eval is faster.
+      
+      5. **num_restarts**: Current=3. Try 5-7 for more diverse solutions.
+      
+      ## Workflow:
+      
+      1. Generate 5-10 candidates with generate_10_candidates
+      
+      2. Probe with probe_solution, rank by c5_bound
+      
+      3. Evaluate top 2-3 with lowest c5_bound
+      
+      4. If no improvement, call analyze_results with current_best_score
+      
+      5. Apply suggested mutations to create new candidate set
+      
+      6. Repeat until eval budget exhausted or c5_bound < 0.380923
+      
+      ## Expected Outcome:
+      
+      Find a combination of hyperparameters that gives c5_bound significantly
+      below 0.380923, beating the current best.
+new_middlewares:
+  - name: prioritize_mutation
+    hook: before_model
+    description: |
+      Remind solver to try hyperparameter mutations when stuck.
+      Prevents repeated generation of similar candidates.
+    implementation_py: |
+      def before_model(hook_input):
+          state = hook_input.get("state", {})
+          evals_left = state.get("evals_left", 0)
+          probes_used = state.get("probes_used", 0)
+          best_score = state.get("best_score", 0.999968)
+          current_iteration = state.get("iteration", 0)
+          
+          # If we've done multiple evals without improvement, suggest mutations
+          if evals_left >= 2 and current_iteration > 3:
+              return (
+                  f"Best score so far: {best_score:.6f}. "
+                  "Consider calling analyze_results to get hyperparameter mutations. "
+                  "Try num_intervals=1000, learning_rate=0.004, penalty_strength=80. "
+                  "Don't keep generating similar candidates!"
+              )
+          
+          # Early exploration
+          if evals_left >= 5 and probes_used < 1:
+              return (
+                  f"Evals left: {evals_left}. "
+                  "Use probe_solution to rank candidates before full eval. "
+                  "Call generate_10_candidates with temperature=0.9 for diversity."
+              )
+          
+          return None

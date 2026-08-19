@@ -1,0 +1,258 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are solving the Erdos minimum overlap problem: minimize max_k integral h(x)(1-h(x+k)) dx
+  for a step function h: [0,2] -> [0,1] with integral(h)=1.
+
+  Current best bound: C5 <= 0.38092303510845016
+
+  CRITICAL INSIGHT: The seed program's optimization loop runs for 59,000 steps per restart with 3 restarts.
+  This is extremely wasteful when combined with the probe solution strategy.
+
+  PROBLEM WITH CURRENT APPROACH:
+  The current harness tells the solver to "call generate_diverse_init" and then "EDIT the seed to use ONLY that pattern" with num_restarts=1.
+  BUT the EVOLVE-BLOCK's _optimize_single_run already does the full 59,000 steps. The harness is wasting evaluation budget on
+  FULL TRAINING runs for every initialization pattern instead of using the probe tool.
+
+  CORRECT STRATEGY:
+  1. GENERATE new structural patterns (beyond the 12 in the seed) that are fundamentally different
+  2. EDIT the seed to use ONLY that pattern with num_restorms=1 BUT CHANGE num_steps to 5000 (not 59000!)
+  3. Call probe_solution immediately to check c5_bound and constraint
+  4. ONLY call evaluate_solution if probe shows c5_bound < 0.37
+
+  The key is that we need SHORT training runs (5000 steps) for screening, not the full 59000 steps.
+  This lets us test many different structural patterns within the 30-evaluation budget.
+
+  If the seed already has a good initialization, the harness should still try NEW structures that might beat it.
+  The bottleneck is finding BETTER INITIALizations, not refining bad ones.
+
+  Use the probe tool for EVERY new pattern before full evaluation.
+skill_description: Escape local minima by generating structurally diverse initial step functions with SHORT training runs (5000 steps) and screening with probes.
+skill_body: |
+  # Erdos Minimum Overlap - Diverse Initialization with Short Runs
+
+  ## Why Current Approach Fails
+
+  The seed optimizer runs 59,000 steps per restart. The harness should NOT let the solver
+  do full training for every candidate pattern - that wastes the evaluation budget.
+
+  ## Correct Strategy
+
+  ### Step 1: Generate New Structural Patterns
+
+  Create initializations that are NOT Gaussian/sigmoid-based:
+  - Piecewise constant with specific breakpoints (e.g., h=1 on [0,0.5], h=0 on [0.5,2])
+  - Multi-modal with 3-4 narrow peaks at strategic locations
+  - "Three-finger" pattern: high on [0,a], low on [a,b], medium on [b,2]
+  - Golomb ruler-inspired spacing (optimal for minimizing overlaps)
+
+  ### Step 2: EDIT for SHORT Training Runs
+
+  For EACH new pattern:
+  - Set num_restarts = 1
+  - Set num_steps = 5000 (NOT 59000!)
+  - Set seed_start to a fixed value (e.g., 42)
+  - Optionally replace _get_best_initialization to return ONLY your new pattern
+
+  ### Step 3: SCREEN WITH PROBE (MANDATORY)
+
+  Call probe_solution immediately after editing:
+  - Check if integral(h) ≈ 1 (constraint satisfied)
+  - Check if c5_bound < 0.37 (promising)
+
+  ### Step 4: FULL EVALUATION ONLY IF PASSES
+
+  Call evaluate_solution ONLY if:
+  - probe shows integral(h) ≈ 1 (within 0.05 tolerance)
+  - probe shows c5_bound < 0.37
+
+  ### Step 5: If No Success, ADD NEW STRUCTURE
+
+  If no pattern beats the seed after testing 5-8 candidates:
+  - Try a completely new structural form
+  - OR try seed patterns with MODIFIED hyperparameters (lower penalty, more restarts)
+
+  ## Expected Outcome
+
+  - Test 10-15 different patterns with short 5000-step runs
+  - Use ~10-15 probes for screening
+  - Use 2-4 full evaluations on promising candidates
+  - Find c5_bound < 0.37 (combined_score > 1.03)
+
+  ## Key Commands
+
+  ```python
+  # In EVOLVE-BLOCK, change:
+  hypers.num_steps = 5000  # SHORT runs for screening
+  hypers.num_restarts = 1  # Single run per pattern
+  ```
+tool_descriptions:
+  edit_solution: |
+    Modify the EVOLVE-BLOCK to change hyperparameters or add new initialization patterns.
+
+    CRITICAL: When testing new patterns, set num_steps = 5000 (not 59000) and num_restarts = 1.
+    This allows quick screening of many candidates.
+
+    To use a single initialization pattern:
+    - Set num_restarts = 1
+    - Set seed_start = pattern_index
+    - Or replace _get_best_initialization to return ONLY that pattern's latent
+    - Set num_steps = 5000 for screening
+
+    Example edit for "three-finger" pattern:
+    ```python
+    hypers.num_steps = 5000
+    hypers.num_restarts = 1
+    hypers.seed_start = 42
+    ```
+  evaluate_solution: |
+    Run full evaluation (59000 steps per restart) on a candidate program, returns combined_score.
+    Only call this after probe_solution confirms c5_bound < 0.37 and constraint satisfied.
+  probe_solution: |
+    Quick approximate evaluation (500 intervals, 10s runtime).
+    Returns estimate of c5_bound and constraint satisfaction.
+    
+    CRITICAL: Call probe_solution for EVERY new pattern before full evaluation.
+    This is how you use the 30-probe budget effectively.
+    
+    Screening criteria:
+    - Skip if integral(h) != 1 (constraint violation)
+    - Skip if c5_bound >= 0.37 (not promising)
+    - Keep if c5_bound < 0.37 for full evaluation
+  finish: Submit when combined_score > 1.0 (c5_bound < 0.380923).
+sampling:
+  temperature: 0.8
+  top_p: 0.85
+  top_k: 15
+  max_tokens: 18000
+agent:
+  max_iterations: 50
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 10000
+new_tools:
+- name: create_piecewise_init
+  description: |
+    Create a piecewise constant initialization with specified breakpoints and values.
+    The latent is converted to h via sigmoid, then normalized to satisfy integral(h)=1.
+    
+    Call this to create fundamentally different structures (not Gaussian/sigmoid-based).
+    Examples: "3-finger", "bipartite", "multi-peak", "golomb-spaced".
+  input_schema:
+    type: object
+    properties:
+      pattern_type:
+        type: string
+        description: Type of piecewise pattern ("3-finger", "bipartite", "multi-peak", "golomb")
+      params:
+        type: object
+        description: Pattern-specific parameters
+  implementation_py: |
+    def run(ctx, args):
+        import numpy as np
+        N = 800
+        domain = 2.0
+        dx = domain / N
+        pattern_type = args.get("pattern_type", "3-finger")
+        params = args.get("params", {})
+        
+        latents = {}
+        
+        if pattern_type == "3-finger":
+            # High on [0,a], low on [a,b], medium on [b,2]
+            a = params.get("a", 0.4)
+            b = params.get("b", 1.2)
+            h_raw = np.zeros(N)
+            h_raw[:int(N*a/2)] = 5.0
+            h_raw[int(N*a/2):int(N*b/2)] = -3.0
+            h_raw[int(N*b/2):] = 2.0
+        elif pattern_type == "bipartite":
+            # High on [0,a] U [a,2-a], low on [2-a,2]
+            a = params.get("a", 0.5)
+            h_raw = np.ones(N)
+            h_raw[int(N*a/2):int(N*(2-a)/2)] = -2.0
+        elif pattern_type == "multi-peak":
+            # Multiple narrow peaks
+            n_peaks = params.get("n_peaks", 3)
+            peak_locs = np.linspace(0.3, 1.7, n_peaks)
+            bw = 0.08
+            h_raw = np.zeros(N)
+            for ploc in peak_locs:
+                h_raw += 10.0 * np.exp(-((np.arange(N) - ploc*N/2)/(N*bw/2))**2)
+        elif pattern_type == "golomb":
+            # Golomb ruler-inspired: marks at 0, 1, 4, 9, 11 (scaled)
+            marks = np.array([0.0, 0.5, 1.2, 1.8, 2.0])
+            bw = 0.06
+            h_raw = np.zeros(N)
+            for m in marks:
+                h_raw += 8.0 * np.exp(-((np.arange(N) - m*N/2)/(N*bw/2))**2)
+        
+        # Convert to h in [0,1] via sigmoid, then normalize to integral=1
+        latent = np.tanh(h_raw)  # Keep some negative values for diversity
+        h = 1.0 / (1.0 + np.exp(-latent))
+        h = np.clip(h, 0.01, 0.99)  # Ensure strictly in (0,1)
+        
+        # Normalize to integral = 1
+        current_integral = np.sum(h) * dx
+        if current_integral > 0:
+            h = h / current_integral
+        
+        latents[pattern_type] = latent
+        return {"patterns": latents, "num_patterns": 1}
+new_skills:
+- name: short-run-screening
+  description: |
+    Use SHORT training runs (5000 steps) for screening diverse patterns, then full runs for promising candidates.
+    This maximizes the value of the 30-probe budget.
+  body: |
+    # Short-Run Screening Strategy
+
+    ## Why Short Runs?
+
+    The seed runs 59,000 steps per restart. This is too expensive for screening many patterns.
+    Set num_steps = 5000 for initial screening - you can test 3-5x more patterns.
+
+    ## Workflow
+
+    1. Create a NEW structural pattern (piecewise, multi-peak, Golomb-spaced)
+    2. EDIT the seed:
+       - num_steps = 5000
+       - num_restarts = 1
+       - seed_start = 42 (or any fixed value)
+    3. Call probe_solution to check:
+       - integral(h) ≈ 1?
+       - c5_bound < 0.37?
+    4. If BOTH pass, call evaluate_solution for full result
+    5. If NOT pass, discard and try next pattern
+
+    ## Pattern Types to Try
+
+    - "3-finger": high on [0,0.4], low on [0.4,1.2], medium on [1.2,2]
+    - "bipartite": high on [0,0.5], low on [0.5,1.5], high on [1.5,2]
+    - "multi-peak": 3-5 narrow peaks at strategic locations
+    - "golomb": marks at optimal spacing for 5-7 marks
+
+    ## Budget Management
+
+    - 30 probes = screen 15-20 patterns with 5000-step runs
+    - 2-4 full evaluations on top candidates
+    - Goal: Find c5_bound < 0.37 (combined_score > 1.03)
+new_middlewares:
+- name: force_short_runs
+  hook: before_model
+  description: |
+    Remind the solver to use short training runs (5000 steps) when screening new patterns.
+    Prevents wasting the evaluation budget on full 59000-step runs.
+  implementation_py: |
+    def before_model(hook_input):
+        state = hook_input.get("state", {})
+        probes_left = state.get("probes_left", 0)
+        evals_left = state.get("evals_left", 0)
+        
+        if probes_left > 5 and evals_left >= 5:
+            return (
+                "CRITICAL: Use SHORT training runs (num_steps=5000, num_restarts=1) for screening!\n"
+                "Full 59000-step runs waste the evaluation budget.\n"
+                "Test 10-15 different patterns with probes before spending full evaluations.\n"
+                "Only call evaluate_solution if probe shows c5_bound < 0.37."
+            )
+        return None

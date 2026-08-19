@@ -1,0 +1,195 @@
+schema: h2spec/1.0
+system_prompt: |
+  Erdos minimum overlap problem: Find h: [0,2]->[0,1] minimizing max_k integral h(x)(1-h(x+k))dx.
+  Constraint: integral(h) = 1 exactly.
+  Current best: C5 <= 0.38092303510845016 (combined_score = 0.38092303510845016 / c5_bound).
+  Goal: Beat seed score 1.00001 (c5_bound < 0.3809).
+
+  STRATEGY (READ CAREFULLY):
+
+  The seed optimizer uses expensive Adam training (59000+ steps). With 30 evals total,
+  we CANNOT afford to train many candidates. Instead:
+
+  1. Use analyze_h_structure to rapidly prototype candidate structures. This tool
+     does a quick 10-step SGD on 50-interval discretization and computes analytical c5.
+     This is FAST (2-5s) and tells you if a direction is worth pursuing.
+
+  2. EDIT the EVOLVE-BLOCK to change hyperparameters for FASTER optimization:
+     - REDUCE num_intervals to 200-400 (training is O(n^2) in discretization)
+     - REDUCE num_steps to 10000-20000 (we'll use good initializations)
+     - REDUCE penalty_strength to 10-30 (easier constraint satisfaction)
+     - SET num_restarts to 5-10 (more chances with faster training)
+
+  3. After analyzing with analyze_h_structure and getting a promising candidate
+     (c5 < 0.375), EDIT the program with faster hyperparameters and CALL evaluate_solution.
+
+  4. If evaluate_solution doesn't improve, try a different structure with analyze_h_structure.
+
+  5. KEY INSIGHT: Use many cheap prototypes (analyze_h_structure) to find good structures,
+     then only run ONE expensive full evaluation per promising structure.
+
+  6. Expected workflow: analyze_h_structure -> (if c5<0.375) edit for faster training -> evaluate_solution.
+skill_description: |
+  Generate candidate structures and screen them quickly. Use analytical c5 scoring
+  to avoid expensive full training on poor candidates. Focus on step-function patterns
+  with concentrated support.
+tool_descriptions:
+  edit_solution: |
+    Modify EVOLVE-BLOCK hyperparameters. Target: faster training, more restarts.
+    Changes: num_intervals: 800->200/400, num_steps: 59000/120000->10000/20000,
+    penalty_strength: 61.0->10.0/20.0, num_restarts: 3->8/10.
+  evaluate_solution: |
+    Run full optimization. Returns combined_score = 0.38092303510845016 / c5_bound.
+    Score > 1.0 means c5_bound < 0.3809 (new record!).
+  probe_solution: |
+    Fast approximate evaluation (500 intervals, analytical c5). Separate budget of 30 probes.
+  finish: |
+    Submit when combined_score > 1.0 (c5_bound < 0.38092303510845016).
+sampling:
+  temperature: 0.8
+  top_p: 0.9
+  top_k: 15
+  max_tokens: 12288
+agent:
+  max_iterations: 30
+middleware:
+  budget_reminder_from_left: 3
+  long_tool_output_max_chars: 8000
+new_tools:
+  - name: analyze_h_structure
+    description: |
+      Quick prototype tool. Runs 10-step SGD on 50-interval grid to generate a candidate h.
+      Computes analytical c5 bound (no training, no constraint penalty). Fast (~3-5s).
+      Use this to screen many structures before expensive full eval.
+      Only proceed to evaluate_solution if c5_bound < 0.375.
+    input_schema:
+      type: object
+      properties:
+        max_c5_threshold:
+          type: number
+          default: 0.375
+    implementation_py: |
+      def run(ctx, args):
+          import numpy as np
+          max_c5 = args.get("max_c5_threshold", 0.375)
+          
+          N_probe = 50
+          domain = 2.0
+          dx = domain / N_probe
+          
+          latent = np.random.randn(N_probe) * 2.0
+          lr = 0.1
+          num_steps = 10
+          
+          for step in range(num_steps):
+              h = 1.0 / (1.0 + np.exp(-latent))
+              j = 1.0 - h
+              h_pad = np.pad(h, (0, N_probe))
+              j_pad = np.pad(j, (0, N_probe))
+              H_fft = np.fft.fft(h_pad)
+              J_fft = np.fft.fft(j_pad)
+              corr = np.fft.ifft(H_fft * np.conj(J_fft)).real
+              
+              grad = np.zeros(N_probe)
+              for i in range(N_probe):
+                  latent_plus = latent.copy()
+                  latent_minus = latent.copy()
+                  latent_plus[i] += 1e-3
+                  latent_minus[i] -= 1e-3
+                  
+                  h_plus = 1.0 / (1.0 + np.exp(-latent_plus))
+                  j_plus = 1.0 - h_plus
+                  h_pad_plus = np.pad(h_plus, (0, N_probe))
+                  j_pad_plus = np.pad(j_plus, (0, N_probe))
+                  corr_plus = np.fft.ifft(np.fft.fft(h_pad_plus) * np.conj(np.fft.fft(j_pad_plus))).real
+                  c5_plus = np.max(corr_plus * dx)
+                  
+                  h_minus = 1.0 / (1.0 + np.exp(-latent_minus))
+                  j_minus = 1.0 - h_minus
+                  h_pad_minus = np.pad(h_minus, (0, N_probe))
+                  j_pad_minus = np.pad(j_minus, (0, N_probe))
+                  corr_minus = np.fft.ifft(np.fft.fft(h_pad_minus) * np.conj(np.fft.fft(j_pad_minus))).real
+                  c5_minus = np.max(corr_minus * dx)
+                  
+                  grad[i] = (c5_plus - c5_minus) / 2e-3
+              
+              latent -= lr * grad
+              latent = np.clip(latent, -10, 10)
+          
+          h = 1.0 / (1.0 + np.exp(-latent))
+          h = np.clip(h, 0.001, 0.999)
+          integral = np.sum(h) * dx
+          if integral > 0:
+              h = h / integral
+          
+          j = 1.0 - h
+          h_pad = np.pad(h, (0, N_probe))
+          j_pad = np.pad(j, (0, N_probe))
+          H_fft = np.fft.fft(h_pad)
+          J_fft = np.fft.fft(j_pad)
+          corr = np.fft.ifft(H_fft * np.conj(J_fft)).real
+          c5_bound = float(np.max(corr * dx))
+          
+          return {
+              "h": h.tolist(),
+              "integral": float(np.sum(h) * dx),
+              "c5_bound": c5_bound,
+              "N_probe": N_probe,
+              "recommended": c5_bound < max_c5,
+              "note": f"Coarse probe (N={N_probe}). Use evaluate_solution if c5<0.375."
+          }
+new_skills:
+  - name: rapid-prototype-strategy
+    description: |
+      Use analyze_h_structure for quick screening. Generate many coarse prototypes,
+      screen with analytical c5, then run ONE expensive full eval on the best.
+    body: |
+      # Rapid Prototype Strategy
+
+      ## Problem
+      Full optimization takes 59000+ steps. We have only 30 evals total.
+      Cannot train many candidates.
+
+      ## Solution
+      Use analyze_h_structure tool to quickly prototype structures.
+      Each prototype takes ~3-5s and gives analytical c5 bound.
+
+      ## Workflow
+      1. CALL analyze_h_structure(max_c5_threshold=0.375)
+      2. Check returned c5_bound:
+         - If c5_bound < 0.375: PROMISING, proceed to evaluate_solution
+         - If c5_bound >= 0.375: REJECT, try different structure
+      3. Before evaluate_solution, EDIT program for faster training:
+         - num_intervals=400, num_steps=15000, penalty_strength=15, num_restarts=8
+      4. CALL evaluate_solution on the edited program
+      5. If no improvement, return to step 1 with different structure
+
+      ## Why This Works
+      - analyze_h_structure is O(10 steps on 50 intervals) vs O(59000 steps on 800 intervals)
+      - Can screen 10+ structures in time for 1 full eval
+      - Find better initializations, not just hyperparameters
+      - Save eval budget for promising candidates only
+new_middlewares:
+  - name: probe_first
+    hook: before_model
+    description: |
+      Enforce probe-first strategy: call analyze_h_structure before evaluate_solution
+      unless we're nearly out of evals.
+    implementation_py: |
+      def before_model(hook_input):
+          state = hook_input.get("state", {})
+          evals_left = state.get("evals_left", 0)
+          evals_used = state.get("evals_used", 0)
+          has_pending_edit = "pending_edit" in hook_input
+          if evals_left >= 3 and not has_pending_edit:
+              return (
+                  "You have 3+ evals left. Don't call evaluate_solution yet!\n"
+                  "First call analyze_h_structure to prototype structures.\n"
+                  "Only evaluate after analyzing and confirming c5 < 0.375.\n"
+              )
+          elif evals_left >= 1 and evals_used < 10:
+              return (
+                  f"{evals_left} evals remaining. Use them wisely.\n"
+                  "Have you analyzed candidate structures with analyze_h_structure?\n"
+              )
+          return None

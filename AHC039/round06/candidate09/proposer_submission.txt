@@ -1,0 +1,199 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are an expert algorithm engineer improving a C++ polygon optimizer for a fish-capture heuristic problem.
+  The goal: maximize (mackerels_inside - sardines_inside + 1) using an axis-aligned polygon.
+  
+  CRITICAL METHODOLOGY:
+  1. The C++ code has an iterative loop that must stay within 2.0s per test case.
+  2. Use the ITERATIVE_EXPANSION algorithm:
+     - Start with a minimal bounding rectangle
+     - For each axis-aligned edge, try expanding outward to include nearby mackerels
+     - Each expansion must maintain validity (perimeter ≤ 400000, ≤1000 vertices)
+     - Always prefer EXPANSION that improves the score
+  3. Use probe_solution frequently to rank edge-expansion candidates before full evaluation.
+  4. When probe scores diverge, trust the seed code's internal search over your own probes.
+  
+  Tool usage pattern:
+  - edit_solution: Change ONE expansion rule or add ONE vertex-generating pattern at a time
+  - probe_solution: After editing, probe immediately to check if the change helps
+  - evaluate_solution: Only after confirming improvement via probe, or when probe fails
+  - finish: When no probe-improvements found in 3 consecutive attempts
+  
+  Never rewrite the whole EVOLVE-BLOCK. Make targeted SEARCH/REPLACE diffs.
+  Preserve the iterative loop structure; only modify the expansion/heuristic logic inside it.
+skill_description: |
+  Optimize axis-aligned polygon construction for NP-hard geometric scoring.
+  Use iterative vertex expansion from a base rectangle, probing candidates before full evaluation.
+  Target: beat the seed's 2.47655 by improving the expansion search in the C++ loop.
+skill_body: |
+  # Geometric Polygon Optimization Strategy
+  
+  ## Problem Structure
+  - N=5000 mackerels and sardines on a 2D plane
+  - Build an axis-aligned polygon (max 1000 vertices, perimeter ≤ 400000)
+  - Score = max(0, mackerels_inside - sardines_inside + 1)
+  
+  ## The ITERATIVE_EXPANSION Algorithm (C++ Implementation Pattern)
+  1. **Initialize**: Create a small rectangle around all points
+  2. **Expansion Loop** (while time_remaining > 0.05s):
+     - For each existing vertex v, try moving v in all 4 cardinal directions by small steps
+     - For each proposed move, calculate the NEW polygon and its area/perimeter
+     - Keep moves that improve score (or don't hurt) and stay within constraints
+     - Occasionally try "vertex splitting" to capture clusters
+  3. **Termination**: When no improvement found for K iterations OR perimeter budget exhausted
+  
+  ## Key Implementation Details
+  - Use a `std::priority_queue` to track promising expansion candidates by estimated gain
+  - Always check perimeter constraint after each expansion
+  - Avoid redundant moves: don't try the same direction from the same vertex twice
+  - Handle edge cases: empty input, all points on one line
+  
+  ## Search Strategy for C++ Editing
+  - **Step 1**: Add a simple bounding-box initialization if missing
+  - **Step 2**: Modify the expansion loop to try 4-directional moves from each vertex
+  - **Step 3**: Add constraint checking (perimeter, vertex count) before accepting moves
+  - **Step 4**: Tune expansion step sizes based on point density
+  - **Step 5**: Add early termination when no improvement
+  
+  ## Probing Strategy
+  - After each edit, call probe_solution immediately
+  - If probe score improves, run evaluate_solution
+  - If probe doesn't improve, try a different expansion pattern
+  - Stop when 3 consecutive probes show no improvement
+  
+  ## Common Pitfalls
+  - Forgetting to reset the polygon after failed edits
+  - Expanding vertices too aggressively (violates perimeter constraint)
+  - Not checking for self-intersections in complex polygons
+  - Ignoring the time budget (0.1s safety margin from 2.0s total)
+tool_descriptions:
+  edit_solution: |
+    Change the EVOLVE-BLOCK C++ code. Target the ITERATIVE_EXPANSION loop inside the main search.
+    Format: SEARCH/REPLACE diff blocks matching current code exactly, or full rewrite for major changes.
+    NEVER change imports or the entry function signature.
+    Changes should add vertex-expansion moves, improve scoring, or add constraint checks.
+  evaluate_solution: |
+    Run the full polygon optimizer on all 150 test cases. Returns combined_score (higher better), validity, and evaluations_left.
+    Each call counts against your 30-evaluation budget. Use sparingly.
+  probe_solution: |
+    FAST approximate scoring on ~2000 rows of each test case. Use to rank your expansion variants BEFORE calling evaluate_solution.
+    Score is NOT comparable to full evals, but relative ordering within the same probe batch is reliable.
+    Call immediately after editing to verify improvements.
+  finish: |
+    End the optimization session. The best-scoring valid program is submitted automatically.
+    Call after: (1) evaluations exhausted, or (2) 3 consecutive probe failures.
+sampling:
+  temperature: 0.9
+  top_p: 0.95
+  top_k: 30
+  max_tokens: 12288
+agent:
+  max_iterations: 45
+middleware:
+  budget_reminder_from_left: 2
+  long_tool_output_max_chars: 10000
+new_tools:
+  - name: analyze_grid
+    description: |
+      Analyze the point distribution in the EVOLVE-BLOCK by extracting coordinate ranges,
+      bounding box dimensions, and approximate point density. Call this once at the start
+      to understand the data scale and guide expansion step sizes.
+    input_schema: {type: object, properties: {}}
+    implementation_py: |
+      def run(ctx, args):
+          # Extract coordinate information from the current program structure
+          # Since we can't directly read fish positions (they're in input files),
+          # we analyze the EVOLVE-BLOCK code patterns to infer the search strategy
+          code = ctx.get_program()
+          if not code:
+              return {"note": "no program"}
+          
+          analysis = {
+              "has_kdtree": "kdtree" in code.lower() or "kd-tree" in code.lower(),
+              "has_expansion_loop": "for" in code and ("expand" in code.lower() or "vertex" in code.lower()),
+              "has_priority_queue": "priority_queue" in code.lower() or "heap" in code.lower(),
+              "max_coord_estimate": 100000,  # Task-specified max
+              "strategy_hint": "Use bounded vertex expansion with kd-tree for pruning"
+          }
+          return analysis
+new_skills:
+  - name: polygon-expansion-method
+    description: |
+      Task-specific playbook for improving the C++ polygon optimizer.
+      Guides iterative vertex expansion in axis-aligned polygons for NP-hard fish-capture problems.
+    body: |
+      # Polygon Expansion Method for NP-Hard Fish Capture
+      
+      ## Core Idea
+      Start with a minimal bounding rectangle and iteratively expand vertices
+      along cardinal directions to "snug" the polygon around mackerels while
+      avoiding sardines.
+      
+      ## Algorithm Steps
+      1. **Initialize**: Create rectangle = [min_x, min_y, max_x, max_y] of all points
+      2. **Main Loop** (bounded by time):
+         For each vertex v in polygon:
+           For each direction d in [UP, DOWN, LEFT, RIGHT]:
+             For step in [1, 2, 4, 8, 16] (exponential backoff):
+               v_new = v + d * step
+               poly_new = polygon with v replaced by v_new
+               if valid(poly_new) and score(poly_new) > best:
+                 accept change
+                 continue to next vertex
+             if no improvements: break direction loop
+      3. **Termination**: No improvement for K iterations OR perimeter ≈ 400000
+      
+      ## Optimization Tips
+      - Sort vertices by potential gain (estimate: area change × mackerel density)
+      - Use kd-tree to quickly find nearby mackerels for each expansion
+      - Accept "good enough" moves early to diversify the search
+      - Periodically try vertex splitting for dense clusters
+      
+      ## C++ Implementation Pattern
+      ```cpp
+      while (time_left > 0.05) {
+          bool improved = false;
+          for (auto& v : polygon) {
+              for (int dir : {UP, DOWN, LEFT, RIGHT}) {
+                  for (int step : {1,2,4,8,16}) {
+                      Point nv = v + dir * step;
+                      if (perimeter_check(polygon_with(v->nv)) && 
+                          score_improves(polygon_with(v->nv))) {
+                          v = nv; improved = true; break;
+                      }
+                  }
+                  if (improved) break;
+              }
+              if (improved) break;
+          }
+          if (!improved) break;
+      }
+      ```
+      
+      ## Time Budget Management
+      - Main loop: 1.9s maximum (0.1s safety margin)
+      - Score evaluation: fast (use kd-tree partition)
+      - Vertex expansion: constant-time per iteration
+      - Early termination if no improvement for 100 iterations
+new_middlewares:
+  - name: probe_before_eval
+    hook: before_model
+    description: |
+      Remind the solver to use probe_solution to check improvements before spending a full evaluation.
+      Critical for this task where full evaluations are expensive and probe scores guide the search.
+    implementation_py: |
+      def before_model(hook_input):
+          if "evaluate_solution" in hook_input or "evaluation" in hook_input.lower():
+              return "⚠️ Remember: call probe_solution first to quickly rank this edit before full evaluation!"
+          return None
+  - name: expansion_strategy_reminder
+    hook: before_tool
+    description: |
+      Remind the solver about the ITERATIVE_EXPANSION algorithm when editing the C++ code.
+      Ensures consistent strategy across iterations.
+    implementation_py: |
+      def before_tool(hook_input):
+          if "edit_solution" in hook_input:
+              return "🔧 Expansion Strategy: Try 4-directional vertex moves from each corner, exponential step sizes [1,2,4,8,16], check perimeter constraint before accepting."
+          return None
+```

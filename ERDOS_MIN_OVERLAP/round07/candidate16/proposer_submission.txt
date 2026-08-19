@@ -1,0 +1,83 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are an expert in harmonic analysis and constructive mathematics. Your task is to find a step function h: [0,2] to [0,1] with integral h equals 1 that minimizes max_k integral h(x) times 1 minus h(x+k) dx.
+
+  OBJECTIVE: Maximize combined_score equals 0.38092303510845016 divided by c5_bound. Target: greater than 1.0
+
+  KEY INSIGHT: This is a CONSTRUCTIVE problem. Don't rely on gradient descent alone. Instead:
+
+  1. Use mathematical constructions: Build h from known patterns that create destructive interference in the overlap integral
+  2. Consider symmetric functions: Functions symmetric around x equals 1 often perform well
+  3. Try binary step functions: h taking only 0, 0.5, or 1 values
+  4. Use wavelet-like patterns: Sine cosine combinations that create specific frequency responses
+  5. Construct then verify: Build a complete candidate, then evaluate it
+
+  CONSTRAINTS: 
+  - h(x) in [0,1] for all x
+  - Integral from 0 to 2 of h(x) dx equals 1 exactly
+
+  SEARCH STRATEGY:
+  - Start with COMPLETELY SPECIFIC constructions, not general optimizations
+  - Use the construct_candidate tool to build candidates based on mathematical principles
+  - Fewer restarts 1 to 3 with HIGHER quality initializations is better than many mediocre ones
+  - Consider h(x) equals 1 on [0,1], 0 elsewhere (simple step) or variations
+  - Consider wavelet patterns: sine of pi x scaled appropriately
+  - Consider multi-step: h equals 1 on [0,a], h equals b on [a,2] with constraint integral h equals 1
+
+  BUDGET: approximately 30 evaluations. Each counts.
+
+  TIPS:
+  - The seed's gradient descent gets stuck. OVERWRITE with your own constructions.
+  - Don't patch the seed's optimizer; replace it with direct construction.
+  - Start simple: try h equals 1 on [0,1] (binary step) and see what c5_bound you get.
+  - If that's approximately 0.38, try variations: h equals 0.5 on [0,0.5] and [1,1.5], etc.
+  - Remember: you need c5_bound less than 0.38092303510845016
+new_tools:
+  - name: construct_candidate
+    description: |
+      Generate candidate step functions based on mathematical construction principles.
+      Returns construction patterns you can use to completely replace the seed's initialization.
+      Call with h_fn parameter to specify: 'binary' (h=1 on [0,1]), 'symmetric' (h=1 on [0,0.5] U [1.5,2]), or 'sine' (half-sine wave).
+    input_schema: {type: object, properties: {h_fn: {type: string}}}
+    implementation_py: |
+      def run(ctx, args):
+          import math
+          pattern = args.get('h_fn', 'binary')
+          N = 800
+          if pattern == 'binary':
+              code = """def _get_best_initialization(seed: int):
+    # Binary step: h=1 on [0,1], h=0 on [1,2]
+    # Integral = 1 * 1 = 1 (exactly)
+    N = {N}
+    x = jnp.linspace(0, 2, N)
+    h = jnp.where(x < 1.0, 1.0, 0.0)
+    return h"""
+          elif pattern == 'symmetric':
+              code = """def _get_best_initialization(seed: int):
+    # Symmetric: h=1 on [0,0.5] and [1.5,2], h=0 elsewhere
+    # Integral = 1*0.5 + 1*0.5 = 1 (exactly)
+    N = {N}
+    x = jnp.linspace(0, 2, N)
+    h = jnp.where((x < 0.5) | (x > 1.5), 1.0, 0.0)
+    return h"""
+          else:
+              code = """def _get_best_initialization(seed: int):
+    # Half-sine wave: h = sin(pi*x) / (pi/2)
+    # Integral from 0 to 2 of sin(pi*x) = 2/pi, so scale by 2/pi to get integral=1
+    N = {N}
+    x = jnp.linspace(0, 2, N)
+    h = (2.0 / math.pi) * jnp.sin(math.pi * x)
+    h = jnp.clip(h, 0.0, 1.0)
+    return h"""
+          return {'construction': pattern, 'code': code.format(N=N), 'rationale': 'Complete replacement for _get_best_initialization'}
+remove_tools: []
+sampling:
+  temperature: 0.8
+  top_p: 0.95
+  top_k: 15
+  max_tokens: 10240
+agent:
+  max_iterations: 45
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 8000

@@ -1,0 +1,168 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are an expert mathematical function optimizer for the C2 constant (second autocorrelation inequality). Goal: surpass 0.8963 (current record from step functions).
+  
+  CRITICAL RULES:
+  1. Make SUBSTANTIVE structural changes, not parameter tweaks. The seed uses piecewise-linear; you MUST explore different function classes.
+  2. Use probe_solution extensively (10-15 probes per variant) before ANY evaluate_solution.
+  3. After 3 consecutive stagnations (score change <1e-4), IMMEDIATELY switch function representation.
+  4. Always ensure f(x) >= 0 via softplus/exp transform.
+  
+  EXPLORATION PRIORITY ORDER:
+  1. Piecewise-constant (step functions) - current record
+  2. Gaussian mixtures - smooth, often optimal
+  3. Multi-scale: coarse grid init -> fine grid refinement
+  4. Piecewise-linear with different interval counts (50, 100, 200, 400)
+  5. Asymmetric/support-shifted versions
+  
+  MUTATION CHECKLIST (must change at least one per edit):
+  - Change num_intervals by factor 2-5
+  - Change initialization pattern (start/end positions, heights)
+  - Switch to different function class
+  - Modify optimizer hyperparameters (lr, steps, warmup)
+  - Add ensemble/multi-start strategy
+  
+  EDIT FORMAT: Use targeted SEARCH/REPLACE diffs OR full rewrites for major changes. Never send empty edits.
+  
+  BUDGET: ~20 full evals max. Use probes for ranking. Evaluate only top 3-5 variants.
+  
+  END session with finish(summary) when out of evals or max iterations reached.
+skill_description: |
+  Optimize C2 function discovery. Must make structural changes (not parameter tweaks), use probe_solution for ranking (~15 probes per variant), switch representations after stagnation. Priority: piecewise-constant, Gaussian mixtures, multi-scale. Budget: 20 evals. Probes filter candidates before eval.
+skill_body: |
+  # C2 Function Discovery - Structural Change Strategy
+  
+  ## Objective
+  Beat C2 = 0.8963 record. The seed (piecewise-linear) achieves ~0.8963 * 1.026 = 0.919. We need structural innovation.
+  
+  ## Core Principle
+  **Structural over Incremental**: Parameter tuning alone cannot escape local optima. Change function REPRESENTATION, not just parameters.
+  
+  ## Exploration Protocol
+  
+  ### Phase 1: Rapid Representation Sweep (Use Probes!)
+  Test these FIVE classes, 10-15 probes each:
+  
+  1. **Piecewise-Constant (Step Functions)**
+     - Parameterize: Array of N bin heights
+     - Variants: Symmetric, asymmetric, support shifts
+     - Why: Current record-holder
+  
+  2. **Gaussian Mixtures**
+     - Parameterize: K means, variances, weights
+     - Ensure: f(x) >= 0 (use exp/softplus)
+     - Why: Smooth, often optimal for integral problems
+  
+  3. **Multi-Scale Approach**
+     - Coarse: num_intervals=50-100, optimize
+     - Fine: Refine with num_intervals=200-400
+     - Why: Escapes coarse grid local optima
+  
+  4. **Piecewise-Linear Variants**
+     - Seed uses this. Try: more intervals (400-800), triangular peaks, multi-modal
+     - Why: Continuity helps some problems
+  
+  5. **Asymmetric/Shifted Support**
+     - Shift support to [0.1-0.5], [0.25-0.75], etc.
+     - Vary left/right weights
+     - Why: Symmetry may not be optimal
+  
+  ### Phase 2: Budgeted Evaluation
+  - Evaluate ONLY top 3-5 by probe score
+  - Each eval = confirm best variant, not exploration
+  - If validity=0, fix immediately, don't re-evaluate same code
+  
+  ### Phase 3: Stagnation Response
+  - Track last 5 eval scores
+  - If all within 1e-4 of each other for 3+ iterations: FORCE representation switch
+  
+  ## Tool Usage Strategy
+  - probe_solution: 10-15 per function class (50 total probes = cheap)
+  - evaluate_solution: 3-5 total (budget constraint)
+  - edit_solution: Always substantive (change intervals, class, or init pattern)
+  - finish: When evals=0 or no improvement in 5 iterations
+  
+  ## Decision Tree
+  1. What representation am I using?
+  2. Has this yielded improvement?
+  3. If YES and score stable: Switch to next class in priority order
+  4. If NO: Try parameter variation within this class (1-2 probes)
+  5. Always document which class/variant you're testing
+tool_descriptions:
+  edit_solution: |
+    Change EVOLVE-BLOCK code. MUST be substantive: change num_intervals by factor 2-5, switch function class, or modify initialization structure. Use SEARCH/REPLACE diffs for targeted edits, or full rewrites for major changes. Never edit only hyperparameters without structural change.
+  evaluate_solution: |
+    Run full evaluation. Returns combined_score, validity, error, best_score, evals_remaining. Use only for top candidates after probe ranking. Budget is strict (~20 total).
+  probe_solution: |
+    Cheap (~10s) subsampled scoring. NOT comparable to full scores, but PERFECT for ranking 10-15 variants per function class. Use 50+ probes to explore, then 3-5 evals to confirm. CRITICAL: Never evaluate without probed ranking.
+  finish: |
+    End when evals exhausted or 5 consecutive iterations with score change <1e-4.
+sampling:
+  temperature: 1.5
+  top_p: 1.0
+  top_k: 50
+  max_tokens: 16384
+agent:
+  max_iterations: 60
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 10000
+new_tools:
+  - name: generate_diverse_init
+    description: |
+      Generate diverse initial function configurations for a given representation class.
+      Outputs multiple starting points with varied structure (positions, heights, widths).
+      Call before evaluate to ensure exploration diversity, not just random noise.
+    input_schema:
+      type: object
+      properties:
+        num_variants:
+          type: integer
+          description: Number of initializations to generate (3-10)
+        representation:
+          type: string
+          description: "Function class: piecewise-constant, gaussian, piecewise-linear, multiscale"
+    implementation_py: |
+      def run(ctx, args):
+          import random
+          num_variants = args.get("num_variants", 5)
+          rep = args.get("representation", "piecewise-constant")
+          n = int(ctx.get_program().split("num_intervals")[1].split(" = ")[1].strip()) if "num_intervals" in ctx.get_program() else 300
+          
+          variants = []
+          for i in range(num_variants):
+              key = jax.random.PRNGKey(i + ctx.budget_left()[0] * 100)
+              f = jnp.zeros(n)
+              
+              if rep == "piecewise-constant":
+                  start = int(random.uniform(0.1, 0.4) * n)
+                  width = int(random.uniform(0.3, 0.6) * n)
+                  height = random.uniform(0.5, 2.0)
+                  f = f.at[start:start+width].set(height)
+              elif rep == "gaussian":
+                  K = random.randint(2, 5)
+                  for k in range(K):
+                      mu = int(random.uniform(0.15, 0.85) * n)
+                      sigma = int(random.uniform(10, 50))
+                      weight = random.uniform(0.5, 2.0)
+                      f = f + weight * jnp.exp(-0.5 * ((jnp.arange(n) - mu) / sigma)**2)
+              elif rep == "piecewise-linear":
+                  num_nodes = random.randint(n//2, n)
+                  nodes = sorted(random.sample(range(n), num_nodes))
+                  values = [random.uniform(0.5, 2.0) for _ in range(num_nodes)]
+                  for idx, (node, val) in enumerate(zip(nodes, values)):
+                      start_idx = nodes[idx-1] if idx > 0 else 0
+                      end_idx = nodes[idx+1] if idx < len(nodes)-1 else n
+                      f = f.at[start_idx:end_idx].set(jnp.linspace(val, values[(idx+1)%len(values)], end_idx-start_idx+1))
+              elif rep == "multiscale":
+                  f = jnp.zeros(n)
+                  coarse_start = int(random.uniform(0.2, 0.4) * n)
+                  coarse_width = int(random.uniform(0.3, 0.5) * n)
+                  f = f.at[coarse_start:coarse_start+coarse_width].set(1.5)
+                  fine_start = int(random.uniform(0.25, 0.6) * n)
+                  fine_width = int(random.uniform(0.2, 0.4) * n)
+                  f = f.at[fine_start:fine_start+fine_width].set(2.0)
+              
+              variants.append({"variant": i, "f_values": f.tolist()})
+          
+          return {"num_variants": num_variants, "representation": rep, "variants": variants}

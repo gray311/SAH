@@ -1,0 +1,211 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are an expert performance engineer specializing in MoE EPLB load balancing.
+  
+  The evaluator rewards TWO things: (1) better load balance (lower variance in expert loads), and (2) faster execution.
+  
+  CRITICAL INSIGHT: The seed program's balanced_packing() uses Python loops inside hot spots. 
+  The main win is vectorization - rewrite to use torch operations (sort, scatter, gather) to eliminate Python overhead.
+  
+  STRATEGY:
+  1. Rewrite balanced_packing() to be fully vectorized:
+     - Pre-allocate all output arrays (no dynamic list appends)
+     - Use torch.sort() with descending=True, then scatter/gather for assignment
+     - Replace Python loops with tensor operations
+     - Use index arithmetic instead of per-item min() calls
+  
+  2. Use probe_solution to rank vectorization variants BEFORE full evaluation
+  
+  3. When budget_left < 5: probe all, evaluate best, finish
+  
+  Preserve function signatures. For rebalance_experts_hierarchical, keep same parameters.
+  
+  Example vectorization pattern:
+  OLD: for group in indices: for p in valid: pack_items[p] += 1
+  NEW: Sort groups by weight descending, compute pack indices via rank arithmetic
+  
+  Use torch efficiently: vectorized over Python loops. O(n log n) from sort, not O(n^2) from nested loops.
+  
+  Method for efficient evaluation:
+  - Generate 3-5 MAX variants per turn
+  - Probe all, evaluate top 2
+  - If no improvement after 3 attempts, try different approach
+  - Never repeat same technique with different parameters - change structure, not params
+skill_description: |
+  Optimize MoE EPLB algorithm by vectorizing hot loops in balanced_packing(), using torch.scatter/gather for assignment, and pre-allocating arrays. Focus on execution time reduction while maintaining load balance.
+skill_body: |
+  # Vectorization-First Strategy for MoE EPLB
+  
+  ## Core Insight
+  The seed's balanced_packing() has O(n^2) Python loop overhead. Vectorization with torch operations can eliminate this entirely.
+  
+  ## Step 1: Analyze Hotspots
+  The inner loop over group in indices with for p in valid: ... is the bottleneck.
+  This is where vectorization wins.
+  
+  ## Step 2: Rewrite balanced_packing() to Vectorize
+  - Pre-allocate pack_index and rank_in_pack as full tensors
+  - Use torch.sort() with descending=True on each layer
+  - Replace Python min() with tensor argmin across packs
+  - Use scatter/gather or index arithmetic for assignment
+  - Avoid list comprehensions entirely
+  
+  ## Step 3: Iterate Strategically
+  - Generate variants that change the vectorization strategy
+  - NOT: tweak a loop limit or parameter
+  - BUT: try different assignment schemes (simple rank vs weight-aware)
+  
+  ## Step 4: Use Probe to Rank
+  - Probe 3-5 variants per turn
+  - Evaluate top 2 only
+  
+  ## Step 5: When Budget Runs Low
+  - Probe all remaining
+  - Evaluate best
+  - Finish immediately
+  
+  ## Entry Function
+  rebalance_experts_hierarchical - modify internal logic, keep signature.
+  
+  ## Preserve Constraints
+  - Exact function signatures
+  - torch device handling
+  - Return types (pack_index, rank_in_pack)
+tool_descriptions:
+  edit_solution: |
+    Change the EVOLVE-BLOCK code. For this task: rewrite balanced_packing() to use vectorized torch operations.
+    
+    Focus on replacing Python loops with:
+    - torch.sort(), argsort() for ordering
+    - torch.div() or range arithmetic for pack assignment
+    - Pre-allocated tensors instead of list appends
+    
+    Example pattern:
+    OLD: for group in indices: for p in valid: ...
+    NEW: sorted_idx = weight[i].argsort(descending=True)
+         pack_idx = torch.arange(num_groups) // groups_per_pack
+    
+    After editing, call evaluate_solution to score.
+  evaluate_solution: |
+    Returns combined_score (higher is better), incorporating load balance and execution time.
+    
+    Scores reward: (1) lower variance in expert loads, (2) fewer operations/faster runtime.
+    
+    Budget: ~20 evaluations. Strategy: probe 3-5 variants, evaluate top 2.
+  probe_solution: |
+    Cheap evaluation on subsampled data (~10s runtime, no eval budget cost).
+    
+  finish: |
+    End session when: (1) budget exhausted, or (2) no improvement over best_so_far after 3 attempts.
+    Summary format: "Best score: X using Vectorized-binning strategy"
+sampling:
+  temperature: 1.4
+  top_p: 0.95
+  top_k: 30
+  max_tokens: 16384
+agent:
+  max_iterations: 60
+middleware:
+  budget_reminder_from_left: 3
+  long_tool_output_max_chars: 18000
+new_tools:
+  - name: analyze_packing_complexity
+    description: |
+      Analyze the current balanced_packing implementation to identify Python loop hotspots and estimate vectorization potential.
+      Returns complexity analysis and specific lines to vectorize.
+    input_schema:
+      type: object
+      properties: {}
+    implementation_py: |
+      def run(ctx, args):
+          program = ctx.get_program()
+          lines = program.split('\n')
+          in_balanced_packing = False
+          hotspot_lines = []
+          python_loop_lines = []
+          
+          for i, line in enumerate(lines):
+              if 'def balanced_packing(' in line:
+                  in_balanced_packing = True
+              elif in_balanced_packing and line.strip().startswith('def '):
+                  in_balanced_packing = False
+              elif in_balanced_packing:
+                  if 'for ' in line and ':' in line:
+                      python_loop_lines.append((i+1, line.strip()))
+                  if '[' in line and 'for' in line:
+                      python_loop_lines.append((i+1, line.strip()))
+                  if 'min(' in line and 'lambda' in line:
+                      python_loop_lines.append((i+1, line.strip()))
+          
+          analysis = {
+              "python_loops_detected": len(python_loop_lines),
+              "hotspot_lines": [line[1] for line in python_loop_lines],
+              "vectorization_recommendation": "Vectorize " + str(len(python_loop_lines)) + " Python loop(s) using torch operations. Replace for-loops with argsort/scatter.",
+              "estimated_speedup": "5-10x if loops are eliminated"
+          }
+          return analysis
+  - name: generate_vectorized_pattern
+    description: |
+      Generate a specific vectorized pattern for balanced_packing. Choose from: (1) simple rank assignment, (2) weight-aware scatter, (3) bin-exhaustion with tensor ops.
+    input_schema:
+      type: object
+      properties:
+        pattern_type:
+          type: string
+          enum: [rank-assignment, weight-scatter, bin-exhaustion]
+    implementation_py: |
+      def run(ctx, args):
+          pattern_type = args.get("pattern_type", "rank-assignment")
+          
+          patterns = {
+              "rank-assignment": "Vectorized rank assignment pattern using simple division. Returns pack_idx and rank computed via torch.div and modulo operations. Eliminates all Python loops.",
+              "weight-scatter": "Weight-aware scatter assignment pattern using sorted indices. Uses torch.sort with descending=True then assigns based on sorted positions. Better for skewed loads.",
+              "bin-exhaustion": "Bin-exhaustion pattern that fills each pack to capacity before moving to next. Uses tensor masks for assignment. Good for uniform loads."
+          }
+          
+          if pattern_type in patterns:
+              return {"pattern_type": pattern_type, "pattern_desc": patterns[pattern_type]}
+          else:
+              return {"error": "Unknown pattern_type", "pattern_type": "rank-assignment", "pattern_desc": patterns["rank-assignment"]}
+new_skills:
+  - name: vectorization-playbook
+    description: |
+      Playbook for vectorizing MoE EPLB's balanced_packing() to eliminate Python loop overhead and speed up execution while maintaining load balance.
+    body: |
+      # Vectorization Playbook for MoE EPLB
+  
+      ## Problem
+      The seed's balanced_packing() uses nested Python loops that cause O(n^2) overhead:
+      for group in indices:
+          valid = [p for p in range(num_packs) if pack_items[p] < groups_per_pack]
+          best_pack = min(candidates, key=lambda x: (x[0], x[1]))[2]
+      
+      ## Solution: Rewrite with Torch Operations
+      Replace Python loops with:
+      1. torch.sort() with descending=True for ordering
+      2. torch.div() for pack assignment
+      3. Pre-allocated tensors instead of lists
+      
+      ## Key Principles
+      - Pre-allocate all output arrays upfront
+      - Use vectorized assignment with tensor masks
+      - Avoid Python min() calls - use argmin or arithmetic
+      - Single pass: sort once, assign in bulk
+      
+      ## Recommended Implementation
+      Replace balanced_packing with vectorized version:
+      - Sort each layer by weight descending
+      - Compute pack indices via integer division
+      - Compute ranks via modulo
+      - No nested Python loops
+      
+      ## Testing Strategy
+      - Use probe_solution to test different vectorization patterns
+      - Compare scores across patterns
+      - Evaluate best pattern with full evaluation
+      
+      ## Pattern Selection
+      - Start with rank-assignment (simplest)
+      - If no improvement, try weight-scatter
+      - If still no improvement, try bin-exhaustion
+      - Never retry same pattern with different parameters

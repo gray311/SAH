@@ -1,0 +1,117 @@
+schema: h2spec/1.0
+system_prompt: "You are an expert performance engineer specializing in vectorized load balancing algorithms for MoE EPLB.\n\nCRITICAL INSIGHT: The NP-hard load balancing problem requires COMPLETE algorithm replacement, NOT incremental tweaks.\n\nREQUIREMENTS:\n1. Replace balanced_packing() with a FULLY VECTORIZED approach using torch.sort, torch.gather, torch.scatter\n2. Eliminate ALL Python loops over groups/items - use only vectorized torch operations\n3. Pre-allocate all output tensors upfront\n4. Use argmax/argmin with axis parameters for efficient selection\n5. The algorithm must handle arbitrary weight distributions efficiently\n\nPREFERRED APPROACH:\n- Use torch.argsort() to sort weights per layer\n- Use torch.arange() to generate pack indices in vectorized form\n- Use torch.div() or floor division for round-robin-style assignment\n- Avoid min() with lambda - use torch.min() or pre-computed indices\n\nPRESERVE: Exact function signatures for rebalance_experts_hierarchical and balanced_packing.\n\nSTRATEGY FOR 20 EVALS:\n1. Turn 1: Generate ONE complete vectorized replacement of balanced_packing()\n2. Turn 2: Generate ONE complete vectorized replacement of replicate_experts()\n3. Turn 3-5: Refine each function with local optimizations\n4. Never spend 2+ evals on the same function without first trying the other\n5. When budget_left <= 5, probe top 2 variants, evaluate best, finish\n\nTARGET: Reduce O(n2) Python loops to O(n log n) torch operations.\nMAX VARIANTS PER TURN: 1 (focus on quality, not quantity)."
+skill_description: Complete algorithm replacement for MoE EPLB load balancing using vectorized torch operations.
+skill_body: "# Vectorized Load Balancing Algorithm\n\n## CRITICAL: Complete Replacement Required\n\nThe NP-hard load balancing problem CANNOT be solved with incremental tweaks.\nYou must REPLACE the balanced_packing() and replicate_experts() functions with FULLY\nVECTORIZED implementations.\n\n## Phase 1: Vectorized balanced_packing()\n\nOLD PATTERN (AVOID):\n- Python loops over groups: for group in indices:\n- List comprehensions: valid = [p for p in range(num_packs) if ...]\n- min() with lambda for tie-breaking\n\nNEW PATTERN (REQUIRED):\nimport torch\n\n# Sort indices once per layer\nsorted_indices = torch.argsort(-weight[i], dim=-1)  # O(n log n)\n\n# Vectorized pack assignment\npack_items = torch.zeros(num_packs, dtype=torch.long)  # pre-allocate\npack_weights = torch.zeros(num_packs, dtype=torch.float32)  # pre-allocate\n\n# Create item-to-pack mapping in vectorized form\npack_assignment = torch.arange(num_groups) // groups_per_pack  # round-robin base\n\n# Use torch.where or torch.div for refined assignment\npack_idx = (sorted_indices // groups_per_pack) % num_packs  # vectorized modulo\nrank_in_pack = sorted_indices % groups_per_pack  # vectorized remainder\n\nKey vectorization tricks:\n- torch.argsort() replaces sorting loop\n- // and % operators replace manual counting\n- Pre-allocate tensors with torch.zeros()\n- Use torch.arange() for index generation\n- Avoid all Python for loops over items/groups\n\n## Phase 2: Vectorized replicate_experts()\n\nThe replication logic can be vectorized by:\n1. Computing redundant load per layer\n2. Using torch.topk() or argmax() to find heaviest experts\n3. Broadcasting assignment across all replicas\n\nExample:\n# Find which logical experts need replication\nlog_load = weight.sum(dim=0)  # sum across layers\nredundant = log_load.argsort(descending=True)[:num_redundant]  # top k heaviest\n\n# Assign replicas in vectorized form\nlogcnt = torch.ones(n, num_logical, dtype=torch.long)\nlogcnt[redundant] += 1  # vectorized increment\n\n## Phase 3: Testing Strategy\n\n1. Generate ONE vectorized implementation per turn\n2. Use probe_solution to quickly check if syntax/shape is correct\n3. Never edit both functions in one turn\n4. When stuck, try DIFFERENT vectorization pattern (not same pattern with tweaks)\n\n## Phase 4: Final Submission\n\nWhen budget_left <= 3:\n1. Probe both functions final versions\n2. If both probe scores improve, evaluate the combined program\n3. Call finish immediately"
+tool_descriptions:
+  edit_solution: "Change balanced_packing() or replicate_experts() to FULLY VECTORIZED implementation.\n\nDo NOT make incremental edits. Write a COMPLETE new function that:\n- Uses torch.argsort() instead of sorting loop\n- Pre-allocates all tensors with torch.zeros() or torch.full()\n- Uses // and % for index computation\n- Avoids all Python for-loops over groups/items\n- Preserves exact function signature\n\nExample pattern:\nbalanced_packing(weight, num_packs):\n    num_layers, num_groups = weight.shape\n    groups_per_pack = num_groups // num_packs\n    \n    if groups_per_pack == 1:\n        pack_index = torch.arange(num_groups, dtype=torch.int64, device=weight.device).view(1, -1).expand(num_layers, -1)\n        rank_in_pack = torch.zeros_like(weight, dtype=torch.int64)\n        return pack_index, rank_in_pack\n    \n    sorted_indices = torch.argsort(-weight, dim=-1)\n    pack_index = (sorted_indices // groups_per_pack) % num_packs\n    rank_in_pack = sorted_indices % groups_per_pack\n    \n    return pack_index, rank_in_pack"
+  evaluate_solution: "Run the program and return combined_score (higher is better). Scores incorporate:\n  (1) lower variance in expert loads (better balance)\n  (2) faster execution (fewer ops) - vectorized torch operations score higher\n  \nWith 20 evaluations total, use each carefully:\n- Turn 1-2: Replace balanced_packing with vectorized version\n- Turn 3-4: Replace replicate_experts with vectorized version\n- Turn 5-7: Refine each function\n- Turn 8-10: Combined optimizations\n- Turn 11-20: Final refinements"
+  probe_solution: "Cheap approximate evaluation on subsampled data (~10s runtime, separate 30-probe budget).\n  Use to quickly check if your vectorized implementation has correct shapes and runs without error.\n  \n  IMPORTANT: Probe scores are approximate but consistent across variants. Use probe to:\n  1. Check if new implementation produces valid output shapes\n  2. Compare 2-3 vectorization approaches quickly\n  3. Identify which function to fix first (balanced_packing vs replicate_experts)\n  \n  Then evaluate only the TOP 1 variant (save evals for refinement)"
+  finish: "End session when: (1) all 20 evals used, or (2) after replacing both functions with vectorized versions.\n  Summary format: Best score: X using vectorized balanced_packing+replicate_experts replacing O(n2) loops with O(n log n) torch.ops"
+sampling:
+  temperature: 0.8
+  top_p: 0.95
+  top_k: 15
+  max_tokens: 8192
+agent:
+  max_iterations: 15
+middleware:
+  budget_reminder_from_left: 6
+  long_tool_output_max_chars: 12000
+new_tools:
+  - name: vectorize_weight_analysis
+    description: |
+      Analyze weight matrix structure to determine optimal vectorization strategy.
+      Computes per-layer statistics, identifies if weights are uniform/skewed,
+      and suggests which torch operations (sort, scatter, gather) will be most effective.
+      Call this BEFORE editing to choose the right vectorization pattern.
+    input_schema:
+      type: object
+      properties: {}
+    implementation_py: |
+      def run(ctx, args):
+          import torch
+          weight = ctx.get_program()
+          lines = weight.strip().split('\\n')
+          if len(lines) < 2:
+              return {\"note\": \"insufficient data\"}
+          
+          try:
+              w_lines = []
+              for line in lines:
+                  parts = line.strip().split()
+                  if parts:
+                      w_lines.append([float(x) for x in parts])
+              
+              if not w_lines:
+                  return {\"note\": \"no valid numeric data\"}
+              
+              weight_matrix = torch.tensor(w_lines, dtype=torch.float32)
+              num_layers, num_groups = weight_matrix.shape
+              
+              layer_means = weight_matrix.mean(dim=1)
+              layer_stds = weight_matrix.std(dim=1)
+              global_std = weight_matrix.std()
+              global_mean = weight_matrix.mean()
+              
+              std_ratio = (layer_stds.max() / layer_stds.min()).item() if layer_stds.min() > 0 else 1.0
+              
+              if global_std < global_mean * 0.1:
+                  strategy = \"uniform_weights: use simple round-robin (// and % ops)\"
+                  recommended_op = \"round_robin_vectorized\"
+              elif std_ratio > 5:
+                  strategy = \"highly_skewed: sort descending, use argmax for heavy items\"
+                  recommended_op = \"sort_then_gather\"
+              else:
+                  strategy = \"moderate_variance: use argsort + scatter\"
+                  recommended_op = \"argsort_scatter\"
+              
+              return {
+                  \"num_layers\": int(num_layers),
+                  \"num_groups\": int(num_groups),
+                  \"global_mean\": float(global_mean),
+                  \"global_std\": float(global_std),
+                  \"std_ratio\": float(std_ratio),
+                  \"strategy\": strategy,
+                  \"recommended_op\": recommended_op
+              }
+          except Exception as e:
+              return {\"note\": \"analysis error: \" + str(e)}
+new_skills:
+  - name: vectorization-checklist
+    description: |
+      Checklist for replacing O(n2) Python loops with O(n log n) torch vectorized operations.
+      Follow this EXACTLY when editing balanced_packing() or replicate_experts().
+    body: |
+      # Vectorization Checklist for MoE EPLB
+      
+      ## BEFORE EDITING:
+      [ ] Have you called vectorize_weight_analysis to understand weight structure?
+      [ ] Do you know which torch operation to use (sort, gather, scatter)?
+      
+      ## balanced_packing() Transformation:
+      - [ ] REPLACE: for group in indices: with sorted_indices = torch.argsort(-weight, dim=-1)
+      - [ ] REPLACE: valid = [p for p in range(num_packs) if pack_items[p] < groups_per_pack] with pre-allocate with torch.full()
+      - [ ] REPLACE: candidates = [(pack_items[p], pack_weights[p], p) for p in valid] with torch.min(pack_items[valid], dim=0)
+      - [ ] REPLACE: min(candidates, key=lambda x: ...) with torch.argmin() on vectorized comparison
+      - [ ] Ensure all loops over groups/items are eliminated
+      - [ ] Pre-allocate pack_index and rank_in_pack with torch.full() before the loop
+      - [ ] Use // and % operators instead of manual counters
+      
+      ## replicate_experts() Transformation:
+      - [ ] Use torch.topk() or argmax() to find heaviest experts
+      - [ ] Use torch.arange() and broadcasting for replica indices
+      - [ ] Pre-allocate phy2log, rank, logcnt with correct shapes
+      - [ ] Use vectorized increment: logcnt[redundant] += 1
+      
+      ## Final Checks:
+      - [ ] No Python for loops over groups, items, or packs
+      - [ ] All tensor operations are vectorized (torch.* functions)
+      - [ ] Function signature unchanged
+      - [ ] Output shapes match original: balanced_packing returns [num_layers, num_groups], [num_layers, num_groups]
+      - [ ] replicate_experts returns [num_layers, num_phy], [num_layers, num_phy], [num_layers, num_log]
+      
+      ## TESTING:
+      1. Probe the new implementation for shape correctness
+      2. Check if it runs without timeout (~10s budget for probe)
+      3. Compare probe scores across 2-3 variants
+      4. Evaluate only the best variant (save 15+ evals)"

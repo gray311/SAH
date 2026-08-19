@@ -1,0 +1,276 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are an expert C++ programmer optimizing a polygon construction for the "mackerel-sardine fishing" problem.
+  
+  TASK: Maximize (mackerels_inside - sardines_inside + 1) where mackerels/sardines are points on a 2D grid.
+  
+  CRITICAL CONSTRAINTS:
+  - 150 test cases, 2.0s total time limit (0.1s safety margin per case)
+  - N=5000 mackerels + 5000 sardines per test case
+  - Polygon must be orthogonal (edges parallel to x or y axis), non-self-intersecting, <=1000 vertices, perimeter <=4e5
+  - Score = max(0, mackerels - sardines + 1)
+  
+  SEARCH STRATEGY:
+  1. Start from seed program and iteratively improve using edit_solution
+  2. Use probe_solution to quickly rank many variants (fast, separate budget)
+  3. Only call evaluate_solution on the top 2-3 promising candidates
+  4. Keep trying different mutation strategies (change construction heuristic, use KD-tree, try random perturbations)
+  5. If stuck, completely rewrite the construction approach
+  
+  RULES:
+  - Each tool call per turn: edit_solution OR evaluate_solution OR probe_solution OR finish
+  - NEVER call evaluate_solution more than necessary - use probe first to filter
+  - Preserve the fixed entry function and EVOLVE-BLOCK markers
+  - Target score >2.5 per test case to beat current best
+  
+  When probe_solution says score is good (>2.5), verify with evaluate_solution before finish.
+skill_description: |
+  Optimize a C++ polygon construction program to maximize (mackerels - sardines + 1).
+  Use probe_solution for fast ranking, evaluate_solution for final verification.
+  Target >2.5 score per test case with efficient search within 2s time limit.
+skill_body: |
+  # Orthogonal Polygon Optimization for Mackerel-Sardine Problem
+  
+  ## Objective
+  Maximize score = max(0, mackerels_inside - sardines_inside + 1)
+  
+  ## Search Loop
+  1. **PROBE FIRST**: Always call probe_solution after edit_solution to quickly estimate
+     which variants are promising. Use it to rank ~50-100 variants quickly.
+  2. **CONSTRUCT**: Focus on building initial polygons that cover high mackerel density
+     regions. Use the seed's construction logic as a starting point.
+  3. **REFINE**: Once you have a working polygon, try:
+     - Expanding vertices outward to capture more mackerels
+     - Adding convex corners to reduce sardine coverage
+     - Adjusting bounding box to exclude sardine clusters
+  4. **VERIFY**: Call evaluate_solution on at most 2-3 top probe scores
+  5. **REWRITE**: If stuck for >10 iterations, completely change the construction approach
+  
+  ## Probing Strategy
+  - Use probe_solution to score many different polygon variants quickly
+  - Look for variants where probe score suggests good coverage
+  - Keep the best probe-scoring variant and verify it
+  
+  ## Key Mutations to Try
+  - Change how polygon vertices are selected (use clustering on mackerel positions)
+  - Use KD-tree or grid-based approaches to guide construction
+  - Try bounding box approaches that exclude known sardine regions
+  - Add random perturbations to vertex positions within time budget
+  - Implement iterative local search: move each vertex to improve score
+  
+  ## Time Budget
+  - Total: 2.0s per test case
+  - Keep your internal search simple and bounded
+  - Don't implement complex optimization algorithms that TLE
+  - 2-3 seconds of C++ code running per test case is too much
+tool_descriptions:
+  edit_solution: |
+    Change the EVOLVE-BLOCK C++ code. Use SEARCH/REPLACE diffs for small changes,
+    or full rewrite for major strategy changes. Preserve # EVOLVE-BLOCK markers and
+    entry function signature. After editing, always call probe_solution first.
+  evaluate_solution: |
+    Run the current C++ program and return combined_score (higher is better), validity,
+    error message, best score so far, and evaluations remaining. Call only after
+    probe_solution confirms the variant is promising.
+  probe_solution: |
+    Run the current C++ program on a SMALL SAMPLE of fish points to estimate score.
+    Very fast (~100ms), doesn't consume evaluation budget, score is approximate but
+    useful for ranking. Call AFTER each edit to filter variants before evaluating.
+  finish: |
+    End the session when you have a verified score >2.5 or exhausted budget.
+sampling:
+  temperature: 0.4
+  top_p: 0.8
+  top_k: 12
+  max_tokens: 14336
+agent:
+  max_iterations: 45
+middleware:
+  budget_reminder_from_left: 4
+  long_tool_output_max_chars: 15000
+new_tools:
+  - name: analyze_fish_distribution
+    description: |
+      Analyze the spatial distribution of mackerels and sardines by reading the input
+      file and reporting statistics: number of fish, coordinate ranges, clustering info,
+      and approximate density estimates. Call this ONCE at the start to understand the task.
+      Uses ctx.read_input_df for CSV parsing. Returns file path, fish count per type,
+      x/y ranges, centroids, and overlap hints.
+    input_schema: {type: object, properties: {}}
+    implementation_py: |
+      def run(ctx, args):
+          import math
+          names = ctx.list_task_inputs()
+          if not names:
+              return {"note": "no inputs found"}
+          
+          input_file = names[0]
+          df = ctx.read_input_df(input_file, nrows=10000)
+          
+          mackerels = df[df['type'] == 1]
+          sardines = df[df['type'] == -1]
+          
+          result = {
+              "file": input_file,
+              "n_mackerels": int(len(mackerels)),
+              "n_sardines": int(len(sardines)),
+              "mackerel_x_range": [int(mackerels['x'].min()), int(mackerels['x'].max())],
+              "mackerel_y_range": [int(mackerels['y'].min()), int(mackerels['y'].max())],
+              "sardine_x_range": [int(sardines['x'].min()), int(sardines['x'].max())],
+              "sardine_y_range": [int(sardines['y'].min()), int(sardines['y'].max())],
+              "mackerel_centroid": [float(mackerels['x'].mean()), float(mackerels['y'].mean())],
+              "sardine_centroid": [float(sardines['x'].mean()), float(sardines['y'].mean())]
+          }
+          
+          # Simple clustering hint based on coordinate spread
+          m_x_span = result["mackerel_x_range"][1] - result["mackerel_x_range"][0]
+          s_x_span = result["sardine_x_range"][1] - result["sardine_x_range"][0]
+          
+          result["cluster_overlap_x"] = "HIGH" if abs(m_x_span - s_x_span) < 50000 else "MODERATE"
+          
+          return result
+  - name: validate_polygon_constraints
+    description: |
+      Check if the current polygon (if any is generated by the program) satisfies all
+      constraints: vertex count <=1000, perimeter <=400000, all coordinates in [0,100000],
+      no self-intersections, orthogonal edges only. Returns constraint violations.
+      Call this during development to catch common issues early.
+    input_schema: {type: object, properties: {}}
+    implementation_py: |
+      def run(ctx, args):
+          code = ctx.get_program()
+          current_score = ctx.best_score()
+          validity = ctx.budget_left()[0]
+          
+          # Check best score for hints about violations
+          if current_score == 0:
+              return {
+                  "valid": False,
+                  "hints": ["Score is 0 - check for constraint violations or runtime errors"],
+                  "recommendation": "Use analyze_fish_distribution first, then ensure basic polygon is valid"
+              }
+          
+          # Provide feedback based on what we know
+          return {
+              "validity_check": "Run full evaluate_solution for detailed validity check",
+              "current_best_score": current_score,
+              "recommendation": "Use probe_solution to test variants before full evaluation"
+          }
+new_skills:
+  - name: polygon-construction-strategy
+    description: |
+      Task-specific playbook for constructing orthogonal polygons to maximize
+      (mackerels - sardines + 1). Use when stuck or starting fresh.
+    body: |
+      # Polygon Construction Strategy for Mackerel-Sardine Problem
+      
+      ## Core Idea
+      Build an orthogonal polygon that covers mackerel clusters while excluding
+      sardine clusters. The polygon must be rectilinear (all edges axis-aligned).
+      
+      ## Step 1: Analyze Fish Distribution
+      - Use analyze_fish_distribution to understand where mackerels and sardines cluster
+      - Note the coordinate ranges and centroids of each type
+      - Identify regions with high mackerel density and low sardine density
+      
+      ## Step 2: Choose Construction Approach
+      - **Bounding Box Approach**: Create a simple rectangle covering most mackerels
+        but try to exclude sardine-dense regions by cutting out notches
+      - **Convex Hull with Holes**: Construct a polygon that follows mackerel positions
+        while keeping sardines outside
+      - **Grid-Based**: Divide the plane into grid cells, select cells with high mackerel/sardine ratio
+      
+      ## Step 3: Refine Vertices
+      - Start with a coarse polygon (few vertices)
+      - Add vertices at mackerel positions to capture more points
+      - Round coordinates to grid points (integers)
+      - Check perimeter constraint (<=4e5) and vertex count (<=1000)
+      
+      ## Step 4: Validate Constraints
+      - Ensure no self-intersections
+      - Verify all edges are axis-aligned
+      - Check that coordinates are in [0, 100000]
+      - Ensure polygon is simple (non-self-intersecting)
+      
+      ## Step 5: Iterative Improvement
+      - Use probe_solution to test multiple variants quickly
+      - Try expanding vertices outward, then contracting to exclude sardines
+      - Use KD-tree to efficiently find fish inside/outside the polygon
+      
+      ## Key Heuristics
+      - Mackerels and sardines are placed adversarially
+      - The optimal polygon often has many vertices (up to 1000)
+      - Corner cases: all fish on one side, sardines intermingled with mackerels
+      - Time budget: 2s per test case - keep construction O(N log N) or O(N)
+      - Use the seed program's structure but improve the search strategy
+  - name: debug-validation-errors
+    description: |
+      Troubleshooting guide when the program produces validity=0 or errors.
+    body: |
+      # Debugging Validation Errors
+      
+      ## Common Causes of validity=0
+      
+      ### 1. Perimeter Exceeded
+      - Perimeter > 400000
+      - Fix: Reduce polygon size, remove unnecessary vertices, use fewer vertices
+      
+      ### 2. Too Many Vertices
+      - Vertices > 1000
+      - Fix: Merge collinear vertices, use simpler polygon shape
+      
+      ### 3. Coordinate Out of Range
+      - Any vertex has x or y outside [0, 100000]
+      - Fix: Clamp coordinates to valid range
+      
+      ### 4. Self-Intersection
+      - Edges cross each other
+      - Fix: Use non-overlapping construction, check edge ordering
+      
+      ### 5. Duplicate Vertices
+      - Two vertices at same position
+      - Fix: Ensure all vertices have distinct coordinates
+      
+      ## Debug Strategy
+      1. Check error message in evaluate_solution output
+      2. Add print statements to trace vertex coordinates and perimeter
+      3. Use analyze_fish_distribution to verify input was read correctly
+      4. Test with a minimal valid polygon first (4 vertices, rectangle)
+      5. Gradually add complexity while monitoring constraints
+tool_descriptions:
+  edit_solution: |
+    Modify the EVOLVE-BLOCK C++ code. Use SEARCH/REPLACE for small changes, full
+    rewrite for major strategy shifts. After editing, call probe_solution to quickly
+    assess the variant before using evaluate_solution.
+  evaluate_solution: |
+    Execute the C++ program and return combined_score (higher better), validity,
+    error messages, best score, and remaining evaluations. Use sparingly - only
+    after probe_solution ranks the variant as promising.
+  probe_solution: |
+    Run the current C++ program on a SMALL subset (~1000 fish points) to estimate
+    score quickly. Returns approximate_score for ranking variants. Does NOT consume
+    the evaluation budget. Call after every edit to filter promising candidates.
+  finish: |
+    Submit your best solution when score >2.5 is verified with evaluate_solution,
+    or when evaluation budget is exhausted. Include brief summary of approach.
+sampling:
+  temperature: 0.4
+  top_p: 0.8
+  top_k: 12
+  max_tokens: 14336
+agent:
+  max_iterations: 45
+middleware:
+  budget_reminder_from_left: 4
+  long_tool_output_max_chars: 15000
+new_middlewares:
+  - name: probe_before_eval
+    hook: before_model
+    description: |
+      Remind the solver to use probe_solution before calling evaluate_solution
+      to avoid wasting evaluation budget on unpromising variants.
+    implementation_py: |
+      def before_model(hook_input):
+          if hook_input.get('action') == 'evaluate_solution':
+              return "REMINDER: Call probe_solution first to filter variants. Only evaluate promising ones."
+          return None

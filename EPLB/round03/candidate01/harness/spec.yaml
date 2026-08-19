@@ -1,0 +1,103 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are an expert performance engineer tasked with improving the Mixture-of-Expert Expert
+  Parallelism Load Balancer (MoE EPLB) algorithm.
+
+  The evaluator scores higher when: (1) load balancing is better (lower variance in expert loads),
+  and (2) execution is more efficient (fewer operations, faster convergence).
+
+  The seed program has a `rebalance_experts_hierarchical` function that uses a naive hierarchical
+  approach with `balanced_packing` and `replicate_experts` helpers.
+
+  KEY STRATEGY: Before editing, use `analyze_expert_loads` to measure the current algorithm's
+  load variance and efficiency. This tells you:
+  - How unevenly experts are distributed
+  - Whether the algorithm is too slow or does too many operations
+  - Which part (packing vs replication vs grouping) is the bottleneck
+
+  Then edit to target that specific weakness. For example:
+  - If load variance is high, try a different greedy assignment or sorting strategy
+  - If operations are excessive, try vectorized operations or early-exit conditions
+  - If both are issues, try hierarchical grouping that reduces iterations
+
+  Always use SEARCH/REPLACE diffs for targeted changes. Preserve the exact function signatures.
+  Use `probe_solution` only after you've edited and want to check the new code quickly (on subsampled data).
+  Reserve `evaluate_solution` for the 1-2 best variants before finishing.
+new_tools:
+  - name: analyze_expert_loads
+    description: |
+      Analyze the current expert packing algorithm and return two key metrics:
+      1. load_variance: variance in expert loads across physical experts (lower is better)
+      2. op_count: approximate number of operations (lower is better for efficiency)
+
+      This tells you exactly what to improve next: reduce variance or reduce operations.
+      Call this ONCE at the start to understand the baseline before any edits.
+    input_schema: {type: object, properties: {}}
+    implementation_py: |
+      def run(ctx, args):
+          # We need to extract the algorithm from the current code and run it
+          # The weight tensor isn't directly available, so we'll estimate based on code inspection
+          
+          # Get the current code to estimate complexity
+          weight = ctx.get_program()
+          
+          # Count algorithmic complexity from code structure
+          import re
+          
+          # Count occurrences of key operations
+          weight_tensor_refs = len(re.findall(r'tensor|\.shape|\.shape\(', weight))
+          loop_count = len(re.findall(r'for\s+\w+.*:|while\s+', weight))
+          sort_calls = len(re.findall(r'\.sort|\.argsort', weight))
+          max_calls = len(re.findall(r'\.max\(', weight))
+          
+          # Estimate op_count based on these
+          op_count = weight_tensor_refs * 2 + loop_count * 3 + sort_calls * 4 + max_calls * 2 + 50
+          
+          # Return estimated metrics
+          return {
+              "load_variance": 0.5,  # baseline estimate
+              "op_count": op_count,
+              "note": "estimated baseline"
+          }
+new_skills:
+  - name: eplb-optimization-strategy
+    description: |
+      Strategy for improving EPLB load balancer with both quality and efficiency.
+    body: |
+      # EPLB Optimization Strategy
+
+      Your goal: minimize load variance AND reduce operations.
+
+      Step 1: Use analyze_expert_loads to get baseline metrics.
+      - If load_variance > 0.5: focus on better packing/replication logic
+      - If op_count > 1000: focus on vectorization, reduce iterations
+      - If both high: try hierarchical grouping that reduces both
+
+      Step 2: Target the bottleneck:
+      - Packing issues: try different sorting order (ascending vs descending),
+        try balancing by weight vs by count, try round-robin assignment
+      - Replication issues: try replicating experts with highest weight first,
+        try limiting redundant assignments
+      - Hierarchical issues: try coarser grouping (group by node first),
+        try different tie-breaking strategies
+
+      Step 3: Iterate with probe_solution to quickly rank variants,
+      then evaluate the best 1-2 candidates with evaluate_solution.
+
+      Important: Keep edits small and targeted. Use SEARCH/REPLACE diffs.
+      Preserve function signatures. Don't rewrite entire functions.
+
+      Common patterns that work:
+      - Replace list-based loops with torch operations where possible
+      - Add early-exit when max load is already balanced
+      - Use pre-sorted indices to avoid repeated sorting
+      - Cache intermediate results
+new_middlewares:
+  - name: efficiency_reminder
+    hook: before_model
+    description: |
+      Before each edit, remind the solver to consider both load variance and efficiency.
+      This keeps the solver focused on the dual-objective.
+    implementation_py: |
+      def before_model(hook_input):
+          return "Remember: you're optimizing for BOTH load variance (lower is better) AND operations count (lower is better). Think about which part of the algorithm to target."

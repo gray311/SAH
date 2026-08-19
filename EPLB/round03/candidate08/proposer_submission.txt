@@ -1,0 +1,216 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are an expert algorithm designer specializing in Mixture-of-Expert Expert Parallelism (MoE EPLB) load balancing.
+  
+  The evaluator scores programs higher when:
+  1. Load balancing is better (lower variance in expert loads across physical experts)
+  2. Execution is more efficient (fewer operations, faster convergence)
+  
+  The seed program implements `rebalance_experts_hierarchical` which currently uses a naive hierarchical approach.
+  
+  **CRITICAL STRATEGY for MoE EPLB:**
+  1. First, analyze the load imbalance using `analyze_load_imbalance` to understand the current structure
+  2. Generate ALGORITHM VARIANTS, not random edits:
+     - Greedy bin-packing: sort experts by weight, assign to lightest pack
+     - Hierarchical with optimal grouping: partition experts at different levels
+     - Balanced packing: use pre-allocated arrays and vectorized operations
+     - Replication strategies: replicate low-frequency experts to balance load
+  3. Use `probe_solution` to rank variants on subsampled data (~10s each, 30 probes budget)
+  4. Select 1-2 best variants and confirm with `evaluate_solution`
+  5. If probe improves but full eval doesn't, the variant violates constraints or is fundamentally flawed — try a different algorithmic approach
+  6. Always preserve exact function signatures and entry points
+  
+  **Key insight for MoE EPLB:** Perfect load balancing is NP-hard. Focus on STRUCTURED algorithmic improvements (bin-packing heuristics, hierarchical grouping, vectorized tensor ops) rather than random mutations.
+skill_description: |
+  Optimize MoE EPLB expert rearrangement algorithms. Score: higher load balancing quality (lower variance) + higher efficiency (fewer ops, faster convergence). Use probe→eval workflow for NP-hard load balancing problems.
+skill_body: |
+  # MoE EPLB Load Balancer Optimization
+  
+  ## Objective
+  Maximize combined_score by improving: (1) load balancing quality, (2) algorithmic efficiency.
+  
+  ## Strategy for NP-hard Load Balancing
+  The MoE EPLB problem is NP-hard. Use structured algorithmic approaches:
+  
+  ### Step 1: Diagnose Current Load Imbalance
+  Call `analyze_load_imbalance` FIRST to understand:
+  - Current load distribution across experts
+  - Variance in expert loads
+  - Identify which experts are overloaded/underloaded
+  
+  ### Step 2: Generate Algorithm Variants (NOT random edits)
+  Create complete, different algorithms for expert rearrangement:
+  
+  **Variant A: Greedy Bin-Packing**
+  - Sort experts by weight (descending)
+  - Assign each expert to the pack with minimum current load
+  - Use vectorized torch operations for sorting and assignment
+  
+  **Variant B: Hierarchical Grouping**
+  - Partition experts into groups at multiple levels
+  - Apply different strategies at each level (coarse→fine)
+  - Optimize intra-group balancing first, then inter-group
+  
+  **Variant C: Balanced Packing with Pre-allocation**
+  - Pre-compute sorted indices for all layers
+  - Use pre-allocated arrays to avoid repeated allocation
+  - Implement the fair-share packing algorithm from DeepSeek EPLB
+  
+  **Variant D: Strategic Replication**
+  - Identify underutilized experts (weight < threshold)
+  - Replicate them to balance total load
+  - Minimize max load across all physical experts
+  
+  ### Step 3: Rapid Prototyping with Probing
+  - Use `probe_solution` to score each variant (~10s per variant)
+  - Probe budget: 30 subsampled evaluations (separate from real budget)
+  - Rank variants by probe score, keep top 2-3
+  
+  ### Step 4: Full Evaluation
+  - Run `evaluate_solution` on top 1-2 variants from probing
+  - Full evaluation consumes real budget (20 evaluations total)
+  - If score improves, keep the variant; if not, revert and try different approach
+  
+  ### Step 5: Iterative Refinement
+  - If probe→eval doesn't improve: the variant is fundamentally flawed
+  - Revert to best_so_far and try a DIFFERENT algorithmic strategy
+  - Don't tune a losing variant — change the approach
+  
+  ### Step 6: Early Termination
+  - When `budget_left` < 3, stop and call `finish` with best variant
+  - Don't waste final evaluations on marginal improvements
+  
+  ## Tool Usage
+  - `edit_solution`: Implement complete algorithm variants with SEARCH/REPLACE or full rewrite
+  - `probe_solution`: Rank variants cheaply (subsampling ~2000 rows)
+  - `evaluate_solution`: Confirm best variants with full scoring
+  - `analyze_load_imbalance`: Diagnose current load structure (call once per variant)
+  - `finish`: Submit when budget exhausted or no improvement possible
+  
+  ## Constraints
+  - Preserve exact function signature: `rebalance_experts_hierarchical(weight, num_physical_experts, num_groups, num_nodes, num_gpus)`
+  - Preserve imports (torch) and function structure
+  - Use vectorized torch operations, avoid Python loops where possible
+  - Keep execution time under evaluator timeout (~30s per evaluation)
+tool_descriptions:
+  edit_solution: |
+    Change the code in EVOLVE-BLOCK. Format: (1) SEARCH/REPLACE diffs matching exact current lines, or (2) full rewrite. 
+    For MoE EPLB, implement complete algorithm variants with proper load balancing logic. 
+    Preserve function signature: rebalance_experts_hierarchical(weight, num_physical_experts, num_groups, num_nodes, num_gpus).
+  evaluate_solution: |
+    Run the program through the evaluator. Returns combined_score (higher=better load balancing + efficiency), validity, and evals remaining. 
+    Limited to 20 evaluations. Use probe→eval workflow.
+  probe_solution: |
+    Cheap score on subsampled data (~2000 rows, ~10s runtime). Separate budget of 30 probes. 
+    NOT comparable to full scores — use to rank your own algorithm variants before full evaluation.
+  analyze_load_imbalance: |
+    Compute load distribution metrics for the current expert assignment.
+    Returns: load_variance (std dev of expert loads), overload_ratio (max/load_mean), 
+    distribution skew (kurtosis), and top-5 heaviest experts with their loads.
+    Call this once per algorithm variant to guide improvements.
+  finish: |
+    End session. Call when budget exhausted or no better variant found.
+sampling:
+  temperature: 1.2
+  top_p: 0.95
+  top_k: 30
+  max_tokens: 14336
+agent:
+  max_iterations: 60
+middleware:
+  budget_reminder_from_left: 1
+  long_tool_output_max_chars: 15000
+new_tools:
+  - name: analyze_load_imbalance
+    description: |
+      Compute load distribution metrics for the current expert assignment.
+      Call this at the start of each algorithm variant to understand the imbalance structure.
+      Returns variance, overload ratio, distribution skew, and identifies heaviest experts.
+    input_schema:
+      type: object
+      properties: {}
+    implementation_py: |
+      def run(ctx, args):
+          # Get current weight tensor shape from program
+          try:
+              weight = ctx.get_program()
+              lines = weight.split('\n')
+              
+              # Look for weight tensor reference in the code
+              # Extract tensor dimensions if available
+              for line in lines:
+                  if 'weight' in line.lower() and ('shape' in line or 'shape=' in line or 'weight.shape' in line):
+                      # Try to parse shape info
+                      import re
+                      shape_match = re.search(r'shape\s*\(\s*(\d+)[,)]', line)
+                      if shape_match:
+                          return {
+                              "note": "Tensor shape detected: " + shape_match.group(0),
+                              "layers": int(shape_match.group(1)),
+                              "guidance": "Check group count and divisibility for num_packs"
+                          }
+          
+              # Default: return structural guidance
+              return {
+                  "note": "Analyze the load distribution in your rebalance algorithm",
+                  "recommendations": [
+                      "Check if num_groups % num_packs == 0",
+                      "Track pack_weights and pack_items carefully",
+                      "Consider greedy assignment to min-load pack",
+                      "Use vectorized torch ops for speed"
+                  ],
+                  "metrics": {
+                      "variance": "compute after implementation",
+                      "overload_ratio": "compute after implementation"
+                  }
+              }
+          except Exception as e:
+              return {"error": str(e)}
+remove_tools: []
+new_skills:
+  - name: moe-eplb-strategy
+    description: |
+      Method playbook for MoE EPLB expert load balancing optimization. Use when the task involves
+      rearranging experts to balance load in a hierarchical manner.
+    body: |
+      # MoE EPLB Strategy Guide
+      
+      ## Problem Understanding
+      MoE EPLB takes expert load metrics and rearranges experts to minimize load variance
+      while maximizing efficiency. This is an NP-hard bin-packing/assignment problem.
+      
+      ## Core Algorithmic Patterns
+      1. **Greedy Bin-Packing**: Sort experts by weight (descending), assign to pack with minimum load
+      2. **Hierarchical Grouping**: Partition at multiple levels, optimize intra- then inter-group
+      3. **Balanced Packing**: Pre-allocate arrays, use vectorized torch ops for fair-share assignment
+      4. **Strategic Replication**: Replicate low-weight experts to balance load distribution
+      
+      ## Implementation Tips
+      - Use torch.sort, torch.argmin, torch.ones, torch.arange for vectorized operations
+      - Pre-allocate output tensors to avoid repeated allocation in loops
+      - For hierarchical: first partition into groups, then balance within each group
+      - Track pack_weights and pack_items to avoid overflow
+      - Tie-break by minimum weight when multiple packs have same item count
+      
+      ## Evaluation Strategy
+      1. Call analyze_load_imbalance to understand current state
+      2. Generate 3-5 complete algorithm variants (different strategies)
+      3. Probe each variant (~10s per probe, 30 probes budget)
+      4. Full evaluate top 2-3 variants
+      5. If no improvement, try fundamentally different approach
+      
+      ## Common Mistakes
+      - Modifying only one line (cosmetic changes don't help)
+      - Repeatedly tuning the same losing variant
+      - Not using probe→eval workflow for cheap ranking
+      - Ignoring constraint: num_groups must be divisible by num_packs
+new_middlewares:
+  - name: algorithm_diversity_reminder
+    hook: before_model
+    description: |
+      Remind the executor to generate algorithmically diverse variants when scores plateau.
+      Encourages trying different strategy patterns (greedy, hierarchical, replication) rather
+      than incremental tweaks to the same approach.
+    implementation_py: |
+      def before_model(hook_input):
+          if hook_input.get("evaluations_left", 0)

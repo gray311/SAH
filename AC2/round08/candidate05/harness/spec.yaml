@@ -1,0 +1,346 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are optimizing C₂ = ||f * f||₂² / ((∫f)² ||f * f||_∞) for the second autocorrelation inequality.
+  
+  Current best: 0.8963 (step functions). Target: surpass this.
+  
+  KEY INSIGHT: The seed program already uses piecewise-constant step functions via jnp.piecewise.
+  Don't try to "fix" the function type - instead, SYSTEMATICALLY EXPLORE the multi-level step space.
+  
+  STRATEGY:
+  1. Start with seed's pattern (400 intervals, multi-level steps around 1.0-2.0 heights)
+  2. Generate structured variations: change heights, widths, positions systematically
+  3. Use probe_solution heavily (cheap ranking) to guide search
+  4. Evaluate only top 1-2 candidates (save your 20 evals)
+  5. If no progress in 10 iterations, try a different initial height range or symmetry
+  
+  WORKFLOW:
+  - Generate pattern variation
+  - Verify it's still a valid step function (check no linear patterns)
+  - Probe to rank (do this for 3-5 variants per iteration)
+  - Evaluate the best 1-2
+  - Iterate with new variations based on what worked
+  
+  COMBINATORIAL SEARCH: Think of heights as variables (0.5-2.5 range). The best function
+  likely has multiple levels at different heights. Explore systematically, not randomly.
+  
+  BUDGET: 20 full evaluations maximum. Use probes liberally (~15-20 probes per eval).
+skill_description: |
+  Systematic combinatorial search for multi-level step functions. Explores height/width/position space
+  methodically rather than trying to fix function type.
+skill_body: |
+  # Systematic Combinatorial Search for C₂ Maximization
+  
+  ## Understanding the Problem
+  
+  You're optimizing C₂ for step functions. The seed program already creates piecewise-constant
+  functions - don't waste time "fixing" them. Instead, explore the parameter space systematically.
+  
+  ## Search Space
+  
+  Think of a step function as having:
+  - Several levels (2-6 regions)
+  - Each level has: height (0.5-2.5), width (10%-40% of domain), position
+  
+  The current best uses heights around 1.0-2.0 with multiple levels.
+  
+  ## Strategy: Parameter Space Exploration
+  
+  ### Iteration 1: Baseline with variations
+  1. Take seed's structure (num_intervals=400, heights ~1.0-2.0)
+  2. Generate 3-5 variations by tweaking:
+     - Center height: ±0.2 (try 1.2, 1.4, 1.6)
+     - Width of central region: ±5% (try narrower/wider)
+     - Add/remove outer levels
+  3. Probe all variants
+  4. Evaluate the best 2
+  
+  ### Iteration 2: If no progress, explore heights
+  1. Keep central region structure
+  2. Vary heights systematically:
+     - Try lower heights (0.7-1.2)
+     - Try higher heights (1.8-2.5)
+     - Try asymmetric heights
+  3. Probe → Evaluate best
+  
+  ### Iteration 3+: Scale the search
+  1. If 3-level functions plateau, try 4-level or 2-level
+  2. If symmetric functions plateau, try asymmetric
+  3. If wide functions plateau, try narrow peaks
+  
+  ## Pattern Variation Recipe
+  
+  When generating variations, think in terms of:
+  - height_adjustment: ±0.1 to ±0.3 from base
+  - width_adjustment: ±5% to ±10% from base
+  - region_adjustment: shift boundaries by ±5%
+  
+  Combine 2-3 adjustments per variant for diverse search.
+  
+  ## Verification
+  
+  Before evaluating:
+  - Confirm the function still uses piecewise patterns (jnp.piecewise or jnp.where with constants)
+  - No linear expressions like jnp.linspace
+  
+  ## Budget Discipline
+  
+  - Max 20 full evaluations
+  - Use ~15-20 probes per iteration to rank many variants
+  - Only evaluate the single best candidate from each iteration
+  - If you've used 10 evals with no progress, restart with a completely different strategy
+tool_descriptions:
+  edit_solution: |
+    Edit the EVOLVE-BLOCK to create multi-level step functions with varied parameters.
+    
+    Seed structure: 400 intervals, num_intervals=400, learning_rate=0.22, num_steps=37000.
+    
+    To vary:
+    - Adjust num_intervals (try 300-600)
+    - Vary learning_rate (try 0.15-0.35)
+    - Modify num_steps (try 20000-50000)
+    - Change reinit_fraction (try 0.1-0.3)
+    - Adjust reinit_std (try 0.02-0.05)
+    
+    Keep the piecewise structure - don't switch to linear functions.
+    
+    Example variation:
+    - Change num_intervals to 500
+    - Change learning_rate to 0.28
+    - Change reinit_fraction to 0.22
+  evaluate_solution: |
+    Run full C₂ evaluation. Returns combined_score. Use sparingly - max 20 total.
+    Only evaluate after probing and confirming step function structure.
+    10s-30s per call, debits from 20-eval budget.
+  probe_solution: |
+    Cheap approximate C₂ score on subsampled data (~10s). Separate budget (~30 probes).
+    Perfect for ranking many variants before full evaluation. Scores are approximate
+    but consistent within the probe budget.
+  finish: |
+    End the session. Call when budget exhausted or you've tried multiple strategies with no progress.
+sampling:
+  temperature: 0.85
+  top_p: 0.85
+  top_k: 15
+  max_tokens: 14000
+agent:
+  max_iterations: 40
+middleware:
+  budget_reminder_from_left: 3
+  long_tool_output_max_chars: 12000
+new_tools:
+- name: generate_pattern_variation
+  description: |
+    Generate a systematic variation of the current step function parameters.
+    Takes seed parameters and creates modified versions with varied heights, widths, positions.
+    Call this to explore the combinatorial step function space methodically.
+    
+    Use when: You want to explore new parameter combinations without random guessing.
+    
+    Returns multiple variation suggestions with predicted impact.
+  input_schema:
+    type: object
+    properties:
+      base_heights:
+        type: array
+        items:
+          type: number
+      num_levels:
+        type: integer
+      exploration_depth:
+        type: integer
+  implementation_py: |
+    def run(ctx, args):
+        import math
+        import random
+        
+        code = ctx.get_program()
+        
+        # Extract current parameters from seed structure
+        current_params = {
+            'num_intervals': 400,
+            'learning_rate': 0.22,
+            'num_steps': 37000,
+            'warmup_steps': 3700,
+            'reinit_fraction': 0.18,
+            'reinit_std': 0.028,
+            'reinit_interval': 180,
+        }
+        
+        # Get base heights from pattern initialization (approximate from seed)
+        if args.get('base_heights') is None:
+            base_heights = [1.0, 1.5, 2.0]  # Default multi-level heights
+        else:
+            base_heights = args['base_heights']
+        
+        num_levels = args.get('num_levels', 3)
+        exploration_depth = args.get('exploration_depth', 3)
+        
+        variations = []
+        
+        # Generate systematic variations
+        for i in range(exploration_depth + 1):
+            variation = {
+                'description': f'Variation {i}',
+                'param_changes': {},
+                'height_mods': list(base_heights),
+                'strategy': f'Systematic level {i}'
+            }
+            
+            # Vary key parameters systematically
+            if i == 0:
+                # Baseline - small tweaks
+                variation['param_changes']['num_intervals'] = min(600, max(300, current_params['num_intervals'] + random.randint(-50, 50)))
+                variation['param_changes']['learning_rate'] = round(current_params['learning_rate'] + random.uniform(-0.05, 0.05), 2)
+            elif i == 1:
+                # Wider intervals, slower learning
+                variation['param_changes']['num_intervals'] = min(500, max(350, current_params['num_intervals'] - 50))
+                variation['param_changes']['learning_rate'] = round(current_params['learning_rate'] - 0.05, 2)
+            elif i == 2:
+                # Narrower, faster learning
+                variation['param_changes']['num_intervals'] = min(600, max(400, current_params['num_intervals'] + 50))
+                variation['param_changes']['learning_rate'] = round(current_params['learning_rate'] + 0.05, 2)
+            elif i == 3:
+                # Different reinit strategy
+                variation['param_changes']['reinit_fraction'] = round(current_params['reinit_fraction'] + 0.05, 2)
+                variation['param_changes']['reinit_std'] = round(current_params['reinit_std'] + 0.01, 3)
+            elif i == 4:
+                # Asymmetric pattern
+                variation['strategy'] = 'Asymmetric multi-level'
+                variation['height_mods'] = [0.8, 1.5, 2.2, 1.2, 0.7]
+            elif i == 5:
+                # Higher peaks
+                variation['strategy'] = 'Higher peak exploration'
+                variation['height_mods'] = [1.2, 2.0, 2.8]
+            elif i == 6:
+                # Lower, wider
+                variation['strategy'] = 'Lower wider pattern'
+                variation['height_mods'] = [0.6, 1.0, 1.4]
+            elif i == 7:
+                # Very aggressive reinit
+                variation['param_changes']['reinit_fraction'] = round(current_params['reinit_fraction'] + 0.1, 2)
+                variation['param_changes']['reinit_std'] = round(current_params['reinit_std'] * 2, 3)
+            
+            variations.append(variation)
+        
+        # Add some height-focused variations
+        for mod_factor in [0.9, 1.1, 1.25, 1.5]:
+            h_mods = [h * mod_factor for h in base_heights]
+            variations.append({
+                'description': f'Height scaled by {mod_factor:.2f}',
+                'height_mods': h_mods,
+                'strategy': 'Height scaling'
+            })
+        
+        return {
+            'variations': variations,
+            'recommendation': 'Start with variation 0 (baseline tweaks), probe 5 variants, evaluate best',
+            'next_steps': ['Call edit_solution with chosen variation', 'Call probe_solution on 3-5 variants', 'Call evaluate_solution on best probe']
+        }
+remove_tools: []
+new_skills:
+- name: combinatorial-search-playbook
+  description: |
+    Systematic exploration of multi-level step function parameter space. Use parameter variations
+    rather than random edits. Methodical search beats random mutations.
+  body: |
+    # Combinatorial Search for Multi-Level Step Functions
+    
+    ## Core Principle: Systematic Parameter Exploration
+    
+    The C₂ optimization problem has a combinatorial structure:
+    - Multiple levels (2-6)
+    - Each level has height, width, position
+    
+    Random mutations rarely find the optimum. Instead, systematically explore:
+    
+    ### 1. Parameter Space Grid
+    
+    Think of parameters as a grid to explore:
+    
+    - num_intervals: [300, 400, 500, 600]
+    - learning_rate: [0.15, 0.20, 0.25, 0.30, 0.35]
+    - reinit_fraction: [0.10, 0.15, 0.20, 0.25, 0.30]
+    - Central height: [0.7, 1.0, 1.3, 1.6, 2.0]
+    
+    Don't random-walk through this space. Use structured sweeps.
+    
+    ### 2. Search Protocol
+    
+    **Iteration 1: Baseline Sweep**
+    - Start with seed's parameters
+    - Generate 5 variations by tweaking 1-2 parameters at a time
+    - Probe all 5
+    - Evaluate the best
+    
+    **Iteration 2: Expand on Success**
+    - If baseline+δ worked, try baseline+2δ
+    - If baseline worked better, try neighbors
+    - Keep exploring in the promising direction
+    
+    **Iteration 3+: Systematic Coverage**
+    - If no single-parameter sweeps worked, try 2-parameter combinations
+    - Try different initial heights (lower vs higher)
+    - Try different symmetries (symmetric vs asymmetric)
+    
+    ### 3. Decision Tree
+    
+    If probe scores show:
+    - Clear direction: Exploit (go further in that direction)
+    - Mixed results: Explore (try orthogonal parameter changes)
+    - All bad: Restart with completely different parameter regime
+    
+    ### 4. Budget Allocation
+    
+    With 20 evals total:
+    - Early iterations (5-7): Use 2 evals each, heavy probing
+    - Mid iterations (4-5): Use 2 evals each
+    - Late iterations (3-4): Use 1 eval each, confirm top candidates
+    
+    Total: ~16-18 evals leaves buffer for retry
+    
+    ### 5. Common Patterns to Try
+    
+    If stuck, these patterns often work:
+    
+    1. **Higher central peak**: Increase central height to 2.0-2.5
+    2. **Wider support**: Expand the central region to 60-70%
+    3. **Multi-level complexity**: Add 4-5 levels with varying heights
+    4. **Asymmetric profile**: Make one side wider than the other
+    5. **Sharper transition**: Reduce interval count but increase heights
+    
+    ## Checklist
+    
+    - [ ] Using generate_pattern_variation for systematic exploration
+    - [ ] Probing 3-5 variants before each eval
+    - [ ] Only 1-2 evals per iteration
+    - [ ] Tracking which parameter changes helped
+    - [ ] Restarting strategy if 5 iterations with no progress'
+new_middlewares:
+- name: enforce_probe_first
+  hook: before_model
+  description: |
+    Middleware that enforces probing before evaluation. Prevents wasting evals
+    on unprobed variants and encourages systematic search.
+  implementation_py: |
+    def before_model(hook_input):
+        state = hook_input.get("state", {})
+        iteration = state.get("iteration", 0)
+        last_tool = state.get("last_tool", "unknown")
+        probes_since_eval = state.get("probes_since_eval", 0)
+        
+        # Warn if evaluating without recent probing
+        if last_tool in ["edit_solution", "analyze_step_structure"] and probes_since_eval == 0:
+            return "You made an edit but haven't probed yet! Call probe_solution on at least 2-3 variants before evaluating to rank them."
+        
+        # Require 3+ probes before eval after an edit
+        if probes_since_eval < 3 and last_tool not in ["probe_solution", "evaluate_solution", "finish"]:
+            return "Best practice: Probe 3-5 variants before evaluating. This helps you pick the most promising candidate."
+        
+        # Reset counter after probe
+        if last_tool == "probe_solution":
+            state["probes_since_eval"] = probes_since_eval + 1
+        elif last_tool == "evaluate_solution":
+            state["probes_since_eval"] = 0
+        
+        return None

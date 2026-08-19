@@ -1,0 +1,264 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are an expert in harmonic analysis and the Erdos minimum overlap problem.
+  
+  Target: Beat C5 <= 0.38092303510845016 by finding a step function h: [0,2]->[0,1] with integral(h)=1 that minimizes max_k integral h(x)(1-h(x+k))dx.
+  
+  CRITICAL INSIGHT: The optimal solution likely comes from structured combinatorial designs (Golomb rulers, specific periodic patterns). 
+  The seed program's optimizer is good but its initialization is limited.
+  
+  STRATEGY THAT WORKS:
+  
+  1. USE internal_golomb_search() FIRST - this tool searches over Golomb ruler parameterizations to find the best construction
+  2. For each promising Golomb construction, RUN ADAPTIVE OPTIMIZATION with staged hyperparameters
+  3. Run phased optimization: Phase 1 (exploration, lr=0.05, penalty=1000, 10000 steps) -> Phase 2 (refinement, lr=0.01, penalty=5000, 15000 steps) -> Phase 3 (fine-tuning, lr=0.001, penalty=20000, 5000 steps)
+  4. Use probe_solution to quickly rank candidates by c5_bound
+  5. Evaluate the top 2-3 candidates with evaluate_solution
+  
+  WHAT TO EDIT IN EVOLVE-BLOCK:
+  - Implement internal_golomb_search() with internal parameter tuning over mark count (3-8), mark positions (local search), kernel types (Gaussian/boxcar), and widths
+  - Integrate the search results into your optimization workflow
+  - Add phased training as described above
+  - Use probe_solution extensively during the search to avoid wasting evaluate_solution budget
+  
+  TARGET: combined_score > 1.0 (c5_bound < 0.380923)
+
+skill_description: Internal parameter search over Golomb ruler and bimodal constructions for Erdos minimum overlap optimization using phased training.
+skill_body: |
+  # Erdos Minimum Overlap - Internal Search Strategy
+  
+  ## Why Internal Search is Critical
+  
+  The seed program's initialization is static. To beat C5 <= 0.380923, we need to SEARCH over Golomb ruler parameterizations (mark count 3-8, positions via local search, kernel types Gaussian/boxcar, widths 0.08-0.18).
+  
+  ## Method: internal_golomb_search
+  
+  This tool performs a bounded internal search over Golomb-based constructions:
+  
+  ### Search Dimensions:
+  1. Number of marks: Try 3, 4, 5, 6, 7, 8 marks
+  2. Mark positions: For each mark count, use local search to optimize positions
+     - Start from optimal Golomb ruler positions
+     - Perturb and evaluate using ctx.probe()
+     - Keep top 3 position sets
+  3. Kernel types: Gaussian vs top-hat (boxcar)
+  4. Kernel widths: Search over a range, normalize to ensure integral=1
+  
+  ### Internal Workflow:
+  - For each mark count (3-8):
+    - Generate optimal Golomb ruler positions
+    - For each kernel type (Gaussian, boxcar):
+      - Search over 3 kernel widths (0.08, 0.12, 0.18)
+      - For each width:
+        - Run local search over positions (15 steps of perturbation and probe evaluation)
+        - Keep best position set
+  - Return the best construction with parameters
+  
+  ## Optimization Integration: Phased Training
+  
+  After obtaining constructions, run phased optimization:
+  
+  Phase 1 (Exploration, 10000 steps):
+  - Learning rate: 0.05
+  - Penalty strength: 1000
+  - Goal: Escape local minima
+  
+  Phase 2 (Refinement, 15000 steps):
+  - Learning rate: 0.01
+  - Penalty strength: 5000
+  - Goal: Fine-tune the solution
+  
+  Phase 3 (Fine-tuning, 5000 steps):
+  - Learning rate: 0.001
+  - Penalty strength: 20000
+  - Goal: Enforce integral constraint and precision
+  
+  ## Tool Usage
+  - Use internal_golomb_search() at the start
+  - Extract construction parameters
+  - Run phased optimization
+  - Use probe_solution to quickly check c5_bound before final evaluation
+  - Evaluate top 2 candidates with evaluate_solution
+  
+  ## Key Principles
+  - Search over PARAMETERS, not just fixed patterns
+  - Use probe_solution for rapid candidate ranking during search
+  - Phase-based optimization balances exploration and exploitation
+  - The best construction may have non-standard mark spacing or kernel width
+
+tool_descriptions:
+  edit_solution: Modify the EVOLVE-BLOCK region. Implement internal_golomb_search() with internal parameter tuning over mark count, positions, kernels, and widths, then integrate results into phased optimization.
+  evaluate_solution: Run and return combined_score (higher=success).
+  probe_solution: Quick approximate evaluation on subsampled data (~10s, separate budget of 30 probes).
+  finish: End when no improvement possible.
+sampling:
+  temperature: 1.1
+  top_p: 0.9
+  top_k: 30
+  max_tokens: 16000
+agent:
+  max_iterations: 60
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 12000
+new_tools:
+  - name: internal_golomb_search
+    description: |
+      Perform bounded internal search over Golomb ruler parameterizations.
+      Searches over mark count (3-8), positions (local optimization), kernel types (Gaussian/boxcar), and widths.
+      Uses ctx.probe() for rapid evaluation during search. Returns best construction with parameters.
+    input_schema:
+      type: object
+      properties: {}
+    implementation_py: |
+      def run(ctx, args):
+          import numpy as np
+          import math
+          
+          N = 800
+          domain = 2.0
+          dx = domain / N
+          constructions = []
+          
+          def make_h_from_marks(marks, kernel_type='gaussian', widths=None):
+              x = np.linspace(0, domain, N)
+              h = np.zeros(N)
+              if widths is None:
+                  widths = [0.15] * len(marks)
+              if kernel_type == 'gaussian':
+                  for mark, width in zip(marks, widths):
+                      h += np.exp(-((x - mark) / width) ** 2 * 30)
+              else:
+                  for mark, width in zip(marks, widths):
+                      h += np.clip((x - mark) / width + 0.5, 0, 1)
+              
+              integral = h.sum() * dx
+              if integral > 0:
+                  h = h / integral
+              return h
+          
+          def probe_c5(h):
+              j = 1.0 - h
+              N_local = 800
+              h_pad = np.pad(h, (0, N_local))
+              j_pad = np.pad(j, (0, N_local))
+              corr_fft = np.fft.fft(h_pad) * np.conj(np.fft.fft(j_pad))
+              correlation = np.fft.ifft(corr_fft).real
+              return float(np.max(correlation) * dx)
+          
+          def local_optimize_positions(marks, kernel_type, widths, steps=15):
+              best_score = float('inf')
+              best_marks = marks.copy()
+              for _ in range(steps):
+                  perturbed = np.array(marks)
+                  perturbed = perturbed + np.random.uniform(-0.05, 0.05, len(marks))
+                  perturbed = np.clip(perturbed, 0, domain)
+                  h = make_h_from_marks(perturbed, kernel_type, widths)
+                  score = probe_c5(h)
+                  if score < best_score:
+                      best_score = score
+                      best_marks = perturbed.copy()
+              return best_marks, best_score
+          
+          best_overall = None
+          best_overall_score = float('inf')
+          
+          base_positions = {
+              3: np.array([0.0, 1.0, 2.0]),
+              4: np.array([0.0, 0.5, 1.5, 2.0]),
+              5: np.array([0.0, 0.25, 0.75, 1.25, 2.0]),
+              6: np.array([0.0, 0.2, 0.6, 1.0, 1.4, 2.0]),
+              7: np.array([0.0, 0.15, 0.45, 0.75, 1.05, 1.35, 2.0]),
+              8: np.array([0.0, 0.12, 0.35, 0.55, 0.8, 1.0, 1.3, 2.0]),
+          }
+          
+          for num_marks in [3, 4, 5, 6, 7, 8]:
+              base_marks = base_positions[num_marks]
+              for width in [0.08, 0.12, 0.18]:
+                  widths = [width] * num_marks
+                  for ktype in ['gaussian', 'boxcar']:
+                      best_marks, score = local_optimize_positions(base_marks, ktype, widths, steps=12)
+                      h = make_h_from_marks(best_marks, ktype, widths)
+                      c5 = probe_c5(h)
+                      if c5 < best_overall_score:
+                          best_overall_score = c5
+                          best_overall = {'marks': best_marks.tolist(), 'kernel': ktype, 'width': width, 'c5_bound': c5, 'h': h}
+              for widths_combo in [[0.1, 0.15], [0.08, 0.12, 0.16], [0.12, 0.14, 0.16]]:
+                  if len(widths_combo) != num_marks:
+                      continue
+                  for ktype in ['gaussian', 'boxcar']:
+                      best_marks, score = local_optimize_positions(base_marks, ktype, widths_combo, steps=8)
+                      h = make_h_from_marks(best_marks, ktype, widths_combo)
+                      c5 = probe_c5(h)
+                      if c5 < best_overall_score:
+                          best_overall_score = c5
+                          best_overall = {'marks': best_marks.tolist(), 'kernel': ktype, 'width': widths_combo, 'c5_bound': c5, 'h': h}
+          
+          if best_overall:
+              return {'constructions': [best_overall], 'note': 'Best Golomb construction via internal search', 'c5_best': best_overall['c5_bound']}
+          return {'constructions': [], 'note': 'No constructions found'}
+
+new_skills:
+  - name: golomb-search-playbook
+    description: |
+      Use internal_golomb_search to systematically explore Golomb ruler parameterizations with mark count 3-8, kernel types, and widths. Then run phased optimization: exploration (lr=0.05, penalty=1000) -> refinement (lr=0.01, penalty=5000) -> fine-tuning (lr=0.001, penalty=20000).
+    body: |
+      # Golomb Search Playbook for Erdos Minimum Overlap
+      
+      ## Overview
+      The internal_golomb_search tool systematically explores Golomb ruler-based constructions with internal parameter optimization. This is critical because static patterns miss the optimal configuration.
+      
+      ## Step-by-Step Workflow
+      
+      Step 1: Run Internal Search
+      Call internal_golomb_search() at the start of your edit. It will:
+      - Search over mark counts: 3, 4, 5, 6, 7, 8 marks
+      - Try both Gaussian and boxcar kernels
+      - Optimize mark positions via local search (15 steps of perturbation)
+      - Search over kernel widths (0.08, 0.12, 0.18)
+      - Use ctx.probe() for rapid evaluation during search
+      - Return the single best construction with parameters
+      
+      Step 2: Extract Construction Parameters
+      From the returned construction, extract:
+      - mark positions (array of float)
+      - kernel type (gaussian/boxcar)
+      - kernel width(s)
+      - c5_bound from probe evaluation
+      
+      Step 3: Phased Optimization
+      Use the construction as initialization for phased optimization:
+      
+      Phase 1 (Exploration, 10000 steps):
+      - Learning rate: 0.05
+      - Penalty strength: 1000
+      - Goal: Escape local minima
+      
+      Phase 2 (Refinement, 15000 steps):
+      - Learning rate: 0.01
+      - Penalty strength: 5000
+      - Goal: Fine-tune the solution
+      
+      Phase 3 (Fine-tuning, 5000 steps):
+      - Learning rate: 0.001
+      - Penalty strength: 20000
+      - Goal: Enforce integral constraint and precision
+      
+      Step 4: Evaluate Top Candidates
+      After optimization, use probe_solution to quickly check c5_bound.
+      Evaluate the top 2 candidates with evaluate_solution.
+      
+      ## Key Principles
+      - Search over parameters, not just fixed patterns
+      - Golomb rulers provide excellent starting points but need parameter tuning
+      - Use probe_solution during search, not evaluate_solution (budget efficiency)
+      - The best construction may have non-standard mark spacing or kernel width
+
+new_middlewares:
+  - name: remind_probe_first
+    hook: before_model
+    description: |
+      Remind the solver to use probe_solution for candidate ranking before full evaluation to save budget.
+    implementation_py: |
+      def before_model(hook_input):
+          return "Before spending an evaluate_solution call, call probe_solution to quickly rank candidates and identify the top 2-3 for full evaluation."

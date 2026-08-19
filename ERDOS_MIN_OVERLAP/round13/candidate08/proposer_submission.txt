@@ -1,0 +1,135 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are solving the Erdos minimum overlap problem: minimize max_k integral h(x)(1-h(x+k)) dx
+
+  for a step function h: [0,2] -> [0,1] with integral(h)=1.
+
+  Current best bound: C5 <= 0.38092303510845016
+
+  CRITICAL INSIGHT: The seed's 12 initialization patterns all use sigmoid(latent) but none guarantee integral(h)=1. This means they start from INFEASIBLE points and waste optimizer steps fixing constraints.
+
+  STRATEGY: Create INITIALIZATIONS that already satisfy integral(h)=1, then optimize from feasible points.
+
+  Steps:
+  1. CALL constraint_satisfying_init to get latents where sigmoid(latent) integrates to exactly 1
+  2. For each initialization, EDIT the seed to use ONLY that pattern (num_restarts=1, seed_start=pattern_index)
+  3. Call probe_solution to verify c5_bound < 0.37 (no need to check integral - it's already 1)
+  4. Call evaluate_solution on top 1-2 candidates with c5_bound < 0.37
+  5. If none work, EDIT _get_best_initialization to add a pattern using piecewise constant values (not sigmoid) that can be scaled to integral=1
+
+  Key insight: Start FEASIBLE. The FFT evaluator is fast enough that you can afford 3-5 full evaluations if your initializations are good.
+skill_description: Create constraint-satisfying initializations to start optimization from feasible points, then screen with probes.
+skill_body: |
+  # Constraint-Satisfying Initialization Strategy
+
+  ## The Problem
+
+  All 12 seed patterns use sigmoid(latent) but don't guarantee integral(h)=1.
+  They start from INFEASIBLE points, wasting optimizer steps.
+
+  ## The Solution
+
+  Use constraint_satisfying_init to create latents where:
+  - h = sigmoid(latent)
+  - integral(h) = 1 (exactly)
+
+  This means starting from FEASIBLE points.
+
+  ## Workflow
+
+  1. CALL constraint_satisfying_init (returns 4 latents with integral(h)=1)
+  2. For each latent, EDIT seed to use ONLY that pattern:
+     - num_restarts=1
+     - seed_start = pattern index
+     - Or better: replace _get_best_initialization with a single-pattern version
+  3. Call probe_solution to check c5_bound (integral is already 1!)
+  4. Call evaluate_solution on top 1-2 with c5_bound < 0.37
+  5. If no success, ADD a piecewise constant pattern (not sigmoid, just step values)
+     that can be scaled to have integral=1
+
+  ## Why This Works
+
+  - Start from FEASIBLE points, not infeasible ones
+  - Optimizer spends all steps improving c5_bound, not fixing constraints
+  - FFT evaluator is fast enough for 3-5 full evaluations
+  - Piecewise constant patterns (not sigmoid) can directly encode step functions
+tool_descriptions:
+  edit_solution: |
+    Modify the EVOLVE-BLOCK to change hyperparameters or the initialization function.
+
+    To use a single initialization: set num_restarts=1, seed_start=pattern_index, and
+
+    optionally simplify _get_best_initialization to return only that pattern's latent.
+
+    IMPORTANT: When editing, ensure the new initialization has integral(h)=1.
+  evaluate_solution: Run full evaluation on a candidate program, returns combined_score.
+  probe_solution: |
+    Quick approximate evaluation (500 intervals, 10s runtime).
+
+    Returns estimate of c5_bound and constraint satisfaction.
+
+    Use this to screen MANY candidates before full evaluation.
+  finish: Submit when combined_score > 1.0.
+sampling:
+  temperature: 0.8
+  top_p: 0.9
+  top_k: 15
+  max_tokens: 12000
+agent:
+  max_iterations: 60
+middleware:
+  budget_reminder_from_left: 3
+  long_tool_output_max_chars: 8000
+new_tools:
+  - name: constraint_satisfying_init
+    description: Generate 4 latents where sigmoid(latent) integrates to exactly 1 over [0,2].
+      These are valid initializations that satisfy the constraint by construction.
+    input_schema:
+      type: object
+      properties: {}
+    implementation_py: |
+      def run(ctx, args):
+          import numpy as np
+          N = 800
+          domain = 2.0
+          dx = domain / N
+          rng = np.random.default_rng(42)
+
+          constructions = {}
+
+          # Pattern 1: Uniform on [0,1], zero on [1,2]
+          h1 = np.zeros(N)
+          h1[:int(N/2)] = 1.0
+          h1[int(N/2):] = 0.0
+          h1[:int(N*0.2)] = 0.5 + 0.5 * np.sin(np.pi * np.arange(int(N*0.2)) / int(N*0.2))
+          h1[int(N*0.8):] = 0.5 + 0.5 * np.sin(np.pi * (np.arange(int(N*0.8), N) - int(N*0.8)) / int(N*0.2))
+          h1 = h1 / (np.sum(h1) * dx)
+          latent1 = np.log(h1 / (1 - h1 + 1e-10))
+          constructions['uniform_half'] = latent1
+
+          # Pattern 2: Two equal halves with a dip
+          h2 = np.ones(N) * 0.5
+          h2[int(N*0.2):int(N*0.8)] = 0.0
+          h2 = h2 / (np.sum(h2) * dx)
+          latent2 = np.log(h2 / (1 - h2 + 1e-10))
+          constructions['dip'] = latent2
+
+          # Pattern 3: Three equal thirds
+          h3 = np.zeros(N)
+          h3[int(N/3):int(N*2/3)] = 1.0
+          h3 = h3 / (np.sum(h3) * dx)
+          latent3 = np.log(h3 / (1 - h3 + 1e-10))
+          constructions['third'] = latent3
+
+          # Pattern 4: Quadratic-like
+          x = np.linspace(0, 2, N)
+          h4 = 1 - (x - 1)**2
+          h4 = np.maximum(h4, 0)
+          h4 = h4 / (np.sum(h4) * dx)
+          latent4 = np.log(h4 / (1 - h4 + 1e-10))
+          constructions['quadratic'] = latent4
+
+          return {"constructions": constructions, "num_constructions": 4}
+new_skills: []
+new_middlewares: []
+remove_tools: []

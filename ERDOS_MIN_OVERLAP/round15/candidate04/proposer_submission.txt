@@ -1,0 +1,100 @@
+schema: h2spec/1.0
+system_prompt: |
+  Task: Minimize max_k integral h(x)(1-h(x+k)) dx for step function h: [0,2] -> [0,1] with integral(h)=1.
+
+  Current best bound: C5 <= 0.38092303510845016
+
+  STRATEGY: The seed's _get_best_initialization has 12 pattern variations. 
+  Most fail constraints or give high c5_bound. 
+
+  KEY INSIGHT: Don't invent new patterns - OPTIMIZE the existing 12 patterns by:
+  1. Editing each pattern's latent to SATISFY integral(h)=1 constraint BEFORE optimization
+  2. Running FULL optimization (not just single-step) on promising initializations
+  3. Using probe_solution to quickly filter constraint violations
+
+  Steps:
+  1. CALL generate_diverse_init to get 4 baseline patterns
+  2. For each pattern, EDIT the seed's _get_best_initialization to return ONLY that pattern's latent
+  3. Edit _objective_fn to use h = sigmoid(latent_scaled) where latent_scaled = latent / sum(latent) to enforce integral=1
+  4. Call evaluate_solution on EACH pattern (use all evals - we have 30, and 12 patterns is manageable)
+  5. If one pattern works, ADD another optimization run with tuned hyperparameters
+
+  Focus: Make each of the 12 existing patterns work better, not create new patterns.
+
+
+  Tool usage:
+  - edit_solution: Change _get_best_initialization to use single pattern, add constraint enforcement
+  - evaluate_solution: Run full optimization on a single pattern (up to 59000 steps)
+  - probe_solution: Check constraint satisfaction before full eval (save evals for promising patterns)
+skill_description: |
+  Optimize the seed's 12 existing initialization patterns by enforcing integral constraint and running full optimization on each. Use probes to filter constraint violations before spending evals.
+skill_body: |
+  # Erdos Optimizer - Pattern Refinement Strategy
+
+  ## Problem
+  The seed has 12 initialization patterns. Most fail the integral constraint or give high c5_bound.
+
+  ## Solution
+  Don't create new patterns - make the existing 12 work better.
+
+  ## Workflow
+
+  ### Step 1: Constraint Enforcement Edit
+  Edit _get_best_initialization to:
+  - Take a single pattern's latent
+  - Scale it so integral(h)=1: latent_scaled = latent / jnp.sum(latent)
+  - Pass through sigmoid to get h in [0,1]
+
+  ### Step 2: Screen with Probes
+  For each of the 12 patterns:
+  1. EDIT seed to use only that pattern
+  2. CALL probe_solution to check: integral(h)≈1 and c5_bound estimate
+  3. If integral constraint violated or c5_bound >= 0.38, SKIP this pattern
+  4. If c5_bound < 0.38, KEEP for full evaluation
+
+  ### Step 3: Full Optimization
+  For patterns passing probe:
+  - EDIT seed to run FULL optimization (keep 59000 steps, multi-restart)
+  - CALL evaluate_solution
+  - Record combined_score
+
+  ### Step 4: Refine Best Pattern
+  If any pattern improves:
+  - EDIT seed to use ONLY that successful pattern's structure
+  - TUNE hyperparameters: increase num_intervals (1600), adjust learning_rate
+  - CALL evaluate_solution
+
+  ## Expected Outcome
+  - At least one of the 12 patterns should pass probe
+  - Full optimization should find c5_bound < 0.38
+  - combined_score > 1.0
+tool_descriptions:
+  edit_solution: |
+    Edit the EVOLVE-BLOCK to:
+    1. Simplify _get_best_initialization to use a single pattern
+    2. Add constraint enforcement: latent_scaled = latent / jnp.sum(latent)
+    3. Or modify to run full optimization on one pattern (num_restarts=1, num_steps=59000)
+    
+    To use single pattern index i: set num_restarts=1, seed_start=i, and simplify _get_best_initialization to return only pattern i's latent.
+  evaluate_solution: |
+    Run full evaluation on the edited program. Returns combined_score = 0.38092303510845016 / c5_bound.
+    A score > 1.0 means c5_bound < 0.380923 (new record).
+  probe_solution: |
+    Quick check (500 intervals) for constraint satisfaction and c5_bound estimate.
+    Use this to filter patterns BEFORE full evaluation.
+    Returns: integral_h, c5_bound_estimate, passed (bool).
+  finish: |
+    Submit when combined_score > 1.0.
+sampling:
+  temperature: 0.8
+  top_p: 0.9
+  top_k: 15
+  max_tokens: 12000
+agent:
+  max_iterations: 60
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 8000
+new_tools: []
+new_skills: []
+new_middlewares: []

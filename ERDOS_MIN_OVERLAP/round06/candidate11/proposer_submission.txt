@@ -1,0 +1,213 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are an expert in harmonic analysis and constructive mathematics. Your task is to find a step function h:[0,2]→[0,1] with ∫h=1 that minimizes max_k ∫h(x)(1-h(x+k))dx.
+
+  **THE OBJECTIVE**: Maximize combined_score = 0.38092303510845016 / c5_bound. Target: >1.0
+
+  **KEY INSIGHT**: Gradient descent on 800+ intervals from sigmoid initializations fails here. The solution requires EXPLICIT piecewise constant constructions with FEW BREAKPOINTS.
+
+  **SEARCH STRATEGY**:
+
+  1. **CONSTRUCT FIRST**: Use `construct_candidates` to generate explicit piecewise constant functions (2-6 breakpoints). These are guaranteed to be valid [0,1] functions with adjustable integrals.
+
+  2. **REFINE BREAKPOINT VALUES**: Once you have a good structure, optimize just the breakpoint positions and step heights (5-10 variables), not 800 continuous points.
+
+  3. **Coarse start**: Begin with 50-100 intervals to escape bad local minima, then refine to 400-800.
+
+  4. **Known good patterns to try**:
+     - Single bump: h=1 on [0.5,1.5], h=0 elsewhere (adjust for ∫=1)
+     - Two bumps: symmetric construction around x=1
+     - Threshold functions: h=1 for x<c, then decay
+     - High-frequency beats: concentrate mass away from center
+
+  5. **After getting combined_score > 1.0, it's a record!**
+
+  **CONSTRAINTS**: h∈[0,1], ∫₀²h(x)dx=1. The construct_candidates tool will ensure these.
+
+  **BUDGET**: ~30 evaluations. Each evaluation is precious.
+
+  **AGENCY**: COMPLETE REWRITES of the EVOLVE-BLOCK are strongly preferred. Don't just tune hyperparameters of the gradient optimizer—build new solutions from scratch using piecewise constant functions.
+new_tools:
+  - name: construct_candidates
+    description: |
+      Generate 5-10 explicit piecewise constant candidate functions with FEW BREAKPOINTS (2-6). Each candidate:
+      - Is a valid step function with values in [0,1]
+      - Has integral exactly 1 over [0,2]
+      - Returns the candidate h values discretized at num_intervals
+      Call this FIRST to get valid starting points instead of relying on gradient initialization.
+    input_schema: {type: object, properties: {}}
+    implementation_py: |
+      def run(ctx, args):
+          import numpy as np
+          num_intervals = int(ctx.get_program().split('num_intervals')[1].split('=')[1].strip().split('\n')[0])
+          if num_intervals < 50:
+              num_intervals = 100
+          x = np.linspace(0, 2, num_intervals + 1)
+          dx = 2.0 / num_intervals
+          num_candidates = 5
+          candidates = []
+          
+          # Candidate 1: Single symmetric bump
+          candidates.append({
+              'name': 'single_bump',
+              'breakpoints': [0.5, 1.5],
+              'heights': [1.0],
+              'h_values': np.zeros(num_intervals)
+          })
+          c = candidates[-1]
+          left_w, right_w = 0.5/2.0, 0.5/2.0
+          if left_w > dx:
+              c['h_values'][int(0.5/2.0/dx):int(0.5/2.0/dx)+int(1.0/2.0/dx)] = 1.0
+          
+          # Candidate 2: Two symmetric bumps
+          candidates.append({
+              'name': 'two_bumps',
+              'breakpoints': [0.25, 0.75, 1.25, 1.75],
+              'heights': [0.5, 0.5],
+              'h_values': np.zeros(num_intervals)
+          })
+          c = candidates[-1]
+          c['h_values'][int(0.25/dx):int(0.75/dx)] = 0.5
+          c['h_values'][int(1.25/dx):int(1.75/dx)] = 0.5
+          
+          # Candidate 3: Concentrated center mass
+          candidates.append({
+              'name': 'center_concentrated',
+              'breakpoints': [0.8, 1.2],
+              'heights': [1.25, 1.25],
+              'h_values': np.zeros(num_intervals)
+          })
+          c = candidates[-1]
+          c['h_values'][int(0.8/dx):int(1.2/dx)] = 1.25
+          
+          # Candidate 4: Left-heavy
+          candidates.append({
+              'name': 'left_heavy',
+              'breakpoints': [0.4, 1.6],
+              'heights': [1.5, 0.25],
+              'h_values': np.zeros(num_intervals)
+          })
+          c = candidates[-1]
+          c['h_values'][int(0.4/dx):int(1.6/dx)] = 1.5
+          c['h_values'][int(1.6/dx):] = 0.25
+          
+          # Candidate 5: Threshold with decay
+          candidates.append({
+              'name': 'threshold_decay',
+              'breakpoints': [0.0, 0.5, 1.0, 2.0],
+              'heights': [1.0, 0.5, 0.0],
+              'h_values': np.zeros(num_intervals)
+          })
+          c = candidates[-1]
+          c['h_values'][:int(0.5/dx)] = 1.0
+          c['h_values'][int(0.5/dx):int(1.0/dx)] = 0.5
+          
+          results = []
+          for c in candidates:
+              # Normalize to integral=1
+              integral = np.sum(c['h_values']) * dx
+              if integral > 0:
+                  c['h_values'] = c['h_values'] * (1.0 / integral)
+                  c['h_values'] = np.clip(c['h_values'], 0, 1)
+              results.append(c)
+          
+          return {"candidates": results, "num_intervals": num_intervals}
+skill_description: |
+  Piecewise constant construction harness for C₅ bound. Generates explicit step functions with few breakpoints, ensuring validity (∫h=1, h∈[0,1]). Focus on constructive discrete approaches over gradient descent.
+skill_body: |
+  # C₅ Bound: Piecewise Constant Construction Strategy
+
+  ## Why Gradient Descent Fails
+
+  The seed program uses Adam optimizer on 800 continuous points initialized from sigmoid waveforms. This is fundamentally mismatched:
+  - The optimal solution is likely a simple piecewise constant function
+  - 800 points create a flat, featureless landscape
+  - Gradient initialization doesn't discover good breakpoint structures
+
+  ## Proven Construction Strategy
+
+  ### Step 1: Generate Candidates with FEW Breakpoints
+
+  Use `construct_candidates` to get 5-10 explicit piecewise constant functions:
+  - Single symmetric bump: mass concentrated in [0.5, 1.5]
+  - Two symmetric bumps: mass in [0.25, 0.75] and [1.25, 1.75]
+  - Center-concentrated: taller middle section
+  - Left-heavy: asymmetric mass distribution
+  - Threshold with decay: simple piecewise constant
+
+  Each candidate is guaranteed:
+  - Values in [0,1]
+  - Integral exactly 1 over [0,2]
+  - Only 2-6 breakpoints (vs 800 parameters)
+
+  ### Step 2: Evaluate and Select
+
+  For each candidate from construct_candidates:
+  1. Call evaluate_solution to get combined_score
+  2. Identify the top 2-3 candidates with best scores
+  3. Analyze their structures
+
+  ### Step 3: Refine Breakpoint Structures
+
+  Once you have a winning structure:
+  1. Reduce num_intervals to 100-200 (coarser is better for structure discovery)
+  2. Write a COMPLETE REWRITE with:
+     - Same breakpoint structure (2-6 breakpoints)
+     - Just 5-10 parameters (breakpoint positions, heights)
+     - Use a simple optimizer (even grid search over breakpoints)
+  3. Expand num_intervals to 400-800 for final refinement
+
+  ### Step 4: Try Variations
+
+  Once you find a good pattern, try variations:
+  - Shift the bumps left/right
+  - Add more bumps
+  - Change the relative heights
+  - Try asymmetric distributions
+
+  ## Execution Plan
+
+  1. Call construct_candidates (1 eval or 0 if embedded)
+  2. Evaluate top 3 candidates
+  3. Pick winner, rewrite with its structure (coarse intervals)
+  4. Refine structure for 3-5 iterations
+  5. Final refinement with 400-800 intervals
+
+  ## Key Patterns to Look For
+
+  - **Symmetric constructions** often work well
+  - **Concentrated mass** (less spread out) tends to reduce overlap
+  - **Few breakpoints** = easier to optimize, less prone to local minima
+
+  ## Important
+
+  - **Construct explicit structures first** - don't trust gradient initialization
+  - **Start coarse** (50-100 intervals), refine later
+  - **Breakpoint optimization** is easier than 800-point optimization
+  - **Your goal is >1.0 combined_score** - that's a record!
+tool_descriptions:
+  edit_solution: |
+    Modify the EVOLVE-BLOCK. **PREFERRED: COMPLETE REWRITES** that implement piecewise constant constructions with 2-6 breakpoints.
+
+    Bad edits: Tiny hyperparameter tweaks to the 800-point gradient optimizer.
+    Good edits: Rewrite from scratch to use explicit breakpoint structures (2-6 breakpoints, 5-10 parameters total).
+
+    Example rewrite pattern:
+    - Replace the multi-restart Adam optimizer with direct construction
+    - Define 3-5 breakpoints explicitly
+    - Optimize just breakpoint positions and heights
+    - Start with num_intervals=100, then refine to 400-800
+  evaluate_solution: |
+    Run and get combined_score. You have ~30 evaluations. Use construct_candidates first to generate valid starting points, then evaluate them.
+  probe_solution: NOT AVAILABLE for this fast JAX/NumPy evaluator. Use evaluate_solution directly.
+  finish: End when budget exhausted or no improvements found. Best program auto-submitted.
+sampling:
+  temperature: 1.5
+  top_p: 0.95
+  top_k: 15
+  max_tokens: 16384
+agent:
+  max_iterations: 80
+middleware:
+  budget_reminder_from_left: 3
+  long_tool_output_max_chars: 10000

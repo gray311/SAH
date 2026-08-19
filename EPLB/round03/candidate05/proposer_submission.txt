@@ -1,0 +1,161 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are an expert algorithm engineer specializing in PyTorch optimization and load balancing.
+  The evaluator scores based on: (1) load balance quality (lower variance = better), and (2) execution efficiency (fewer operations = better).
+  
+  CRITICAL BOTTLENECK DIAGNOSIS:
+  The seed rebalance_experts_hierarchical function contains an O(n^2) Python loop in balanced_packing that iterates over groups and repeatedly scans pack states. This dominates runtime and limits achievable load balance.
+  
+  TASK STRATEGY - Two-pronged attack:
+  1. VECTORIZE the balanced_packing inner loop using torch operations (replace list-based pack tracking with tensors and vectorized argmin).
+  2. Tune tie-breaking and grouping parameters for better load balance.
+  
+  METHOD:
+  Step 1: Examine balanced_packing's structure - identify the Python loops scanning valid packs and finding min items.
+  Step 2: Rewrite using vectorized approach:
+    - Pre-sort all groups by weight using torch.sort once per layer
+    - Assign to packs in round-robin manner using torch.arange
+    - Use torch.argmin on pre-computed pack stats instead of repeated Python list operations
+  Step 3: For replication, use replicate_experts as a base but optimize the selection loop.
+  Step 4: Test incrementally - make ONE structural vectorization change per edit.
+  Step 5: Preserve exact function signatures.
+  
+  Avoid: Random variant generation, changing only parameter values, using probe_solution for ranking. Focus on replacing Python loops with torch vectorized operations.
+skill_description: |
+  Optimizes expert load balancer algorithms by identifying algorithmic bottlenecks and applying targeted PyTorch vectorization transformations, with evaluation on combined load balance and efficiency metrics.
+skill_body: |
+  # Vectorized Algorithm Optimization for EPLB
+  
+  ## Core Problem
+  The balanced_packing function has an O(n^2) Python loop. Replace with vectorized PyTorch operations.
+  
+  ## Step-by-Step Transformation
+  
+  ### Step 1: Analyze current code
+  - Locate the inner loop in balanced_packing that builds pack_items and pack_weights lists
+  - Note where min() and list comprehensions are used to find the best pack
+  
+  ### Step 2: Replace with vectorized approach
+  Strategy A (Block Assignment):
+  - After sorting groups by weight, assign group i to pack (i mod num_packs) for deterministic balancing
+  - Use: pack_index = (sorted_indices + torch.arange(num_groups)[:, None]) % num_packs
+  
+  Strategy B (Greedy Vectorized):
+  - Pre-compute pack capacities using torch.full
+  - Use torch.argmin and torch.gather for batched pack selection
+  
+  ### Step 3: Key optimizations
+  - Replace [p for p in range(num_packs) if pack_items[p] < groups_per_pack] with boolean mask
+  - Replace min(pack_items[p] for p in valid) with torch.min(pack_items[valid])
+  - Pre-allocate all output tensors once
+  
+  ### Step 4: Validation
+  - Ensure vectorized version produces IDENTICAL outputs than the seed
+  - Check that execution time is reduced
+  
+  ### Step 5: Iterative refinement
+  - If block assignment is too coarse, try block-cyclic
+  - Experiment with tie-breaking strategies
+  
+  ## Tools to Use
+  - edit_solution: Submit SEARCH/REPLACE diffs focusing on balanced_packing function
+  - evaluate_solution: Score each variant
+  - Avoid probe_solution
+  
+  ## Success Criteria
+  - Vectorize at least one inner loop
+  - Maintain or improve load balance quality
+  - Pass validity checks
+tool_descriptions:
+  edit_solution: |
+    Modify the EVOLVE-BLOCK region with SEARCH/REPLACE diffs. Focus on the balanced_packing function's inner loop - replace the Python list-based pack selection with tensor operations.
+  evaluate_solution: |
+    Run the evaluator. Focuses on combined_score which rewards both load balance and efficiency.
+  probe_solution: |
+    Subsampled evaluation (~2000 rows). Use sparingly. The main bottleneck is the algorithm structure.
+  finish: |
+    Call this when you've achieved a score above seed or exhausted the budget.
+sampling:
+  temperature: 0.5
+  top_p: 0.9
+  top_k: 10
+  max_tokens: 12288
+agent:
+  max_iterations: 60
+middleware:
+  budget_reminder_from_left: 3
+  long_tool_output_max_chars: 16000
+new_tools:
+  - name: analyze_algorithm_structure
+    description: |
+      Inspect the current rebalance_experts_hierarchical code structure, identify Python loops that can be vectorized, and report the transformation candidates. Call this before making edits.
+    input_schema:
+      type: object
+      properties: {}
+    implementation_py: |
+      def run(ctx, args):
+          code = ctx.get_program()
+          report = []
+          if "for group in indices:" in code and "pack_items" in code:
+              report.append({
+                  "issue": "Python loop in balanced_packing with pack selection",
+                  "suggestion": "Replace list-based pack tracking with torch tensors and vectorized argmin",
+                  "pattern": "pack_items = [0] * num_packs, for group in indices: ... min(pack_items[p]...)",
+                  "replacement": "Use torch.full for init, torch.argmin for selection, torch.gather for assignment"
+              })
+          if "redundant_indices = (weight / logcnt).max" in code:
+              report.append({
+                  "issue": "Python loop in replicate_experts for redundant expert selection",
+                  "suggestion": "Use torch.max on weight/logcnt tensor",
+                  "pattern": "redundant_indices = (weight / logcnt).max(...)"
+              })
+          return {"analysis": "Loop analysis", "candidates": report, "note": "Review code manually for Python loops in pack selection." if not report else ""}
+new_skills:
+  - name: vectorization-recipe
+    description: |
+      A task-specific playbook for vectorizing the EPLB rebalance algorithm.
+    body: |
+      # Vectorization Recipe for EPLB Algorithm
+
+      ## Identifying Vectorization Candidates
+
+      Look for these patterns:
+      1. pack_items = [0] * num_packs - replace with torch.full
+      2. for group in indices: with manual pack selection - replace with sorted assignment
+      3. [p for p in range(num_packs) if condition] - replace with boolean mask
+      4. min(pack_items[p] for p in valid) - replace with torch.min(pack_items[valid])
+
+      ## Common Vectorized Patterns
+
+      ### Pattern 1: Block Assignment
+      pack_index = (sorted_indices + torch.arange(num_groups)[:, None]) % num_packs
+      rank_in_pack = (sorted_indices // groups_per_pack).long()
+
+      ### Pattern 2: Greedy Vectorized
+      pack_capacity = torch.full((num_packs,), groups_per_pack-1, dtype=torch.long)
+      pack_weights = torch.zeros(num_packs, dtype=torch.float32)
+      valid = pack_capacity > 0
+      best_pack = torch.argmin(pack_weights[valid])
+
+      ### Pattern 3: Round-Robin
+      pack_index = (torch.arange(num_groups) + torch.arange(num_layers)[:, None] * num_groups) % num_packs
+
+      ## Validation Checklist
+      - Does output shape match the seed?
+      - Are all indices within valid ranges?
+      - Does pack_weights show balanced distribution?
+
+      ## Tips
+      - Start with block assignment; it often provides good baseline
+      - Preserve exact return types (torch.Tensor, not lists)
+new_middlewares:
+  - name: vectorization_reminder
+    hook: before_model
+    description: |
+      Reminds the solver to focus on vectorizing Python loops before making random edits.
+    implementation_py: |
+      def before_model(hook_input):
+          program = hook_input.get("program", "")
+          if "for group in indices:" in program and "pack_items = [" in program:
+              return "Vectorization focus: Replace Python loops with pack selection (for group in indices, pack_items = [0] * num_packs) with torch.tensor operations before proceeding."
+          return None

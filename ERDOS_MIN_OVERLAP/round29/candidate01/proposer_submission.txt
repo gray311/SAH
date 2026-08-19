@@ -1,0 +1,374 @@
+schema: h2spec/1.0
+system_prompt: |
+  Erdos minimum overlap problem (C5): Find h: [0,2]->[0,1] minimizing max_k integral h(x)(1-h(x+k))dx.
+
+  CONSTRAINT: integral(h) = 1 exactly. h values in [0,1].
+
+  Current best: C5 <= 0.38092303510845016 (combined_score = 1.0).
+
+  GOAL: Find h achieving c5_bound < 0.38092303510845016 (combined_score > 1.0).
+
+  KEY INSIGHT: The seed program uses a generic multi-restart optimizer that starts from random latent vectors and optimizes via gradient descent. This approach struggles because:
+  1. Random initializations rarely satisfy the integral constraint well
+  2. The optimizer gets stuck in local minima that don't correspond to structured step functions
+  3. There's no explicit exploration of known good mathematical constructions
+
+  STRATEGY - PHASE 1: DIRECT CONSTRUCTION OF STEP FUNCTIONS
+
+  Instead of relying on the optimizer to find good h functions, explicitly CONSTRUCT diverse step functions that:
+  - Have exactly integral(h) = 1 (use the constraint directly in construction)
+  - Exploit known mathematical structures for low overlap:
+    * Bipartite: h(x) = 1 for x < a, 0 for x >= a (tune a to satisfy integral)
+    * Multi-step: piecewise constant with multiple levels
+    * Symmetric patterns around x=1
+    * Sparse functions (mostly zero with narrow peaks)
+
+  CONSTRUCTION METHOD:
+  1. Define a step function analytically with parameters (thresholds, heights, widths)
+  2. Scale it to satisfy integral(h) = 1 exactly
+  3. Clip to [0,1] range
+  4. Compute c5_bound via FFT (as in seed program)
+  5. If c5_bound < 0.375, run the optimizer from this INITIAL POINT (not from scratch)
+  6. Use the optimizer to fine-tune the parameters, not to discover from random
+
+  PHASE 2: If Phase 1 fails after 2 attempts, THEN tune hyperparameters of the optimizer.
+
+  PHASE 3: Try completely different construction strategies:
+  - Golomb ruler: place narrow peaks at well-separated positions
+  - Fractional parts: use h(x) = frac(k*x) for various k
+  - Dirichlet-like: concentrate mass at specific points
+
+  CRITICAL: The constructor tools should BUILD h functions analytically, not rely on the optimizer to do this. Use the optimizer only for fine-tuning.
+skill_description: |
+  Construct diverse step functions analytically (bipartite, multi-step, symmetric, sparse) with integral constraint. Use FFT to compute c5_bound. Initialize optimizer from good initializations rather than random. Focus on mathematical structures that minimize overlap.
+skill_body: |
+  # Analytical Step Function Construction for Erdos C5
+
+  ## Core Principle
+  Don't rely on the optimizer to discover good initial h functions from random noise. Instead, CONSTRUCT diverse step functions analytically that satisfy the integral constraint, then use the optimizer for fine-tuning.
+
+  ## Why This Works
+  - Random initializations rarely have integral ≈ 1
+  - Optimizer starting from bad points wastes budget
+  - Mathematical constructions (bipartite, Golomb, etc.) are known to give low overlap
+  - We can guarantee integral = 1 in the construction
+
+  ## Step 1: Construct Analytical Candidates
+
+  Choose ONE construction type per iteration:
+
+  ### A. Bipartite Construction
+  h(x) = 1 for x < a, h(x) = 0 for x >= a
+  To satisfy integral(h) = 1: width * 1 = 1, so width = 1. Choose a = 0.5.
+  This gives: h(x) = 1 if x < 0.5, else 0.
+  Compute c5_bound via FFT.
+
+  ### B. Two-Step Construction
+  h(x) = 1 for x < a1, h(x) = b for a1 <= x < a2, h(x) = 0 otherwise
+  Choose a1, a2, b to satisfy integral = 1.
+  Example: a1 = 0.4, a2 = 0.6, b = 0.5 → integral = 0.4*1 + 0.2*0.5 = 0.5 (adjust as needed)
+
+  ### C. Multi-Step (n peaks)
+  Place n narrow rectangular peaks at positions x1, x2, ..., xn
+  Each peak: height = H, width = w
+  integral = n * H * w = 1
+  Choose H, w, and positions to minimize overlap.
+  Example: 3 peaks at 0.4, 1.0, 1.6 with H=10, w=0.05 → integral ≈ 3*10*0.05 = 1.5 (normalize)
+
+  ### D. Symmetric Construction
+  h(x) = h(2-x) (symmetric around x=1)
+  Use this to exploit symmetry in the overlap integral.
+
+  ### E. Sparse Construction
+  Most of h is 0, with narrow high peaks.
+  This minimizes overlap because peaks rarely align.
+
+  ## Step 2: Validate Construction
+  1. Check integral(h) ≈ 1 (should be exact by construction)
+  2. Check h(x) in [0,1] for all x
+  3. Compute c5_bound via FFT (fast, analytical)
+  4. If c5_bound < 0.375, proceed to optimization
+
+  ## Step 3: Initialize Optimizer
+  If you have a constructed h with c5_bound < 0.375:
+  - Use edit_solution to set the EVOLVE-BLOCK with this h as INITIALIZATION
+  - OR, better: modify the seed program to use your constructed h as the starting point
+  - Run the optimizer from this GOOD starting point
+
+  ## Step 4: Fine-Tuning (Optional)
+  If you want to fine-tune your construction:
+  - Use the optimizer with small learning rate
+  - Keep the structure (don't let it destroy your good construction)
+
+  ## Step 5: Alternative Constructions
+  If current construction fails:
+  - Try bipartite with different split point
+  - Try different number of peaks
+  - Try different peak positions (Golomb-like spacing)
+  - Try different symmetry types
+
+  ## Key Rules
+  - ALWAYS construct analytically first, don't rely on random initialization
+  - GUARANTEE integral = 1 in your construction
+  - Use FFT to compute c5_bound (fast, separate from optimizer)
+  - Only run optimizer on constructions with c5_bound < 0.375
+  - Try multiple construction types (bipartite, multi-step, symmetric, sparse)
+  - Don't waste optimizer budget on random starts
+tool_descriptions:
+  edit_solution: 'Edit the EVOLVE-BLOCK to set initial h values. Use analytical constructions to set good starting points. Format: h = list of values on [0,2] with integral = 1.'
+  evaluate_solution: 'Full 59000-step optimizer. Returns combined_score = 0.38092303510845016 / c5_bound. Higher is better. combined_score > 1.0 means new record.'
+  probe_solution: 'Fast approximate evaluation (500 intervals, FFT). Approximate c5_bound. Budget: separate from eval budget. Use to screen constructed candidates.'
+  finish: 'Submit when combined_score > 1.0 (c5_bound < 0.38092303510845016).'
+sampling:
+  temperature: 0.5
+  top_p: 0.9
+  top_k: 15
+agent:
+  max_iterations: 80
+middleware:
+  budget_reminder_from_left: 6
+  long_tool_output_max_chars: 6000
+new_tools:
+  - name: construct_bipartite
+    description: |
+      Construct a bipartite step function: h(x) = 1 for x < a, 0 for x >= a.
+      Automatically sets a = 0.5 to satisfy integral(h) = 1 exactly.
+      Returns h as a discretized array and precomputed c5_bound via FFT.
+      Use this as an initial point for the optimizer.
+    input_schema:
+      type: object
+      properties:
+        a:
+          type: number
+          default: 0.5
+    implementation_py: |
+      def run(ctx, args):
+          import numpy as np
+          N = 800
+          domain = 2.0
+          dx = domain / N
+          a = args.get('a', 0.5)
+          # Create bipartite: h(x) = 1 for x < a, 0 for x >= a
+          # Normalize to satisfy integral = 1
+          width = a * domain
+          if width == 0:
+              return {"error": "Invalid a"}
+          h_raw = np.zeros(N)
+          h_raw[:int(N*a)] = 1.0 / width  # Scale to get integral = 1
+          h = np.clip(h_raw, 0.0, 1.0)
+          # Compute c5_bound via FFT
+          h_padded = np.pad(h, (0, N))
+          j_padded = np.pad(1.0 - h, (0, N))
+          corr = np.fft.ifft(np.fft.fft(h_padded) * np.conj(np.fft.fft(j_padded))).real
+          c5_bound = np.max(corr * dx)
+          return {
+              "h": h.tolist(),
+              "a": a,
+              "integral": float(np.sum(h) * dx),
+              "c5_bound": float(c5_bound),
+              "pattern_type": "bipartite",
+              "optimized": True  # Integral is exactly 1 by construction
+          }
+  - name: construct_multipeak
+    description: |
+      Construct a multi-peak step function with n peaks at specified positions.
+      Each peak is a narrow rectangle. Automatically scales to satisfy integral(h) = 1.
+      Choose n and positions strategically to minimize overlap (e.g., well-separated).
+      Returns discretized h and precomputed c5_bound.
+    input_schema:
+      type: object
+      properties:
+        n_peaks:
+          type: integer
+          default: 3
+        peak_positions:
+          type: array
+          items:
+            type: number
+          default: [0.4, 1.0, 1.6]
+        peak_width:
+          type: number
+          default: 0.08
+    implementation_py: |
+      def run(ctx, args):
+          import numpy as np
+          N = 800
+          domain = 2.0
+          dx = domain / N
+          n_peaks = args.get('n_peaks', 3)
+          peak_positions = args.get('peak_positions', [0.4, 1.0, 1.6])
+          peak_width = args.get('peak_width', 0.08)
+          
+          h = np.zeros(N)
+          for pos in peak_positions:
+              start = int(pos * N)
+              end = start + int(N * peak_width)
+              h[start:end] = 1.0  # Height before normalization
+          
+          # Scale to satisfy integral = 1
+          current_integral = np.sum(h) * dx
+          if current_integral == 0:
+              return {"error": "Zero integral"}
+          h = h / current_integral
+          
+          # Clip to [0,1]
+          h = np.clip(h, 0.0, 1.0)
+          
+          # Compute c5_bound via FFT
+          h_padded = np.pad(h, (0, N))
+          j_padded = np.pad(1.0 - h, (0, N))
+          corr = np.fft.ifft(np.fft.fft(h_padded) * np.conj(np.fft.fft(j_padded))).real
+          c5_bound = np.max(corr * dx)
+          
+          return {
+              "h": h.tolist(),
+              "n_peaks": n_peaks,
+              "peak_positions": peak_positions,
+              "peak_width": peak_width,
+              "integral": float(np.sum(h) * dx),
+              "c5_bound": float(c5_bound),
+              "pattern_type": f"multipeak_{n_peaks}",
+              "optimized": True
+          }
+  - name: construct_sparse
+    description: |
+      Construct a sparse step function: mostly zeros with a few narrow high peaks.
+      Sparse functions minimize overlap because peaks rarely align for different k.
+      Automatically scales to satisfy integral(h) = 1.
+      Returns discretized h and precomputed c5_bound.
+    input_schema:
+      type: object
+      properties:
+        num_spikes:
+          type: integer
+          default: 5
+        spike_positions:
+          type: array
+          items:
+            type: number
+          default: [0.1, 0.3, 0.7, 1.3, 1.9]
+        spike_height:
+          type: number
+          default: 20.0
+        spike_width:
+          type: number
+          default: 0.04
+    implementation_py: |
+      def run(ctx, args):
+          import numpy as np
+          N = 800
+          domain = 2.0
+          dx = domain / N
+          num_spikes = args.get('num_spikes', 5)
+          spike_positions = args.get('spike_positions', [0.1, 0.3, 0.7, 1.3, 1.9])
+          spike_height = args.get('spike_height', 20.0)
+          spike_width = args.get('spike_width', 0.04)
+          
+          h = np.zeros(N)
+          for pos in spike_positions:
+              start = int(pos * N)
+              end = start + int(N * spike_width)
+              h[start:end] = spike_height
+          
+          # Scale to satisfy integral = 1
+          current_integral = np.sum(h) * dx
+          if current_integral == 0:
+              return {"error": "Zero integral"}
+          h = h / current_integral
+          
+          # Clip to [0,1]
+          h = np.clip(h, 0.0, 1.0)
+          
+          # Compute c5_bound via FFT
+          h_padded = np.pad(h, (0, N))
+          j_padded = np.pad(1.0 - h, (0, N))
+          corr = np.fft.ifft(np.fft.fft(h_padded) * np.conj(np.fft.fft(j_padded))).real
+          c5_bound = np.max(corr * dx)
+          
+          return {
+              "h": h.tolist(),
+              "num_spikes": num_spikes,
+              "spike_positions": spike_positions,
+              "spike_height": spike_height,
+              "spike_width": spike_width,
+              "integral": float(np.sum(h) * dx),
+              "c5_bound": float(c5_bound),
+              "pattern_type": "sparse",
+              "optimized": True
+          }
+new_skills:
+  - name: analytical-construction-first
+    description: |
+      Always construct step functions analytically (bipartite, multi-peak, sparse) before using the optimizer.
+      Use construct_bipartite, construct_multipeak, or construct_sparse to generate candidates.
+      Screen with probe_solution, then evaluate top candidates with c5_bound < 0.375.
+      Only after exhausting analytical constructions should you tune hyperparameters.
+    body: |
+      # Analytical Construction First for Erdos C5
+
+      ## Core Principle
+      The optimizer cannot discover good h functions from random noise. Instead, CONSTRUCT them analytically with guaranteed integral constraint.
+
+      ## Workflow
+
+      ### Phase 1: Analytical Construction
+      1. CALL construct_bipartite(a=0.5) OR construct_multipeak(n_peaks=3, peak_positions=[0.4, 1.0, 1.6]) OR construct_sparse(num_spikes=5)
+      2. Each returns h with integral=1 and precomputed c5_bound via FFT
+      3. Check c5_bound < 0.375
+
+      ### Phase 2: Screening
+      4. CALL probe_solution on each candidate
+      5. Keep those with c5_bound < 0.375 (or even < 0.37)
+
+      ### Phase 3: Optimization
+      6. CALL evaluate_solution on the BEST candidate (lowest c5_bound)
+      7. If combined_score > 1.0, finish
+      8. If not, try different construction parameters (different a, positions, etc.)
+
+      ### Phase 4: Alternative Constructions
+      If Phase 1 fails:
+      - Try bipartite with a=0.45, 0.55
+      - Try multipeak with n=2, n=4, n=5
+      - Try sparse with different spike positions
+      - Try symmetric constructions
+
+      ## Key Rules
+      - ALWAYS construct analytically first
+      - GUARANTEE integral = 1 in construction
+      - Use FFT for fast c5_bound (don't waste evals)
+      - Only optimize candidates with c5_bound < 0.375
+      - Try multiple construction types before tuning hyperparameters
+      - Don't use random initialization from the seed program
+
+      ## Tools to Use
+      - construct_bipartite: simple two-level function
+      - construct_multipeak: multiple rectangular peaks
+      - construct_sparse: narrow spikes with mostly zeros
+      - probe_solution: fast screening
+      - evaluate_solution: full optimization on promising candidates
+sampling:
+  temperature: 0.6
+  top_p: 0.85
+  top_k: 12
+agent:
+  max_iterations: 60
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 5000
+new_middlewares:
+  - name: construction_reminder
+    hook: before_model
+    description: |
+      Reminds the solver to use analytical constructions before optimizer tuning.
+    implementation_py: |
+      def before_model(hook_input):
+          history = hook_input.get("history", [])
+          has_construction = any(
+              "construct_bipartite" in str(turn.get("tools_used", [])) or
+              "construct_multipeak" in str(turn.get("tools_used", [])) or
+              "construct_sparse" in str(turn.get("tools_used", []))
+              for turn in history
+          )
+          if not has_construction:
+              return "Reminder: Use construct_bipartite, construct_multipeak, or construct_sparse to generate step functions with integral=1 before tuning hyperparameters."
+          return None

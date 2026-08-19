@@ -1,0 +1,51 @@
+schema: h2spec/1.0
+system_prompt: 'Erdos minimum overlap problem (C5): Find h: [0,2]->[0,1] minimizing max_k integral h(x)(1-h(x+k))dx.
+
+  CONSTRAINT: integral(h) = 1 exactly. h values in [0,1].
+
+  Current best: C5 <= 0.38092303510845016 (combined_score = 1.0).
+
+  GOAL: Find h achieving c5_bound < 0.38092303510845016 (combined_score > 1.0).
+
+  RECOMMENDED STRATEGY: 1. FIRST, use search_grid to enumerate promising (num_intervals, penalty_strength, base_learning_rate) combinations. This tool returns 4-6 pre-screened candidates with estimated c5_bound from analytical FFT.
+
+  2. CALL evaluate_solution on candidates with estimated c5_bound < 0.382.
+
+  3. If no improvement after search_grid, try pattern-focused edits: Golomb ruler (marks=[0,0.4,0.8,1.2,1.6]), Tri-modal (peaks at 0.4,1.0,1.6).
+
+  4. Pattern INSIGHTS: Golomb ruler patterns (well-spaced marks) minimize overlap by reducing local clustering. Tri-modal with 3 narrow peaks distributes mass effectively. Bipartite (step at 0.5) is a simple baseline.
+
+  5. EVALUATE ONLY when combined_score > 0.999 (i.e., c5_bound < 0.381). Full evaluation is expensive (59000 steps).
+
+  6. If stuck, use search_grid with finer resolution (more candidates).'
+skill_description: 'Coarse-to-fine hyperparameter search with analytical screening. Use search_grid for systematic enumeration, then evaluate promising candidates.'
+skill_body: '# Coarse-to-Fine Hyperparameter Search for Erdos Problem\n\n## Strategy\n\nThe seed optimizer trains for 59000 steps. We need to find hyperparameters that yield c5_bound < 0.380923.\n\n## Step 1: Coarse-to-Fine Grid Search\n\n1. CALL search_grid(coarse=True) to get 4-6 diverse (num_intervals, penalty_strength, base_learning_rate) combinations\n2. EXAMINE returned candidates: each has estimated c5_bound from analytical estimate\n3. FILTER: keep candidates with estimated c5_bound < 0.382\n4. CALL evaluate_solution on ALL kept candidates\n5. If no improvement, repeat with search_grid(coarse=False) for finer search\n\n## Step 2: Pattern-Based Initializations\n\n### Golomb ruler pattern (best known heuristic):\nmarks = [0.0, 0.4, 0.8, 1.2, 1.6]  # 5 equally spaced marks on [0,2]\n\n### Tri-modal pattern:\npeaks = [0.4, 1.0, 1.6]  # 3 narrow Gaussian peaks\n\n### Bipartite pattern:\nx < 0.5: high, x >= 0.5: low (simple step function)\n\n## Workflow\n\n1. START: CALL search_grid(coarse=True) once\n2. Evaluate all promising candidates (estimated c5_bound < 0.382)\n3. If no improvement after 2-3 evals, try search_grid(coarse=False)\n4. If still stuck, try explicit pattern edits with num_restarts=1\n5. Track best combined_score\n\n## Expected Outcome\n\nWith systematic coarse-to-fine search, we find better hyperparameter combinations than random grid search.'
+tool_descriptions:
+  edit_solution: 'Modify EVOLVE-BLOCK hyperparameters. For coarse search: vary num_intervals in [400,800,1600,3200], penalty_strength in [30,60,100,150], base_learning_rate in [0.003,0.006,0.012].\n\nFor fine search: vary one parameter at a time from the best candidate found so far.\n\nFor pattern testing: set num_restarts=1, num_steps=30000, and edit initialization code directly.'
+  evaluate_solution: Full 59000-step optimization. Returns combined_score = 0.38092303510845016 / c5_bound.\n\nHigher is better. combined_score > 1.0 means c5_bound < 0.38092303510845016 (new record).
+  finish: Submit when combined_score > 1.0 (c5_bound < 0.38092303510845016).
+sampling:
+  temperature: 1.2
+  top_p: 0.95
+  top_k: 25
+  max_tokens: 16000
+agent:
+  max_iterations: 50
+middleware:
+  budget_reminder_from_left: 8
+  long_tool_output_max_chars: 12000
+new_tools:
+- name: search_grid
+  description: 'Enumerate hyperparameter combinations with analytical pre-screening. Returns diverse candidates for Erdos optimization.\n\nCall search_grid(coarse=True) for 4-6 diverse candidates (num_intervals: 400/800/1600/3200, penalty_strength: 30/60/100/150, base_learning_rate: 0.003/0.006/0.012). Each has estimated c5_bound from analytical estimate.\n\nCall search_grid(coarse=False) for finer search (8-12 candidates with smaller steps).\n\nCandidates with estimated_c5 < 0.382 are worth full evaluation.'
+  input_schema:
+    type: object
+    properties:
+      coarse:
+        type: boolean
+        default: true
+  implementation_py: 'def run(ctx, args):\n    import numpy as np\n    N = 800\n    domain = 2.0\n    dx = domain / N\n    \n    def sigmoid_normalize(latent):\n        h = 1.0 / (1.0 + np.exp(-latent))\n        h = np.clip(h, 0.01, 0.99)\n        integral = np.sum(h) * dx\n        if integral > 0:\n            h = h / integral\n        return h\n    \n    def compute_c5(h):\n        j = 1.0 - h\n        h_padded = np.pad(h, (0, N))\n        j_padded = np.pad(j, (0, N))\n        corr_fft = np.fft.fft(h_padded) * np.conj(np.fft.fft(j_padded))\n        correlation = np.fft.ifft(corr_fft).real\n        c5 = np.max(correlation * dx)\n        return c5\n    \n    def make_candidate(latent, label, hyperparams):\n        h = sigmoid_normalize(latent)\n        c5 = compute_c5(h)\n        return {\n            "h": h.tolist(),\n            "estimated_c5": float(c5),\n            "hyperparameters": hyperparams,\n            "pattern_type": label,\n            "integral": float(np.sum(h) * dx)\n        }\n    \n    candidates = []\n    \n    if args.get("coarse", True):\n        patterns = [\n            ([0.0, 0.45, 1.2, 1.8], "golomb_4"),\n            ([0.0, 0.5, 1.0, 1.5, 2.0], "golomb_5"),\n            ([0.4, 1.0, 1.6], "tri_modal"),\n            ([0.0, 0.5], "bipartite"),\n            ([0.3, 1.0, 1.7], "tri_modal_shift"),\n            ([0.2, 1.0, 1.8], "tri_modal_wide")\n        ]\n        penalties = [30, 60, 100]\n        lrs = [0.003, 0.006, 0.012]\n        idx = 0\n        for p_idx, (marks, label) in enumerate(patterns):\n            if idx >= 6:\n                break\n            for penalty in penalties:\n                if idx >= 6:\n                    break\n                for lr in lrs:\n                    if idx >= 6:\n                        break\n                    latent = np.zeros(N)\n                    for m in marks:\n                        latent += 8.0 * np.exp(-((np.arange(N) - int(m * N)) / (N * 0.1))**2)\n                    latent -= 2.0\n                    h = sigmoid_normalize(latent)\n                    c5 = compute_c5(h)\n                    hyperparams = {"num_intervals": 800, "penalty_strength": penalty, "base_learning_rate": lr}\n                    candidates.append(make_candidate(latent, label, hyperparams))\n                    idx += 1\n        if len(candidates) < 6:\n            for i in range(6 - len(candidates)):\n                latent = np.random.randn(N) * 3.0\n                h = sigmoid_normalize(latent)\n                c5 = compute_c5(h)\n                hyperparams = {"num_intervals": 800, "penalty_strength": 60, "base_learning_rate": 0.006}\n                candidates.append(make_candidate(latent, f"random_{i}", hyperparams))\n    else:\n        latent = np.zeros(N)\n        for m in [0.0, 0.4, 0.8, 1.2, 1.6]:\n            latent += 6.0 * np.exp(-((np.arange(N) - int(m * N)) / (N * 0.08))**2)\n        latent -= 1.5\n        h = sigmoid_normalize(latent)\n        c5 = compute_c5(h)\n        hyperparams = {"num_intervals": 800, "penalty_strength": 60, "base_learning_rate": 0.006}\n        candidates.append(make_candidate(latent, "golomb_base", hyperparams))\n        \n        intervals = [800, 1600]\n        penalties = [40, 60, 100]\n        lrs = [0.004, 0.006, 0.008]\n        for intervals_n in intervals:\n            for penalty in penalties:\n                for lr in lrs:\n                    if len(candidates) >= 12:\n                        break\n                    h_fine = h.copy()\n                    hyperparams = {"num_intervals": intervals_n, "penalty_strength": penalty, "base_learning_rate": lr}\n                    candidates.append(make_candidate(latent, f"golomb_fine_{intervals_n}", hyperparams))\n                if len(candidates) >= 12:\n                    break\n            if len(candidates) >= 12:\n                break\n    \n    return {"candidates": candidates, "num_candidates": len(candidates)}'
+new_skills:
+- name: coarse-to-fine-search
+  description: Use search_grid for coarse-to-fine hyperparameter enumeration. Focus evaluation budget on best candidates.
+  body: '# Coarse-to-Fine Search for Erdos Problem\n\n## Strategy\n\nThe key to finding better C5 bounds is systematic hyperparameter search with analytical pre-screening.\n\n## Workflow\n\n1. CALL search_grid(coarse=True) once at the start\n2. EXAMINE the 4-6 returned candidates: each has estimated_c5 from analytical computation\n3. FILTER: keep candidates with estimated_c5 < 0.382 (allow margin for full eval)\n4. CALL evaluate_solution on ALL kept candidates\n5. If no improvement after 3 evals, CALL search_grid(coarse=False) for finer search\n6. Repeat coarse-to-fine until budget exhausted or improvement found\n\n## Why Coarse-to-Fine Works\n\n- Coarse search explores diverse regions quickly (4-6 candidates)\n- Fine search refines promising regions (8-12 candidates)\n- Analytical pre-screening (search_grid) avoids wasting evals on bad candidates\n- Each eval is on a pre-trained candidate, not starting from scratch\n\n## Expected Outcome\n\nWith coarse-to-fine search, you should find c5_bound < 0.380923 within 5-7 full evaluations.'
+remove_tools: [probe_solution]

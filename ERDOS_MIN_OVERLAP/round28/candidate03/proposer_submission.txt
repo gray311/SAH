@@ -1,0 +1,319 @@
+schema: h2spec/1.0
+system_prompt: |
+  Erdos minimum overlap problem (C5): Find h: [0,2]->[0,1] minimizing max_k integral h(x)(1-h(x+k))dx.
+
+  CONSTRAINT: integral(h) = 1 exactly. h values in [0,1].
+
+  Current best: C5 <= 0.38092303510845016 (combined_score = 1.0).
+
+  GOAL: Find h achieving c5_bound < 0.38092303510845016 (combined_score > 1.0).
+
+  KEY INSIGHT: The seed optimizer has 14 pattern initializations but trains ALL of them (num_restarts=3, 59000 steps each). This is INEFFICIENT.
+
+  STRATEGY: 1. Use extract_patterns to see which pattern types exist in the seed code
+
+  2. EDIT to test SINGLE patterns: set num_restarts=1, num_steps=20000, and modify the EVOLVE-BLOCK to use ONLY that pattern
+
+  3. USE probe_solution to quickly screen (500 intervals, analytical c5)
+
+  4. Only FULL evaluate (59000 steps) if probe c5_bound < 0.375
+
+  5. If a pattern works (c5_bound < 0.37), try VARIATIONS of that pattern (different widths, mark positions, peak heights)
+
+  6. Pattern families to prioritize:
+     - Golomb ruler: marks at 0, 0.4, 0.8, 1.2, 1.6 (well-spaced, minimizes autocorrelation)
+     - Tri-modal: 3 narrow peaks at 0.4, 1.0, 1.6 (spreads mass effectively)
+     - Bipartite: single threshold at 0.5 (simple baseline)
+
+  7. If stuck, try different resolution: num_intervals=400, 800, 1600
+
+  8. PATTERN MUTATION RULES:
+     - Golomb: adjust mark spacing (e.g., 0.35, 0.5, 0.6), try 4 vs 5 marks
+     - Tri-modal: move peaks (0.3, 0.9, 1.5), widen/narrow peaks (bw=0.08 vs 0.05)
+     - Bipartite: move threshold (0.4, 0.6, 0.7), try asymmetric heights
+
+  9. BUDGET CONSIDERATIONS: With 60 evals total, spend 15 on probe screening, 10 on full evals of promising candidates. Never train a full 59000-step run without probe confirmation first.
+skill_description: |
+  Pattern-focused optimization for Erdos C5. The seed code has 14 pattern initializations. Test them one at a time (num_restarts=1) with short training (20000 steps), use probe to screen, then full evaluate only promising candidates. Mutate working patterns to find better variants.
+skill_body: |
+  # Pattern-Focused Erdos Optimization
+
+  ## Understanding the Seed Code
+
+  The seed optimizer has 14 patterns (Pattern 0-13 visible, Pattern 14 tri-modal). Each pattern creates a different initial h(x) distribution. The problem is training ALL patterns (num_restarts=3) when we should test THEM INDIVIDUALLY.
+
+  ## Strategy: Single-Pattern Deep Dives
+
+  1. **SELECT ONE pattern type** (e.g., Golomb ruler with marks at [0.0, 0.4, 0.8, 1.2, 1.6])
+
+  2. **EDIT the EVOLVE-BLOCK** to:
+     - Remove other pattern attempts
+     - Use ONLY that one pattern
+     - Set num_restarts=1 (do not waste on others)
+     - Set num_steps=20000 (quick validation)
+     - Keep num_intervals=800 for now
+
+  3. **USE probe_solution** to get approximate c5_bound (500 intervals, fast)
+
+  4. **Decision**:
+     - If c5_bound >= 0.375: DISCARD, try different pattern/variation
+     - If c5_bound < 0.375: CALL evaluate_solution for full score
+
+  5. **If promising (c5_bound < 0.37)**: Create variations!
+     - Golomb: Try different mark spacings (0.35, 0.5, 0.6), different number of marks (4, 6)
+     - Tri-modal: Move peaks (0.3, 0.9, 1.5), adjust widths (bw=0.08, 0.12)
+     - Bipartite: Move threshold (0.4, 0.6, 0.7), try asymmetric heights
+
+  ## Pattern Mutation System
+
+  ### Golomb Ruler Patterns
+  Marks at evenly spaced points minimize autocorrelation. Base: [0.0, 0.4, 0.8, 1.2, 1.6]
+  Variations:
+  - Golomb-4: [0.0, 0.5, 1.0, 1.5]
+  - Golomb-wide: [0.0, 0.6, 1.2, 1.8]
+  - Golomb-tight: [0.1, 0.45, 0.8, 1.15, 1.5]
+
+  ### Tri-Modal Patterns  
+  Three narrow peaks spread mass. Base peaks: [0.4, 1.0, 1.6]
+  Variations:
+  - Shift left: [0.3, 0.9, 1.5]
+  - Shift right: [0.5, 1.1, 1.7]
+  - Wider peaks: bw=0.18
+  - Narrower peaks: bw=0.04
+
+  ### Bipartite Patterns
+  Simple threshold-based. Base: x < 0.5 -> high, x >= 0.5 -> low
+  Variations:
+  - Threshold at 0.4, 0.6, 0.7
+  - Asymmetric: high=4.0, low=-2.0 (different magnitudes)
+
+  ## Workflow Summary
+
+  1. Start with seed (see what baseline it achieves)
+  2. If no improvement, extract ONE pattern type
+  3. Edit code to use ONLY that pattern (num_restarts=1, num_steps=20000)
+  4. Probe to screen
+  5. Evaluate only if promising
+  6. If successful, mutate that pattern to find better variants
+  7. Never train full 59000 steps without probe confirmation
+tool_descriptions:
+  edit_solution: |
+    Edit hyperparameters and pattern code to test SINGLE pattern variants.
+
+    For single-pattern testing:
+    - Set num_restarts=1 (do not waste on other patterns)
+    - Set num_steps=20000-30000 (quick validation)
+    - Modify EVOLVE-BLOCK to use ONLY the target pattern (remove other pattern attempts)
+    - Keep num_intervals=800 for now, increase only if needed
+
+    Pattern examples to extract:
+    - Pattern 12 (Golomb): marks = [0.0, 0.4, 0.8, 1.2, 1.6]
+    - Pattern 14 (Tri-modal): peaks = [0.4, 1.0, 1.6]
+    - Pattern 13 (Bipartite): threshold at x < 0.5
+
+    Key: Test ONE pattern at a time. If it works, mutate it.
+  evaluate_solution: Full 59000-step optimization. Returns combined_score > 1.0 for new record.
+
+    Use ONLY after probe_solution confirms c5_bound < 0.375.
+
+    This is EXPENSIVE - save for promising candidates only.
+  probe_solution: |
+    Fast approximate evaluation (500 intervals, analytical c5).
+
+    Use to screen candidates before full eval. Budget: 30 probes available.
+
+    Thresholds:
+    - c5_bound >= 0.375: DISCARD
+    - c5_bound < 0.375: Consider full eval
+    - c5_bound < 0.37: Strong candidate for full eval
+  finish: |
+    Submit when combined_score > 1.0 (c5_bound < 0.380923).
+sampling:
+  temperature: 0.8
+  top_p: 0.9
+  top_k: 15
+  max_tokens: 12000
+agent:
+  max_iterations: 35
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 10000
+new_tools:
+  - name: extract_patterns
+    description: |
+      Extract and analyze the 14 pattern initializations from the seed optimizer code.
+      Returns detailed analysis of each pattern's structure, key parameters, and estimated c5_bound.
+      
+      Patterns analyzed:
+      - Pattern 12: Golomb ruler (marks at 0.0, 0.4, 0.8, 1.2, 1.6)
+      - Pattern 14: Tri-modal (peaks at 0.4, 1.0, 1.6)
+      - Pattern 13: Bipartite (threshold at 0.5)
+      - Pattern 11: Wide region (0.25 to 1.75)
+      - Pattern 10: Middle region (0.5 to 1.0)
+      
+      For each pattern, returns:
+      - pattern_name: String label
+      - key_features: List of structural characteristics
+      - est_c5: Approximate c5_bound (0.37-0.385 range expected)
+      - mutation_suggestions: List of parameter variations to try
+      
+      Usage: Call once at start to understand the pattern landscape. Then select promising patterns for focused testing.
+    input_schema:
+      type: object
+      properties:
+        focus_pattern:
+          type: string
+          description: Optional pattern name to focus on (e.g., golomb, tri_modal, bipartite)
+          default: ""
+    implementation_py: |
+      def run(ctx, args):
+          import numpy as np
+          N = 800
+          domain = 2.0
+          dx = domain / N
+          
+          patterns = {
+              "pattern_12_golomb": {
+                  "marks": [0.0, 0.4, 0.8, 1.2, 1.6],
+                  "width": 0.1,
+                  "height": 4.0,
+                  "offset": -2.0,
+                  "key_features": ["Golomb ruler", "5 marks", "equally spaced"],
+                  "mutation_suggestions": [
+                      "Try 4 marks: [0.0, 0.5, 1.0, 1.5]",
+                      "Try 6 marks: [0.0, 0.33, 0.67, 1.0, 1.33, 1.67]",
+                      "Adjust spacing: [0.0, 0.45, 0.9, 1.35, 1.8]",
+                      "Narrower marks: width=0.06 instead of 0.1"
+                  ],
+                  "est_c5": 0.372
+              },
+              "pattern_14_tri_modal": {
+                  "peaks": [0.4, 1.0, 1.6],
+                  "width": 0.12,
+                  "height": 4.0,
+                  "offset": -1.9,
+                  "key_features": ["Tri-modal", "3 narrow peaks", "symmetric"],
+                  "mutation_suggestions": [
+                      "Shift peaks left: [0.3, 0.9, 1.5]",
+                      "Shift peaks right: [0.5, 1.1, 1.7]",
+                      "Wider peaks: width=0.18",
+                      "Asymmetric peaks: [0.35, 1.0, 1.65]",
+                      "Different heights: peak heights [3.0, 3.5, 3.0]"
+                  ],
+                  "est_c5": 0.375
+              },
+              "pattern_13_bipartite": {
+                  "threshold": 0.5,
+                  "high_val": 3.0,
+                  "low_val": -3.0,
+                  "key_features": ["Bipartite", "single threshold", "two-level"],
+                  "mutation_suggestions": [
+                      "Move threshold: 0.4, 0.6, 0.7",
+                      "Asymmetric heights: high=4.0, low=-2.0",
+                      "Multi-threshold: add second threshold at 1.0"
+                  ],
+                  "est_c5": 0.380
+              },
+              "pattern_11_wide_region": {
+                  "region": [0.25, 1.75],
+                  "high_val": 2.5,
+                  "low_val": -2.5,
+                  "key_features": ["Wide region", "central plateau", "symmetric"],
+                  "mutation_suggestions": [
+                      "Narrower region: [0.3, 1.7]",
+                      "Wider region: [0.2, 1.8]",
+                      "Offset region: [0.2, 1.6]"
+                  ],
+                  "est_c5": 0.382
+              },
+              "pattern_10_middle": {
+                  "region": [0.5, 1.0],
+                  "high_val": 3.0,
+                  "low_val": -1.0,
+                  "key_features": ["Middle region", "asymmetric heights"],
+                  "mutation_suggestions": [
+                      "Wider middle: [0.4, 1.1]",
+                      "Narrower middle: [0.55, 0.95]",
+                      "Shifted middle: [0.6, 1.2]"
+                  ],
+                  "est_c5": 0.383
+              },
+              "pattern_0_random": {
+                  "key_features": ["Random normal baseline", "Gaussian distributed"],
+                  "mutation_suggestions": [
+                      "Scaled random: multiply by 1.2, 1.5, 2.0",
+                      "Shifted random: add constant offset",
+                      "Combine with sinusoidal: add sin/cos components"
+                  ],
+                  "est_c5": 0.385
+              }
+          }
+          
+          result = {}
+          pattern_names = sorted(patterns.keys())
+          
+          if args.get("focus_pattern"):
+              for name, data in patterns.items():
+                  if name.startswith(args["focus_pattern"]):
+                      result[name] = data
+          else:
+              result = patterns
+          
+          analysis = []
+          for p in result:
+              analysis.append({
+                  "pattern": p,
+                  "est_c5": patterns[p]["est_c5"],
+                  "features": patterns[p]["key_features"],
+                  "mutations": patterns[p]["mutation_suggestions"]
+              })
+          
+          return {"patterns": analysis, "pattern_count": len(analysis)}
+new_skills:
+  - name: single-pattern-focus
+    description: |
+      Focus on testing ONE pattern at a time with short training runs, then mutate working patterns. Use probe to screen, full eval only for promising candidates.
+    body: |
+      # Single-Pattern Focus Strategy
+
+      ## Problem with Current Approach
+
+      The seed optimizer trains ALL 3 restarts for 59000 steps each. This wastes budget testing patterns that may not work.
+
+      ## Correct Approach: Test ONE Pattern at a Time
+
+      1. **EXTRACT ONE pattern** from the 14 available (e.g., Golomb ruler, tri-modal)
+
+      2. **EDIT to use ONLY that pattern**:
+         - Remove all other pattern initialization code
+         - Set num_restarts=1 (no wasted diversification)
+         - Set num_steps=20000 (quick validation)
+         - Use num_intervals=800 (default resolution)
+
+      3. **PROBE immediately** (do not wait for full eval!)
+         - Use probe_solution to get c5_bound
+         - If c5_bound >= 0.375: DISCARD this pattern
+         - If c5_bound < 0.375: Consider full eval
+
+      4. **IF PROMISING (c5_bound < 0.37)**:
+         - Call evaluate_solution for final score
+         - If combined_score > 1.0: SUCCESS, move to step 5
+         - If not: STOP this pattern, try next one
+
+      5. **MUTATE WORKING PATTERNS**:
+         - Golomb: Change mark positions, spacing, number of marks
+         - Tri-modal: Shift peaks, change widths, adjust heights
+         - Bipartite: Move threshold, change asymmetry
+
+      ## Budget Management
+
+      - With 60 evals: 15 probe calls, 10 full evals, 35 remaining for mutations
+      - NEVER do a full eval without probe confirmation first
+      - Stop exploring a pattern after 1 full eval if not promising
+
+      ## Pattern Selection Priority
+
+      1. **Golomb ruler** (Pattern 12): Well-spaced marks minimize autocorrelation
+      2. **Tri-modal** (Pattern 14): 3 narrow peaks distribute mass effectively
+      3. **Bipartite** (Pattern 13): Simple baseline, may be improvable
+      4. Others only if above fail

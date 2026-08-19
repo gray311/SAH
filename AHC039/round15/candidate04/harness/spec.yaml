@@ -1,0 +1,188 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are a C++ polygon optimizer for axis-aligned fish capture. Goal: maximize (mackerels - sardines + 1).
+  
+  CRITICAL STRATEGY: Compact rectangle-based area optimization around mackerel density peaks.
+  
+  SEARCH METHOD (encodes in EVOLVE-BLOCK C++ code):
+  
+  1. GRID-BASED DENSITY ANALYSIS:
+     - Build 100x100 grid (cell_size=1000) over [0,100000]x[0,100000]
+     - For each cell, count mackerels (M) and sardines (S) from input points
+     - Build 2D prefix sum arrays for O(1) rectangle queries
+     - Identify density peaks: cells where M - S is maximized
+  
+  2. COMPACT RECTANGLE CONSTRUCTION:
+     - From each peak cell, expand in all 4 directions to form a rectangle
+     - At each expansion step, use prefix sums to compute M-S of candidate rectangle
+     - Stop expanding when M-S decreases OR perimeter exceeds budget
+     - Keep rectangles with M - S > 0
+  
+  3. MULTI-PEAK COMBINATION:
+     - Find top 5-10 disjoint density peaks
+     - Construct compact rectangle around each
+     - Try combining adjacent rectangles if they form a valid single polygon
+     - Always prefer compact shapes over elongated ones
+  
+  4. GRID-BASED SCORING:
+     - Use 2D prefix sums for O(1) rectangle score queries
+     - No need for full polygon evaluation until final output
+     - Quick iteration through candidate shapes
+  
+  5. RANDOMIZED RESTARTS:
+     - Run 10-15 restarts with different random seeds
+     - Each restart: select random region, build prefix sums, find local peaks, construct polygons
+     - Track best polygon across all restarts
+  
+  6. VALIDATION:
+     - Output valid axis-aligned polygon (4-1000 vertices, integer coords [0,100000])
+     - Perimeter <= 400,000
+     - Use simple rectangle/L-shape construction (guarantees no self-intersection)
+  
+  Tools:
+  - edit_solution: Replace EVOLVE-BLOCK with C++ implementing grid-based peak finding + compact polygon construction
+  - evaluate_solution: Run C++ program, get score (mackerels-sardines+1)
+  - probe_solution: Use grid prefix sums for fast approximate scoring
+  - finish: Submit when you have a working grid-based density optimizer
+  
+  KEY DIFFERENCE from seed: Use 2D prefix sums for O(1) rectangle scoring and focus on compact rectangles around local mackerel peaks, not linear corridors.
+skill_description: |
+  Grid-based density peak finding with compact rectangle construction. Build 100x100 grid, compute M-S counts, use 2D prefix sums for O(1) rectangle queries, find local peaks, expand into compact rectangles, run 10-15 restarts.
+skill_body: |
+  # Grid-Based Density Peak Optimization Strategy
+  
+  ## Core Idea
+  
+  Instead of linear corridors, build compact rectangles around local mackerel density peaks.
+  Use 2D prefix sums for O(1) rectangle scoring to quickly evaluate many candidates.
+  
+  ## Step-by-Step Method
+  
+  ### Step 1: Grid Construction
+  
+  - Divide [0,100000]x[0,100000] into 100x100 grid (cell_size=1000)
+  - For each cell, count mackerels and sardines from input points
+  - Build 2D prefix sum arrays for both M and S counts
+  
+  ### Step 2: Density Peak Identification
+  
+  - Compute score = M - S for each cell
+  - Find top 10 cells with highest positive score
+  - Also consider cells near boundaries
+  
+  ### Step 3: Rectangle Expansion
+  
+  For each peak cell, expand outward to form rectangles:
+  - Start with the cell as a 1x1 rectangle
+  - Try expanding each dimension by increasing amount (1, 2, 3, ... cells)
+  - Use prefix sums to compute M-S in O(1)
+  - Stop when M-S decreases or perimeter budget exceeded
+  - Keep all candidate rectangles with M-S > 0
+  
+  ### Step 4: Multi-Peak Combination (Optional)
+  
+  - Check if adjacent rectangles can be merged
+  - Prefer keeping separate compact rectangles if combined shape is less compact
+  
+  ### Step 5: Hill Climbing
+  
+  - For top candidate rectangles, try slight adjustments:
+    - Shift one boundary by ±100, ±200, ±300 units
+    - Re-evaluate using prefix sums
+    - Keep best adjustment
+  
+  ### Step 6: Randomized Restarts
+  
+  - Run 10-15 restarts with different seeds
+  - Each restart: pick random starting cell, build local grid, find peak, construct polygon
+  - Output best polygon across all restarts
+  
+  ## C++ Implementation Notes
+  
+  - Use 100x100 fixed grid arrays
+  - Precompute prefix sums at startup: O(grid_size^2)
+  - Rectangle query is O(1): sum = P[max_r][max_c] - P[min_r-1][max_c] - P[max_r][min_c-1] + P[min_r-1][min_c-1]
+  - Total time per evaluation: < 2.0s
+  - Output format: m (vertices count), then m lines of "x y" coordinates
+new_tools:
+- name: compute_grid_prefix_sums
+  description: |
+    Build 100x100 grid, count mackerels/sardines per cell, compute 2D prefix sums for O(1) rectangle scoring.
+    Returns grid statistics and prefix sum arrays. Call once at startup.
+  input_schema:
+    type: object
+    properties: {}
+  implementation_py: |
+    def run(ctx, args):
+        import json
+        
+        # Parse fish positions from program
+        program_text = ctx.get_program()
+        fish_data = []
+        for line in program_text.split('\n'):
+            line = line.strip()
+            if line.startswith('fish['):
+                try:
+                    # Extract mackerel or sardine coordinates
+                    parts = line.replace('fish[', '').replace(']', '').split(',')
+                    if len(parts) >= 2:
+                        x, y = int(parts[0].strip()), int(parts[1].strip())
+                        # Default: first N are mackerels, next N are sardines
+                        fish_idx = int(parts[0])
+                        if fish_idx < 5000:
+                            fish_type = 1
+                        else:
+                            fish_type = -1
+                        fish_data.append((x, y, fish_type))
+                except:
+                    continue
+        
+        grid_size = 100
+        cell_size = 100000 // grid_size
+        
+        # Initialize grid
+        M = [[0] * grid_size for _ in range(grid_size)]
+        S = [[0] * grid_size for _ in range(grid_size)]
+        
+        # Count fish per cell
+        for x, y, ftype in fish_data:
+            if ftype > 0:
+                cx, cy = min(x // cell_size, grid_size - 1), min(y // cell_size, grid_size - 1)
+                M[cy][cx] += 1
+            else:
+                cx, cy = min(x // cell_size, grid_size - 1), min(y // cell_size, grid_size - 1)
+                S[cy][cx] += 1
+        
+        # Build prefix sums
+        P_M = [[0] * (grid_size + 1) for _ in range(grid_size + 1)]
+        P_S = [[0] * (grid_size + 1) for _ in range(grid_size + 1)]
+        
+        for r in range(grid_size):
+            for c in range(grid_size):
+                P_M[r + 1][c + 1] = P_M[r][c + 1] + P_M[r + 1][c] - P_M[r][c] + M[r][c]
+                P_S[r + 1][c + 1] = P_S[r][c + 1] + P_S[r + 1][c] - P_S[r][c] + S[r][c]
+        
+        total_M = P_M[grid_size][grid_size]
+        total_S = P_S[grid_size][grid_size]
+        
+        return {
+            "total_mackerels": total_M,
+            "total_sardines": total_S,
+            "grid_size": grid_size,
+            "cell_size": cell_size,
+            "prefix_sums_P_M": P_M,
+            "prefix_sums_P_S": P_S
+        }
+remove_tools: []
+sampling:
+  temperature: 1.2
+  top_p: 0.95
+  top_k: 25
+  max_tokens: 14336
+agent:
+  max_iterations: 45
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 15000
+new_skills: []
+new_middlewares: []

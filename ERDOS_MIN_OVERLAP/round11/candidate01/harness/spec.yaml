@@ -1,0 +1,190 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are solving the Erdos minimum overlap problem: minimize max_k integral h(x)(1-h(x+k)) dx
+  for a step function h: [0,2] -> [0,1] with integral(h)=1.
+
+  Current best bound: C5 <= 0.38092303510845016
+
+  KEY INSIGHT: The seed program optimizes smooth sigmoid functions, not true step functions.
+  You MUST use the step_function_generator tool to create valid step-function candidates.
+  Then optimize them with the ErdosOptimizer's multi-restart strategy.
+
+  Method:
+  1. CALL step_function_generator to get a valid step function (N intervals, k are high, 1 is low)
+  2. EDIT the EVOLVE-BLOCK to refine the step heights or interval widths (not the latent!)
+  3. Use probe_solution to quickly check if the constraint integral(h)=1 is satisfied
+  4. Only call evaluate_solution on valid candidates with integral(h)=1
+  5. Try different (k, low_height) combinations: try low_height=0, 0.1, 0.2, ... to find best overlap
+
+  Strategy for finding new bound:
+  - A step function with k intervals at height H_high and 1 interval at H_low must satisfy:
+    k*H_high*1 + H_low*(1-k) = 1  =>  H_high = (1 - H_low*(1-k)) / k
+  - For k intervals, try H_low = 0 (clean step) or small values to relax constraint
+  - Compute the resulting h and evaluate overlap
+  - The goal is to minimize max_k integral h(x)(1-h(x+k)) dx
+
+  Focus: Use step_function_generator, then refine structure, NOT hyperparameters.
+skill_description: |
+  Generate valid step-function candidates using step_function_generator, then refine interval
+  heights to minimize C5 bound. Use probe to screen integral constraint before full eval.
+skill_body: |
+  # Erdos Minimum Overlap - Step Function Search
+
+  ## Core Strategy: True Step Functions, Not Smooth Sigmoids
+
+  The seed program fails because it optimizes smooth latent -> sigmoid, which cannot
+  discover sharp step functions efficiently. You MUST:
+
+  ### Step 1: Generate Step Function with step_function_generator
+  - This creates N intervals where k have height H_high, 1 has height H_low
+  - H_high and H_low automatically satisfy integral(h)=1
+  - This is a VALID step function representation
+
+  ### Step 2: Structure of the Search
+  For k intervals at H_high and 1 at H_low:
+  - H_high = (1 - H_low*(1-k)) / k
+  - Try different k values: 100, 200, 500, 1000 (fewer steps = simpler, may find global optimum)
+  - Try H_low = 0 (cleanest) or small values like 0.01, 0.05
+  - The optimizer then tweaks EXACTLY which intervals are high vs low (by editing the EVOLVE-BLOCK)
+
+  ### Step 3: Use probe_solution aggressively
+  - After any edit, call probe_solution FIRST to check constraint
+  - Only proceed if integral(h) approx 1 (within tolerance)
+  - Use probes to rank many (k, H_low) combinations before full eval
+
+  ### Step 4: Evaluation Strategy
+  - Call evaluate_solution only on candidates that:
+    1. Pass probe screening (integral approx 1)
+    2. Have reasonable H_high in [0,1] range
+  - Document which (k, H_low) combination worked best
+
+  ## Why This Works
+  - Step functions are exactly what the problem asks for
+  - The FFT-based evaluator works perfectly on step functions
+  - With true step representation, the optimizer can find solutions the smooth latent cannot
+tool_descriptions:
+  edit_solution: Modify the EVOLVE-BLOCK to change step_function_generator parameters (k, H_low) or interval structure.
+  evaluate_solution: Run full evaluation, returns combined_score.
+  probe_solution: Quick approximate evaluation to screen candidates. Also check integral constraint!
+  finish: Submit when combined_score > 1.0 or best step-function solution found.
+sampling:
+  temperature: 0.7
+  top_p: 0.8
+  top_k: 15
+  max_tokens: 14000
+agent:
+  max_iterations: 60
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 6000
+new_tools:
+- name: step_function_generator
+  description: |
+    Generate a valid step function h: [0,2] -> [0,1] with integral(h)=1.
+    Creates N discretization intervals where k intervals have height H_high
+    and 1 interval has height H_low, chosen so integral = 1 exactly.
+    This is the CORRECT representation for the Erdos problem.
+    Call this to get a valid starting point, then optimize the step structure.
+  input_schema:
+    type: object
+    properties:
+      k:
+        type: integer
+        description: Number of high-height intervals (must be >= 1)
+      H_low:
+        type: number
+        description: Height of the single low interval (0 to 1, can be 0)
+      N:
+        type: integer
+        description: Total discretization intervals (use 800 or more)
+  implementation_py: |
+    def run(ctx, args):
+        import numpy as np
+        N = args.get("N", 800)
+        k = args.get("k", 500)
+        H_low = args.get("H_low", 0.0)
+        domain = 2.0
+        dx = domain / N
+        
+        # Compute H_high to satisfy integral(h) = 1
+        # integral = H_high * k * dx + H_low * (N-k) * dx = 1
+        # H_high = (1 - H_low*(N-k)*dx) / (k*dx) = (1 - H_low*(N-k)) / k
+        H_high = (1.0 - H_low * (N - k)) / k
+        
+        # Validate H_high is in [0, 1]
+        if H_high < 0 or H_high > 1:
+            return {"error": "H_high out of [0,1] for k=" + str(k) + ", H_low=" + str(H_low) + ", valid: False"}
+        
+        # Create step function: first k intervals at H_high, last at H_low
+        h = np.full(N, H_low)
+        h[:k] = H_high
+        
+        # Return discretization and parameters for EVOLVE-BLOCK editing
+        return {
+            "h": h,
+            "H_high": float(H_high),
+            "H_low": float(H_low),
+            "k": k,
+            "N": N,
+            "dx": float(dx),
+            "valid": True,
+            "integral_check": float(h.sum() * dx)
+        }
+new_skills:
+- name: step-function-search-guide
+  description: |
+    Guide for searching the Erdos step-function space: generate step functions with
+    different (k, H_low) pairs, use probes to screen, evaluate promising ones.
+  body: |
+    # Step-Function Search for Erdos Problem
+
+    ## Problem Recap
+    Find step function h: [0,2] -> [0,1] with integral(h)=1 that minimizes
+    max_k integral h(x)(1-h(x+k)) dx.
+
+    ## Why Step Functions?
+    The seed optimizer uses smooth sigmoids, which cannot efficiently find
+    sharp step functions. Use step_function_generator to create VALID step functions.
+
+    ## Search Strategy
+
+    ### Step 1: Choose (k, H_low) Pair
+    - k: number of high intervals (try 100, 200, 500, 1000, N-1)
+    - H_low: low interval height (try 0, 0.01, 0.05, 0.1, or let generator use 0)
+    - H_high is computed: (1 - H_low*(N-k)) / k
+
+    ### Step 2: Generate with step_function_generator
+    - Call with your chosen (k, H_low, N=800)
+    - Verify "valid": True and 0 <= H_high <= 1
+    - This gives you a DISCRETE step function representation
+
+    ### Step 3: Refine with EVOLVE-BLOCK editing
+    - Edit to: swap which intervals are high vs low
+    - OR: add more structure (e.g., make 2 low intervals instead of 1)
+    - OR: change k to a different number of high intervals
+    - Each edit creates a NEW step function candidate
+
+    ### Step 4: Probe Screen
+    - After any edit, call probe_solution
+    - Check: does integral(h) approx 1? (use H_low, H_high from the generator)
+    - Skip full eval if constraint violated
+
+    ### Step 5: Full Evaluation
+    - Call evaluate_solution on candidates that pass probe
+    - Track best combined_score
+
+    ### Success Pattern
+    - Best known: 0.380923... (combined_score = 0.999855)
+    - Your goal: combined_score > 1.0 (c5_bound < 0.380923)
+    - Try: k=N-1 (one low interval), H_low=0, then optimizer finds best location
+new_middlewares:
+- name: constraint_reminder
+  hook: before_model
+  description: |
+    Remind solver to use step_function_generator and check integral constraint before eval.
+    Fires before each generation/edit step to enforce correct workflow.
+  implementation_py: |
+    def before_model(hook_input):
+        if "step_function_generator" in str(hook_input) or "edit" in str(hook_input).lower():
+            return "Reminder: Use step_function_generator to create valid step function (k high intervals + 1 low), ensure H_high in [0,1], and check integral(h)=1 via probe before evaluate_solution."
+        return None

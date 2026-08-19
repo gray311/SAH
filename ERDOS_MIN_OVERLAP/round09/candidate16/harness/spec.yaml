@@ -1,0 +1,99 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are optimizing a JAX/NumPy program to solve the Erdos minimum overlap problem:
+  Find h: [0,2]->[0,1] with integral(h)=1 that minimizes max_k integral h(x)(1-h(x+k)) dx.
+
+  Current best: C5 <= 0.38092303510845016. Beat this with combined_score > 1.0.
+
+  CRITICAL STRATEGY FOR THIS TASK:
+  The seed program has only 12 fixed initialization patterns and 59000 optimization steps.
+  It gets stuck in local optima. To break through:
+
+  1. IN EVERY evaluation, implement a multi-restart loop inside _optimize_single_run:
+     - For EACH of 5 different initializations (try them all):
+       a) Use a DIFFERENT structured init pattern (bimodal, triangular, periodic, Golomb, sine-wave)
+       b) Run 3000 steps with aggressive LR=0.05, penalty=5000
+       c) Run 10000 steps with moderate LR=0.01, penalty=20000
+       d) Use probe_solution (CHEAP) to get c5_bound
+       e) Pick the 2 best by probe and evaluate them fully
+     - The best of all 5 restarts is your final answer
+
+  2. VARY num_intervals: Try [400, 800, 1200, 1600] across different restarts.
+     Higher resolution can find finer structures.
+
+  3. USE probe_solution FREQUENTLY: Rank all 5 restarts by probe before spending eval budget.
+
+  4. The seed program's 12 patterns are ALL variants of the same basic ideas (bimodal, triangular, periodic).
+     Your multi-restart must actually TRY THEM DIFFERENTLY with different hyperparams.
+
+  Write code that implements this EXACT multi-research loop. Call probe_solution 5 times, evaluate 2 times max.
+
+skill_description: Multi-restart optimization for Erdos minimum overlap.
+skill_body: |
+  # Erdos Minimum Overlap - Multi-Restart Strategy
+  
+  ## Why the Seed Fails
+  The seed program tries 12 initialization patterns but:
+  - Uses identical hyperparameters for all
+  - Runs a single long optimization (59000 steps) per start
+  - Doesn't probe before final evaluation
+  
+  This means all 12 starts go through the SAME optimization trajectory, missing diverse basins.
+  
+  ## The Winning Approach
+  Implement a 5-restart loop inside _optimize_single_run:
+  
+  ### Step 1: Define 5 Distinct Initializations
+  Use these patterns:
+  - Pattern 0: Bimodal at 0.25, 0.75 with Gaussian peaks
+  - Pattern 1: Triangular 3-level piecewise
+  - Pattern 2: Periodic alternating high/low
+  - Pattern 3: Golomb-inspired (5 marks at 0.25, 0.7, 1.1, 1.75)
+  - Pattern 4: Sine-wave modulated
+  
+  ### Step 2: Multi-Restart Loop
+  For each pattern:
+  1. Generate latent vector
+  2. Normalize to ensure integral(h)=1
+  3. Run 2-phase optimization: 3000 steps (LR=0.05, penalty=5000) + 10000 steps (LR=0.01, penalty=20000)
+  4. Call probe_solution to get c5_bound (cheap!)
+  5. Track best 2 by probe
+  
+  Vary num_intervals in [400, 800, 1200] across restarts.
+  
+  ### Step 3: Final Evaluation
+  After multi-restart, use evaluate_solution on top 2 candidates.
+  Return the best c5_bound found.
+
+tool_descriptions:
+  edit_solution: |
+    Rewrite _optimize_single_run to implement a multi-restart loop:
+    - Define 5 initialization functions with genuinely different structures
+    - For each pattern, try 3 num_intervals values (5x3=15 attempts)
+    - Each attempt: 2-phase optimization (3000+10000 steps) with varying LR/penalty
+    - After each attempt, extract h and compute probe c5_bound
+    - Track best 2 by probe score
+    - Use evaluate_solution on top 2
+    - Return best c5_bound from all attempts
+  evaluate_solution: |
+    Run the multi-restart search. Combined score = 0.38092303510845016 / best_c5_bound.
+    Use probes internally to filter candidates, then evaluate top 2 fully.
+  probe_solution: |
+    Approximate c5 bound using subsampled correlation. Call this after each restart
+    to rank candidates cheaply before final evaluation.
+  finish: |
+    Submit when combined_score > 1.0 (c5_bound < 0.38092303510845016).
+sampling:
+  temperature: 1.1
+  top_p: 0.98
+  top_k: 30
+  max_tokens: 16000
+agent:
+  max_iterations: 65
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 12000
+new_tools: []
+remove_tools: []
+new_skills: []
+new_middlewares: []

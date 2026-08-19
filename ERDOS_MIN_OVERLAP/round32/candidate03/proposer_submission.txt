@@ -1,0 +1,219 @@
+schema: h2spec/1.0
+system_prompt: |
+  Erdos minimum overlap problem (C5): Find h: [0,2]->[0,1] minimizing max_k integral h(x)(1-h(x+k))dx.
+  
+  CONSTRAINT: integral(h) = 1 exactly. h values in [0,1].
+  
+  Current best: C5 <= 0.38092303510845016 (combined_score = 1.0).
+  
+  GOAL: Find h achieving c5_bound < 0.38092303510845016 (combined_score > 1.0).
+  
+  STRATEGY:
+  
+  1. CALL compute_overlap_profile ONCE to get the full overlap profile
+     - This returns overlap values for ALL k shifts
+     - Identify the k with MAXIMUM overlap (problematic shift)
+  
+  2. Design a STEP FUNCTION with NARROW SEPARATED PEAKS
+     - Place peaks at positions that minimize overlap at problematic k
+     - For k=1, separate peaks by >1 unit
+     - For k=2, separate peaks by >2 units
+     - For multiple k, find a configuration that works for all
+  
+  3. Use probe_solution to screen candidates (c5_bound < 0.382)
+  4. Use evaluate_solution to confirm improvements
+  5. Only evaluate when you have a clear structural improvement
+  
+  KEY INSIGHT: Step functions with WELL-SEPARATED narrow peaks can achieve low overlap.
+  Think like a Golomb ruler: place "marks" (peaks) so no two marks are at distance k where k creates high overlap.
+  
+  Example step function structure:
+  h(x) = 1.0 if x in [a1-b1/2, a1+b1/2] U [a2-b2/2, a2+b2/2] U ... else 0.0
+  Adjust widths so integral(h) = 1.0
+  
+  Focus on creating HARMONIC SEPARATION: peaks separated by distances that DON'T create peak overlap.
+skill_description: |
+  Use compute_overlap_profile to identify the maximum-overlap shift k, then design step functions
+  with narrow separated peaks that minimize overlap at that k. Start with simple 2-peak or 3-peak
+  configurations before adding complexity.
+skill_body: |
+  # Erdos C5 - Step Function Design
+  
+  ## Phase 1: Profile Analysis
+  1. CALL compute_overlap_profile to see the full overlap landscape
+  2. Identify k_max where overlap is maximum
+  3. Note: For step functions, overlap at shift k comes from peaks overlapping with themselves shifted by k
+  
+  ## Phase 2: Design Separated Peaks
+  For a function with n peaks at positions p1, p2, ..., pn with widths w1, w2, ..., wn:
+  
+  - The overlap at shift k occurs when peak i overlaps with peak j shifted by k
+  - To minimize max overlap: place peaks so NO peak overlaps with another at the problematic k
+  - Simple strategy: if k_max ≈ 1, place peaks separated by >1.5 units
+  - If k_max ≈ 2, place peaks separated by >2.5 units
+  
+  ## Phase 3: Concrete Designs to Try
+  
+  ### Design A: Two Narrow Peaks (symmetric)
+  - Peak 1 centered at x=0.5, width 0.2 (height 1.0, contributes 0.1 to integral)
+  - Peak 2 centered at x=1.5, width 0.2 (height 1.0, contributes 0.1 to integral)
+  - Add three more peaks of width 0.133 at x=0.35, 0.7, 1.1, 1.45 to reach integral=1
+  - Separation: 0.2, 0.45, 0.7, 0.75, 0.95 - carefully chosen
+  
+  ### Design B: Three Peaks Equidistant
+  - Peak 1 at x=0.33, width 0.15 (integral 0.15)
+  - Peak 2 at x=1.0, width 0.2 (integral 0.2)  
+  - Peak 3 at x=1.67, width 0.15 (integral 0.15)
+  - Need 0.5 more: add two small peaks at x=0.7, x=1.35 (width 0.25 each)
+  
+  ### Design C: Four Peaks Quarter-Distributed
+  - Peaks at x=0.5, 1.0, 1.5 with equal width 0.167 (integral 0.167 each = 0.5)
+  - Add peaks at boundaries x=0.0, x=2.0 with width 0.25 each (integral 0.25 each = 0.5)
+  - Separation between adjacent: 0.5 - check overlap at various k
+  
+  ## Phase 4: Verification
+  1. Compute integral(h) - must equal 1.0 exactly
+  2. Verify all h(x) in [0,1]
+  3. Use probe_solution to check c5_bound < 0.382
+  4. If successful, use evaluate_solution to confirm
+  
+  ## Key Principle
+  Reducing C5 requires MINIMIZING the maximum overlap across ALL shifts k.
+  Think: "If I place my peaks here, what shift k causes the worst overlap?"
+  Then redesign to reduce that specific overlap.
+tool_descriptions:
+  edit_solution: |
+    Create step functions with narrow separated peaks.
+    
+    Structure: h(x) = sum of rectangular pulses
+    - Each pulse: 1.0 in [center-width/2, center+width/2], 0.0 elsewhere
+    - Sum of widths must equal 1.0 (for integral constraint)
+    - Place pulses to minimize overlap at problematic k values
+    
+    Example: Two pulses of width 0.25 at x=0.5 and x=1.5
+    h = array([1.0]*(50) + [0.0]*(1000) + [1.0]*(50) + [0.0]*(1000))
+    (assuming 50 intervals per unit width for 800 total intervals)
+  
+  evaluate_solution: |
+    Full evaluation. Returns combined_score = 0.38092303510845016 / c5_bound.
+    Combined_score > 1.0 means c5_bound < 0.38092303510845016 (new record).
+  
+  probe_solution: |
+    Fast approximate evaluation (500 intervals). Uses probe budget.
+    Target: c5_bound < 0.382 before full evaluation.
+  
+  finish: |
+    Submit when combined_score > 1.0.
+sampling:
+  temperature: 1.2
+  top_p: 0.95
+  top_k: 50
+  max_tokens: 12000
+agent:
+  max_iterations: 80
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 15000
+new_tools:
+  - name: compute_overlap_profile
+    description: |
+      Compute the full overlap profile for the current best program.
+      Returns overlap values for ALL k shifts from 0 to 799 (for 800 intervals).
+      Identifies the k value with maximum overlap and the top 5 problematic shifts.
+      
+      This tool evaluates the program directly and returns computational results,
+      not source code analysis. Use this to understand which shift k causes the
+      worst overlap, then design step functions that minimize overlap at that k.
+    input_schema:
+      type: object
+      properties: {}
+    implementation_py: |
+      def run(ctx, args):
+          h = ctx.get_best_program()
+          if h is None or h == "":
+              return {"error": "No best program available"}
+          
+          # Extract h array - handle common patterns
+          import re
+          
+          # Pattern 1: h = array([...])
+          match = re.search(r"h\s*=\s*array\s*\(([^)]+)\)", h, re.IGNORECASE)
+          if not match:
+              # Pattern 2: h = np.array([...])
+              match = re.search(r"np\.array\s*\(([^)]+)\)", h, re.IGNORECASE)
+          
+          if not match:
+              return {"error": "Could not extract h array from program"}
+          
+          try:
+              h_vals = [float(x.strip()) for x in match.group(1).split(",")]
+              h_vals = np.array(h_vals)
+          except:
+              return {"error": "Failed to parse h values"}
+          
+          N = len(h_vals)
+          if N != ctx.hypers.num_intervals:
+              return {"error": f"Unexpected h length: {N} (expected {ctx.hypers.num_intervals})"}
+          
+          dx = 2.0 / N
+          
+          # Compute overlap profile
+          h_padded = np.pad(h_vals, (0, N))
+          j_padded = np.pad(1.0 - h_vals, (0, N))
+          
+          corr_fft = np.fft.fft(h_padded) * np.conj(np.fft.fft(j_padded))
+          correlation = np.fft.ifft(corr_fft).real
+          overlap = correlation * dx
+          
+          # Find top 5 problematic k values
+          top_k = np.argsort(overlap)[-5:][::-1]
+          top_vals = overlap[top_k]
+          
+          return {
+              "overlap_profile": [float(overlap[k]) for k in range(N)],
+              "max_overlap": float(overlap.max()),
+              "max_overlap_k": int(np.argmax(overlap)),
+              "top_5_k": [int(k) for k in top_k],
+              "top_5_overlap": [float(v) for v in top_vals]
+          }
+new_skills:
+  - name: step-function-construction
+    description: |
+      Construct step functions with separated narrow peaks to minimize C5.
+      Focus on harmonic separation: place peaks so they don't overlap at problematic shifts.
+    body: |
+      # Step Function Construction for Erdos C5
+      
+      ## Core Strategy
+      Design h(x) as a sum of narrow rectangular pulses with total width = 1.0.
+      Place pulses at positions that minimize maximum overlap across all shifts k.
+      
+      ## Design Principles
+      
+      1. **Narrow Peaks**: Use widths 0.1-0.3 to minimize self-overlap
+      2. **Harmonic Separation**: Place peaks at distances that avoid problematic k values
+      3. **Symmetry**: Symmetric placements often yield lower C5
+      
+      ## Example Constructions
+      
+      ### Two-Peak Design (width=0.25 each)
+      Peaks at x=0.5, x=1.5
+      - Separation: 1.0 unit (400 intervals at 800 intervals total)
+      - Good for minimizing overlap at small k
+      
+      ### Three-Peak Design (width=0.2 each)
+      Peaks at x=0.33, x=1.0, x=1.67
+      - Separation: 0.67 and 0.67 units
+      - Check overlap at k=1, k=2, k=0.67
+      
+      ## Implementation Template
+      
+      For N=800 intervals (dx=0.0025):
+      - Peak at position p (0-indexed): h[p-w//2:p+w//2] = 1.0
+      - Total sum of widths must be N/800 = 1.0
+      
+      ## Verification Steps
+      1. Sum(h) = 1.0 (integral constraint)
+      2. All h[i] in [0,1]
+      3. Use compute_overlap_profile to check max overlap
+      4. Target: max_overlap < 0.38092303510845016

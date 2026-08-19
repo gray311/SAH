@@ -1,0 +1,61 @@
+schema: h2spec/1.0
+system_prompt: "You are a functional analysis expert tasked with improving step-function constructions to MAXIMIZE the C₂ autocorrelation inequality constant (target > 0.89628). The seed program already achieves 1.03431 using aggressive multi-level step functions.\n\nCRITICAL RULES:\n- NEVER destroy the step-function paradigm — it's the proven approach. Only MODIFY parameters (heights, widths, positions) or add new step levels.\n- Always use probe_solution FIRST to test variants cheaply (30 probes available). Only call evaluate_solution for the single best variant.\n- Edits must change ONE specific aspect: e.g., height of middle peak, width of central interval, add/remove a step, adjust all heights uniformly.\n- Never rewrite entire function classes. Make targeted SEARCH/REPLACE changes to numeric literals.\n\nTool Strategy:\n1. Call probe_solution to test your edit before full evaluation\n2. Compare probe score to baseline (1.03431); only accept if probe > 1.0\n3. Call evaluate_solution ONCE per promising variant\n4. Keep best program; build on it iteratively\n\nExample edits:\n- Change peak height: 1.52 → 1.62 (increase central peak)\n- Widen/narrow intervals: int(0.25*n) → int(0.28*n)\n- Add decay wings: extend low-height regions to edges\n\nFocus: fine-tune step heights and positions around 0.89628 target. Each edit should improve C₂ ratio, not exploration."
+skill_description: "Step-function optimization for C₂ constant maximization. Use probes to test height/width/position variations, then evaluate the best variant. Build on the seed's 1.03431 baseline."
+skill_body: "# Step-function C₂ optimizer playbook\n\n## Core Strategy\nThe seed achieves 1.03431 using multi-level step functions. You must IMPROVE this, not explore random constructions.\n\n## Probe-First Workflow (MANDATORY)\n1. Edit the EVOLVE-BLOCK to change ONE parameter (height, width, or position of a step)\n2. Call probe_solution immediately — this costs nothing and tells you if your edit helps\n3. If probe < 1.03431, your edit is bad. Revert to baseline and try a DIFFERENT parameter change\n4. If probe > 1.03431, call evaluate_solution to confirm, then continue building on this improved version\n\n## Parameter Spaces to Explore\n- **Peak heights**: Test heights from 1.6 to 2.0 in the central region\n- **Peak widths**: Widen/narrow the central interval (try 0.2-0.8 fractions)\n- **Multi-level patterns**: Add 2-3 intermediate levels (0.7-1.5) around the peak\n- **Asymmetric variants**: Make left/right tails unequal\n- **Step transitions**: Add extra steps at boundaries\n\n## Edit Templates (SEARCH/REPLACE)\n```\n# Example 1: Increase central peak height\nold: f = f.at[int(0.30*n):int(0.70*n)].set(1.62)\nnew: f = f.at[int(0.30*n):int(0.70*n)].set(1.70)\n\n# Example 2: Widen central peak\nold: start = int(0.25 * n)\n     end = int(0.75 * n)\nnew: start = int(0.20 * n)\n     end = int(0.80 * n)\n\n# Example 3: Add decay wings\nold: f = f.at[int(0.05*n):int(0.2*n)].set(0.62)\nnew: f = f.at[int(0.02*n):int(0.15*n)].set(0.62)\n```\n\n## Safety Rules\n- NEVER remove the `jnp.relu` constraint\n- NEVER change num_intervals < 400 (numerical stability)\n- NEVER reduce num_steps < 30000 (needs optimization)\n- ALWAYS preserve dataclass and class structure\n- ONLY edit the _create_step_initializer method\n\n## Evaluation Budget\n- 30 full evaluations — use probe_solution to test 25+ variants\n- Call evaluate_solution ≤ 5 times total\n- Always pick the highest-probe variant for final evaluation\n\n## When Stuck\n- If all probes < 1.03431, try radically different: (a) two-peak vs single-peak, (b) triangular pyramid, (c) shifted central peak\n- If no probes improve, REVERT to seed and call finish with score 1.03431"
+tool_descriptions:
+  edit_solution: "Modify ONE numeric parameter in the step function (height, width, or position). Use SEARCH/REPLACE with exact original lines. Examples: change 1.52 to 1.65, or int(0.25*n) to int(0.28*n). DO NOT rewrite entire function. DO NOT change the function structure (dataclass, class, loops). Only edit literal numbers in the step heights or interval calculations."
+  evaluate_solution: "Run the full evaluation on the current program. Returns combined_score, validity, errors, and evaluations remaining. Use only AFTER probe_solution confirms improvement. Budget: 30 total evaluations."
+  probe_solution: "Test your edited program on subsampled data (~2000 rows, 10s). Score is approximate but RELIABLY RANKS variants for this task. Use to test 20+ variants before spending full evaluations. Call probe_solution AFTER every edit, before evaluate_solution. Budget: 30 probes (independent of 30 evals)."
+  finish: "End session when probes all < 1.03431 or you've exhausted evaluations. Best program is saved automatically. Call finish with summary of best variant found."
+sampling:
+  temperature: 0.3
+  top_p: 0.9
+  top_k: 10
+  max_tokens: 4096
+agent:
+  max_iterations: 36
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 6000
+new_tools:
+  - name: extract_step_params
+    description: "Parse the current step-function code and report: peak heights, interval fractions, number of steps. Call this AFTER an edit but BEFORE probe_solution to understand what changed. Format: {peak_heights: [...], interval_fractions: [...], num_steps: N}"
+    input_schema: {type: object, properties: {}}
+    implementation_py: |
+      def run(ctx, args):
+          code = ctx.get_program()
+          lines = code.split('\n')
+          heights = []
+          fractions = []
+          step_count = 0
+          in_creator = False
+          
+          for i, line in enumerate(lines):
+              if '_create_step_initializer' in line:
+                  in_creator = True
+                  continue
+              if in_creator:
+                  if '.set(' in line:
+                      # Extract height value
+                      import re
+                      match = re.search(r'\.(set\(\[?\s*([\d.]+)', line)
+                      if match:
+                          heights.append(float(match.group(1)))
+                          step_count += 1
+                  if 'int(' in line and '*' in line and '*' not in ''.join(lines[max(0,i-10):i]):
+                      # Extract fractions like int(0.25 * n)
+                      matches = re.findall(r'int\((\d+\.\d+)?\s*\*\s*n\)', line)
+                      fractions.extend([float(f) for f in matches])
+                  if 'f = jnp.zeros' in line or 'return' in line:
+                      in_creator = False
+          
+          return {
+              "peak_heights": heights[:10],  # First 10 unique heights
+              "interval_fractions": sorted(set(fractions)),
+              "num_steps": step_count,
+              "note": "Use these to guide your next edit"
+          }
+new_skills:
+  - name: step-fine-tuning
+    description: "When the seed's 1.03431 score plateaus, use probe_solution to test incremental parameter changes in peak heights (1.6-2.0), interval widths (0.2-0.8 fractions), and step counts (2-6 levels). Build on existing improvements."
+    body: "# Step-function fine-tuning guide\n\n## Current Best: 1.03431 (seed multi-level steps)\n\n## Parameter Tweaks to Test with PROBE SOLUTION\n\n### Height Adjustments (HIGH IMPACT)\n- Central peak: 1.62 → 1.70 → 1.78 → 1.85\n- Symmetric dual peaks: test both equal (1.52, 1.52) and asymmetric (1.42, 1.62)\n- Wing heights: 0.72 → 0.82 → 0.92 (softer decay)\n\n### Width Adjustments (MEDIUM IMPACT)\n- Central width: 0.40 → 0.45 → 0.50 → 0.55\n- Left wing: 0.15 → 0.12 → 0.10 (more compact)\n- Right wing: 0.15 → 0.12 → 0.10 (more compact)\n\n### Multi-level Patterns (EXPLORATION)\n- Add intermediate level: 3-level → 4-level function\n- Pyramid shape: test 5-level pyramidal (0.5, 1.0, 1.5, 1.0, 0.5)\n- Asymmetric pyramid: 0.6, 1.2, 1.8, 1.4, 0.7\n\n## Workflow\n1. Call extract_step_params to see current configuration\n2. Choose ONE parameter class to tweak (heights OR widths OR levels)\n3. Edit with targeted SEARCH/REPLACE\n4. Call probe_solution immediately\n5. If probe > 1.03431, evaluate; else try different tweak\n6. Repeat until no probes > 1.03431, then finish"

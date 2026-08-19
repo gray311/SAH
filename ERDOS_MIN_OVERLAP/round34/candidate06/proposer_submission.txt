@@ -1,0 +1,268 @@
+schema: h2spec/1.0
+system_prompt: |
+  Erdos minimum overlap problem (C5): Find h: [0,2]->[0,1] minimizing max_k integral h(x)(1-h(x+k))dx.
+  
+  CONSTRAINT: integral(h) = 1 exactly. h values in [0,1].
+  
+  Current best: C5 <= 0.38092303510845016 (combined_score = 1.0).
+  
+  GOAL: Find h achieving c5_bound < 0.38092303510845016 (combined_score > 1.0).
+  
+  STRATEGY - CONSTRUCTION FOCUS:
+  
+  1. CREATE STEP FUNCTIONS with specific structures:
+     - Bipartite: h(x) = 1 for x < threshold, 0 otherwise (scales to satisfy integral=1)
+     - Multi-modal: Multiple narrow peaks separated by gaps
+     - Sparse: Non-zero on small intervals
+     - Golomb-like: Peaks at specific positions with controlled spacing
+  
+  2. KEY INSIGHT: The optimal h may be a piecewise constant function with few jumps.
+     Start with simple 2-4 interval structures, then refine.
+  
+  3. Ensure integral constraint by scaling: if sum of interval widths = W, scale heights so sum = 1.
+  
+  4. Evaluate candidates and iterate, focusing on reducing peak overlap at problematic k values.
+  
+  5. Use probe_solution extensively to screen many structural variants before full evaluation.
+  
+  6. Only submit when combined_score > 1.0.
+skill_description: |
+  Construct step functions with specific structures (bipartite, multi-modal, sparse) that satisfy integral(h)=1.
+  Use probe_solution to screen many variants before full evaluation. Focus on reducing peak overlaps.
+skill_body: |
+  # Step Function Construction Strategy
+  
+  ## Core Principle
+  The optimal step function h likely has few intervals with specific spacing. Build structured candidates, not random ones.
+  
+  ## Construction Types
+  
+  ### 1. Bipartite Functions
+  - Single threshold: h(x) = 1 for x < t, 0 for x >= t (scaled)
+  - For domain [0,2]: h(x) = 1 for x < t * 2, 0 otherwise, where t chosen so integral = 1
+  - Bipartite functions have simple correlation structure
+  
+  ### 2. Multi-Modal Functions
+  - Two peaks: h has two narrow intervals where h ≈ 1, separated by region where h = 0
+  - Peaks at positions p1, p2 with widths w1, w2: total width = w1 + w2 = 1 (for integral = 1)
+  - Adjust spacing to minimize overlap at problematic k values
+  
+  ### 3. Sparse Functions
+  - Non-zero on very small intervals
+  - Example: three narrow peaks at 0.33, 1.0, 1.67 with width 0.1 each
+  
+  ## Constraint Satisfaction
+  - integral(h) = 1 means sum of (height * width) over all intervals = 1
+  - If heights are all 1, sum of widths must equal 1
+  - Domain is [0,2], so available "space" for width-1 regions is generous
+  
+  ## Evaluation Strategy
+  1. Construct 3-5 different structural variants
+  2. Use probe_solution to quickly score each
+  3. Evaluate top 1-2 candidates fully
+  4. If no improvement, try different structural templates
+  
+  ## Key Insight
+  Simple structures (2-4 intervals) may outperform complex random ones because:
+  - Easier to analytically compute correlations
+  - Fewer degrees of freedom = more predictable behavior
+  - The problem may have an analytical optimum with simple structure
+tool_descriptions:
+  edit_solution: |
+    Modify the step function construction. Focus on creating structured h functions:
+    - Bipartite: single threshold region
+    - Multi-modal: 2-4 narrow peaks with gaps
+    - Sparse: very small non-zero intervals
+    
+    To create multi-modal: define peak positions and widths, ensure sum of widths = 1.
+    Example: peaks at [0.3, 1.0, 1.7] with widths [0.15, 0.3, 0.15] -> sum=0.6, scale to 1.
+    
+    Always verify the integral constraint (sum of widths for height=1 regions must equal 1).
+  evaluate_solution: |
+    Full optimization run. Returns combined_score = 0.38092303510845016 / c5_bound.
+    Higher is better. combined_score > 1.0 means new record.
+    
+    Use only after probe_solution confirms c5_bound < 0.375.
+  probe_solution: |
+    Fast approximate evaluation (500 intervals). Good for screening many structural variants.
+    
+    Check if c5_bound < 0.375 before full evaluation.
+    Budget: separate from eval budget.
+  finish: |
+    Submit when combined_score > 1.0.
+sampling:
+  temperature: 0.4
+  top_p: 0.9
+  top_k: 15
+  max_tokens: 12000
+agent:
+  max_iterations: 60
+middleware:
+  budget_reminder_from_left: 8
+  long_tool_output_max_chars: 10000
+new_tools:
+- name: construct_step_function
+  description: |
+    Generate a step function h: [0,2]->[0,1] with specified structure that satisfies integral(h)=1.
+    
+    Structure types:
+    - "bipartite": single threshold (h=1 for x<t, h=0 otherwise)
+    - "bimodal": two narrow peaks separated by gap
+    - "trimodal": three narrow peaks at specified positions
+    - "sparse": non-zero on very small total-width intervals
+    
+    Returns h as a discretized array with 800 intervals.
+    
+    All outputs satisfy: values in [0,1] and integral over [0,2] equals 1.
+  input_schema:
+    type: object
+    properties:
+      structure:
+        type: string
+        enum: [bipartite, bimodal, trimodal, sparse]
+      params:
+        type: object
+        description: Structure-specific parameters
+        properties:
+          threshold:
+            type: number
+            description: For bipartite, threshold t where h=1 for x < t*2
+          peak_positions:
+            type: array
+            items:
+              type: number
+            description: For multi-modal, positions of peaks in [0,2]
+          peak_widths:
+            type: array
+            items:
+              type: number
+            description: For multi-modal, widths of each peak (sum must be <= 1)
+          total_width:
+            type: number
+            description: For sparse, total width of non-zero regions (must be <= 1)
+    required: [structure, params]
+  implementation_py: |
+    def run(ctx, args):
+        import numpy as np
+        structure = args.get("structure", "bimodal")
+        params = args.get("params", {})
+        
+        N = 800
+        domain = 2.0
+        dx = domain / N
+        h = np.zeros(N)
+        
+        if structure == "bipartite":
+            # Single threshold: h=1 for x < threshold * 2
+            threshold = params.get("threshold", 0.5)
+            cutoff = threshold * 2
+            mask = np.arange(N) * dx < cutoff
+            h[mask] = 1.0
+        
+        elif structure == "bimodal":
+            # Two peaks
+            positions = params.get("peak_positions", [0.3, 1.7])
+            widths = params.get("peak_widths", [0.2, 0.2])
+            for pos, width in zip(positions, widths):
+                left = max(0, pos - width/2)
+                right = min(2, pos + width/2)
+                mask = (np.arange(N) * dx >= left) & (np.arange(N) * dx < right)
+                h[mask] = 1.0
+        
+        elif structure == "trimodal":
+            # Three peaks
+            positions = params.get("peak_positions", [0.33, 1.0, 1.67])
+            widths = params.get("peak_widths", [0.15, 0.3, 0.15])
+            for pos, width in zip(positions, widths):
+                left = max(0, pos - width/2)
+                right = min(2, pos + width/2)
+                mask = (np.arange(N) * dx >= left) & (np.arange(N) * dx < right)
+                h[mask] = 1.0
+        
+        elif structure == "sparse":
+            # Very sparse: non-zero on small total width
+            total_width = params.get("total_width", 0.5)
+            positions = params.get("peak_positions", [0.5, 1.0, 1.5])
+            num_peaks = len(positions)
+            width_per_peak = total_width / num_peaks
+            for pos, width in zip(positions, [width_per_peak]*num_peaks):
+                left = max(0, pos - width/2)
+                right = min(2, pos + width/2)
+                mask = (np.arange(N) * dx >= left) & (np.arange(N) * dx < right)
+                h[mask] = 1.0
+        
+        # Verify integral constraint
+        integral = np.sum(h) * dx
+        return {"h": h.tolist(), "integral": float(integral), "structure": structure}
+
+new_skills:
+- name: structured-construction-playbook
+  description: Build step functions with specific structures (bipartite, multi-modal, sparse) that satisfy integral=1.
+  body: |
+    # Structured Step Function Construction
+    
+    ## Why Structure Matters
+    Random sigmoid-based functions don't naturally satisfy integral=1 and may have suboptimal correlation structure.
+    Piecewise constant step functions with few intervals are analytically tractable and may achieve better C5 bounds.
+    
+    ## Construction Guide
+    
+    ### Step 1: Choose a Structure
+    - **Bipartite**: Single threshold. h=1 on [0, t), h=0 on [t, 2]. Integral = t*1 = t, so set t=1.
+      Example: h(x) = 1 for x < 1, h(x) = 0 for x >= 1.
+    
+    - **Bimodal**: Two peaks. Total width of peaks = 1.
+      Example: peaks at [0.3, 1.7] with widths [0.4, 0.4], gap = 1.2.
+      h = 1 on [0.3, 0.7] and [1.3, 1.7], h = 0 elsewhere.
+    
+    - **Trimodal**: Three peaks. Total width = 1.
+      Example: peaks at [0.33, 1.0, 1.67] with widths [0.2, 0.3, 0.2], sum = 0.7, scale to 1.
+      Or: three equal peaks of width 1/3 each.
+    
+    - **Sparse**: Non-zero on very small total width (e.g., 0.3-0.5).
+      Example: three narrow peaks of width 0.1 each at [0.5, 1.0, 1.5].
+    
+    ### Step 2: Ensure Integral = 1
+    For height=1 regions: sum of widths must equal 1.
+    For varying heights: sum of (height * width) must equal 1.
+    
+    ### Step 3: Use construct_step_function Tool
+    Call: construct_step_function(structure="bimodal", params={"peak_positions": [0.3, 1.7], "peak_widths": [0.2, 0.2]})
+    
+    This tool returns a discretized h array with integral = 1.
+    
+    ### Step 4: Evaluate with probe
+    Use probe_solution to quickly screen candidates. Keep those with c5_bound < 0.375.
+    
+    ### Step 5: Full evaluation
+    Evaluate promising candidates. Target combined_score > 1.0.
+    
+    ## Key Insight
+    Simple structures (2-4 intervals) are easier to optimize and may outperform complex random functions.
+    Start with 2-3 interval structures, then refine.
+new_middlewares:
+- name: structure_reminder
+  hook: before_model
+  description: Remind executor to use structured step function construction instead of random approaches.
+  implementation_py: |
+    def before_model(hook_input):
+        history = hook_input.get("history", [])
+        
+        # If no construct_step_function calls yet, remind
+        has_construct = any("construct_step_function" in str(turn.get("tools_used", [])) 
+                          for turn in history)
+        if not has_construct:
+            return "Reminder: Use construct_step_function to create structured step functions (bipartite, bimodal, trimodal, sparse) with integral=1. Avoid random sigmoid-based approaches."
+        
+        # If we've only tried one structure type, encourage diversity
+        structures_tried = set()
+        for turn in history:
+            if "construct_step_function" in str(turn.get("tools_used", [])):
+                tool_result = turn.get("tool_outputs", {}).get("construct_step_function", {})
+                if isinstance(tool_result, dict) and "structure" in tool_result:
+                    structures_tried.add(tool_result["structure"])
+        
+        if len(structures_tried) <= 1:
+            return f"You've only tried {len(structures_tried)} structure type(s). Try different structures: bipartite, bimodal, trimodal, or sparse to explore diverse solutions."
+        
+        return None

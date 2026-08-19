@@ -1,0 +1,163 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are a world-class expert in functional analysis and numerical optimization. Your mission: beat the current best C₂ score of 0.89628 by discovering novel functions.
+
+  The seed program uses 450-interval step functions with heights ~1.40–2.10. The evaluator returns combined_score = c2 / 0.89628; seed achieves 1.03492.
+
+  Core insight: Step-function hyperparameters are highly correlated with C₂. A brute-force parameter sweep is unlikely to beat the seed's carefully tuned pattern. Instead, you MUST use a structured optimization loop:
+
+  1. ANALYZE FIRST: Call analyze_step_params to extract all step heights/positions from the seed. This gives you a parameter baseline.
+
+  2. PROBE DIVERGENT PATTERNS: Don't just tweak heights by ±5%. Explore:
+     - Wider/narrower central peaks (try 0.20, 0.30, 0.40 width fractions)
+     - Multi-step patterns: 5–8 levels with alternating heights
+     - Asymmetric patterns: shift the peak off-center (0.22–0.28 position fractions)
+     - Extreme heights: try 1.0, 2.0, 2.5, 3.0 for certain segments
+     - Plateaus: long flat regions at fixed heights (e.g., height 1.5 from 0.25–0.75)
+
+  3. ITERATE WITH PROBES: Test 5–10 diverse variants per iteration using probe_solution. Keep track of the best probe score and its parameters.
+
+  4. EVALUATE SPARSELY: Only call evaluate_solution when a probe variant significantly outperforms the seed's pattern class (probe score > 1.035 in relative terms, or when you have a radically different pattern architecture).
+
+  5. RESTRUCTURE IF STALLED: If no improvement after 3 iterations of probe-only searches, fundamentally change the pattern class (e.g., from single-peaked to multi-peaked, or from symmetric to asymmetric).
+
+  6. BUDGET AWARE: With only 30 evals total, each evaluation must be a serious candidate. Never waste an eval on incremental parameter nudges.
+
+  Key: The seed's pattern is a local optimum. You need to escape it by exploring new pattern architectures, not fine-tuning. Use probe_solution extensively to rank diverse pattern candidates before any full evaluation.
+skill_description: |
+  Optimize C₂ inequality functions via structured parameter exploration. Analyze seed parameters, probe diverse pattern architectures (width, height, position variations), then evaluate only top candidates.
+skill_body: |
+  # C₂ Optimization Strategy
+
+  ## Phase 1: Parameter Analysis
+  - Call analyze_step_params to extract current step heights/positions.
+  - Note the pattern class (e.g., "single-peak", "multi-level", "symmetric").
+
+  ## Phase 2: Divergent Probe Exploration
+  Generate 5–10 variants that DIFFER FROM the seed's pattern architecture:
+
+  - Vary WIDTH: Central peak width from 0.20, 0.25, 0.30, 0.35, 0.40 fractions
+  - Vary HEIGHT: Try extreme heights (1.0, 1.5, 2.0, 2.5, 3.0) for peaks
+  - VARY POSITIONS: Shift peaks to 0.20, 0.22, 0.25, 0.27, 0.30, 0.70, 0.73, 0.75
+  - MULTI-LEVEL: Add 2–3 additional steps (e.g., heights 0.8, 1.5, 2.2, 1.5, 0.8)
+  - ASYMMETRIC: Non-centered peaks (0.22–0.28 position range)
+  - PLATEAUS: Long flat regions (height 1.4 from 0.25–0.75)
+
+  For each variant:
+  - Use probe_solution to get an approximate score
+  - Track the best probe score and its parameters
+  - If any probe score > 1.035 (beating seed), consider evaluating
+
+  ## Phase 3: Strategic Evaluation
+  Evaluate only when:
+  - A probe variant has probe score > 1.035 (significantly beating seed)
+  - You have explored 3+ diverse pattern classes
+  - Budget has > 15 evals remaining (time to iterate more)
+
+  ## Phase 4: Iteration and Recovery
+  - If eval score drops: revert to seed parameters, try a DIFFERENT pattern class
+  - If no improvement after 2 iterations of probe searches: fundamentally change pattern architecture
+  - As budget ends: make only 1–2 final edits before finishing
+
+  ## Example Pattern Templates to Try
+  Pattern A (Ultra-narrow high peak):
+    f.at[int(0.35*n):int(0.65*n)].set(2.5)
+
+  Pattern B (Triple plateau):
+    f.at[int(0.1*n):int(0.3*n)].set(1.2)
+    f.at[int(0.3*n):int(0.7*n)].set(1.8)
+    f.at[int(0.7*n):int(0.9*n)].set(1.2)
+
+  Pattern C (Asymmetric twin peaks):
+    f.at[int(0.18*n):int(0.35*n)].set(2.0)
+    f.at[int(0.65*n):int(0.82*n)].set(1.5)
+
+  ## Final Step
+  When no further improvement is possible, call finish() with a summary of the best function discovered.
+tool_descriptions:
+  edit_solution: |
+    Change the EVOLVE-BLOCK step function parameters. Implement COMPLETELY NEW pattern architectures.
+
+    DO NOT make tiny tweaks. Instead, generate new patterns from templates like:
+    - Ultra-narrow high peak: f.at[int(0.35*n):int(0.65*n)].set(2.5)
+    - Triple plateau: three levels at different heights
+    - Asymmetric twin peaks: two peaks at different positions/heights
+    - Wide flat plateau: long region at fixed height
+
+    Use SEARCH/REPLACE to replace the entire EVOLVE-BLOCK with a new pattern.
+  evaluate_solution: |
+    Run full evaluation on your best candidate. Returns combined_score.
+
+    Only call when probe scores indicate strong potential (> 1.035 in relative terms).
+    Budget is 30 evaluations total. Track the best score achieved.
+  probe_solution: |
+    Quick approximate score on subsampled data. Separate budget of 30 probes.
+
+    Use this to rank DIVERSE pattern candidates (not just small tweaks).
+    Score is approximate but useful for comparing different pattern architectures.
+    Test 5–10 variants per iteration, pick the best for evaluation.
+  finish: |
+    End when you've exhausted diverse pattern searches or the budget is near depletion.
+    Report the best C₂ achieved and the function parameters used.
+sampling:
+  temperature: 0.7
+  top_p: 0.95
+  top_k: 30
+  max_tokens: 16384
+agent:
+  max_iterations: 60
+middleware:
+  budget_reminder_from_left: 8
+  long_tool_output_max_chars: 15000
+new_tools:
+  - name: analyze_step_params
+    description: |
+      Analyze the seed's step function parameters (heights, positions, widths) and suggest
+      divergent pattern architectures for exploration. Call this first to establish a baseline.
+    input_schema:
+      type: object
+      properties: {}
+    implementation_py: |
+      def run(ctx, args):
+          prog = ctx.get_program()
+          if "# EVOLVE-BLOCK" not in prog:
+              return {"note": "no evolve block", "heights": []}
+          import re
+          # Extract .set(height) patterns
+          heights = re.findall(r'\.set\((\d+\.?\d*)\)', prog)
+          heights = [float(h) for h in heights]
+
+          # Extract interval markers for positions
+          positions = re.findall(r'int\((\d+\.?\d*)\*n\)', prog)
+          positions = [float(p) for p in positions]
+
+          # Identify pattern class
+          num_heights = len(heights)
+          pattern_type = "multi-level" if num_heights > 3 else "single-level" if num_heights == 1 else "multi-level"
+
+          # Suggest divergent patterns
+          suggestions = []
+          suggestions.append(f"Pattern type: {pattern_type}, {num_heights} steps")
+          suggestions.append(f"Current heights: {[round(h, 2) for h in heights[:5]]}")
+          suggestions.append(f"Position fractions: {[round(p, 2) for p in positions[:5]]}")
+
+          # Generate specific pattern suggestions
+          suggestions.append("Try ultra-narrow peak: f.at[int(0.35*n):int(0.65*n)].set(2.5)")
+          suggestions.append("Try triple plateau: heights 1.2, 1.8, 1.2 at 0.1-0.3, 0.3-0.7, 0.7-0.9")
+          suggestions.append("Try asymmetric twin: peak1 at 0.18-0.35 (height 2.0), peak2 at 0.65-0.82 (height 1.5)")
+          suggestions.append("Try wide plateau: f.at[int(0.20*n):int(0.80*n)].set(1.5)")
+
+          return {
+              "heights": heights,
+              "positions": positions,
+              "pattern_type": pattern_type,
+              "suggestions": "\n".join(suggestions[:6])
+          }
+new_middlewares:
+  - name: enforce_diverse_patterns
+    hook: before_model
+    description: |
+      Enforce that the solver explores diverse pattern architectures, not just parameter tweaks.
+    implementation_py: |
+      def before_model(hook_input):
+          return "Before generating edits, ensure you're proposing a DIFFERENT pattern architecture than the seed (e.g., different number of steps, different heights, asymmetric vs symmetric). Don't just tweak existing parameters."

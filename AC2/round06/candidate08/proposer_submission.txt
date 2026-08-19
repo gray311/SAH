@@ -1,0 +1,34 @@
+schema: h2spec/1.0
+system_prompt: "You are an expert in optimization and numerical analysis. Your task: maximize C2 by improving the seed program's hyperparameters.\n\nThe seed program uses JAX optimization with configurable parameters. Your strategy:\n\n1. **SYSTEMATIC HYPERPARAMETER SWEEP**: The seed has many tunable parameters that affect convergence:\n   - num_intervals: [100, 200, 350, 500, 1000] - grid resolution\n   - learning_rate: [0.01, 0.05, 0.1, 0.125, 0.2] - step size\n   - num_steps: [10000, 20000, 40000, 80000] - optimization budget\n   - warmup_steps: [1000, 4000, 10000] - warmup length\n   - reinit_fraction: [0.05, 0.1, 0.15] - reinitialization rate\n   - reinit_std: [0.01, 0.02, 0.05] - reinit noise\n\n2. **GRID SEARCH STRATEGY**:\n   - Generate 8-12 parameter combinations\n   - Call probe_solution on each (cheap, ~10s)\n   - Rank by probe score\n   - Evaluate TOP 2-3 with evaluate_solution\n\n3. **IF NO PROGRESS**: Try different learning rate schedules, adaptive learning rates, or restart strategies\n\n4. **MAX 4 FULL EVALS**: Use probes to filter. Never evaluate more than 4 candidates.\n\nTOOL USAGE:\n- edit_solution: Change optimizer hyperparameters (num_intervals, learning_rate, num_steps, warmup_steps, reinit_fraction, reinit_std)\n- probe_solution: Test parameter combinations cheaply (~10s each)\n- evaluate_solution: Only for top 2-3 candidates\n- finish: When done"
+tool_descriptions:
+  edit_solution: 'Change optimizer hyperparameters in the EVOLVE-BLOCK:\n   - Modify OptimizerHyperparameters class fields\n   - Change num_intervals, learning_rate, num_steps, warmup_steps\n   - Tune reinit_fraction and reinit_std for better exploration\n   - Use concrete values, e.g., num_intervals=350, learning_rate=0.125, num_steps=40000'
+  evaluate_solution: Run the full evaluator. Returns combined_score. Use sparingly (max ~20 total). Only evaluate after probing.
+  probe_solution: Cheap score on subsampled data (~10s vs minutes). Separate budget (~30 available). Use for ranking parameter combinations. Call this 8-12 times before any evaluate.
+  finish: End the session. Call when budget exhausted or score > 1.028 achieved.
+sampling:
+  temperature: 0.5
+  top_p: 0.9
+  top_k: 10
+  max_tokens: 12288
+agent:
+  max_iterations: 60
+middleware:
+  budget_reminder_from_left: 1
+  long_tool_output_max_chars: 8000
+new_tools:
+- name: param_sweeper
+  description: Generate systematic hyperparameter combinations for the optimizer. Returns config dicts with values for num_intervals, learning_rate, num_steps, warmup_steps, reinit_fraction, reinit_std. Call this to get diverse starting points before probing.
+  input_schema:
+    type: object
+    properties:
+      num_combinations:
+        type: integer
+        description: Number of combinations to generate (8-15)
+      focus:
+        type: string
+        description: Focus area - 'resolution' (intervals), 'learning_rate', 'steps', or 'balanced'
+  implementation_py: "def run(ctx, args):\n    import random\n    seed = args.get('seed', 42)\n    random.seed(seed)\n    \n    configs = []\n    \n    # Different combinations based on focus\n    if args.get('focus', 'balanced') == 'resolution':\n        num_intervals_list = [100, 200, 350, 500, 800, 1000]\n        lr_list = [0.05, 0.1, 0.125]\n        steps_list = [20000, 40000, 60000]\n        warmup_list = [2000, 4000, 8000]\n        reinit_frac_list = [0.05, 0.1, 0.15]\n        reinit_std_list = [0.01, 0.02, 0.04]\n    elif args.get('focus', 'balanced') == 'learning_rate':\n        num_intervals_list = [300, 400, 500, 600]\n        lr_list = [0.01, 0.05, 0.1, 0.15, 0.2]\n        steps_list = [15000, 30000, 45000, 60000]\n        warmup_list = [1000, 3000, 6000]\n        reinit_frac_list = [0.08, 0.12, 0.18]\n        reinit_std_list = [0.015, 0.025, 0.05]\n    else:  # balanced\n        num_intervals_list = [200, 300, 350, 450, 600]\n        lr_list = [0.05, 0.1, 0.125, 0.2]\n        steps_list = [20000, 35000, 50000, 70000]\n        warmup_list = [2000, 5000, 8000]\n        reinit_frac_list = [0.05, 0.1, 0.15]\n        reinit_std_list = [0.01, 0.02, 0.04]\n    \n    for _ in range(args.get('num_combinations', 10)):\n        config = {\n            'num_intervals': random.choice(num_intervals_list),\n            'learning_rate': random.choice(lr_list),\n            'num_steps': random.choice(steps_list),\n            'warmup_steps': random.choice(warmup_list),\n            'reinit_fraction': random.choice(reinit_frac_list),\n            'reinit_std': random.choice(reinit_std_list),\n        }\n        configs.append(config)\n    \n    return {\n        'configs': configs,\n        'num_generated': len(configs),\n        'focus': args.get('focus', 'balanced')\n    }"
+new_skills:
+- name: optimizer-hyperparameter-tuning
+  description: Method playbook for C2 optimization via hyperparameter sweeps. Focus on grid search over seed optimizer parameters, probe before eval, max 4 evals.
+  body: '# Hyperparameter Optimization for C2 Maximization\n\n## Objective\n\nMaximize C2 > 1.028. Current baseline: 1.02665 (seed). Target: > 1.028.\n\n## Core Strategy: Systematic Hyperparameter Sweep\n\nThe seed program is a JAX optimizer with tunable parameters. Your approach:\n\n### Phase 1: Parameter Space Exploration\n\n1. **Call param_sweeper** to generate 10-12 hyperparameter combinations\n2. Focus on key parameters:\n   - num_intervals: grid resolution (100-1000)\n   - learning_rate: step size (0.01-0.2)\n   - num_steps: optimization budget (10k-80k)\n   - warmup_steps: warmup length (1k-10k)\n   - reinit_fraction: restart rate (0.05-0.2)\n   - reinit_std: restart noise (0.01-0.05)\n\n3. **Probe each combination** (call probe_solution)\n4. **Rank by probe score**\n5. **Evaluate TOP 3** only\n\n### Phase 2: Analysis and Iteration\n\n- If improvement: analyze which parameter changed most\n- Try focusing on that parameter (narrower sweep)\n- If no improvement: try different focus (e.g., resolution vs learning rate)\n\n### Phase 3: Advanced Strategies\n\n- **Adaptive learning rate**: Try schedulers (not supported in seed, but modify warmup)\n- **Multi-stage optimization**: Coarse grid, then refine\n- **Ensemble initialization**: Combine best parameters from different runs\n\n### Critical Rules\n\n- MAX 4 full evaluations\n- Always probe 8-12 combinations before any eval\n- Track which parameter combinations worked\n- Diversify if stuck: switch focus area\n\n## Tool Usage Priority\n\n1. param_sweeper — generate hyperparameter combinations\n2. probe_solution — rank many variants cheaply\n3. edit_solution — apply top parameter set\n4. evaluate_solution — confirm only 2-3 top candidates\n5. finish — when evals exhausted or score > 1.028 achieved'

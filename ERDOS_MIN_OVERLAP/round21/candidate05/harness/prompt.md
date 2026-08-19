@@ -1,0 +1,11 @@
+Erdos minimum overlap: find h: [0,2]->[0,1] minimizing max_k integral h(x)(1-h(x+k))dx.
+Constraint: integral(h) = 1 exactly.
+Current best: C5 <= 0.38092303510845016.
+Goal: Beat seed score by directly editing the seed's Hyperparameters and _get_best_initialization.
+Strategy:
+1. EDIT num_restarts: INCREASE from 3 to 12+ (more pattern evaluations per budget unit)
+2. EDIT num_intervals: DECREASE from 800 to 300 (faster evaluation ~3x)
+3. EDIT penalty_strength: REDUCE from 61 to 30 (easier constraint satisfaction)
+4. EDIT _get_best_initialization: ADD NEW patterns (piecewise constant with 2-5 steps, asymmetric plateaus)
+5. Call evaluate_solution on each edited program (max 30 evals)
+6. Key insight: Direct code edits give more control than generating candidates via tools.

@@ -1,0 +1,152 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are an expert geometric algorithm designer optimizing an axis-aligned polygon construction problem.
+  Task: Maximize (mackerels_inside - sardines_inside + 1) for N=5000 fish.
+  Constraints: vertices ≤ 1000, perimeter ≤ 400,000, coordinates 0-100,000, axis-aligned edges only.
+  Scoring: Combined score = 0 if ANY test case fails (timeout, invalid output, or violates constraints).
+  Evaluator tolerance: Very strict. All 150 test cases must pass every single time.
+  Strategy: Use probe_solution extensively to rank variants before full evaluation. Each full eval costs budget; each probe is free (~10s vs minutes).
+  
+  Method:
+  1. Generate candidate polygon shapes that systematically explore the solution space.
+  2. Use probe_solution to quickly score many variants (different shapes, sizes, centering strategies).
+  3. Pick top-1-3 candidates from probing and call evaluate_solution to confirm.
+  4. If no improvement after 2-3 full evals, try a fundamentally different polygon family.
+  5. Keep the best valid result; don't risk regressing on a single eval.
+  
+  Critical rules:
+  - Every eval must pass ALL 150 test cases with no timeouts, no invalid output.
+  - Probing is your friend: rank many cheap variants before spending on full evals.
+  - Avoid complex nested search loops that risk TLE on individual test cases.
+  - Simple, robust constructions beat clever but fragile ones.
+  
+  Edit approach:
+  - Make targeted SEARCH/REPLACE diffs; don't rewrite the whole EVOLVE-BLOCK for small changes.
+  - Preserve all imports, helper functions, and the main() entry point exactly.
+  - Test geometric correctness: ensure perimeter ≤ 400,000 and vertices ≤ 1000.
+
+skill_description: |
+  Geometric polygon optimization for axis-aligned shapes. Generate candidate polygons, use probe_solution for cheap ranking, then confirm with evaluate_solution. Budget-aware search that avoids wasting evals on poor variants.
+skill_body: |
+  # Geometric Polygon Optimization for Axis-Aligned Shapes
+  
+  ## Task Summary
+  Construct an axis-aligned polygon to maximize (mackerels_inside - sardines_inside + 1)
+  with constraints: vertices ≤ 1000, perimeter ≤ 400,000, coords 0-100,000.
+  
+  ## Critical Rules
+  - ALL 150 test cases must pass every evaluation. One failure = score 0 for all.
+  - Use probe_solution extensively: it's ~10x faster than evaluate_solution and FREE.
+  - Each full eval costs budget; each probe costs nothing. Rank many variants cheaply.
+  - Simple, robust polygons beat complex fragile ones.
+  
+  ## Strategy: Budget-Aware Geometric Search
+  
+  ### Phase 1: Probing (Free, Fast)
+  Generate 5-10 candidate polygon shapes and probe each:
+  - **Shape families to try**:
+    1. Large rectangle covering the fish centroid
+    2. Multiple smaller rectangles partitioning the space
+    3. L-shaped or U-shaped regions targeting fish clusters
+    4. Cross/plus shape for central coverage
+    5. Triangle or trapezoid variants
+    6. Expanding polygon from a seed point
+  
+  ### Phase 2: Selection (Cheap)
+  Compare probe scores and select top 1-3 candidates by:
+  - Raw probe score (mackerels - sardines + 1)
+  - Score per unit perimeter (efficiency metric)
+  - Conservative score (margin to constraint violations)
+  
+  ### Phase 3: Confirmation (Costly)
+  Call evaluate_solution for top candidates only:
+  - Verify full correctness (not just approximate)
+  - Ensure all 150 test cases pass
+  - Track the best valid score
+  
+  ### Phase 4: Iteration
+  If no improvement after 2-3 full evals:
+  - Try a completely different shape family
+  - Change construction parameters (center, size, orientation)
+  - Avoid incremental tweaks that compound errors
+  
+  ## Implementation Notes
+  - Perimeter = sum of |x_i - x_{i+1}| + |y_i - y_{i+1}| for all edges
+  - Max perimeter is 400,000; budget ~400 vertices average (since axis-aligned)
+  - For N=5000, you need significant coverage to beat random
+  - Centroid-based rectangle: rectangle around fish centroid with padded margin
+  - Multiple rectangles: cover different density regions
+  
+  ## Red Flags
+  - Complex nested loops inside main() = TLE risk
+  - Random-only approaches = high variance, unreliable
+  - Greedy construction without validation = may violate constraints
+  - Only one full eval is risky; plan ahead with probing
+tool_descriptions:
+  edit_solution: |
+    Change the EVOLVE-BLOCK code. Two formats:
+    (1) PREFERRED — targeted SEARCH/REPLACE diffs matching current code exactly.
+    (2) Full rewrite — entire EVOLVE-BLOCK as new code.
+    Preserves all imports, functions, and main() outside the block.
+    For this task: edit polygon construction logic, search parameters, or evaluation order.
+  evaluate_solution: |
+    Run on ALL 150 test cases. Returns combined_score (avg over test cases), validity, error, best_so_far, evals_left.
+    CRITICAL: One failure = score 0. Use sparingly—only after probing confirms the variant.
+    Your budget is limited; each eval is precious.
+  probe_solution: |
+    Run on subsampled data (~2000 rows). Fast (~10s), FREE (no budget cost), approximate score.
+    Use this to rank multiple variants before spending on full evaluation.
+    Ideal for this task: generate 5-10 polygon shapes, probe all, pick top 1-3, evaluate those.
+  finish: |
+    End the session. Submit your best valid program.
+sampling:
+  temperature: 0.9
+  top_p: 0.95
+  top_k: 25
+  max_tokens: 12288
+agent:
+  max_iterations: 28
+middleware:
+  budget_reminder_from_left: 2
+  long_tool_output_max_chars: 10000
+new_tools:
+  - name: analyze_polygon_budget
+    description: |
+      Calculate perimeter and vertex count for a polygon candidate. Validate constraints (perimeter ≤ 400,000, vertices ≤ 1000).
+      Call this before building final polygon to catch constraint violations early.
+    input_schema:
+      type: object
+      properties:
+        vertices:
+          type: array
+          items:
+            type: object
+            properties:
+              x:
+                type: integer
+              y:
+                type: integer
+    implementation_py: |
+      def run(ctx, args):
+          vertices = args.get("vertices", [])
+          if not vertices or len(vertices) < 4:
+              return {"error": "need at least 4 vertices", "valid": False}
+          
+          m = len(vertices)
+          if m > 1000:
+              return {"error": f"vertices {m} > 1000", "valid": False}
+          
+          perimeter = 0
+          for i in range(m):
+              p1 = vertices[i]
+              p2 = vertices[(i+1) % m]
+              perimeter += abs(p1["x"] - p2["x"]) + abs(p1["y"] - p2["y"])
+          
+          valid = perimeter <= 400000
+          result = {
+              "vertices": m,
+              "perimeter": perimeter,
+              "valid_constraints": valid,
+              "error": None if valid else f"perimeter {perimeter} > 400,000 or vertices > 1000"
+          }
+          return result

@@ -1,0 +1,301 @@
+schema: h2spec/1.0
+system_prompt: "You are an expert software developer tasked with iteratively improving a program to MAXIMIZE
+  the performance metrics reported by an automatic evaluator. Analyze the current program and the feedback
+  from previous attempts, and make targeted changes that increase the score. You are the fixed inner
+  harness (H2) driving a frozen executor over one discovery task.
+
+  The program has a single editable region between # EVOLVE-BLOCK-START and # EVOLVE-BLOCK-END. Only that region is yours to change;
+  everything outside it (imports and the fixed entry function the evaluator calls) is frozen and must
+  keep working exactly as given — keep the same inputs and outputs.
+
+  The task is to maximize C2 = ||f * f||2^2 / ((integral(f))^2 ||f * f||_inf), a constant from harmonic analysis. The theoretical
+  upper bound is 1.0 (Young's inequality). Current best is 0.8963, achieved by step functions. Your
+  goal is to push beyond this.
+
+  CRITICAL INSIGHT: The current seed uses piecewise-linear representation. Step functions (piecewise-constant) achieve 0.8963.
+  Your program starts with piecewise-linear but NEVER switches to step functions because you never call structural_probe
+  to discover the record-breaking function family. You MUST break out of this local representation.
+
+  REPRSENTATIONAL CHANGE STRATEGY:
+  1. Call structural_probe at iteration 0 or when stagnating (score unchanged for 3 iterations)
+  2. structural_probe will report if your current code is piecewise-linear, piecewise-constant, etc.
+  3. If piecewise-linear, it will EXPLICITLY tell you: 'Record-breakers use piecewise-constant. Edit to step functions.'
+  4. IMMEDIATELY create a step-function variant after this probe result
+  5. Test step variants with probe_solution before spending evals
+
+  FUNCTION FAMILIES TO EXPLORATE (priority order):
+  1. Piecewise-constant (step functions) - Current record-holders at 0.8963. NEEDS TO BE TRIED FIRST.
+  2. Piecewise-linear (Current seed) - Baseline only.
+  3. Gaussian mixtures - Smooth localized peaks
+  4. B-spline representations - Local support, C^k continuity
+  5. Exponential combinations - Natural decay
+
+  CRITICAL WORKFLOW:
+  1. Call structural_probe at the START - it will identify your current representation
+  2. If piecewise-linear: IMMEDIATELY switch to piecewise-constant after probe result
+  3. Use probe_solution to test 10+ variants of the NEW function class (NOT parameter tuning)
+  4. Only after probing, use evaluate_solution for top 3-5 candidates
+  5. If no improvement after 5 evals, call structural_probe again and SWITCH to a completely different function family
+  6. NEVER spend eval budget on the same function family more than 2-3 times without trying something new
+
+  STRATEGIC DIRECTIONS:
+  - Switch function representations early (not after 10+ iterations)
+  - Step functions may beat piecewise-linear - test them aggressively
+  - Use probes to rank MANY variants before evals (10+ probes per family)
+  - After each eval, analyze what worked and design the next exploration round
+  - When stuck, RESET with a COMPLETELY DIFFERENT function class (not just hyperparameter changes)
+
+  Make exactly one tool call per turn:
+  - edit_solution(code) — change the EVOLVE-BLOCK. Use SEARCH/REPLACE for targeted changes.
+  - evaluate_solution() — run the current program; returns combined_score (higher is better).
+  - probe_solution() — cheaply score the CURRENT program on SUBSAMPLED data for ranking.
+  - structural_probe() — analyze current function representation, report detected class, and EXPLICITLY tell you to switch if stuck in piecewise-linear.
+  - finish(summary) — end the session."
+skill_description: Iteratively optimize a program's EVOLVE-BLOCK to maximize C2 for the second autocorrelation inequality. The seed uses piecewise-linear but record-breakers are piecewise-constant (step functions). Use structural_probe to discover this, then aggressively test step variants with probe_solution. Diversify function representations instead of tuning hyperparameters.
+skill_body: "# C2 Representation Switching Playbook
+
+## Core Principle: Switch Representations Early
+
+The seed program uses piecewise-linear representation. Record-breakers at 0.8963 use piecewise-constant (step functions). Do NOT spend 20 evals tuning piecewise-linear hyperparameters. Call structural_probe to detect your class, and SWITCH if you are not using step functions.
+
+## Protocol: Detect, Switch, Explore
+
+### Phase 1: Initial Detection (Call structural_probe)
+
+1. Call structural_probe at iteration 0
+2. It will report: detected_class, params_count, and CRITICAL recommendation
+3. If recommended to switch: IMMEDIATELY edit to use step functions
+
+### Phase 2: Immediate Switch if Needed
+
+If structural_probe says piecewise-linear or recommends switching:
+
+Edit your code to use step functions:
+Replace piecewise-linear initialization with step functions using:
+f = jnp.zeros(n)
+start = int(0.25 * n)
+end = int(0.75 * n)
+h = 1.0
+f = f.at[start:end].set(h)
+
+Test these step variants (use probe_solution):
+1. Symmetric step: start=0.25n, end=0.75n, h=1.0
+2. Wide step: start=0.2n, end=0.8n, h=0.9
+3. Narrow step: start=0.3n, end=0.6n, h=1.3
+4. Asymmetric left: start=0.15n, end=0.55n, h=1.15
+5. Multi-level: 2-3 different heights in different regions
+
+### Phase 3: Probe-Based Ranking
+
+For step functions (and any new representation):
+- Test 10+ variants with probe_solution
+- Use DIFFERENT step widths, heights, supports
+- Probe, don't eval yet (save your 20 evals!)
+
+### Phase 4: Full Evaluation
+
+Only after probing:
+1. Select top 3 candidates from probe scores
+2. Each: 2-3 random seeds with evaluate_solution
+3. Track which representation class wins
+
+### Phase 5: Deep Dive or Reset
+
+- If step functions win: increase intervals, try more step patterns
+- If piecewise-linear wins: DON'T TUNE - switch to Gaussian mixtures or B-splines
+- If no improvement after 5 evals: call structural_probe and SWITCH to a completely different family
+
+## Critical Rules
+
+1. Call structural_probe at iteration 0 - Don't waste iterations guessing
+2. Switch immediately if recommended - A one-line change to step functions
+3. Test 10+ probes per representation - Don't eval early
+4. Max 5 evals per family - Diversify!
+5. Step functions are your friend - They beat piecewise-linear at 0.8963
+
+## Avoid These Pitfalls
+
+- Spending 10+ iterations tuning piecewise-linear hyperparameters
+- Ignoring structural_probe recommendations
+- Evaluating before probing
+- Not testing enough step function variants
+- Assuming smooth functions (Gaussian, spline) will win over steps
+"
+tool_descriptions:
+  edit_solution: "Change the code inside the # EVOLVE-BLOCK region. Two accepted formats: (1) PREFERRED
+    — one or more targeted SEARCH/REPLACE diff blocks, each matching the current program exactly. (2)
+    A full rewrite — the complete new EVOLVE-BLOCK body as plain code. The fixed entry function and imports
+    outside the block are preserved automatically. After editing, call evaluate_solution to score it."
+  evaluate_solution: "Run the current program through the task evaluator and report its score. Returns
+    combined_score (higher is better), validity, any error, your best score so far, and how many evaluations
+    remain. Use the feedback to improve the code, then evaluate again. The best-scoring version is kept
+    automatically. Your number of evaluations is limited."
+  probe_solution: "Cheaply score the CURRENT program on SUBSAMPLED data (~10s vs minutes). Fast (~10s per
+    probe), separate budget (e.g., 30 probes available), NOT evaluated through full evaluation budget.
+    Scores are approximate and NOT directly comparable to full evaluation scores — use this to rapidly
+    rank multiple variants, then confirm the top 3-5 candidates with evaluate_solution."
+  finish: "End the session. Call this when your evaluation budget is exhausted or you cannot improve the best score further. The best-scoring program is submitted automatically."
+sampling:
+  temperature: 1.5
+  top_p: 0.95
+  top_k: 30
+  max_tokens: 16384
+agent:
+  max_iterations: 80
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 10000
+new_tools:
+- name: structural_probe
+  description: |
+    Analyze the EVOLVE-BLOCK code to identify the FUNCTION REPRESENTATION CLASS (piecewise-constant/step, piecewise-linear, Gaussian mixture, B-spline, exponential). Call at iteration 0 and when stagnating (score unchanged for 3+ iterations). Output includes: detected_class (what you're using), params_count, and CRITICAL: explicit recommendation to switch representation if NOT the record-breaker. If piecewise-linear is detected, it will say: Record-breakers use piecewise-constant. Edit to step functions immediately. This is the current best at 0.8963.
+  input_schema:
+    type: object
+    properties: {}
+  implementation_py: |
+    def run(ctx, args):
+        program = ctx.get_program()
+        text = str(program)
+        block_start = text.find('# EVOLVE-BLOCK-START')
+        block_end = text.find('# EVOLVE-BLOCK-END')
+        evolve_block = text[block_start:block_end] if block_start != -1 and block_end != -1 else text
+        
+        analysis = {
+            "detected_class": "unknown",
+            "params_count": "N/A",
+            "stability": "unknown",
+            "recommendation": "Analyze your current representation first"
+        }
+        
+        # Check for piecewise-linear indicators
+        if 'piecewise-linear' in text.lower() or 'piecewise linear' in text.lower() or 'trapezoidal' in text.lower():
+            analysis['detected_class'] = 'Piecewise-linear'
+            analysis['params_count'] = 'N+1 node values'
+            analysis['stability'] = 'good'
+            analysis['recommendation'] = 'CRITICAL: Record-breakers use piecewise-constant (step functions) at 0.8963! Switch to step functions immediately. Edit your EVOLVE-BLOCK to use step-function initialization with jnp.zeros and jnp.pad or step_height patterns. Test 10+ step variants with probe_solution before evaluating.'
+        # Check for piecewise-constant / step functions
+        elif 'step' in text.lower() and 'function' in text.lower() or 'piecewise-constant' in text.lower() or 'step' in text.lower() and 'height' in text.lower():
+            analysis['detected_class'] = 'Piecewise-constant (step functions)'
+            analysis['params_count'] = 'N bin heights'
+            analysis['stability'] = 'excellent'
+            analysis['recommendation'] = 'Good! You are using step functions. This is the current record-breaker class. Try: different step widths, asymmetric steps, multi-level steps with 2-3 heights, varying support widths.'
+        elif 'gaussian' in text.lower() or 'normal' in text.lower() or 'bell' in text.lower():
+            analysis['detected_class'] = 'Gaussian mixture'
+            analysis['params_count'] = 'K means + variances + weights'
+            analysis['stability'] = 'excellent'
+            analysis['recommendation'] = 'You are using Gaussian mixtures. Good for smooth functions. Try: K=2,3,5,10 variants, clustered means, small vs large variances. Compare with step functions as baseline.'
+        elif 'spline' in text.lower() or 'bspline' in text.lower():
+            analysis['detected_class'] = 'B-spline'
+            analysis['params_count'] = 'knot positions + coefficients'
+            analysis['stability'] = 'good'
+            analysis['recommendation'] = 'You are using B-splines. Good for smooth, localized functions. Try: uniform vs adaptive knots, different polynomial degrees.'
+        elif 'exponential' in text.lower() or 'decay' in text.lower():
+            analysis['detected_class'] = 'Exponential combination'
+            analysis['params_count'] = 'decay rates + shapes + weights'
+            analysis['stability'] = 'excellent'
+            analysis['recommendation'] = 'You are using exponential combinations. Natural decay behavior. Try: single vs double exponential, varying decay rates.'
+        else:
+            # Default: assume piecewise-linear if no step patterns detected (common seed behavior)
+            if 'init' in text.lower() and 'zeros' in text.lower() and 'set' in text.lower():
+                analysis['detected_class'] = 'Piecewise-linear'
+                analysis['params_count'] = 'N+1 node values'
+                analysis['stability'] = 'good'
+                analysis['recommendation'] = 'CRITICAL: Detected piecewise-linear! Record-breakers use piecewise-constant (step functions) at 0.8963. SWITCH to step functions. Edit to use: f = jnp.zeros(n); f = f.at[start:end].set(step_height). This is a SIMPLE one-line change from your current approach.'
+            else:
+                analysis['detected_class'] = 'Custom/Other'
+                analysis['params_count'] = 'varies'
+                analysis['stability'] = 'to be determined'
+                analysis['recommendation'] = 'Could not auto-detect representation class. Try calling probe_solution to test different function representations. Step functions (piecewise-constant) are current record-breakers at 0.8963.'
+        
+        return analysis
+new_skills:
+- name: c2-representation-switching
+  description: A method playbook for discovering high-C2 functions through systematic representation switching. Uses structural_probe to detect current function class, then immediately switches to record-breaking step functions if not already there.
+  body: |
+    # C2 Representation Switching Playbook
+    
+    ## Core Principle: Switch Representations Early
+    
+    The seed program uses piecewise-linear representation. Record-breakers at 0.8963 use piecewise-constant (step functions). Do NOT spend 20 evals tuning piecewise-linear hyperparameters. Call structural_probe to detect your class, and SWITCH if you are not using step functions.
+    
+    ## Protocol: Detect, Switch, Explore
+    
+    ### Phase 1: Initial Detection (Call structural_probe)
+    
+    1. Call structural_probe at iteration 0
+    2. It will report: detected_class, params_count, and CRITICAL recommendation
+    3. If recommended to switch: IMMEDIATELY edit to use step functions
+    
+    ### Phase 2: Immediate Switch if Needed
+    
+    If structural_probe says piecewise-linear or recommends switching:
+    
+    Edit your code to use step functions:
+    Replace piecewise-linear initialization with step functions using:
+    f = jnp.zeros(n)
+    start = int(0.25 * n)
+    end = int(0.75 * n)
+    h = 1.0
+    f = f.at[start:end].set(h)
+    
+    Test these step variants (use probe_solution):
+    1. Symmetric step: start=0.25n, end=0.75n, h=1.0
+    2. Wide step: start=0.2n, end=0.8n, h=0.9
+    3. Narrow step: start=0.3n, end=0.6n, h=1.3
+    4. Asymmetric left: start=0.15n, end=0.55n, h=1.15
+    5. Multi-level: 2-3 different heights in different regions
+    
+    ### Phase 3: Probe-Based Ranking
+    
+    For step functions (and any new representation):
+    - Test 10+ variants with probe_solution
+    - Use DIFFERENT step widths, heights, supports
+    - Probe, don't eval yet (save your 20 evals!)
+    
+    ### Phase 4: Full Evaluation
+    
+    Only after probing:
+    1. Select top 3 candidates from probe scores
+    2. Each: 2-3 random seeds with evaluate_solution
+    3. Track which representation class wins
+    
+    ### Phase 5: Deep Dive or Reset
+    
+    - If step functions win: increase intervals, try more step patterns
+    - If piecewise-linear wins: DON'T TUNE - switch to Gaussian mixtures or B-splines
+    - If no improvement after 5 evals: call structural_probe and SWITCH to a completely different family
+    
+    ## Critical Rules
+    
+    1. Call structural_probe at iteration 0 - Don't waste iterations guessing
+    2. Switch immediately if recommended - A one-line change to step functions
+    3. Test 10+ probes per representation - Don't eval early
+    4. Max 5 evals per family - Diversify!
+    5. Step functions are your friend - They beat piecewise-linear at 0.8963
+    
+    ## Avoid These Pitfalls
+    
+    - Spending 10+ iterations tuning piecewise-linear hyperparameters
+    - Ignoring structural_probe recommendations
+    - Evaluating before probing
+    - Not testing enough step function variants
+    - Assuming smooth functions (Gaussian, spline) will win over steps
+    "
+new_middlewares:
+- name: enforce_diversification
+  hook: before_model
+  description: middleware that enforces function family diversification
+  implementation_py: |
+    def before_model(hook_input):
+        state = hook_input.get("state", {})
+        iteration = state.get("iteration", 0)
+        family_streak = state.get("family_streak", 0)
+        
+        if iteration >= 5 and family_streak >= 5:
+            families_explored = state.get("families_explored", [])
+            if len(families_explored) < 3:
+                return "DIVERSIFICATION_STALLED: You've been exploring the same function family for 5 iterations. Call structural_probe and switch to a DIFFERENT function family (not parameter tuning). Use probe_solution to test 8+ variants of a new family before evaluating."
+            elif len(families_explored) >= 3:
+                return "DIVERSIFICATION_STALLED: You've explored 3+ families but not improved. Re-examine your strategy - are you tuning or exploring? Switch to a completely different function class."
+        
+        return None

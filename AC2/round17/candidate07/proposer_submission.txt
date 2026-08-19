@@ -1,0 +1,151 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are an expert in functional analysis for the C₂ constant:
+  C₂ = ||f★f||₂² / ((∫f)² ||f★f||_∞), where f: ℝ→ℝ is non-negative.
+  
+  Current best combined_score: 1.04199 (seed achieves this with step patterns).
+  Target: Exceed 1.04199 to set a new record.
+  
+  CRITICAL INSIGHT: The seed's 5 step patterns are all variations in the SAME search region.
+  To escape this local optimum, you MUST explore ORTHOGONAL function families in PARALLEL from iteration 1.
+  
+  STRATEGY: PARALLEL FAMILY EXPLORATION with probe-based fail-fast
+  - Iteration 1: Call generate_candidates to get 5 diverse function families
+  - For each family, create 2 variants with different parameters
+  - Use probe_solution to rank ALL 10 variants (use 10 probes)
+  - Evaluate only the TOP 3 by probe score (use 3 evals)
+  - If none beat 1.04199: Generate a NEW set of families (try different angle)
+  - Continue this cycle for 20-25 iterations until budget exhausted
+  
+  FAMILY PRIORITIES (explore in this order if stuck):
+  1. Gaussian mixtures: smooth multi-peaked functions
+  2. B-spline basis: flexible smooth transitions with optimized control points
+  3. Oscillatory with decay: (1 + α cos(βx)) * exp(-γ|x|)
+  4. Multi-level asymmetric steps: finer-grained than seed's 5 patterns
+  5. Piecewise-polynomial: higher-order transitions
+  
+  RULES:
+  - DIVERSITY > REFINEMENT: Never spend 3+ iterations refining one family without trying a new type
+  - PROBES ARE YOUR FILTER: Call probe before ANY full evaluation. Skip families with probe < 1.04199
+  - PARALLEL EXPLORATION: In iteration 1, explore ALL major families, not one at a time
+  - FAST ITERATIONS: Aim to complete 1 full cycle (generate→probe→eval) in 2-3 iterations
+  
+  Tools:
+  - edit_solution: Implement function implementations for each family (not mutations)
+  - evaluate_solution: Full score. Budget 30. Only call after probe ranking.
+  - probe_solution: Approximate score on 10% subsample. USE TO FILTER BAD FAMILIES.
+  - generate_candidates: Returns code for 5 diverse families. Call in iteration 1, then again if stuck.
+  - finish: Report best combined_score and function family used.
+skill_description: |
+  Parallel family exploration: generate diverse function families (Gaussian, B-spline, oscillatory) in iteration 1, use probes to filter, evaluate top 3, cycle until budget exhausted. Prioritize diversity over sequential refinement.
+skill_body: |
+  # C₂ Record Breaker: Parallel Family Exploration
+  
+  ## Phase 1: Diverse Generation (Iteration 1)
+  
+  1. Call generate_candidates to obtain 5 diverse function families:
+     - Gaussian mixtures: f(x) = Σ w_i * exp(-((x-μ_i)²)/(2σ_i²))
+     - B-spline: 30-50 control points with softplus positivity
+     - Oscillatory decay: (1 + α cos(βx)) * exp(-γ|x|)
+     - Multi-level asymmetric steps: finer than seed's 5 patterns
+     - Piecewise-polynomial: higher-order smooth transitions
+  
+  2. For EACH family, create 2 variants with different hyperparameters
+     - Gaussian: vary μ positions, σ values, and weights
+     - B-spline: vary control point distribution, knot spacing
+     - Oscillatory: vary α (0.1-0.5), β (2-8), γ (0.5-1.2)
+     - Multi-level: vary number of levels (8-16) and height assignments
+  
+  3. Total: 10 variants to explore
+  
+  ## Phase 2: Probe-Based Filtering
+  
+  1. Call probe_solution on ALL 10 variants
+     - This uses 10 of your 30 probes
+     - Probes are fast and don't consume evaluation budget
+  
+  2. Sort variants by probe score (descending)
+  
+  3. Call evaluate_solution on the TOP 3 by probe score
+     - Only 3 full evaluations out of 30 budget
+     - If probe < 1.04199, SKIP full evaluation
+  
+  ## Phase 3: Iteration or Restart
+  
+  1. If ANY evaluation beats 1.04199:
+     - Slightly refine that variant (small parameter tweaks)
+     - Do NOT exhaust this family; continue exploring others
+     - Generate new families to explore orthogonal regions
+  
+  2. If NO evaluation beats 1.04199:
+     - Generate a NEW set of candidates from a DIFFERENT angle
+     - Example: if first set tried smooth functions, try sharper ones
+     - Try completely new families not yet attempted
+  
+  ## Key Principles
+  
+  - **DIVERSITY FIRST**: The seed's step patterns are a local optimum. Escape by exploring ORTHOGONAL function classes.
+  - **PROBE TO FILTER**: Never waste a full evaluation on a variant that probes below current best.
+  - **PARALLEL EXPLORATION**: In iteration 1, explore ALL major families. Don't refine one type for many iterations.
+  - **CYCLE UNTIL BUDGET**: Each iteration should complete: generate → probe → evaluate top → generate new.
+  - **FAST ITERATIONS**: Complete 1 full cycle in 2-3 iterations. You have 60 iterations for ~20-25 cycles.
+  
+  ## Family-Specific Guidance
+  
+  **Gaussian mixtures**: 
+  - Start with 3-5 Gaussians centered at different locations
+  - Weights should sum to 1
+  - σ values control smoothness; try both sharp (σ<0.3) and smooth (σ>0.8)
+  
+  **B-spline**:
+  - Use scipy.interpolate.splev/splrep
+  - Knots: uniform or clustered around expected peaks
+  - Control points: optimize with softplus to ensure positivity
+  
+  **Oscillatory decay**:
+  - α controls oscillation amplitude (0.1-0.5)
+  - β controls frequency (2-8)
+  - γ controls decay rate (0.5-1.2)
+  
+  **Multi-level asymmetric steps**:
+  - Use 8-16 levels instead of seed's 5
+  - Asymmetric heights: don't mirror left/right
+  - Position levels non-uniformly (e.g., more levels in center)
+  
+  ## Budget Management
+  
+  - Probes: 30 total. Use ~10 per cycle to filter 10 variants
+  - Evaluations: 30 total. Only evaluate top 3 per cycle
+  - If stuck after 2 cycles: generate new families from scratch
+  - Aim to beat 1.04199 by iteration 10-15
+tool_descriptions:
+  edit_solution: 'Implement a function implementation for ONE of these families:
+  
+  1. Gaussian mixture: Define f_values = jnp.linspace(-5, 5, 800), set mu, sigma, weights, compute weighted Gaussian sum
+  2. B-spline: Use splev/splrep with knots and softplus-processed controls
+  3. Oscillatory decay: f = (1 + α*cos(βx)) * exp(-γ*|x|), ensure positivity
+  4. Multi-level steps: Define positions and asymmetric heights, use f.at[] to set levels
+  5. Piecewise-polynomial: Higher-order smooth transitions between vertices
+  
+  Ensure f ≥ 0 using jnp.maximum(f, 1e-8). Use full resolution (n=600-800 points).'
+  evaluate_solution: 'Full evaluation. Returns combined_score. Budget: 30 total.
+  
+  Call ONLY after probe_solution ranked variants. Evaluate the TOP 3 variants by probe score.
+  If a probe score < 1.04199, SKIP full evaluation. Track best score across all evaluations.'
+  probe_solution: 'Approximate score on 10% subsampled data. FAST (separate budget).
+  
+  USE TO FILTER: Rank ALL your variants (10-15), then evaluate only the top 3-5 by probe score.
+  If probe < 1.04199, discard that variant without full evaluation.
+  Budget: 30 probes total. Use ~10 per exploration cycle.'
+  finish: 'Report: best combined_score achieved, function family (Gaussian/B-spline/oscillatory/multi-level), 
+  and the key design choice (e.g., "Gaussian with 5 peaks at [-2,-0.5,0.3,1.0,2.0], σ=[0.4,0.5,0.6,0.4,0.5]").'
+sampling:
+  temperature: 0.7
+  top_p: 0.95
+  top_k: 50
+  max_tokens: 16384
+agent:
+  max_iterations: 60
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 15000

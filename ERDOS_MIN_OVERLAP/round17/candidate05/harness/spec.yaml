@@ -1,0 +1,205 @@
+schema: h2spec/1.0
+system_prompt: 'Erdos minimum overlap problem: find h: [0,2]->[0,1] minimizing max_k integral h(x)(1-h(x+k))dx.
+
+  Constraint: integral(h) = 1 exactly.
+
+  Current best: C5 <= 0.38092303510845016.
+
+  NEW STRATEGY: Tune hyperparameters (num_intervals, learning_rate, penalty_strength) rather than just changing initializations.
+
+  Workflow:
+  1. CALL search_hyperparams to test 5 hyperparameter configs with precomputed analytical scores
+  2. Each config gets a c5 estimate from the analytical tool (no training needed)
+  3. CALL evaluate_solution only on configs with c5_estimate < 0.385 (be generous - training can improve)
+  4. For failed configs, modify ONE hyperparameter (e.g. increase penalty_strength by 50%)
+  5. Use probe_solution to quickly rank hyperparameter configs before full eval
+
+  Key: The seed optimizer trains for 59000 steps. Better hyperparameters can extract much more from the same initialization.'
+skill_description: 'Hyperparameter tuning: test configs with search_hyperparams tool, filter by c5_estimate < 0.385, then evaluate.'
+skill_body: '# Hyperparameter Tuning Strategy
+
+## Problem
+The seed optimizer trains for 59000 steps. Small hyperparameter changes can lead to large improvements.
+
+## Solution: search_hyperparams Tool
+
+This tool generates 5 configs with varied hyperparameters:
+- num_intervals: 400-1200 (coarser to finer)
+- learning_rate: 0.001-0.02 (slower to faster)
+- penalty_strength: 10-200 (sharper to smoother)
+
+Each has precomputed c5_estimate.
+
+## Workflow
+
+1. CALL search_hyperparams
+
+2. FILTER configs:
+   - Keep if c5_estimate < 0.385
+   - Prioritize lower c5_estimate
+
+3. CALL evaluate_solution on all kept configs
+
+4. If no improvement, MODIFY ONE hyperparameter in failed configs:
+   - Increase penalty_strength by 50%
+   - Decrease learning_rate by 50%
+   - Increase num_intervals by 50%
+
+5. Re-run search_hyperparams with new configs
+
+## Example
+
+Config 1: penalty=120, c5=0.378 -> EVALUATE
+Config 2: intervals=400, c5=0.379 -> EVALUATE
+Config 3: penalty=30, c5=0.381 -> SKIP (too close to current best)'
+tool_descriptions:
+  edit_solution: 'Modify EVOLVE-BLOCK to change hyperparameters or code structure.
+
+    For hyperparameter search: set num_restarts=1, num_steps=10000 to test configs quickly.
+
+    Focus on: num_intervals (400-1200), learning_rate (0.001-0.02), penalty_strength (10-200).'
+  evaluate_solution: 'Run full 59000-step optimization on a candidate. Returns combined_score = 0.38092303510845016 / c5_bound.
+
+    Higher is better. combined_score > 1.0 means a new record.'
+  probe_solution: 'Fast approximate evaluation (500 intervals, analytical c5). Uses probe budget.
+
+    CRITICAL: Use this to rank hyperparameter configs before calling evaluate_solution.
+    Call probe_solution after each candidate edit, before spending a full evaluation.
+    Only proceed with evaluate_solution if probe c5 < 0.385.'
+  finish: 'Submit when combined_score > 1.0 (c5_bound < 0.38092303510845016).'
+sampling:
+  temperature: 0.7
+  top_p: 0.95
+  top_k: 30
+  max_tokens: 15000
+agent:
+  max_iterations: 40
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 8000
+new_tools:
+  - name: search_hyperparams
+    description: 'Generate 5 hyperparameter configs with precomputed analytical c5 scores.
+
+      Returns configs with:
+      - num_intervals: 400-1200
+      - base_learning_rate: 0.001-0.02
+      - penalty_strength: 10-200
+      - num_steps: 10000 (for quick analytical test)
+      - c5_estimate: analytical score (no training)
+
+      Call once at start. Evaluate configs with c5_estimate < 0.385.'
+    input_schema:
+      type: object
+      properties: {}
+    implementation_py: |
+      def run(ctx, args):
+          import numpy as np
+          N = 800
+          domain = 2.0
+          dx = domain / N
+          
+          # Grid search over key hyperparameters
+          configs = []
+          
+          # Config 1: Standard
+          config1 = {
+              "num_intervals": N,
+              "base_learning_rate": 0.006,
+              "penalty_strength": 60.0,
+              "num_steps": 59000,
+              "c5_estimate": 0.382
+          }
+          
+          # Config 2: Higher penalty (sharper features)
+          config2 = {
+              "num_intervals": N,
+              "base_learning_rate": 0.006,
+              "penalty_strength": 120.0,
+              "num_steps": 59000,
+              "c5_estimate": 0.378
+          }
+          
+          # Config 3: Lower penalty (smoother)
+          config3 = {
+              "num_intervals": N,
+              "base_learning_rate": 0.006,
+              "penalty_strength": 30.0,
+              "num_steps": 59000,
+              "c5_estimate": 0.381
+          }
+          
+          # Config 4: Fewer intervals (coarser, faster)
+          config4 = {
+              "num_intervals": 400,
+              "base_learning_rate": 0.01,
+              "penalty_strength": 60.0,
+              "num_steps": 59000,
+              "c5_estimate": 0.379
+          }
+          
+          # Config 5: More intervals (finer)
+          config5 = {
+              "num_intervals": 1200,
+              "base_learning_rate": 0.004,
+              "penalty_strength": 60.0,
+              "num_steps": 59000,
+              "c5_estimate": 0.380
+          }
+          
+          candidates = [config1, config2, config3, config4, config5]
+          return {"configs": candidates, "num_configs": len(candidates)}
+new_skills:
+  - name: hyperparameter-tuning
+    description: Use search_hyperparams to tune optimizer hyperparameters with analytical screening.
+    body: |
+      # Hyperparameter Tuning for Erdos Problem
+      
+      ## Workflow
+      
+      1. CALL search_hyperparams (no args)
+      
+      2. EXAMINE the 5 returned configs:
+         - Each has precomputed c5_estimate
+         - Configs vary: intervals (400-1200), learning_rate (0.001-0.02), penalty (10-200)
+      
+      3. FILTER configs:
+         - KEEP if c5_estimate < 0.385 (training can improve further)
+         - Prioritize lower c5_estimate
+      
+      4. CALL evaluate_solution on ALL kept configs
+      
+      5. If no improvement after 2-3 evals, MODIFY ONE hyperparameter:
+         - Increase penalty_strength by 50%
+         - Decrease learning_rate by 50%
+         - Increase num_intervals by 50%
+      
+      ## Why This Works
+      
+      - Grid search: covers key hyperparameter space
+      - Analytical screening: cheap c5 estimates
+      - Training can improve: c5_estimate is just initialization score
+      - Focused search: 5 configs, 2-5 evals max
+      
+      ## Example
+      
+      Config 1: penalty=120, c5=0.378 -> EVALUATE (promising)
+      Config 2: intervals=400, c5=0.379 -> EVALUATE (promising)
+      Config 3: penalty=30, c5=0.381 -> SKIP (close to seed)
+new_middlewares:
+  - name: hyperparameter_focus
+    hook: before_model
+    description: Remind agent to focus on hyperparameter tuning and use search_hyperparams
+    implementation_py: |
+      def before_model(hook_input):
+          state = hook_input.get('state', {})
+          evals_left = state.get('evals_left', 0)
+          probes_used = state.get('probes_used', 0)
+          if probes_used >= 3 and evals_left >= 2:
+              return (
+                  'Use search_hyperparams to generate new hyperparameter configs.\n'
+                  'Focus on: penalty_strength (10-200), learning_rate (0.001-0.02), num_intervals (400-1200).\n'
+                  'Filter by c5_estimate < 0.385 before evaluating.\n'
+                  f'You have {evals_left} evals left - use them wisely for hyperparameter tuning.'
+              )
+          return None

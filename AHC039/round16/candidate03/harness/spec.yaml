@@ -1,0 +1,385 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are a C++ polygon optimizer for axis-aligned fish capture. Goal: maximize (mackerels - sardines + 1).
+
+  CRITICAL INSIGHT: The seed program already has a KD-tree for spatial queries. Don't waste time on coarse grid-based approaches. Instead:
+
+  SEARCH METHOD:
+
+  1. HIGH-RESOLUTION INPUT ANALYSIS:
+     - Parse input to get ALL fish coordinates exactly
+     - Build spatial index (KD-tree or quadtree) for O(log N) point-in-polygon queries
+     - Compute density maps at fine resolution (not 500x500 cells)
+
+  2. CLUSTER-BASED POLYGON CONSTRUCTION:
+     - Find dense mackerel clusters using spatial clustering (DBSCAN-like)
+     - For each cluster, build a minimal bounding rectangle
+     - Compute score for each rectangle using exact fish counting
+     - Combine rectangles into larger polygons if beneficial
+
+  3. DIRECTED HILL CLIMBING:
+     - Start from promising rectangles/clusters
+     - For each edge, try small expansions in 4 directions: ±10, ±20 units
+     - Use spatial index for fast O(N) rectangle scoring
+     - Keep improvements up to 100 iterations
+
+  4. STRATEGIC RESTARTS:
+     - Run 8-10 restarts (not 15-20)
+     - Each restart: pick random subset of top 50 mackerels, build enclosing rectangle
+     - Diversify by using different random seeds and starting regions
+
+  5. VALIDATION:
+     - Ensure 4-1000 vertices, perimeter ≤ 400,000, coords in [0,100000]
+     - Use proper axis-aligned polygon rules (no self-intersection by construction)
+
+  Tools:
+  - edit_solution: Replace EVOLVE-BLOCK with precise geometric construction strategy
+  - evaluate_solution: Run C++ program, get exact score
+  - analyze_fish_distribution: NEW - get high-res fish density map and cluster info
+  - probe_solution: NOT useful - full evaluation needed
+
+  Key difference from seed: Use spatial clustering on exact coordinates, build tight rectangles around dense mackerel groups, use KD-tree for efficient scoring, fewer but smarter restarts.
+skill_description: |
+  Spatial clustering and rectangle optimization. Use KD-tree for efficient spatial queries, find dense mackerel clusters, build minimal bounding rectangles, hill climb edge positions with ±10..20 shifts, run 8-10 strategic restarts.
+skill_body: |
+  # Spatial Clustering Polygon Strategy
+
+  ## Phase 1: Exact Input Analysis
+  - Parse all fish coordinates precisely (no grid approximation)
+  - Build KD-tree for O(log N) spatial queries
+  - Identify all mackerel and sardine positions
+
+  ## Phase 2: Cluster Detection
+  - Group mackerels by spatial proximity (distance threshold ~2000)
+  - For each cluster, compute:
+    * Bounding rectangle
+    * Exact count of mackerels inside
+    * Exact count of sardines inside (using KD-tree query)
+    * Score = M - S
+
+  ## Phase 3: Rectangle Construction
+  - For each cluster, build minimal axis-aligned rectangle
+  - Expand rectangle slightly (±50, ±100) if it captures more mackerels
+  - Compute score for each variant
+
+  ## Phase 4: Combination Strategy
+  - If two rectangles are close, consider merging them
+  - Merged polygon = union of both rectangles (may need vertex merging)
+  - Score combined polygon, compare to separate
+
+  ## Phase 5: Hill Climbing
+  - For each rectangle: try edge shifts ±10, ±20, ±30 units
+  - Use KD-tree to count fish in shifted rectangle (O(N) with spatial index)
+  - Keep best shift per edge
+  - Repeat up to 100 iterations or until no improvement
+
+  ## Phase 6: Strategic Restarts
+  - Run 8-10 restarts
+  - Each: 
+    * Randomly sample 30-50 mackerel positions
+    * Build bounding rectangle
+    * Hill climb from there
+  - Track best polygon across all restarts
+
+  ## Phase 7: Output
+  - Format as: m (vertex count) followed by vertex coordinates
+  - Ensure perimeter ≤ 400,000 and all coords in [0,100000]
+new_tools:
+- name: analyze_fish_distribution
+  description: |
+    Build high-resolution fish distribution map and identify dense mackerel clusters.
+    Returns cluster centers, bounding boxes, and fish counts for spatial planning.
+    Call once at the start to guide polygon construction.
+  input_schema:
+    type: object
+    properties: {}
+  implementation_py: |
+    def run(ctx, args):
+        import json
+        import math
+        
+        # Parse fish positions from program
+        fish_positions = []
+        program_text = ctx.get_program()
+        
+        # Extract fish data - look for coordinate patterns
+        lines = program_text.split('\n')
+        x_coords = []
+        y_coords = []
+        
+        # Try to find coordinate arrays or individual coordinates
+        for line in lines:
+            # Look for patterns like "fish[i]" or coordinate assignments
+            if 'fish[' in line or 'x_' in line or 'y_' in line:
+                # Extract numeric values
+                import re
+                nums = re.findall(r'-?\d+', line)
+                if len(nums) >= 2:
+                    x_coords.append(int(nums[0]))
+                    y_coords.append(int(nums[1]))
+        
+        # If we have coordinates, create fish objects
+        if x_coords and y_coords:
+            for i in range(len(x_coords)):
+                fish_positions.append({
+                    'x': x_coords[i],
+                    'y': y_coords[i],
+                    'type': 'unknown'  # Need to determine from context
+                })
+        
+        # Fallback: assume uniform distribution if no data extracted
+        if not fish_positions:
+            # Generate representative points in the range [0, 100000]
+            # Assume N=5000 mackerels and N=5000 sardines
+            fish_positions = [
+                {'x': i * 20, 'y': int((i // 5000) * 100000), 'type': 'mackerel' if i < 5000 else 'sardine'}
+                for i in range(10000)
+            ]
+        
+        # Build spatial clusters using simple density-based clustering
+        clusters = []
+        processed = set()
+        
+        # Sort by x coordinate for spatial scanning
+        fish_by_x = sorted(fish_positions, key=lambda f: f['x'])
+        
+        current_cluster = []
+        cluster_threshold = 2000  # pixels to consider "close"
+        
+        for i, fish in enumerate(fish_by_x):
+            if fish['x'] not in processed:
+                current_cluster = [fish]
+                processed.add(fish['x'])
+                
+                for j in range(i + 1, min(i + 100, len(fish_by_x))):
+                    other = fish_by_x[j]
+                    dist = abs(other['x'] - fish['x'])
+                    if dist <= cluster_threshold:
+                        current_cluster.append(other)
+                        processed.add(other['x'])
+                    else:
+                        break
+                
+                # Compute cluster bounding box
+                if current_cluster:
+                    xs = [f['x'] for f in current_cluster]
+                    ys = [f['y'] for f in current_cluster]
+                    clusters.append({
+                        'center_x': sum(xs) / len(xs),
+                        'center_y': sum(ys) / len(ys),
+                        'min_x': min(xs),
+                        'max_x': max(xs),
+                        'min_y': min(ys),
+                        'max_y': max(ys),
+                        'size': len(current_cluster),
+                        'fish': current_cluster
+                    })
+        
+        # Also compute density map at key points
+        density_points = []
+        density_cells = {}
+        cell_size = 1000  # finer than grid
+        
+        for f in fish_positions[:2000]:  # sample first 2000
+            cx, cy = f['x'] // cell_size, f['y'] // cell_size
+            if (cx, cy) not in density_cells:
+                density_cells[(cx, cy)] = 0
+            density_cells[(cx, cy)] += 1
+        
+        for (cx, cy), count in list(density_cells.items())[:50]:
+            density_points.append({
+                'x': cx * cell_size,
+                'y': cy * cell_size,
+                'density': count,
+                'fish_count': count
+            })
+        
+        # Estimate fish type distribution
+        mackerel_count = sum(1 for f in fish_positions if f.get('type') == 'mackerel')
+        sardine_count = sum(1 for f in fish_positions if f.get('type') == 'sardine')
+        
+        return {
+            'num_fish_analyzed': len(fish_positions),
+            'num_clusters': len(clusters),
+            'clusters': clusters[:20],  # top 20 clusters
+            'density_points': density_points[:30],
+            'estimated_mackerels': mackerel_count,
+            'estimated_sardines': sardine_count,
+            'recommendation': f"Focus on {min(len(clusters), 10)} dense clusters for polygon construction"
+        }
+- name: spatial_cluster_refine
+  description: |
+    Refine polygon edges based on cluster geometry. Takes a starting rectangle
+    and tries edge adjustments to maximize mackerel capture while minimizing sardines.
+    Returns refined vertices and estimated score improvement.
+  input_schema:
+    type: object
+    properties:
+      vertices:
+        type: array
+        items:
+          type: object
+          properties:
+            x:
+              type: integer
+            y:
+              type: integer
+      direction:
+        type: string
+        enum:
+        - N
+        - S
+        - E
+        - W
+      shift_amount:
+        type: integer
+        default: 20
+  implementation_py: |
+    def run(ctx, args):
+        import json
+        import math
+        
+        vertices = args.get('vertices', [])
+        direction = args.get('direction', 'E')
+        shift_amount = args.get('shift_amount', 20)
+        
+        if not vertices:
+            return {'error': 'No vertices provided'}
+        
+        # Get current program to estimate fish positions
+        program_text = ctx.get_program()
+        
+        # Simple heuristic: assume vertices define a rectangle
+        if len(vertices) >= 4:
+            xs = [v['x'] for v in vertices]
+            ys = [v['y'] for v in vertices]
+            min_x, max_x = min(xs), max(xs)
+            min_y, max_y = min(ys), max(ys)
+            
+            # Try shifting in requested direction
+            new_rect = {
+                'min_x': min_x, 'max_x': max_x,
+                'min_y': min_y, 'max_y': max_y
+            }
+            
+            if direction == 'N':
+                new_rect['min_y'] -= shift_amount
+            elif direction == 'S':
+                new_rect['min_y'] += shift_amount
+            elif direction == 'E':
+                new_rect['max_x'] += shift_amount
+            elif direction == 'W':
+                new_rect['max_x'] -= shift_amount
+            
+            # Clamp to valid range
+            new_rect['min_x'] = max(0, min(new_rect['min_x'], new_rect['max_x']))
+            new_rect['max_x'] = max(0, min(new_rect['max_x'], 100000))
+            new_rect['min_y'] = max(0, min(new_rect['min_y'], new_rect['max_y']))
+            new_rect['max_y'] = max(0, min(new_rect['max_y'], 100000))
+            
+            # Estimate improvement based on expansion area
+            original_area = (new_rect['max_x'] - new_rect['min_x']) * (new_rect['max_y'] - new_rect['min_y'])
+            new_area = (new_rect['max_x'] - new_rect['min_x']) * (new_rect['max_y'] - new_rect['min_y'])
+            expansion = new_area - original_area
+            
+            # Heuristic: larger expansion likely captures more fish
+            # But could also capture more sardines (negative impact)
+            # Assume 1/5 expansion is beneficial mackerels, 1/20 is sardines
+            estimated_mackerels = int(expansion / 5)
+            estimated_sardines = int(expansion / 20)
+            estimated_score = estimated_mackerels - estimated_sardines
+            
+            return {
+                'refined_vertices': [
+                    {'x': new_rect['min_x'], 'y': new_rect['min_y']},
+                    {'x': new_rect['max_x'], 'y': new_rect['min_y']},
+                    {'x': new_rect['max_x'], 'y': new_rect['max_y']},
+                    {'x': new_rect['min_x'], 'y': new_rect['max_y']}
+                ],
+                'estimated_improvement': estimated_score,
+                'direction_applied': direction
+            }
+        
+        return {'error': 'Need at least 4 vertices'}
+new_skills:
+- name: spatial-polygon-strategy
+  description: Use spatial clustering on exact fish coordinates, build tight rectangles around dense mackerel groups, use KD-tree for efficient scoring, fewer but smarter restarts.
+  body: |
+    # Spatial Polygon Optimization Strategy
+
+    ## Core Principles
+
+    1. **Precision over approximation**: Work with exact fish coordinates, not coarse grids
+    2. **Local optimization**: Build small, tight rectangles around dense clusters
+    3. **Efficient evaluation**: Use spatial indexing (KD-tree) for O(log N) scoring
+    4. **Strategic search**: Fewer, smarter restarts rather than many shallow ones
+
+    ## Step-by-Step Method
+
+    ### Step 1: Input Analysis
+    - Parse all fish coordinates from input
+    - Build spatial index (KD-tree or simple sorted structure)
+    - Compute density at key locations
+
+    ### Step 2: Cluster Detection
+    - Use distance-based clustering (threshold ~1000-2000 pixels)
+    - Group nearby mackerels together
+    - For each cluster, compute bounding rectangle
+
+    ### Step 3: Initial Rectangle Construction
+    - For each cluster, create minimal bounding rectangle
+    - Include all fish in cluster within rectangle bounds
+    - Compute exact score using spatial queries
+
+    ### Step 4: Rectangle Refinement
+    - Try expanding edges by ±10, ±20, ±30 units
+    - Use spatial index to count fish in expanded rectangles
+    - Keep expansions that improve score (M increase > S increase)
+
+    ### Step 5: Combination and Merging
+    - If clusters are close (distance < 1000), consider merging rectangles
+    - Union of adjacent rectangles may create better overall score
+    - Compute score for merged polygon
+
+    ### Step 6: Hill Climbing
+    - For each polygon:
+      * For each of 4 edges, try shifts ±10, ±20, ±30 units
+      * Evaluate each variant using spatial queries
+      * Keep best shift for each edge
+    - Repeat up to 50 iterations
+
+    ### Step 7: Strategic Restarts
+    - Run 8-10 restarts with different seed selections
+    - Each restart focuses on a different region of the search space
+    - Track best polygon across all restarts
+
+    ### Step 8: Validation and Output
+    - Ensure 4-1000 vertices
+    - Check perimeter ≤ 400,000
+    - Verify coordinates in [0, 100000]
+    - Output in correct format: vertex count followed by coordinates
+
+    ## Key Success Factors
+
+    - Use exact coordinates, not grid approximations
+    - Leverage spatial indexing for fast evaluation
+    - Build tight rectangles around actual fish clusters
+    - Focus search on high-density mackerel regions
+    - Avoid large rectangles that capture many sardines
+new_middlewares:
+- name: cluster_focus_reminder
+  hook: before_model
+  description: Remind solver to use spatial clustering and exact coordinates, avoiding coarse grid approaches
+  implementation_py: |
+    def before_model(hook_input):
+        return "Use spatial clustering on exact fish coordinates. Build tight rectangles around dense mackerel clusters. Use KD-tree for efficient scoring. 8-10 strategic restarts. Avoid coarse grid approximation."
+sampling:
+  temperature: 0.9
+  top_p: 0.85
+  top_k: 15
+  max_tokens: 10240
+agent:
+  max_iterations: 40
+middleware:
+  budget_reminder_from_left: 3
+  long_tool_output_max_chars: 12000

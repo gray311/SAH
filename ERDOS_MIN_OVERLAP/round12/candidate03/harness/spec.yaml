@@ -1,0 +1,196 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are solving the Erdos minimum overlap problem: minimize max_k integral h(x)(1-h(x+k)) dx
+  for a step function h: [0,2] -> [0,1] with integral(h)=1.
+  
+  Current best bound: C5 <= 0.38092303510845016
+  
+  CRITICAL INSIGHT: The seed program's optimizer gets STUCK at its initial local optimum.
+  The multi-restart initialization with 12 patterns is GOOD but NOT GOOD ENOUGH.
+  The optimizer is trying to find a BETTER local optimum but fails to escape the seed's basin.
+  
+  STRATEGY: Do NOT just tune hyperparameters. You MUST fundamentally CHANGE the search strategy.
+  
+  PHASE 1 - CONSTRUCTION-FIRST APPROACH (Use 15 evals):
+  Instead of optimizing a continuous latent space, construct EXACT step functions by specifying:
+  - A set of interval boundaries in [0, 2] (e.g., [0, 0.5, 1.0, 1.5, 2.0])
+  - A value in [0,1] for each interval
+  
+  This gives YOU control over the DISCRETE structure. Try constructions like:
+  - Uniform distribution: 2 intervals, each with h=0.5
+  - Concentrated mass: Many tiny intervals at one location
+  - Alternating: k intervals alternating between a and b (where a*b=1 for integral=1)
+  - Golomb-like spacing: intervals spaced to minimize overlaps
+  
+  Edit the EVOLVE-BLOCK to IMPLEMENT this construction approach. Replace the entire optimizer
+  with a constructor that takes specified boundaries/values and computes the C5 bound directly.
+  
+  PHASE 2 - SYSTEMATIC CONSTRUCTION SPACE SEARCH (Use 15 evals):
+  Once you have working constructions, systematically explore:
+  - Number of intervals: 2, 3, 4, 5, 6, 8, 10
+  - For each n, try different value combinations where all values are in [0,1] and sum to 1
+  - Use probe_solution to quickly score constructions before full evaluation
+  
+  PHASE 3 - GRADUAL COMPLEXITY (Use 10 evals):
+  Start with simple constructions (2-3 intervals), then gradually increase complexity.
+  For each complexity level, do a systematic grid search over the parameter space.
+  
+  IMPORTANT: Each edit must COMPLETELY REPLACE the EVOLVE-BLOCK with a working implementation
+  of your proposed construction strategy. Do NOT try to "tune" the existing optimizer.
+  
+  SUCCESS CRITERIA: combined_score > 1.0 (meaning c5_bound < 0.38092303510845016)
+skill_description: Construction-based search for Erdos minimum overlap
+skill_body: |
+  # Construction-Based Search for Erdos Minimum Overlap
+  
+  ## Core Idea
+  Instead of optimizing in continuous latent space, explicitly CONSTRUCT step functions
+  by specifying their piecewise structure. This gives you DIRECT CONTROL over the solution.
+  
+  ## Step Function Construction Pattern
+  
+  A step function h: [0, 2] -> [0, 1] is defined by:
+  1. Partition [0, 2] into n intervals: [x0, x1), [x1, x2), ..., [xn-1, 2]
+  2. Assign a value h_i in [0, 1] to each interval
+  3. Constraint: sum(h_i * (x_{i+1} - x_i)) = 1 (integral constraint)
+  
+  ## Search Strategy
+  
+  ### Phase 1: Simple Constructions (2-5 intervals)
+  - Uniform: n intervals, all h_i = 1/n (satisfies integral constraint automatically)
+  - Concentrated: One interval with h=1, rest with h=0 (edge case)
+  - Alternating: Values a, b alternating where a * width_a + b * width_b = 1
+  
+  ### Phase 2: Systematic Grid Search
+  For fixed n intervals:
+  1. Choose n-1 boundary points in (0, 2), sorted
+  2. Choose n-1 values in (0, 1), then solve for last value to satisfy integral
+  3. Compute C5 bound and score
+  
+  ### Phase 3: Value Optimization
+  Once boundaries are fixed, use simple gradient-based optimization on the VALUES only.
+  This is much more tractable than optimizing both boundaries and values.
+  
+  ## Key Insight
+  The optimal solution might be a VERY SIMPLE step function (2-4 intervals) that the
+  continuous optimizer never finds because it gets stuck in a complex latent space optimum.
+  
+  ## Implementation Template
+  Edit EVOLVE-BLOCK to implement:
+  ```python
+  def construct_step_function(n_intervals, boundaries, values):
+      # boundaries: n-1 points in (0, 2)
+      # values: n values in [0, 1]
+      # Returns h as numpy array of length n_intervals (or padded)
+      h = np.zeros(n_intervals)
+      for i in range(n_intervals):
+          h[i] = values[i]
+      return h
+  ```
+tool_descriptions:
+  edit_solution: Replace EVOLVE-BLOCK with a complete step function CONSTRUCTOR that explicitly specifies boundaries and values. Do NOT try to tune the existing optimizer.
+  evaluate_solution: Run full evaluation, returns combined_score.
+  probe_solution: Quick approximate evaluation for screening constructions.
+  finish: Submit when combined_score > 1.0 or after exhaustive construction search.
+sampling:
+  temperature: 1.2
+  top_p: 0.95
+  top_k: 30
+  max_tokens: 14000
+agent:
+  max_iterations: 60
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 10000
+new_tools:
+- name: generate_construction_candidates
+  description: Generate diverse step function constructions by specifying intervals and values. Returns list of (boundaries, values) pairs ready for immediate evaluation.
+  input_schema:
+    type: object
+    properties: {}
+  implementation_py: |
+    def run(ctx, args):
+        import numpy as np
+        N_base = 800
+        domain = 2.0
+        candidates = []
+        
+        # Construction 1: Uniform n-partitions for n in [2, 6]
+        for n in [2, 3, 4, 5, 6]:
+            boundaries = np.linspace(0, domain, n+1)[1:-1]
+            values = np.ones(n) / n
+            candidates.append((boundaries.tolist(), values.tolist()))
+        
+        # Construction 2: Two-interval alternating (a, b) with integral = 1
+        # h = a on [0, x), h = b on [x, 2]
+        # constraint: a*x + b*(2-x) = 1
+        # Try various ratios and solve for x
+        for ratio in [0.1, 0.2, 0.3, 0.5, 0.7, 0.8, 0.9]:
+            a = 1 - ratio
+            b = ratio
+            x_opt = 1 / (a + b)
+            if 0 < x_opt < 2:
+                boundaries = [x_opt]
+                values = [a, b]
+                candidates.append((boundaries, values))
+        
+        # Construction 3: Golomb-like spacing for n=5
+        marks = [0, 0.25, 0.625, 0.9375, 1.0]
+        widths = [marks[i+1] - marks[i] for i in range(4)]
+        values_uniform = np.ones(5) / 5
+        candidates.append((marks[:-1], values_uniform.tolist()))
+        
+        # Construction 4: Concentrated mass
+        for center in [0.25, 0.5, 0.75, 1.0, 1.25]:
+            boundaries = [center - 0.1, center + 0.1]
+            values = [1.0, 0.0]
+            candidates.append((boundaries, values))
+        
+        return {"constructions": candidates, "count": len(candidates)}
+new_skills:
+- name: step-function-construction
+  description: Explicitly construct step functions by specifying intervals and values, then compute C5 bound directly.
+  body: |
+    # Step Function Construction Strategy
+    
+    ## Why Construction > Optimization
+    
+    The seed optimizer tries 12 initialization patterns but OPTIMIZES in continuous space.
+    This means it can NEVER find a solution that lies exactly on a simple step function boundary.
+    
+    By explicitly CONSTRUCTING step functions, you:
+    1. Have EXACT control over the piecewise structure
+    2. Can systematically search the finite space of simple constructions
+    3. Avoid getting stuck in complex latent space local optima
+    
+    ## Construction Algorithm
+    
+    ### Step 1: Define Intervals
+    Choose n boundaries: 0 = x0 < x1 < ... < xn = 2
+    
+    ### Step 2: Assign Values
+    Choose values v1, v2, ..., vn where each vi in [0, 1]
+    
+    ### Step 3: Enforce Integral Constraint
+    sum(vi * (xi - x_{i-1})) = 1
+    
+    ### Step 4: Compute C5 Bound
+    h_padded = pad(h, N)
+    j_padded = 1 - h_padded
+    corr = FFT(h_padded) * conj(FFT(j_padded))
+    correlation = IFFT(corr).real
+    C5 = max(correlation * dx)
+    
+    ## Search Patterns
+    
+    ### Pattern A: Uniform partitions
+    n intervals, boundaries = linspace(0, 2, n+1), values = [1/n] * n
+    
+    ### Pattern B: Two-interval split
+    One boundary at x, values = [a, b] where a*x + b*(2-x) = 1
+    
+    ### Pattern C: Concentrated mass
+    One narrow interval with value ~1, rest with value 0
+    
+    ### Pattern D: Golomb-like spacing
+    Use optimal spacing patterns from combinatorial design theory

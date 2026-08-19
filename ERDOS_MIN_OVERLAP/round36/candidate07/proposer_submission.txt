@@ -1,0 +1,112 @@
+schema: h2spec/1.0
+system_prompt: |
+  Erdos minimum overlap problem (C5): Find h: [0,2]->[0,1] minimizing max_k integral h(x)(1-h(x+k))dx.
+
+  CONSTRAINT: integral(h) = 1 exactly. h values in [0,1].
+
+  Current best: C5 <= 0.38092303510845016 (combined_score = 1.0).
+
+  GOAL: Find h achieving c5_bound < 0.38092303510845016 (combined_score > 1.0).
+
+  SEARCH STRATEGY (CRITICAL):
+  The seed program uses 800 intervals and sigmoid parameterization with 13+ pattern initializations.
+  Current harness fails because it relies on correlation_analyzer which CANNOT parse the seed's h array format.
+  The seed stores h as: h = array((v0, v1, ..., v799)) with ~500-600 digits total.
+
+  FIX: Use EDIT_DIRECT to manually craft a new h array with the SPECIFIED NUMBER of intervals, ensuring:
+    - sum(h) * (2.0 / N) = 1 (integral constraint)
+    - All values in [0, 1]
+    - Use sparse peaks (narrow Gaussians or boxcars) to create low-overlap structures
+
+  NEW WORKFLOW:
+  1. Decide on a SPARSE PEAK COUNT (start with 3-4 peaks)
+  2. Use EDIT_DIRECT to manually write a new h array with:
+     - Exactly N intervals (match seed or try smaller N=200, 400, 800)
+     - Peaks at strategic positions (e.g., 0.0, 0.66, 1.33) to minimize self-overlap at shifts k=1,2,...
+     - Smooth transitions between peaks (sinusoidal ramps or sigmoid blends)
+  3. CALL evaluate_solution immediately on the crafted h
+  4. If score <= 1.0, try DIFFERENT peak counts and positions
+
+  KEY INSIGHT: The seed's 13+ patterns are too broad and overlapping. Sparse, well-separated peaks may achieve lower C5.
+  Try: 3 peaks at 0.0, 0.66, 1.33 (Golomb-like) OR 2 peaks at 0.0, 1.33 OR 4 peaks at 0.0, 0.5, 1.0, 1.5
+
+  Stop patterns: Reduce from 13 to 3-5 distinct peak configurations.
+  Focus on structural simplicity over hyperparameter tuning.
+skill_description: 'Sparse peak construction: Manually craft h arrays with 3-4 narrow peaks at strategic positions to minimize overlap at problematic shifts k=1,2,...'
+skill_body: |
+  # Sparse Peak Strategy for Erdos C5
+  
+  ## Problem Understanding
+  The C5 bound measures max_k integral h(x)(1-h(x+k)) dx. To minimize this, we need h to have LOW overlap with its shifts. Broad, smooth functions have high overlap at many k. Sparse, well-separated peaks have LOW overlap because:
+  - At small k, peaks don't overlap with their shifted versions
+  - At large k, the function value is zero (or near-zero)
+  
+  ## Step 1: Choose Peak Configuration
+  Select a PEAK COUNT and POSITIONS:
+  - Count: 2-4 peaks (start with 3)
+  - Positions: Divide [0,2] into equal segments, place peaks at centers
+    - Example: 3 peaks at x = 0.0, 0.667, 1.333 (separation 2/3)
+    - Example: 2 peaks at x = 0.0, 1.333 (separation 4/3)
+    - Example: 4 peaks at x = 0.0, 0.5, 1.0, 1.5
+  
+  ## Step 2: Craft h Array with EDIT_DIRECT
+  Manually construct h as an array of N values where:
+  - N = num_intervals (match seed: 800, or try smaller: 200, 400)
+  - Each peak is a narrow Gaussian or boxcar: value approx 1.0 at center, decays to approx 0.1 at edges
+  - Ensure integral constraint: sum(h) * (2.0/N) = 1.0
+  
+  ## Step 3: Verify Constraints
+  Check:
+  1. sum(h) * (2.0/N) approx 1.0 (within tolerance 0.99-1.01)
+  2. All h[i] in [0.0, 1.0]
+  3. Peaks are narrow (width < 0.2 in x-units)
+  
+  ## Step 4: Evaluate
+  Call evaluate_solution on the crafted h.
+  - If combined_score > 1.0: SUCCESS!
+  - If combined_score <= 1.0: Try different peak count/positions
+  
+  ## Why This Works
+  The seed's 13+ patterns create high overlap at many k values because they're too broad.
+  Sparse peaks create LOW overlap at the problematic k values (typically k=1,2,3,...).
+  This is a STRUCTURED, NOT RANDOM, search.
+tool_descriptions:
+  edit_solution: |
+    Use EDIT_DIRECT to manually craft a new h array with SPECIFIED peak configuration.
+    Format: h = array((v0, v1, ..., v799)) where N = num_intervals.
+    
+    Structure: Create NARROW peaks (width ~10-20 values) at strategic positions:
+    - 3 peaks at x = 0.0, 0.667, 1.333 (separation 2/3)
+    - 2 peaks at x = 0.0, 1.333 (separation 4/3)
+    - 4 peaks at x = 0.0, 0.5, 1.0, 1.5
+    
+    Each peak: value ~1.0 at center, decays to ~0.1 at edges over ~10-15 values.
+    
+    CRITICAL: Ensure sum(h) * (2.0/N) = 1.0 (integral constraint).
+    - Calculate total mass = 1.0
+    - If 3 peaks, each contributes ~0.33 to integral
+    - Peak height ~ 1.0 / (peak_width * dx) where dx = 2.0/N
+    
+    Avoid sigmoid parameterization - directly specify h values.
+  evaluate_solution: |
+    Full optimization. Returns combined_score = 0.38092303510845016 / c5_bound.
+    combined_score > 1.0 means c5_bound < 0.38092303510845016 (new record).
+    
+    Use AFTER crafting a sparse-peak h array with EDIT_DIRECT.
+    Only call evaluate on well-structured h arrays (integral=1, values in [0,1]).
+  probe_solution: |
+    Fast approximate evaluation. NOT useful for sparse-peak strategy since we craft h directly.
+    Skip probe_solution; go straight from EDIT_DIRECT to evaluate_solution.
+  finish: |
+    Submit when combined_score > 1.0 (c5_bound < 0.38092303510845016).
+    Report: peak_count, peak_positions, N (intervals), and achieved c5_bound.
+sampling:
+  temperature: 0.9
+  top_p: 0.95
+  top_k: 30
+  max_tokens: 12000
+agent:
+  max_iterations: 80
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 8000

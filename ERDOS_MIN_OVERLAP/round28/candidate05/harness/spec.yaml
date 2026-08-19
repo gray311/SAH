@@ -1,0 +1,220 @@
+schema: h2spec/1.0
+system_prompt: |
+  Erdos minimum overlap (C5): Find h:[0,2]->[0,1] minimizing max_k integral h(x)(1-h(x+k))dx.
+  
+  CONSTRAINT: integral(h)=1 exactly. h in [0,1].
+  Current best: C5 <= 0.38092303510845016 (combined_score=1.0).
+  GOAL: Find h with c5_bound < 0.38092303510845016 (combined_score > 1.0).
+  
+  PRIMARY STRATEGY: Explore DIFFERENT initialization PATTERNS first (not hyperparameters).
+  
+  INITIALIZATION PATTERNS (call generate_pattern_candidates once):
+  1. Golomb ruler: marks at [0.0, 0.4, 0.8, 1.2, 1.6]
+  2. Bipartite: high on [0,0.5), low on [0.5,2]
+  3. Tri-modal: 3 narrow peaks at [0.4, 1.0, 1.6]
+  4. Golomb variant: marks at [0.0, 0.45, 0.9, 1.35, 1.8]
+  5. Bipartite variant: split at a=0.6
+  6. Uniform baseline: h(x) ~ 0.5 everywhere
+  7. Two-bump: peaks at [0.3, 1.7]
+  8. Skewed bimodal: peaks at [0.2, 1.5]
+  
+  WORKFLOW:
+  1. CALL generate_pattern_candidates ONCE to get 8 diverse initializations
+  2. Use probe_solution to screen all 8 (cheap, ~10s each)
+  3. Evaluate the 2-3 best with combined_score improvement using evaluate_solution
+  4. If no success, THEN vary ONE hyperparameter (num_intervals, learning_rate, penalty)
+  
+  KEY INSIGHT: The seed's 15 patterns may all converge to similar local minima. 
+  Fresh pattern designs (Golomb, bipartite, tri-modal) may escape the seed's optimization basin.
+  
+  BUDGET: 60 evaluations. Each training run (num_steps=59000) is expensive (~1 eval).
+  Use probe_solution heavily to filter bad candidates before full evaluation.
+skill_description: |
+  Pattern-first search for Erdos C5. Primary strategy: generate diverse initialization patterns (Golomb, bipartite, tri-modal), screen with probe_solution, evaluate top candidates. Only tune hyperparameters after exhausting pattern space.
+skill_body: |
+  # Pattern-First Strategy for Erdos C5
+  
+  ## Phase 1: Pattern Exploration (MOST IMPORTANT)
+  
+  The seed optimizer's 15 patterns may all converge to similar local minima. 
+  We need FRESH pattern designs to escape this basin.
+  
+  1. CALL generate_pattern_candidates() ONCE
+     - Returns 8 diverse initializations (Golomb, bipartite, tri-modal variants)
+     - Each has precomputed integral and c5_bound (no training needed!)
+  
+  2. ANALYZE the candidates:
+     - Filter: keep only those with c5_bound < 0.375 (allows ~5% margin for full eval)
+     - Sort by c5_bound (lowest first)
+  
+  3. CALL evaluate_solution on top 2-3 candidates
+     - Only evaluate if probe suggests improvement
+     - Stop early if combined_score > 1.0
+  
+  ## Phase 2: Hyperparameter Tuning (SECONDARY)
+  
+  Only if Phase 1 fails (no improvement in top 5 candidates):
+  
+  1. Start with BEST pattern from Phase 1 (not seed)
+  2. Vary ONE hyperparameter at a time:
+     - num_intervals: 400, 800, 1600, 3200
+     - base_learning_rate: 0.001, 0.005, 0.01, 0.02
+     - penalty_strength: 20, 40, 60, 80, 120
+     - num_steps: 30000, 59000, 80000
+  3. Use probe_solution to screen before full eval
+  
+  ## Critical Success Factors
+  
+  - ALWAYS call generate_pattern_candidates FIRST (not hyperparameter tuning)
+  - Use probe_solution for ALL pattern candidates (budget ~30 probes)
+  - Evaluate only top 2-3 after probing
+  - If no success after 5 patterns with probe screening, try new patterns
+tool_descriptions:
+  edit_solution: |
+    Modify EVOLVE-BLOCK hyperparameters OR pattern parameters.
+    
+    For pattern-based search: use generate_pattern_candidates instead.
+    
+    For hyperparameter tuning (Phase 2):
+    - Change ONE parameter at a time
+    - Try: num_intervals in [400, 800, 1600], base_learning_rate in [0.001, 0.005, 0.01],
+      penalty_strength in [20, 40, 60, 80], num_steps in [30000, 59000, 80000]
+    
+    Key: Do NOT just hyperparameter-tune the seed pattern. Use fresh patterns first.
+  evaluate_solution: |
+    Full 59000-step optimization. Returns combined_score = 0.38092303510845016 / c5_bound.
+    
+    Use ONLY after probe_solution confirms c5_bound < 0.375.
+    combined_score > 1.0 means c5_bound < 0.38092303510845016 (new record).
+  probe_solution: |
+    Fast approximate evaluation (500 intervals, analytical c5). Uses probe budget (~30 total).
+    
+    Call for EVERY pattern candidate from generate_pattern_candidates before full eval.
+    Keep candidates with c5_bound < 0.375 (allows margin for full eval noise).
+  finish: |
+    Submit when combined_score > 1.0 (c5_bound < 0.38092303510845016).
+sampling:
+  temperature: 0.8
+  top_p: 0.9
+  top_k: 15
+  max_tokens: 16000
+agent:
+  max_iterations: 50
+middleware:
+  budget_reminder_from_left: 8
+  long_tool_output_max_chars: 12000
+new_tools:
+- name: generate_pattern_candidates
+  description: |
+    Generate 8 diverse, integral-constrained initializations. Each has h (latent, [0,1]), integral (~1.0), c5_bound (analytical), pattern_type. Patterns: Golomb, bipartite, tri-modal variants. All normalized. Domain=[0,2], N=800. Call ONCE, screen with probe, evaluate top 2-3.
+  input_schema:
+    type: object
+    properties: {}
+  implementation_py: |
+    def run(ctx, args):
+        import numpy as np
+        N = 800
+        domain = 2.0
+        dx = domain / N
+        
+        def make_candidate(marks=None, split_a=None, uniform=False, peaks=None, pattern_label=""):
+            h = np.zeros(N)
+            if uniform:
+                h = np.full(N, 0.5)
+            elif peaks:
+                for p in peaks:
+                    h += 10.0 * np.exp(-((np.arange(N) - int(p * N)) / (N * 0.12))**2)
+            elif split_a is not None:
+                h[:int(N*split_a)] = 5.0
+                h[int(N*split_a):] = -0.5
+            elif marks:
+                for m in marks:
+                    width = N * 0.08
+                    h += 8.0 * np.exp(-((np.arange(N) - int(m * N)) / width)**2)
+            else:
+                h = np.random.randn(N) * 0.3 + 0.5
+            
+            h = np.clip(h, 0.01, 5.0)
+            h = np.exp(h) / (np.sum(np.exp(h)) + 1e-10)
+            integral = np.sum(h) * dx
+            h = h / integral
+            h = np.clip(h, 0.001, 1.0)
+            h = h / (np.sum(h) * dx)
+            h = np.clip(h, 0.001, 1.0)
+            
+            j = 1.0 - h
+            h_padded = np.pad(h, (0, N))
+            j_padded = np.pad(j, (0, N))
+            corr_fft = np.fft.fft(h_padded) * np.conj(np.fft.fft(j_padded))
+            correlation = np.fft.ifft(corr_fft).real
+            c5_bound = np.max(correlation * dx)
+            
+            return {"h": h.tolist(), "integral": float(np.sum(h) * dx), "c5_bound": float(c5_bound), "pattern_type": pattern_label}
+        
+        candidates = []
+        candidates.append(make_candidate(marks=[0.0, 0.4, 0.8, 1.2, 1.6], pattern_label="Golomb_5"))
+        candidates.append(make_candidate(split_a=0.5, pattern_label="Bipartite_0.5"))
+        candidates.append(make_candidate(peaks=[0.4, 1.0, 1.6], pattern_label="Tri_modal_0.12"))
+        candidates.append(make_candidate(marks=[0.0, 0.45, 0.9, 1.35, 1.8], pattern_label="Golomb_4.5"))
+        candidates.append(make_candidate(split_a=0.6, pattern_label="Bipartite_0.6"))
+        candidates.append(make_candidate(uniform=True, pattern_label="Uniform_0.5"))
+        candidates.append(make_candidate(peaks=[0.3, 1.7], pattern_label="Two_bump_0.3_1.7"))
+        candidates.append(make_candidate(peaks=[0.2, 1.5], pattern_label="Skewed_bimodal_0.2_1.5"))
+        return {"candidates": candidates, "num_candidates": len(candidates)}
+new_skills:
+- name: pattern-first-search
+  description: |
+    Use generate_pattern_candidates to explore diverse initializations before hyperparameter tuning.
+    
+    This skill implements the pattern-first strategy: generate 8 diverse patterns,
+    screen with probe_solution, evaluate top 2-3, then only if no success, tune hyperparameters.
+    
+    The key insight is that the seed's patterns may all converge to the same local minimum,
+    so fresh pattern designs are needed to escape.
+  body: |
+    # Pattern-First Search for Erdos C5
+    
+    ## Core Idea
+    
+    The seed optimizer's 15 patterns all converge to similar local minima (same score 0.999945).
+    We need FRESH pattern designs to escape this basin.
+    
+    ## Step-by-Step Workflow
+    
+    ### Step 1: Generate Patterns
+    1. CALL generate_pattern_candidates() ONCE
+       - Returns 8 diverse initializations
+       - Each precomputed with integral and c5_bound (no training!)
+    
+    ### Step 2: Screen with Probe
+    2. Analyze the 8 candidates:
+       - Filter: keep only c5_bound < 0.375 (allows ~5% margin)
+       - Sort by c5_bound (lowest = best)
+    
+    ### Step 3: Evaluate Top Candidates
+    3. CALL evaluate_solution on top 2-3 candidates
+       - Only if probe suggests improvement
+       - Stop early if combined_score > 1.0
+    
+    ### Step 4: If No Success (Optional)
+    4. Only if all 8 patterns fail to improve:
+       - Take BEST pattern from Step 2
+       - Vary ONE hyperparameter at a time:
+         * num_intervals: 400, 800, 1600, 3200
+         * base_learning_rate: 0.001, 0.005, 0.01, 0.02
+         * penalty_strength: 20, 40, 60, 80, 120
+       - Continue using probe_solution before full eval
+    
+    ## Why This Works
+    
+    - Fresh pattern designs escape the seed's optimization basin
+    - 8 diverse patterns cover Golomb, bipartite, tri-modal, uniform bases
+    - probe_solution allows cheap screening (~10s each) before expensive full eval
+    - If patterns fail, hyperparameter tuning on best pattern is a fallback
+    
+    ## Success Criteria
+    
+    - Call generate_pattern_candidates FIRST (before any hyperparameter changes)
+    - Use probe_solution to screen all 8 candidates
+    - Evaluate only top 2-3 after probe screening
+    - If no improvement after 5 patterns, try new pattern set or hyperparameter tuning

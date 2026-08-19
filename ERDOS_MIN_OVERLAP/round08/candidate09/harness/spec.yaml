@@ -1,0 +1,123 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are optimizing a Python program to find step functions h: [0,2]→[0,1] minimizing max_k ∫ h(x)(1-h(x+k))dx.
+  
+  **OBJECTIVE**: Maximize combined_score = 0.38092303510845016 / c5_bound (need >1.0)
+  
+  **KEY INSIGHT**: The seed's gradient descent on sigmoid(latent) creates smooth functions. 
+  The optimal solution requires SHARP step functions with mass concentrated at strategic locations.
+  
+  **STRATEGY: Direct Step Function Construction**
+  
+  1. **START COARSE**: Use num_intervals=50 to quickly find good mass distributions
+  2. **CONSTRUCT STEPS**: Build piecewise constant functions directly with 3-7 breakpoints
+  3. **MASS BALANCING**: Distribute the integral=1 constraint by adjusting step heights
+  4. **REFINE LATE**: Only increase intervals when you have a promising base pattern
+  
+  **IMPLEMENTATION**: Replace sigmoid(latent) with direct step construction using jnp.concatenate.
+  Start with 3-5 intervals, optimize mass distribution, then refine discretization.
+  
+  **AGENCY**: Complete rewrites that construct step functions directly are required.
+new_tools:
+  - name: construct_step_function
+    description: |
+      Create a piecewise constant step function with specified breakpoints and heights.
+      Returns h array normalized to integral=1 over [0,2].
+    input_schema: 
+      type: object
+      properties:
+        num_breaks:
+          type: integer
+        heights:
+          type: array
+        normalize:
+          type: boolean
+    implementation_py: |
+      def run(ctx, args):
+          import jax.numpy as jnp
+          N = 800
+          num_breaks = args.get('num_breaks', 3)
+          heights = jnp.array(args.get('heights', None))
+          normalize = args.get('normalize', True)
+          
+          if heights is None:
+              num_intervals = num_breaks + 1
+              heights = jnp.ones(num_intervals) / num_intervals
+          
+          h = jnp.zeros(N)
+          interval_size = N // num_intervals
+          for i in range(num_intervals):
+              start_idx = i * interval_size
+              end_idx = min((i + 1) * interval_size, N)
+              h = h.at[start_idx:end_idx].set(heights[i])
+          
+          if normalize and jnp.sum(h) > 0:
+              h = h / jnp.sum(h)
+          
+          return {"h": h, "integral": float(jnp.sum(h))}
+sampling:
+  temperature: 0.8
+  top_p: 0.95
+  top_k: 15
+  max_tokens: 12288
+agent:
+  max_iterations: 50
+middleware:
+  budget_reminder_from_left: 1
+  long_tool_output_max_chars: 8000
+new_skills:
+  - name: step-construction-guide
+    description: |
+      Method for constructing step functions directly. Use when gradient descent fails.
+    body: |
+      # Direct Step Function Construction
+      
+      ## Why Sigmoid Fails
+      h = sigmoid(random_noise) creates smooth functions. Optimal C₅ requires sharp steps.
+      
+      ## Pattern 1: Single Block
+      h = 1 on [0,1], h = 0 on (1,2]. Integral = 1. ✓
+      
+      ## Pattern 2: Double Block  
+      h = 1 on [0,0.5] U [1.5,2], h = 0 elsewhere. Integral = 1. ✓
+      
+      ## Pattern 3: Centered Mass
+      h = 0 on [0,0.3) U [1.7,2], h = 1 on [0.3,1.7]. Scale to integral=1.
+      
+      ## Implementation Code
+      Replace _get_best_initialization with:
+      
+      def _make_single_block(N):
+          mid = N // 2
+          return jnp.concatenate([jnp.ones(mid), jnp.zeros(N-mid)])
+      
+      def _make_double_block(N):
+          n_block = N // 4
+          return jnp.concatenate([jnp.ones(n_block), jnp.zeros(N-2*n_block), jnp.ones(n_block)])
+      
+      def _make_uniform(N):
+          return jnp.ones(N) * 0.5
+      
+      def _get_best_initialization(self, seed):
+          patterns = [_make_single_block, _make_double_block, _make_uniform]
+          best_h, best_score = None, jnp.inf
+          for make_h in patterns:
+              h = make_h(self.hypers.num_intervals)
+              score = self._compute_c5_bound(h)
+              if score < best_score:
+                  best_score, best_h = score, h
+          return best_h
+      
+      ## Refinement
+      1. Start num_intervals=50
+      2. Try all patterns, evaluate
+      3. Pick best, increase intervals: 50→200→500→800
+      4. Fine-tune boundaries by ±5%
+new_middlewares:
+  - name: step_construct_reminder
+    hook: before_model
+    description: |
+      Remind to use direct step construction instead of sigmoid gradients.
+    implementation_py: |
+      def before_model(hook_input):
+          return "Use direct step construction (jnp.concatenate) instead of sigmoid(latent). Try single/double block patterns. Start with 50 intervals."

@@ -1,0 +1,147 @@
+schema: h2spec/1.0
+system_prompt: |
+  Erdos minimum overlap problem: find h: [0,2]->[0,1] minimizing max_k integral h(x)(1-h(x+k))dx.
+  
+  Constraint: integral(h) = 1 exactly.
+  
+  Current best: C5 <= 0.38092303510845016.
+  
+  CRITICAL: The seed optimizer already has 15 diverse initialization patterns (Golomb, bipartite, tri-modal, Gaussian, etc.) that use FFT for analytical c5_bound computation.
+  
+  DO NOT use generate_ready_candidates - it produces invalid candidates.
+  
+  STRATEGY: Edit the EVOLVE-BLOCK to improve the optimizer itself:
+  
+  1. CALL probe_solution on edited EVOLVE-BLOCK to get fast c5_bound estimate (500 intervals)
+  2. If probe shows c5_bound < 0.375, CALL evaluate_solution for full validation
+  3. If probe shows c5_bound >= 0.375, EDIT EVOLVE-BLOCK to try different approaches:
+     - Change hyperparameters (num_intervals, lr, num_steps, penalty_strength)
+     - Add new initialization patterns (different Golomb marks, bipartite splits, multi-peak patterns)
+     - Modify the objective function
+  4. Use probe_solution as a filter - only 1-2 probe calls before each full eval
+  5. Never waste evals on configs with poor probe results
+  
+  Budget: 30 evals total. Use ~5 for probe screening, ~25 for full evaluations of promising configs.
+skill_description: |
+  Direct optimizer improvement: edit EVOLVE-BLOCK to change hyperparameters or add new initialization patterns. Use probe_solution to quickly screen edits (500 intervals, fast). Only evaluate configs where probe shows c5_bound < 0.375.
+tool_descriptions:
+  edit_solution: |
+    Modify EVOLVE-BLOCK to improve the Erdos optimizer.
+    
+    Options:
+    1. Hyperparameter changes: num_intervals (400-1200), base_learning_rate (0.001-0.02), 
+       num_steps (10000-100000), penalty_strength (10-100), num_restarts (1-5)
+    
+    2. New initialization patterns: Add to _get_best_initialization method:
+       - Different Golomb ruler patterns (try more marks at different positions)
+       - Bipartite with different split points (a in [0.3, 0.7])
+       - Multi-peak patterns (3-5 peaks at different locations)
+       - Wave patterns with different frequencies
+    
+    3. Objective function modifications: Change how correlation is computed.
+    
+    Keep code syntactically valid. Always use probe_solution first!
+  evaluate_solution: |
+    Run full 59000-step optimization on the current EVOLVE-BLOCK.
+    
+    Returns combined_score = 0.38092303510845016 / c5_bound.
+    
+    Higher is better. combined_score > 1.0 means a new record.
+    
+    ONLY call this after probe_solution shows c5_bound < 0.375.
+  probe_solution: |
+    Fast approximate evaluation (500 intervals). Returns c5_bound estimate.
+    
+    Use this to SCREEN edits before spending a full eval.
+    
+    Rule: If probe returns c5_bound < 0.375, the config is worth a full eval.
+    If probe returns c5_bound >= 0.375, EDIT EVOLVE-BLOCK instead of evaluating.
+  finish: Submit when combined_score > 1.0 (c5_bound < 0.38092303510845016).
+sampling:
+  temperature: 0.4
+  top_p: 0.95
+  top_k: 30
+  max_tokens: 10000
+agent:
+  max_iterations: 50
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 8000
+new_tools: []
+new_skills:
+  - name: optimizer-improvement
+    description: |
+      Direct optimizer improvement through EVOLVE-BLOCK edits and probe screening.
+      
+      The seed optimizer has 15 initialization patterns. We need to:
+      1. Edit hyperparameters (num_intervals, lr, num_steps, penalty_strength)
+      2. Add better initialization patterns
+      3. Screen all edits with probe_solution (500 intervals)
+      4. Only full-evaluate configs with c5_bound < 0.375
+      
+      This is more effective than generating external candidates because the
+      optimizer already has sophisticated FFT-based c5 computation.
+    body: |
+      # Direct Optimizer Improvement Strategy
+      
+      ## Problem
+      The seed optimizer already has 15 diverse patterns and FFT-based c5 computation.
+      Generating external candidates (like generate_ready_candidates) wastes budget.
+      
+      ## Solution: Edit and Probe
+      1. EDIT EVOLVE-BLOCK to change hyperparameters or add patterns
+      2. CALL probe_solution (500 intervals, fast) to get c5_bound estimate
+      3. If c5_bound < 0.375: CALL evaluate_solution (full 59000 steps)
+      4. If c5_bound >= 0.375: EDIT EVOLVE-BLOCK with a different approach
+      5. Repeat until budget exhausted or combined_score > 1.0
+      
+      ## Example Hyperparameter Changes
+      - num_intervals: 400, 600, 800, 1000, 1200 (affects FFT resolution)
+      - base_learning_rate: 0.001, 0.005, 0.01, 0.02 (affects optimization speed)
+      - num_steps: 10000, 30000, 59000, 100000 (affects convergence)
+      - penalty_strength: 10, 30, 60, 100 (affects integral constraint enforcement)
+      
+      ## Example New Patterns
+      Add to _get_best_initialization():
+      - Golomb with 5 marks: [0.0, 0.5, 1.0, 1.5, 2.0]
+      - Bipartite split at a=0.4: high on [0,a), low on [a,2)
+      - Tri-peak at [0.3, 0.8, 1.6]
+      - Multi-peak at [0.2, 0.6, 1.2, 1.8]
+      
+      ## Budget Discipline
+      - Max 2 probe calls per eval
+      - Never evaluate without probe first
+      - Use evals only for configs with probe c5_bound < 0.375
+new_middlewares:
+  - name: probe_before_eval
+    hook: before_model
+    description: |
+      Enforce probe_solution before evaluate_solution to avoid wasting evals.
+      
+      Remind the agent to check probe results before spending an eval.
+      Encourage editing when probe results are poor.
+    implementation_py: |
+      def before_model(hook_input):
+          state = hook_input.get("state", {})
+          budget_left = state.get("budget_left", 30)
+          evals_used = state.get("evals_used", 0)
+          last_probe = state.get("last_probe_c5", None)
+          last_eval = state.get("last_eval_result", None)
+          
+          if last_eval is not None and evals_used < budget_left - 5:
+              return (
+                  "You have enough budget left to explore more.\n"
+                  "Before spending another eval, call probe_solution to screen edits.\n"
+                  "Only evaluate if probe shows c5_bound < 0.375.\n"
+                  f"Last probe c5_bound: {last_probe}\n"
+                  "If last probe was >= 0.375, EDIT EVOLVE-BLOCK and try again.\n"
+                  "Don't waste evals on configs that probe didn't screen."
+              )
+          elif last_probe is not None and last_probe >= 0.375:
+              return (
+                  "Last probe returned c5_bound >= 0.375. This config is unlikely to improve.\n"
+                  "EDIT EVOLVE-BLOCK to change hyperparameters or add new patterns.\n"
+                  "Try: different num_intervals, learning rate, or new initialization patterns.\n"
+                  "Then probe again before evaluating."
+              )
+          return None

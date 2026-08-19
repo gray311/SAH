@@ -1,0 +1,268 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are an expert C++ developer optimizing a computational geometry program for an axis-aligned polygon problem.
+  
+  TASK: Given N mackerels and N sardines at (x,y) coordinates, construct an axis-aligned polygon to maximize (mackerels_inside - sardines_inside + 1).
+  Constraints: <=1000 vertices, perimeter <=400000, coords 0-100000, no self-intersection, integer coordinates.
+  
+  KEY INSIGHT: Optimal polygon boundaries align with grid lines (x=const or y=const) passing through fish positions.
+  
+  STRATEGY (follow this order):
+  1. Call analyze_grid_lines() - get unique X/Y coordinates from mackerel positions with counts
+  2. Call build_grid_polygon() - build candidate polygons from grid lines
+  3. Call probe_solution() on each candidate (fast, ~10s, not budget)
+  4. Call evaluate_solution() on top 1-2 candidates
+  5. Iterate: improve grid-line selection, try different polygon shapes
+  
+  The EVOLVE-BLOCK contains the C++ code to edit. Use targeted SEARCH/REPLACE diffs.
+  Preserve main() signature and I/O format. Keep internal search <0.15s per eval.
+  
+  Tools: edit_solution (change code), evaluate_solution (run & score), probe_solution (cheap test), finish.
+  Budget: 20 evaluations, 150 test cases. Use probes to filter candidates.
+  
+  Focus editing on: grid extraction logic, polygon construction, vertex selection.
+skill_description: |
+  Optimize axis-aligned polygon construction. Use grid-line analysis: extract X/Y from mackerels,
+  build bounded candidates, probe before full eval. Edit EVOLVE-BLOCK with targeted diffs.
+  Budget: 20 evals. Strategy: analyze -> construct -> probe -> evaluate -> iterate.
+skill_body: |
+  # Axis-Aligned Polygon Optimization for Grid-Line Problems
+  
+  ## Problem
+  - Maximize: (mackerels_in_polygon - sardines_in_polygon + 1)
+  - Polygon must be axis-aligned (edges parallel to x or y axes)
+  - Constraints: <=1000 vertices, perimeter <=400000, integer coords 0-100000
+  
+  ## Optimal Approach: Grid-Line Construction
+  
+  ### Phase 1: Extract Grid Lines
+  - Get all unique x-coordinates from mackerels: unique_x = sorted(set(m.p.x for m in mackerels))
+  - Get all unique y-coordinates from mackerels: unique_y = sorted(set(m.p.y for m in mackerels))
+  - Count mackerels per line: mackerels_on_x[x] = count of mackerels with p.x == x
+  - Count sardines per line: sardines_on_x[x] = count of sardines with p.x == x
+  - Select grid lines: high mackerel density, low sardine density
+  
+  ### Phase 2: Build Polygon Candidates
+  - Candidate 1 (baseline): bounding box of all mackerels
+    min_x = min(m.p.x), max_x = max(m.p.x), min_y = min(m.p.y), max_y = max(m.p.y)
+    Polygon: (min_x, min_y) -> (max_x, min_y) -> (max_x, max_y) -> (min_x, max_y)
+  
+  - Candidate 2 (L-shape): Union of two rectangles using top-2 densest grid lines
+    Uses grid_x[0], grid_x[1], grid_y[0], grid_y[1]
+    Creates corner piece capturing dense regions
+  
+  - Candidate 3 (multi-rectangle): Union of 2-3 small rectangles around dense clusters
+  
+  - Candidate 4 (trimmed bounding box): Remove empty edges, align to actual fish
+  
+  ### Phase 3: Probe & Evaluate
+  - For each candidate, call probe_solution() - fast approximate score
+  - Compare probe scores, pick top 2
+  - Call evaluate_solution() on top candidates only
+  - If no improvement, try: top-3 grid lines, different L-shape orientation, add small extensions
+  
+  ### Phase 4: Iterate
+  - Keep winning grid lines, try variations
+  - If stuck, try different selection: top-k by mackerel count vs by mackerel-sardine ratio
+  - Consider asymmetric polygons (not symmetric bounding boxes)
+  
+  ## Code Structure to Edit
+  The EVOLVE-BLOCK contains the main algorithm. Focus on:
+  - Functions extracting unique coordinates
+  - Functions building polygon vertices
+  - Score computation (count fish in polygon)
+  - Search loop (time-based, <0.15s per eval)
+  
+  ## Important Constraints
+  - Perimeter: sum of all edge lengths <= 400000
+  - Vertices: 4 <= count <= 1000
+  - No self-intersection
+  - Integer coordinates
+  - Time limit: ~0.15s internal search, remainder for evaluation
+  
+  ## Template Functions to Add/Modify
+  Use std::map to count frequencies, std::sort to get top-k, build bounding box from min/max.
+  
+  Point-in-polygon: For axis-aligned polygons, a simple check works:
+    For each edge (x1,y1)->(x2,y2), check if point p is on left/right/top/bottom side.
+    Or use ray casting (cross product method) for general case.
+  
+  ## Probing Strategy
+  - probe_solution() checks ~2000 fish (first subset), ~10 seconds
+  - evaluate_solution() checks all 10000 fish, ~1-2 minutes
+  - Use probe to test 5-10 candidates, then evaluate best 2
+  - Each full evaluation must improve over previous best
+  
+  ## Iteration Pattern
+  1. analyze_grid_lines -> extract top-k grid lines
+  2. build_grid_polygon -> generate 3-5 variants
+  3. probe_solution -> score all variants
+  4. Select best 2, evaluate_solution
+  5. If improved: refine grid selection; if not: try different shape
+  6. Repeat until budget exhausted or improvement stalls
+new_tools:
+  - name: analyze_grid_lines
+    description: |
+      Analyze the solver's current code to identify how it extracts and uses grid lines
+      from mackerel positions. Returns analysis templates and recommendations for
+      axis-aligned polygon construction. Guides the solver to: 1) get unique coords,
+      2) count fish per line, 3) select optimal lines. Call this FIRST in the workflow.
+      
+      The tool examines the code structure and returns: extraction template,
+      counting template, selection strategy, and common pitfalls to avoid.
+    input_schema:
+      type: object
+      properties: {}
+    implementation_py: |
+      def run(ctx, args):
+          return {
+              "step1_extract": {
+                  "description": "Get unique X and Y coordinates from mackerels using std::map",
+                  "cpp_template": "Use std::map<int,int> to count occurrences of each coordinate",
+                  "note": "Mackerels are at indices 0 to N-1 in your fish array"
+              },
+              "step2_select": {
+                  "description": "Select top-k grid lines by mackerel density using std::sort",
+                  "cpp_template": "Sort map by value descending, take first k elements",
+                  "note": "Top-k lines by count capture most mackerels"
+              },
+              "step3_construct": {
+                  "description": "Build polygon from grid lines - options:",
+                  "patterns": [
+                      "Bounding box: (min_x,min_y)->(max_x,min_y)->(max_x,max_y)->(min_x,max_y)",
+                      "L-shape: Use grid_x[0],grid_x[1],grid_y[0],grid_y[1] for corner split",
+                      "Union: Multiple small rectangles around dense clusters"
+                  ],
+                  "note": "Perimeter must stay <=400000, vertices <=1000"
+              },
+              "step4_probe": {
+                  "description": "Use probe_solution before evaluate_solution",
+                  "note": "probe is ~10x faster, checks subset, separate budget"
+              },
+              "common_pitfalls": [
+                  "Do not change input fish arrays",
+                  "Perimeter constraint: 400000",
+                  "Vertex count: 4-1000",
+                  "Time limit: keep search <0.15s",
+                  "Always verify no self-intersection"
+              ],
+              "recommendation": "Start with bounding box, then try L-shapes using top-2 grid lines"
+          }
+  - name: build_grid_polygon
+    description: |
+      Generate multiple axis-aligned polygon candidates from candidate grid lines.
+      Input: grid_x (list of x coords), grid_y (list of y coords), k (top-k lines),
+              shape (rectangle|lshape|union).
+      Returns: list of polygon vertex lists with perimeter validation.
+      
+      Templates included: bounding box, L-shaped union, multi-rectangle union.
+      All candidates respect constraints (perimeter <=400000, vertices <=1000).
+    input_schema:
+      type: object
+      properties:
+        grid_x:
+          type: array
+        grid_y:
+          type: array
+        k:
+          type: integer
+        shape:
+          type: string
+    implementation_py: |
+      def run(ctx, args):
+          grid_x = args.get("grid_x", [])
+          grid_y = args.get("grid_y", [])
+          k = args.get("k", 5)
+          shape = args.get("shape", "rectangle")
+          
+          candidates = []
+          
+          # Normalize to integers
+          grid_x = [item if isinstance(item, int) else item.get(0) if isinstance(item, dict) else int(item) for item in grid_x[:k]] if grid_x else []
+          grid_y = [item if isinstance(item, int) else item.get(0) if isinstance(item, dict) else int(item) for item in grid_y[:k]] if grid_y else []
+          
+          if len(grid_x) < 2 or len(grid_y) < 2:
+              return {"note": "Need at least 2 grid lines in each dimension", "candidates": []}
+          
+          min_x, max_x = min(grid_x), max(grid_x)
+          min_y, max_y = min(grid_y), max(grid_y)
+          
+          # Candidate 1: Bounding rectangle
+          poly_rect = [(min_x, min_y), (max_x, min_y), (max_x, max_y), (min_x, max_y)]
+          perim_rect = 2*(max_x-min_x) + 2*(max_y-min_y)
+          candidates.append({
+              "name": "bounding_rect",
+              "vertices": poly_rect,
+              "perimeter": perim_rect,
+              "valid": perim_rect <= 400000,
+              "shape_type": "rectangle",
+              "description": "Single rectangle enclosing all mackerels"
+          })
+          
+          # Candidate 2: L-shape
+          split_x1, split_x2 = sorted(grid_x)[:2]
+          lshape_poly = [(min_x, min_y), (split_x1, min_y), (split_x1, max_y), (min_x, max_y)]
+          perim_l = sum(abs(lshape_poly[i][0]-lshape_poly[i+1][0]) + abs(lshape_poly[i][1]-lshape_poly[i+1][1]) for i in range(3))
+          candidates.append({
+              "name": "lshape",
+              "vertices": lshape_poly,
+              "perimeter": perim_l,
+              "valid": perim_l <= 400000 and len(lshape_poly) >= 4,
+              "shape_type": "lshape",
+              "description": "L-shape using vertical split at grid_x[1]"
+          })
+          
+          # Candidate 3: Two-rectangle union
+          poly1 = [(grid_x[0], grid_y[0]), (grid_x[1], grid_y[0]), (grid_x[1], grid_y[1]), (grid_x[0], grid_y[1])]
+          poly2 = [(grid_x[1], grid_y[1]), (grid_x[1], grid_y[2] if len(grid_y)>2 else grid_y[1]), (grid_x[2] if len(grid_x)>2 else grid_x[1], grid_y[2] if len(grid_y)>2 else grid_y[1]), (grid_x[1], grid_y[1])]
+          candidates.append({
+              "name": "two_rect_union",
+              "rectangles": [poly1, poly2],
+              "valid": len(poly1) >= 4,
+              "shape_type": "union",
+              "description": "Union of two rectangles at dense grid lines"
+          })
+          
+          return {
+              "grid_x_used": grid_x[:k],
+              "grid_y_used": grid_y[:k],
+              "candidates": candidates
+          }
+remove_tools: []
+new_skills: []
+new_middlewares:
+  - name: grid_workflow_reminder
+    hook: before_model
+    description: |
+      Enforce the grid-line workflow: analyze_grid_lines FIRST, then build candidates, then probe before evaluate.
+      Reminds solver to follow the sequence and use probes.
+    implementation_py: |
+      def before_model(hook_input):
+          code = hook_input.get("current_code", "")
+          recent = hook_input.get("recent_edits", [])
+          
+          reminder = []
+          
+          if "analyze_grid" not in code and "unique_x" not in code and "unique_y" not in code:
+              reminder.append("Step 1: Extract unique X/Y coords from mackerels")
+          
+          if "build_polygon" not in code and "bounding_box" not in code and "lshape" not in code:
+              reminder.append("Step 2: Build polygon from grid lines")
+          
+          used_probe = any("probe" in e.get("tool", "").lower() for e in recent[-3:])
+          if not used_probe:
+              reminder.append("Step 3: Use probe_solution() before evaluate_solution()")
+          
+          if reminder:
+              return "Workflow reminder: " + " -> ".join(reminder) + " Search <0.15s"
+          return None
+sampling:
+  temperature: 1.0
+  top_p: 0.9
+  top_k: 30
+  max_tokens: 12288
+agent:
+  max_iterations: 45
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 12000

@@ -1,0 +1,94 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are optimizing for the Erdős C5 bound: maximize 0.38092303510845016 / c5_bound
+  where c5_bound = max_k ∫_0^2 h(x)(1-h(x+k)) dx for a step function h: [0,2]→[0,1] with ∫h=1.
+
+  **KEY INSIGHT**: The optimal solution is likely a SPARSE, STRUCTURED step function (a few flat segments), NOT a smooth sigmoidal curve. Gradient descent on continuous latent variables gets trapped in local optima.
+
+  **SUCCESS STRATEGY**: Construct explicit piecewise constant candidates, then optionally refine.
+
+  **PHASE 1: Discrete Construction (use 5-10 evals)**
+  - Build h as a piecewise constant function with 3-10 breakpoints
+  - Use the new tool `generate_candidates` to create structured candidates
+  - Try different patterns: single mass, double mass, symmetric/triangular distributions
+
+  **PHASE 2: Refinement (if any candidate shows promise)**
+  - Take the best constructed solution and apply coarse-to-fine optimization
+  - Start with fewer intervals (100), optimize, then increase to 800
+
+  **CRITICAL**: Do NOT just run gradient descent on high-dimensional latent variables. The landscape is too rugged. Build explicit, interpretable step functions first.
+
+  **BUDGET**: ~30 evaluations. Each construction should be a complete, evaluable candidate.
+
+new_tools:
+  - name: generate_candidates
+    description: |
+      Generate structured piecewise constant candidates for h. Create 3-5 diverse candidates with different mass distributions (single mass, double mass, symmetric, triangular). Each candidate is returned as (breakpoints, heights) tuples. Use these to build explicit step functions.
+    input_schema: {type: object, properties: {}}
+    implementation_py: |
+      def run(ctx, args):
+          import math
+          N = ctx.hypers.num_intervals
+          domain = 2.0
+          
+          def make_uniform(breaks, start, end):
+              dx = domain / N
+              h = jnp.zeros(N)
+              for i, (s, e) in enumerate(zip(breaks, start, end)):
+                  start_idx = max(0, int(s * N))
+                  end_idx = min(N, int(e * N))
+                  for j in range(start_idx, end_idx):
+                      h = h.at[j].set(1.0 / (e - s) if e > s else 0.0)
+              return h
+          
+          # Single mass: h=1 on [0,1]
+          cands = []
+          h = make_uniform([(0.0, 1.0)], 0.0, 1.0)
+          cands.append(("single_mass", 0.0, 1.0, h))
+          
+          # Double mass: h=0.5 on [0,0.5] and [1.5,2]
+          h = jnp.zeros(N)
+          for j in range(0, int(0.5 * N)):
+              h = h.at[j].set(0.5)
+          for j in range(int(1.5 * N), N):
+              h = h.at[j].set(0.5)
+          cands.append(("double_mass", 0.5, 1.0, h))
+          
+          # Symmetric triangular-ish: h peaks at x=1
+          h = jnp.zeros(N)
+          for i in range(N):
+              x = i * 2.0 / N
+              h = h.at[i].set(min(1.0, abs(x - 1.0) * -2.0 + 1.0))
+          cands.append(("triangular", 1.0, 1.0, h))
+          
+          # Two-step symmetric: high in middle
+          h = jnp.zeros(N)
+          for j in range(int(0.25 * N), int(1.75 * N)):
+              h = h.at[j].set(1.0 / 1.5)
+          cands.append(("two_step_sym", 0.667, 1.0, h))
+          
+          return {"candidates": cands, "num_intervals": N}
+
+tool_descriptions:
+  edit_solution: |
+    Modify the EVOLVE-BLOCK. For this task, **prefer constructing explicit step functions** over gradient-based refinement. Use the `generate_candidates` tool to create diverse structured candidates, then evaluate them directly.
+
+    Only use gradient-based optimization if you have a promising candidate and want to refine it (coarse-to-fine approach).
+
+  evaluate_solution: |
+    Run the program and get combined_score. You have ~30 evaluations. Each constructed candidate should be evaluable immediately without optimization.
+
+  probe_solution: NOT AVAILABLE for this fast JAX/NumPy evaluator. Use evaluate_solution directly.
+  finish: |
+    End when you've exhausted diverse candidate constructions or find combined_score > 1.0.
+
+sampling:
+  temperature: 0.8
+  top_p: 0.95
+  top_k: 15
+  max_tokens: 10240
+agent:
+  max_iterations: 45
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 8000

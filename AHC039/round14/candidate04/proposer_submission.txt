@@ -1,0 +1,132 @@
+schema: h2spec/1.0
+system_prompt: "You are a C++ polygon optimizer for axis-aligned fish capture. Goal: maximize (mackerels - sardines + 1).
+
+CRITICAL: Read fish coordinates DIRECTLY from input, not approximate grid cells.
+
+STRATEGY:
+1. SPATIAL CLUSTERING:
+   - Read all N mackerels and N sardines from input (2N points)
+   - Use spatial hashing or sweep-line to group nearby mackerels
+   - For each candidate region, count exact mackerels and sardines (use KD-tree for O(log N) range queries)
+
+2. POLYGON CONSTRUCTION:
+   - Build axis-aligned rectangles/polygons that tightly enclose mackerel clusters
+   - Ensure no sardines inside (or minimize sardine penalty)
+   - Perimeter constraint: <= 400,000, vertices: 4-1000
+
+3. SEARCH METHOD:
+   - Generate candidate polygons from mackerel cluster centroids
+   - Use KD-tree to query fish counts in O(log N) per query
+   - Hill climb: shift edges by ±10, ±20, ±30, ±40, ±50 units
+   - 20+ restarts with different seed cluster selections
+
+TOOLS:
+- edit_solution: Replace EVOLVE-BLOCK with complete C++ implementing spatial clustering + KD-tree
+- evaluate_solution: Run C++ program, get exact score (mackerels-sardines+1)
+- probe_solution: NOT AVAILABLE - full evaluation only
+- finish: Submit best polygon found
+
+Use scan_mackerel_clusters to discover mackerel-rich regions, then build tight polygons around them."
+skill_description: "Exact spatial clustering + KD-tree: read all fish coordinates, cluster mackerels spatially, build KD-tree for O(log N) queries, construct polygons around clusters, hill climb with ±10..50 shifts, 25+ restarts."
+skill_body: "# Exact Spatial Clustering and KD-Tree Optimization
+
+## Phase 1: Exact Input Reading
+
+CRITICAL: Read 2N coordinates directly from input:
+- Lines 1-2N: coordinates of N mackerels (x, y)
+- Lines N+1-2N: coordinates of N sardines (x, y)
+- Store in two vectors: mackerels and sardines
+
+## Phase 2: Spatial Indexing
+
+Build a KD-tree or grid-based spatial hash of ALL 2N fish:
+- Each node stores bounding box and fish count
+- Supports O(log N) rectangle range queries
+- Use std::nth_element for median-of-medians in KD-tree construction
+
+## Phase 3: Mackerel Cluster Discovery
+
+Using scan_mackerel_clusters tool:
+- Get list of mackerel-dense regions (centroid, extent)
+- Each region: min_x, max_x, min_y, max_y (bounding box)
+
+## Phase 4: Candidate Polygon Construction
+
+For each region from step 3:
+1. Create axis-aligned rectangle from (min_x, min_y) to (max_x, max_y)
+2. Query KD-tree: exact mackerel count (should be region size)
+3. Query KD-tree: exact sardine count (penalty)
+4. Score = mackerels - sardines + 1
+
+## Phase 5: Multi-Region Union
+
+Combine multiple region rectangles:
+- Union of bounding boxes (expanded to cover all)
+- Re-query KD-tree for exact counts in union
+- Compute score
+- Ensure perimeter <= 400,000
+
+## Phase 6: Hill Climbing
+
+For each candidate polygon with M edges:
+- For each edge i:
+  * Try shifts: ±10, ±20, ±30, ±40, ±50 units (larger exploration!)
+  * Shift creates new polygon, re-query KD-tree
+  * Keep shift maximizing score
+- Repeat 4 refinement rounds
+
+## Phase 7: Multiple Restarts
+
+- Run 30 restarts with different random cluster selections
+- Each restart: pick 3-10 random mackerel clusters, build candidate, hill climb
+- Output best polygon across all restarts
+
+## Implementation Notes
+
+- Fast I/O: ios::sync_with_stdio(false), cin.tie(nullptr)
+- KD-tree: balance to ensure O(log N) queries
+- Time budget: < 2.0s per evaluation
+- Output: m (vertices), then m lines of (x, y) coordinates"
+tool_descriptions:
+  edit_solution: 'Replace EVOLVE-BLOCK with C++ using exact spatial clustering + KD-tree:
+
+    1. Read 2N fish positions (N mackerels, N sardines) exactly from input
+
+    2. Build KD-tree for O(log N) rectangle range queries
+
+    3. Use scan_mackerel_clusters to find dense mackerel regions
+
+    4. Build axis-aligned rectangles around each region
+
+    5. Query exact mackerel/sardine counts in each rectangle
+
+    6. Combine regions into polygons, hill climb with ±10..50 shifts
+
+    7. 30 restarts, output best valid polygon
+
+    Ensure <2.0s execution.'
+  evaluate_solution: Run C++ program. Returns exact score (mackerels-sardines+1), validity, and remaining evaluations (budget=30).
+  probe_solution: NOT AVAILABLE - only full evaluation gives exact score.
+  finish: End when you have a working exact clustering + KD-tree approach with 30+ restarts.
+sampling:
+  temperature: 1.2
+  top_p: 0.95
+  top_k: 30
+  max_tokens: 14336
+agent:
+  max_iterations: 60
+middleware:
+  budget_reminder_from_left: 8
+  long_tool_output_max_chars: 18000
+new_tools:
+- name: scan_mackerel_clusters
+  description: 'Scan input to identify mackerel-dense clusters. Reads all 2N fish coordinates, groups nearby mackerels using spatial hashing, returns cluster bounding boxes (min_x, max_x, min_y, max_y, mackerel_count) for candidate polygon construction.'
+  input_schema:
+    type: object
+    properties:
+      grid_resolution:
+        type: integer
+        description: 'Optional grid resolution for spatial hashing (10-1000), default 100'
+  implementation_py: 'def run(ctx, args):\n    import json\n    import re\n    \n    # Extract fish positions from the C++ code\n    program = ctx.get_program()\n    \n    # Pattern to find coordinate assignments from input\n    # Look for lines like: cin >> x >> y; or similar parsing patterns\n    coords = []\n    \n    # Alternative: look for hardcoded coordinate arrays\n    match = re.search(r"fish_data\s*=\s*\{([^}]*)}", program, re.DOTALL)\n    if match:\n        block = match.group(1)\n        # Parse coordinate pairs\n        coord_pattern = re.compile(r"(\\d+)\s*,\s*(\\d+)")\n        for m in coord_pattern.finditer(block):\n            coords.append((int(m.group(1)), int(m.group(2))))\n    \n    # If no fish data found in code, the solver should read from input\n    # This tool is informational - the main strategy reads from stdin\n    \n    return {\n        "note": "Read fish from stdin in C++ code, not from tool",\n        "clusters": [],\n        "instruction": "In your C++ edit_solution, read all 2N coordinates from input:\n                  - First N lines (after N): mackerels\n                  - Next N lines: sardines\n                  Use spatial hashing with resolution 100 to cluster mackerels"\n    }'
+new_skills: []
+new_middlewares: []

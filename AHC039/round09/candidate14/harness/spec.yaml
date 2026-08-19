@@ -1,0 +1,224 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are a C++ polygon optimizer for axis-aligned fish capture. Goal: maximize (mackerels - sardines + 1).
+
+  CRITICAL STRATEGY: Bounding box with sardine exclusion holes.
+
+  SEARCH METHOD:
+
+  1. DISCOVER MACKEREL CLUSTERS:
+     - Parse all mackerel coordinates
+     - Group mackerels into clusters using 5000-unit distance threshold
+     - Identify cluster centroids and bounding boxes
+
+  2. BUILD BASE POLYGON:
+     - Create bounding box around each cluster (4 vertices per cluster)
+     - Union overlapping cluster boxes into larger polygons
+     - Ensure total perimeter <= 400,000 and vertices <= 1000
+
+  3. EXCLUDE SARDINES:
+     - Identify sardines inside each candidate polygon
+     - For each sardine, carve out a 5x5 exclusion square around it
+     - Apply exclusion as polygon "holes" (subtracted regions)
+     - Re-validate perimeter and vertex count
+
+  4. LOCAL OPTIMIZATION:
+     - For each edge, try shifts +25, +50, +100 units
+     - Shift that maximizes (mackerels - sardines) wins
+     - Repeat 5 rounds per edge
+
+  5. MULTI-CLUSTER COMBINATION:
+     - Try combining top 2-3 clusters into single multi-lobed polygon
+     - Connect clusters with thin corridors if beneficial
+     - Evaluate each combination
+
+  6. RANDOM RESTARTS:
+     - Run 10 restarts with different random perturbations
+     - Each restart: pick random mackerel subset, build cluster, optimize
+     - Output best result
+
+  Tools:
+  - edit_solution: Replace EVOLVE-BLOCK with complete C++ implementation
+  - evaluate_solution: Run C++ program, get score
+  - finish: Submit best solution
+
+  KEY SUCCESS FACTORS:
+  - Capture mackerel clusters with minimal perimeter
+  - Exclude sardines through local hole carving
+  - Keep total perimeter under 400,000
+  - All coordinates in [0, 100000]
+skill_description: |
+  Bounding box with sardine exclusion. Discover mackerel clusters via distance-based grouping, build bounding boxes, carve sardine holes, local edge optimization with +25..100 shifts, 10 random restarts.
+skill_body: |
+  # Bounding Box with Sardine Exclusion Strategy
+
+  ## Core Idea
+  Capture mackerel clusters using minimal-perimeter bounding boxes, then carve out sardine-heavy regions as exclusion holes.
+
+  ## Phase 1: Cluster Discovery
+  - Parse all mackerel coordinates from input
+  - Group mackerels into clusters using 5000-unit distance threshold
+  - For each cluster, compute centroid and axis-aligned bounding box
+  - Track: cluster size, box perimeter contribution
+
+  ## Phase 2: Base Polygon Construction
+  - For each cluster: create 4-vertex rectangle (min_x, min_y, max_x, max_y)
+  - Union overlapping boxes: merge adjacent/overlapping rectangles
+  - Ensure: 4 <= total vertices <= 1000, total perimeter <= 400,000
+  - All coordinates in [0, 100000]
+
+  ## Phase 3: Sardine Exclusion
+  - Count sardines inside candidate polygon
+  - For each sardine: carve 5x5 exclusion square
+  - Implementation: subtract exclusion squares by splitting polygon
+  - Re-calculate score after exclusions
+  - If perimeter exceeds limit: reduce exclusion size to 3x3
+
+  ## Phase 4: Local Edge Optimization
+  - For each edge (up to 1000 vertices):
+    * Try shifts: +25, +50, +100 units in perpendicular direction
+    * For each shift: recalculate mackerel/sardine counts
+    * Keep shift that maximizes (mackerels - sardines)
+  - Repeat 5 refinement rounds
+  - Early stop if no improvement after 2 rounds
+
+  ## Phase 5: Multi-Cluster Combination
+  - Identify top 3 clusters by mackerel count
+  - Try combining them into single multi-lobed polygon
+  - Connect clusters with minimal-width corridors
+  - Evaluate each combination variant
+
+  ## Phase 6: Random Restarts
+  - Run 10 restarts with different random seeds
+  - Each restart: randomly perturb cluster selection
+  - Build bounding boxes for selected clusters
+  - Apply sardine exclusions
+  - Run local optimization
+  - Track best result across all restarts
+
+  ## C++ Implementation Notes
+  - Use O(N log N) sorting for cluster discovery
+  - Use grid-based O(1) fish counting for fast evaluation
+  - Sardine exclusion: use polygon subtraction or boolean operations
+  - Total time per evaluation: < 2.0 seconds
+tool_descriptions:
+  edit_solution: |
+    Replace EVOLVE-BLOCK with C++ implementing bounding box + sardine exclusion:
+    1. Group mackerels into clusters (5000-unit threshold)
+    2. Build bounding boxes for each cluster
+    3. Union overlapping boxes
+    4. Carve sardine exclusion holes (5x5 squares)
+    5. Local edge optimization (+25, +50, +100 shifts, 5 rounds)
+    6. 10 random restarts
+    Ensure <2.0s execution.
+  evaluate_solution: |
+    Run C++ program. Returns score (mackerels-sardines+1), validity, and remaining evaluations (budget=30).
+  finish: |
+    Submit best solution.
+sampling:
+  temperature: 0.9
+  top_p: 0.95
+  top_k: 30
+  max_tokens: 14336
+agent:
+  max_iterations: 60
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 16000
+new_tools:
+  - name: cluster_mackerels
+    description: |
+      Group mackerels into clusters based on 5000-unit distance threshold.
+      Returns clusters with their bounding boxes and mackerel counts.
+    input_schema:
+      type: object
+      properties: {}
+    implementation_py: |
+      def run(ctx, args):
+          import json
+          import math
+
+          program_text = ctx.get_program()
+          mackerels = []
+          for line in program_text.split('\n'):
+              if 'mackerel' in line.lower() and '[' in line:
+                  try:
+                      coords = line.split('[')[1].split(']')[0].split(',')
+                      if len(coords) >= 2:
+                          x, y = int(coords[0].strip()), int(coords[1].strip())
+                          mackerels.append((x, y))
+                  except:
+                      continue
+
+          if not mackerels:
+              return {"clusters": []}
+
+          clusters = []
+          assigned = [False] * len(mackerels)
+
+          for i, (x0, y0) in enumerate(mackerels):
+              if assigned[i]:
+                  continue
+
+              cluster = [(x0, y0)]
+              assigned[i] = True
+
+              for j in range(i + 1, len(mackerels)):
+                  if assigned[j]:
+                      continue
+                  x1, y1 = mackerels[j]
+                  dist = math.sqrt((x0 - x1)**2 + (y0 - y1)**2)
+                  if dist <= 5000:
+                      cluster.append(mackerels[j])
+                      assigned[j] = True
+
+              if cluster:
+                  min_x = min(p[0] for p in cluster)
+                  max_x = max(p[0] for p in cluster)
+                  min_y = min(p[1] for p in cluster)
+                  max_y = max(p[1] for p in cluster)
+                  clusters.append({
+                      "points": cluster,
+                      "bbox": (min_x, min_y, max_x, max_y),
+                      "size": len(cluster)
+                  })
+
+          return {"clusters": clusters}
+new_skills:
+  - name: clustering-polygon-guide
+    description: |
+      Cluster mackerels by distance, build bounding boxes, exclude sardines, optimize edges.
+    body: |
+      # Clustering-Polygon Guide
+
+      ## Step 1: Cluster Mackerels
+      - Parse mackerel coordinates
+      - Group into clusters using 5000-unit distance threshold
+      - Each cluster gets its own bounding box
+
+      ## Step 2: Build Bounding Boxes
+      - For each cluster: min_x, min_y, max_x, max_y -> 4-vertex rectangle
+      - Union overlapping rectangles to reduce vertex count
+      - Ensure total perimeter <= 400,000
+
+      ## Step 3: Exclude Sardines
+      - Count sardines inside polygon
+      - Carve 5x5 exclusion squares around each sardine
+      - Re-evaluate score
+      - Adjust exclusion size if needed
+
+      ## Step 4: Local Optimization
+      - Shift each edge by +25, +50, +100 units
+      - Keep shift that improves score
+      - Repeat 5 rounds
+
+      ## Step 5: Random Restarts
+      - Run 10 restarts with different seeds
+      - Output best result
+new_middlewares:
+  - name: cluster_reminder
+    hook: before_model
+    description: remind solver to cluster mackerels first
+    implementation_py: |
+      def before_model(hook_input):
+          return "Cluster mackerels using 5000-unit threshold, build bounding boxes, carve sardine exclusions, optimize edges with +25..100 shifts."

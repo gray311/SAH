@@ -1,0 +1,116 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are solving the Erdos minimum overlap problem: find a step function h: [0,2] -> [0,1] with integral(h)=1 that minimizes max_k integral h(x)(1-h(x+k))dx.
+  
+  Current best bound: C5 <= 0.38092303510845016
+  Goal: Achieve combined_score > 1.0 (c5_bound < 0.380923).
+  
+  KEY INSIGHT: The seed optimizer uses gradient descent on smooth sigmoid relaxations. This approaches smooth functions, but the optimal solution is likely a TRUE STEP FUNCTION with sharp breakpoints.
+  
+  STRATEGY: Constructive search for step functions, not hyperparameter tuning.
+  
+  Phase 1 - Generate explicit step function candidates:
+  1. Call construct_step_functions to get diverse step-function seeds
+  2. For each seed, use edit_solution to create a candidate that discretizes it
+  3. Call evaluate_solution on each candidate
+  4. Track the best c5_bound found
+  
+  Phase 2 - Refine promising constructions:
+  1. If a candidate has c5_bound < 0.40, it is promising
+  2. Use edit_solution to tweak breakpoints (move, split, merge steps)
+  3. Evaluate refined candidates
+  
+  Phase 3 - Try known constructions from literature:
+  1. Uniform distribution: h(x) = 0.5 for all x
+  2. Two-step: h(x) = 1 for x in [0,a], 0 for x in (a,2], where a=2
+  3. Three-step patterns with breakpoints at rational locations
+  
+  Remember: integral(h) must equal exactly 1. For step functions, this means sum(width_i * height_i) = 1.
+
+tool_descriptions:
+  edit_solution: Modify the EVOLVE-BLOCK to change a step function's breakpoints or step heights. Aim to create a true step function, not a smooth sigmoid.
+  evaluate_solution: Run full evaluation to get the exact C5 bound.
+  probe_solution: Not useful here - full evaluation is cheap and probes don't reflect the true objective.
+  finish: Submit when combined_score > 1.0 or after exhausting 30 evaluations.
+
+sampling:
+  temperature: 1.2
+  top_p: 0.95
+  top_k: 30
+  max_tokens: 14000
+
+agent:
+  max_iterations: 60
+
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 10000
+new_tools:
+- name: construct_step_functions
+  description: |
+    Generate explicit step function candidates for the Erdos problem.
+    Returns step definitions as dicts with keys: uniform, two_step_left, two_step_right,
+    three_step_centered, four_step_even, weighted_two_step, bimodal_steps, triple_peak_steps.
+    Each step function is defined by breakpoints (list of x values) and heights (list of values),
+    ensuring integral equals exactly 1.
+  input_schema:
+    type: object
+    properties: {}
+  implementation_py: |
+    def run(ctx, args):
+        import numpy as np
+        results = {}
+        
+        # 1. Uniform: h(x) = 0.5 everywhere
+        results['uniform'] = {
+            'breakpoints': [0.0, 2.0],
+            'heights': [0.5]
+        }
+        
+        # 2. Two-step left-heavy: h=1 on [0,a], h=0 elsewhere, integral=1 => a=1
+        results['two_step_left'] = {
+            'breakpoints': [0.0, 1.0, 2.0],
+            'heights': [1.0, 0.0]
+        }
+        
+        # 3. Two-step right-heavy: h=1 on [1,2]
+        results['two_step_right'] = {
+            'breakpoints': [0.0, 1.0, 2.0],
+            'heights': [0.0, 1.0]
+        }
+        
+        # 4. Three-step centered: high in middle, zero at edges
+        # h=1 on [0.5,1.5], integral=1*1=1
+        results['three_step_centered'] = {
+            'breakpoints': [0.0, 0.5, 1.5, 2.0],
+            'heights': [0.0, 1.0, 0.0]
+        }
+        
+        # 5. Four-step even: 1 on [0,0.5] and [1,1.5]
+        # integral = 0.5*1 + 0.5*1 = 1
+        results['four_step_even'] = {
+            'breakpoints': [0.0, 0.5, 1.0, 1.5, 2.0],
+            'heights': [1.0, 0.0, 1.0, 0.0]
+        }
+        
+        # 6. Weighted two-step: h=a on [0,1], h=b on (1,2], a+b=2
+        results['weighted_two_step'] = {
+            'breakpoints': [0.0, 1.0, 2.0],
+            'heights': [1.2, 0.8]
+        }
+        
+        # 7. Bimodal: two peaks at 1/3 and 2/3
+        results['bimodal_steps'] = {
+            'breakpoints': [0.0, 1/3, 2/3, 1.0],
+            'heights': [1.5, 0.0, 1.5]
+        }
+        
+        # 8. Triple peak: peaks at 1/4, 1/2, 3/4
+        # h=2 on [0,1/4], h=0 on (1/4,1/2], h=2 on [1/2,3/4], h=0 on (3/4,2]
+        # integral = 2*0.25 + 0 + 2*0.25 + 0 = 1
+        results['triple_peak_steps'] = {
+            'breakpoints': [0.0, 0.25, 0.5, 0.75, 1.0],
+            'heights': [2.0, 0.0, 2.0, 0.0]
+        }
+        
+        return {"constructions": results, "count": len(results)}

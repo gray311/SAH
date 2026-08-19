@@ -1,0 +1,216 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are an expert in harmonic analysis and the Erdos minimum overlap problem.
+
+  Goal: Beat C5 <= 0.38092303510845016 by finding h: [0,2]->[0,1] with integral(h)=1 minimizing max_k integral h(x)(1-h(x+k))dx.
+
+  CRITICAL SEARCH STRATEGY:
+  1. First, call generate_diverse_seeds() to get 5-8 diverse initialization patterns
+  2. For each pattern, run a SHORT optimization (3000-5000 steps) with varying hyperparams
+  3. Use probe_solution to rank all candidates by c5_bound
+  4. Take TOP 3 candidates and REFINE them further (10000-15000 steps each)
+  5. Apply MUTATIONS: try adding/removing peaks, shifting, splitting intervals
+  6. Probe refined candidates, then evaluate only the absolute best
+  7. If best doesn't beat current best, restart from DIFFERENT patterns
+
+  Key insight: The optimal solution likely requires MULTIPLE structural patterns combined. Random single-shot optimization fails.
+
+  Constraints: h values in [0,1], integral(h)=1. Use sigmoid(latent) then normalize.
+
+  Target: combined_score > 1.0 (c5_bound < 0.380923)
+skill_description: |
+  Multi-pattern search for Erdos minimum overlap: generate diverse structured seeds, short-optimize, probe-rank, refine top candidates, then full-evaluate.
+skill_body: |
+  # Erdos Minimum Overlap - Multi-Pattern Search Strategy
+
+  ## Why Current Approaches Fail
+  Single-shot optimization from one random/structured seed cannot escape local minima. The landscape has MANY good structured points but few global optima.
+
+  ## REQUIRED WORKFLOW (MUST FOLLOW IN ORDER)
+
+  ### Step 1: Generate Diverse Seeds
+  Call generate_diverse_seeds() IMMEDIATELY. This returns 5-8 patterns:
+  - bimodal_tight: Two narrow peaks at 0.25, 0.75
+  - bimodal_wide: Two broader peaks with more overlap
+  - triangular_3step: 3-level linear ramps
+  - periodic_2: Alternating high/low on [0,0.5], [0.5,1]
+  - periodic_4: Four-cycle pattern
+  - golomb_5: Peaks at Golomb ruler positions
+  - shifted_bimodal: Same as bimodal but shifted left/right
+  - mixed: Random combination of 2-3 patterns
+
+  ### Step 2: Short Optimization with Varying Hyperparams
+  For EACH seed pattern:
+  - Run optimization for 3000-5000 steps
+  - Use DIFFERENT hyperparams each time:
+    * Run A: lr=0.05, penalty=1000
+    * Run B: lr=0.01, penalty=5000
+    * Run C: lr=0.02, penalty=3000
+  - Record the c5_bound after each run
+
+  ### Step 3: Probe-Rank All Candidates
+  Call probe_solution on each optimized candidate.
+  Sort by c5_bound (lowest = best). Keep TOP 3.
+
+  ### Step 4: Refine Top 3
+  For each of the TOP 3:
+  - Extend optimization to 10000-15000 steps
+  - Try ADAPTIVE MUTATIONS:
+    * AddPeak: Insert a small new peak at a random position
+    * RemovePeak: Remove the smallest peak
+    * ShiftPeak: Shift all peaks by +/-0.1
+    * SplitPeak: Split a wide peak into two narrower ones
+    * Compress: Narrow all peaks by 20%
+  - After each mutation, run 1000-2000 steps
+  - Probe each mutated variant
+
+  ### Step 5: Select Best and Full Evaluate
+  Call probe_solution on all refined candidates.
+  Select absolute best by c5_bound.
+  Call evaluate_solution ONCE on this best candidate.
+
+  ### Step 6: Check and Restart
+  If combined_score > 1.0, you succeeded - call finish().
+  If not, the current seed set may be suboptimal. Call generate_diverse_seeds() again with DIFFERENT base patterns and restart Steps 2-5.
+
+  ## Important Implementation Notes
+  - Ensure integral(h)=1 by normalizing after sigmoid
+  - Use jax.lax.stop_gradient during initial seed creation
+  - The EVOLVE-BLOCK must contain a WHILE/LOOP that iterates through these steps
+  - Save intermediate results to ctx.scratch_write() for debugging
+  - Max evaluations = 30, use probes extensively before final evals
+tool_descriptions:
+  edit_solution: |
+    Modify the EVOLVE-BLOCK region. Implement the multi-pattern search strategy:
+    1. Call generate_diverse_seeds() first
+    2. For each pattern, run short optimization with varying hyperparams
+    3. Probe-rank all candidates, refine top 3 with mutations
+    4. Evaluate best candidate and report combined_score
+  evaluate_solution: |
+    Run and return combined_score (higher=success). The full evaluation.
+  probe_solution: |
+    Quick approximate evaluation on subsampled data. Use this extensively to rank candidates before spending full evals.
+  finish: |
+    End when combined_score > 1.0 or no improvement possible.
+sampling:
+  temperature: 1.1
+  top_p: 0.98
+  top_k: 50
+  max_tokens: 16000
+agent:
+  max_iterations: 70
+middleware:
+  budget_reminder_from_left: 6
+  long_tool_output_max_chars: 15000
+new_tools:
+- name: generate_diverse_seeds
+  description: |
+    Generate 5-8 diverse step function initializations for Erdos problem.
+    Returns dict with pattern names mapping to latent vectors.
+    Each latent vector when passed through sigmoid gives valid h with values in [0,1].
+    Patterns include: bimodal_tight, bimodal_wide, triangular_3step, periodic_2,
+    periodic_4, golomb_5, shifted_bimodal, mixed.
+  input_schema:
+    type: object
+    properties: {}
+  implementation_py: |
+    def run(ctx, args):
+        import numpy as np
+        N = 800
+        domain = 2.0
+        dx = domain / N
+        rng = np.random.default_rng(ctx.budget_left())
+        patterns = {}
+        x = np.linspace(0, domain, N)
+
+        # Pattern 1: bimodal_tight - narrow peaks at 0.25, 0.75
+        a1, a2 = 0.25, 0.75
+        bw1, bw2 = 0.12, 0.12
+        lat = np.exp(-((x-a1)/bw1)**2 * 25) + np.exp(-((x-a2)/bw2)**2 * 25)
+        lat = (lat - np.min(lat)) / (np.max(lat) - np.min(lat) + 1e-10)
+        patterns['bimodal_tight'] = lat
+
+        # Pattern 2: bimodal_wide - broader overlapping peaks
+        a1, a2 = 0.25, 0.75
+        bw1, bw2 = 0.25, 0.25
+        lat = np.exp(-((x-a1)/bw1)**2 * 15) + np.exp(-((x-a2)/bw2)**2 * 15)
+        lat = (lat - np.min(lat)) / (np.max(lat) - np.min(lat) + 1e-10)
+        patterns['bimodal_wide'] = lat
+
+        # Pattern 3: triangular_3step - 3-level linear ramps
+        phases = np.array([0.0, 0.333, 0.666])
+        levels = np.array([-8, -2, 8])
+        lat = np.zeros(N)
+        for p, l in zip(phases, levels):
+            in_range = (x >= p) & (x < p + 0.333)
+            lat = lat + l * in_range
+        lat = (lat - np.min(lat)) / (np.max(lat) - np.min(lat) + 1e-10)
+        patterns['triangular_3step'] = lat
+
+        # Pattern 4: periodic_2 - alternating high/low
+        periodic = 2.0 * (x < 0.5) - 1.0
+        lat = periodic * 5.0
+        lat = (lat - np.min(lat)) / (np.max(lat) - np.min(lat) + 1e-10)
+        patterns['periodic_2'] = lat
+
+        # Pattern 5: periodic_4 - four-cycle pattern
+        periodic_4 = np.sin(2 * np.pi * x) + 1.0
+        lat = (periodic_4 - np.min(periodic_4)) / (np.max(periodic_4) - np.min(periodic_4) + 1e-10)
+        patterns['periodic_4'] = lat
+
+        # Pattern 6: golomb_5 - peaks at optimal spacing
+        marks = np.array([0.0, 0.25, 0.625, 0.9375, 1.0])
+        kws = np.array([0.08, 0.1, 0.09, 0.09, 0.1])
+        lat = np.zeros(N)
+        for m, kw in zip(marks, kws):
+            lat = lat + 8.0 * np.exp(-((x-m)/kw)**2 * 20)
+        lat = (lat - np.min(lat)) / (np.max(lat) - np.min(lat) + 1e-10)
+        patterns['golomb_5'] = lat
+
+        # Pattern 7: shifted_bimodal - left-shifted
+        a1, a2 = 0.15, 0.55
+        bw1, bw2 = 0.12, 0.12
+        lat = np.exp(-((x-a1)/bw1)**2 * 25) + np.exp(-((x-a2)/bw2)**2 * 25)
+        lat = (lat - np.min(lat)) / (np.max(lat) - np.min(lat) + 1e-10)
+        patterns['shifted_bimodal'] = lat
+
+        # Pattern 8: mixed - random combination
+        seed_val = int(ctx.budget_left() * 1000)
+        rng = np.random.RandomState(seed_val)
+        rng_idx = rng.choice([0, 1, 2, 3, 4, 5], size=3, replace=False)
+        mixed_seeds = [int(i) for i in rng_idx]
+        lat = np.zeros(N)
+        for i in mixed_seeds:
+            if i == 0:
+                lat += np.exp(-((x-0.25)/0.2)**2 * 15)
+            elif i == 1:
+                lat += np.exp(-((x-0.75)/0.2)**2 * 15)
+            elif i == 2:
+                lat += 2.0 * (x < 0.5) - 1.0
+            elif i == 3:
+                lat += np.sin(4 * np.pi * x) + 1.0
+            elif i == 4:
+                a1, a2 = 0.2, 0.8
+                lat += np.exp(-((x-a1)/0.15)**2 * 20) + np.exp(-((x-a2)/0.15)**2 * 20)
+            elif i == 5:
+                lat += np.exp(-((x-0.4)/0.1)**2 * 25) + np.exp(-((x-0.6)/0.1)**2 * 25)
+        lat = (lat - np.min(lat)) / (np.max(lat) - np.min(lat) + 1e-10)
+        patterns['mixed'] = lat
+
+        return {'patterns': patterns, 'num_patterns': len(patterns)}
+remove_tools: []
+new_skills: []
+new_middlewares:
+- name: remind_probe_before_eval
+  hook: before_model
+  description: |
+    Remind solver to probe before full evaluation to avoid wasting budget on poor candidates.
+    Fires before each model generation to prompt strategic use of probe_solution.
+  implementation_py: |
+    def before_model(hook_input):
+        remaining = hook_input.get('budget_left', 0)
+        if remaining <= 3:
+            return "WARNING: Only 3 evaluations left! Probe all candidates before final eval."
+        elif remaining <= 10:
+            return "PROBE STRATEGY: Use probe_solution to rank candidates before spending full evals."
+        return None

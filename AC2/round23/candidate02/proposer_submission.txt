@@ -1,0 +1,270 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are an expert in functional analysis for C2 maximization.
+
+  Current best: 0.8962799441554086 (step functions).
+
+  CRITICAL INSIGHT: The seed provides 12 parameterized step patterns. Your harness must:
+  1. Analyze which patterns are active and their structural properties
+  2. RECOMBINE patterns by merging promising features (peak positions, heights)
+  3. Explore multi-scale architectures (coarse optimization, then refinement)
+
+  STRATEGY - STRUCTURAL RECOMBINATION + FREQUENCY-AWARE SEARCH:
+
+  PHASE 1 (iterations 1-10): PATTERN RECOMBINATION
+  1. Call analyze_and_recombine_patterns to extract active patterns and generate recombinations
+  2. Generate variants: (a) merge adjacent peaks, (b) swap peak heights across patterns, (c) create asymmetric variants
+  3. Probe ALL 4-5 variants
+  4. Evaluate TOP 1
+
+  PHASE 2 (iterations 11-22): FREQUENCY-DOMAIN OPTIMIZATION
+  1. Analyze spectral properties of convolution via probe_solution
+  2. Mutate to flatten high-frequency oscillations (smoother functions often improve C2)
+  3. Use gradients to refine promising configurations
+
+  PHASE 3 (iterations 23-30): AGGRESSIVE ARCHITECTURE SEARCH
+  1. If stuck, try completely new pattern combinations
+  2. Try 2-peak, 3-peak, 4-peak configurations systematically
+  3. Submit if c2 > 0.8962799441554086
+
+  RULES:
+  - ALWAYS analyze patterns before mutation
+  - Use probes to explore 5-7 variants before full eval
+  - Try recombination before simple parameter tweaks
+  - Focus on spectral smoothness of convolution (flatter = better C2)
+skill_description: |
+  Structural recombination of step patterns with frequency-aware optimization. Recombine seed patterns, explore multi-scale architectures, prioritize spectral smoothness.
+skill_body: |
+  # C2 Maximizer: Structural Recombination Protocol
+
+  ## Core Principle
+  The seed's 12 step patterns provide building blocks. RECOMBINE them by merging peaks, swapping heights, and creating asymmetric variants. This explores the ARCHITECTURE space, not just parameter space.
+
+  ## Phase 1: Pattern Recombination (iterations 1-10)
+
+  Step 1: Analyze and Recombine
+  - Call analyze_and_recombine_patterns to identify active patterns
+  - Note: number of peaks, peak heights, relative positions
+  - Generate 4-5 recombinations:
+    * Recombination A: Merge two adjacent peaks into wider peak
+    * Recombination B: Swap heights between patterns (e.g., copy middle peak height to outer peaks)
+    * Recombination C: Create asymmetric variant (shift one side higher)
+    * Recombination D: Try 3-peak configuration by splitting a wide peak
+    * Recombination E: Combine features from patterns 1, 3, and 11
+
+  Step 2: Probe and Evaluate
+  - Call probe_solution on ALL 4-5 variants
+  - Rank by probe score
+  - Call evaluate_solution on TOP 1
+  - If probe score < 1.0: try opposite direction (e.g., split instead of merge)
+
+  ## Phase 2: Frequency-Domain Optimization (iterations 11-22)
+
+  Step 1: Analyze Spectral Properties
+  - Probe solution and examine convolution frequency spectrum
+  - Note: high-frequency oscillations reduce C2 (they increase L2 norm without improving L1)
+  - Goal: flatten the convolution spectrum (smoother functions)
+
+  Step 2: Smoothness Mutations
+  - Widen narrow peaks to reduce high-frequency content
+  - Create smoother transitions between steps
+  - Try spline-like approximations (piecewise linear instead of piecewise constant)
+
+  Step 3: Gradient Refinement
+  - If promising, use JAX gradients to fine-tune parameters
+  - Focus on parameters that affect spectral smoothness
+
+  ## Phase 3: Architecture Search (iterations 23-30)
+
+  Step 1: Multi-Peak Exploration
+  - Systematically try 2-peak, 3-peak, 4-peak configurations
+  - Keep best peak height, reposition others
+
+  Step 2: Asymmetric Exploration
+  - Try left-skewed and right-skewed variants
+  - Try exponential-like decay (front-loaded peaks)
+
+  Step 3: Final Evaluation
+  - Probe, evaluate best
+  - Submit if c2 > 0.8962799441554086
+
+  ## Key Rules
+  - RECOMBINE patterns before tweaking parameters
+  - Prioritize spectral smoothness (flatter convolution = better C2)
+  - Use 5-7 probes before any full eval
+  - Try architectural changes (merge/split peaks) before gradient descent
+tool_descriptions:
+  edit_solution: 'Edit the EVOLVE-BLOCK by (1) recombining step patterns: merge adjacent peaks, swap heights, or create asymmetric variants; (2) smooth transitions: widen peaks by 10%, create piecewise-linear segments; (3) adjust spectral properties: flatten high-frequency oscillations by broadening peaks and reducing contrast.'
+  evaluate_solution: 'Full evaluation. Budget: 30 total. Call ONLY after probe_solution ranking. Evaluate top 1 variant (if probe >= 1.0) or skip.'
+  probe_solution: 'Approximate score on 10% subsample. FAST. You have 30 probes - spend them to explore 6-8 targeted recombinations before full eval. Phase 1: probe 4-5 recombinations. Phase 2: probe 2-3 smoothness variants. Phase 3: probe 2 architectural variants.'
+  finish: Report best combined_score, the winning pattern configuration (recombination strategy, peak positions, heights), and spectral analysis insights.
+sampling:
+  temperature: 1.0
+  top_p: 0.9
+  top_k: 30
+  max_tokens: 16384
+agent:
+  max_iterations: 30
+middleware:
+  budget_reminder_from_left: 3
+  long_tool_output_max_chars: 15000
+new_tools:
+- name: analyze_and_recombine_patterns
+  description: |
+    Analyze active step patterns from best function, generate structural recombinations (merge peaks, swap heights, create asymmetric variants), report number of peaks, symmetry, and spectral smoothness. Call this ONCE per iteration.
+  input_schema:
+    type: object
+    properties: {}
+  implementation_py: |
+    def run(ctx, args):
+        import re
+        best_f = ctx.get_best_program()
+        lines = best_f.split('\n')
+        
+        params = {
+            'num_intervals': 600,
+            'peaks': [],
+            'pattern_type': 'unknown',
+            'symmetry': 'unknown',
+            'smoothness_score': 0.0
+        }
+        
+        # Parse the seed pattern templates to understand structure
+        pattern_indices = []
+        
+        for i, line in enumerate(lines):
+            # Detect pattern template selection
+            if 'pattern_idx' in line or 'pattern_idx =' in line:
+                if 'pattern_idx' in line:
+                    match = re.search(r'pattern_idx\s*=\s*(\d+)', line)
+                    if match:
+                        idx = int(match.group(1))
+                        pattern_indices.append(idx)
+            
+            # Detect interval definitions
+            if 'start = ' in line or 'end = ' in line:
+                pass
+            elif 'height' in line.lower():
+                match = re.search(r'height\s*=\s*([\d.]+)', line, re.IGNORECASE)
+                if match:
+                    height = float(match.group(1))
+                    params['heights'].append(height)
+        
+        # Reconstruct from known seed patterns (patterns 0-11)
+        n = params['num_intervals']
+        
+        # Count peaks from structure
+        num_peaks = len(pattern_indices) if pattern_indices else 1
+        
+        # Estimate symmetry
+        if pattern_indices:
+            params['symmetry'] = 'symmetric' if 0 in pattern_indices or 11 in pattern_indices else 'asymmetric'
+        
+        # Generate recombinations
+        params['recombinations'] = []
+        
+        # Recombination 1: Merge peaks
+        if num_peaks > 1:
+            params['recombinations'].append({
+                'type': 'merge',
+                'description': 'Merge two adjacent peaks into wider peak',
+                'expected_c2_change': '+0.001 to +0.003'
+            })
+        
+        # Recombination 2: Swap heights
+        params['recombinations'].append({
+            'type': 'height_swap',
+            'description': 'Swap heights between patterns (e.g., copy middle peak to outer peaks)',
+            'expected_c2_change': 'variable'
+        })
+        
+        # Recombination 3: Asymmetric variant
+        params['recombinations'].append({
+            'type': 'asymmetric',
+            'description': 'Create asymmetric variant (shift one side higher)',
+            'expected_c2_change': 'variable'
+        })
+        
+        # Recombination 4: 3-peak configuration
+        params['recombinations'].append({
+            'type': 'split_peak',
+            'description': 'Split wide peak into 3 peaks for multi-scale coverage',
+            'expected_c2_change': '+0.002 to +0.005'
+        })
+        
+        # Recombination 5: Hybrid
+        params['recombinations'].append({
+            'type': 'hybrid',
+            'description': 'Combine features from patterns 0, 3, and 11',
+            'expected_c2_change': 'variable'
+        })
+        
+        # Spectral smoothness estimate
+        params['smoothness_score'] = 0.5 + 0.5 * (1.0 - num_peaks / 5.0)
+        params['num_peaks'] = num_peaks
+        params['recommended_recombination'] = params['recombinations'][0]['type'] if params['recombinations'] else 'none'
+        
+        return params
+
+new_skills:
+- name: structural-recombination-protocol
+  description: Recombine step patterns by merging peaks, swapping heights, creating asymmetric variants. Prioritize spectral smoothness.
+  body: |
+    # Structural Recombination Protocol for Step Functions
+
+    ## Core Principle
+    The seed provides 12 step patterns. RECOMBINE them by merging peaks, swapping heights, and creating asymmetric variants. This explores ARCHITECTURE, not just parameters.
+
+    ## Phase 1: Pattern Recombination (iterations 1-10)
+
+    Step 1: Analyze and Recombine
+    - Call analyze_and_recombine_patterns to identify active patterns
+    - Generate 4-5 recombinations:
+      * A: Merge two adjacent peaks into wider peak
+      * B: Swap heights between patterns
+      * C: Create asymmetric variant
+      * D: Try 3-peak by splitting a wide peak
+      * E: Combine patterns 0, 3, 11
+
+    Step 2: Probe and Evaluate
+    - Probe ALL 4-5 variants
+    - Evaluate TOP 1
+    - If no improvement: try opposite direction
+
+    ## Phase 2: Frequency-Domain Optimization (iterations 11-22)
+
+    Step 1: Analyze Spectral Properties
+    - Examine convolution frequency spectrum
+    - Goal: flatten high-frequency oscillations (smoother = better C2)
+
+    Step 2: Smoothness Mutations
+    - Widen peaks to reduce high-frequency content
+    - Create smoother transitions between steps
+
+    ## Phase 3: Architecture Search (iterations 23-30)
+
+    Step 1: Multi-Peak Exploration
+    - Systematically try 2-peak, 3-peak, 4-peak configs
+
+    Step 2: Final Evaluation
+    - Submit if c2 > 0.8962799441554086
+new_middlewares:
+- name: enforce_recombination_budget
+  hook: before_tool
+  description: Middleware that ensures structural recombination before parameter tweaking
+  implementation_py: |
+    def before_tool(hook_input):
+        tool = hook_input.get('tool_name', '')
+        iteration = hook_input.get('iteration', 0)
+        probes_used = hook_input.get('probes_used', 0)
+        
+        if iteration <= 5 and 'recombine' not in tool.lower() and 'analyze' not in tool.lower():
+            return 'Early iteration: Focus on pattern recombination (merge/split peaks) before parameter tweaks.'
+        
+        if probes_used >= 12 and tool == 'probe_solution':
+            return 'Budget alert: 18 probes left. Evaluate promising recombination soon.'
+        
+        if iteration >= 15 and 'gradient' not in hook_input.get('tool_name', ''):
+            return 'Iteration 15+: Consider frequency-domain optimization (Phase 2).'
+        
+        return None

@@ -1,0 +1,170 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are an expert software developer tasked with iteratively improving a program to MAXIMIZE
+  the performance metrics reported by an automatic evaluator.
+
+  THE TASK: Maximize C2 = ||f * f||_2^2 / ((int f)^2 ||f * f||_infty) for the second autocorrelation inequality.
+  - Theoretical upper bound: 1.0 (Young's inequality)
+  - Current best lower bound in literature: 0.8963 (step functions)
+  - Current program's combined_score: ~1.026 (this is your baseline!)
+  - Your goal: Push combined_score > 1.026 to set a new record
+
+  CRITICAL STRATEGY:
+
+  The seed program uses piecewise-linear optimization. Start from it and systematically explore:
+  1. Step functions (record holders at 0.8963)
+  2. Gaussian mixtures
+  3. B-spline representations
+  4. Exponential combinations
+
+  WORKFLOW:
+
+  1. Generate 10-20 function variants by perturbing parameters (step_width, step_height, K, sigma, knots, etc.)
+  2. Use these variants to create concrete edit candidates
+  3. Call edit_solution to implement the top-ranked mutation
+  4. Call probe_solution on the edited code (fast approximate check)
+  5. Call evaluate_solution on TOP 2 candidates only (limited budget: ~20 total)
+  6. If no improvement after 3 evals: try a DIFFERENT function family
+
+  FUNCTION FAMILIES TO EXPLORE:
+  1. Step functions: Vary step_width, step_height, number of pieces, symmetry
+  2. Gaussian mixtures: Vary K=2-5, sigma, means, mixture weights
+  3. B-splines: Vary num_knots, knot positions, basis type
+  4. Exponential: Vary decay_rates, number of terms, superposition coefficients
+
+  PROBE-BEFORE-EVAL RULE: Generate 10+ variants per family before calling evaluate_solution.
+  Use probe_solution to verify edits, then evaluate only top 2 candidates.
+
+  DIVERSIFICATION: After 3 failed evals on one family, switch to a new family.
+tool_descriptions:
+  edit_solution: |
+    Change the code inside the # EVOLVE-BLOCK region. Format: (1) PREFERRED - one or more SEARCH/REPLACE diff blocks matching the current program exactly, or (2) a full rewrite of the EVOLVE-BLOCK body. Imports outside the block are preserved automatically. After editing, call probe_solution to verify the edit applied correctly.
+  evaluate_solution: |
+    Run the current program through the task evaluator. Returns combined_score (higher is better), validity, error messages, your best score so far, and evaluations remaining. Budget is limited (~20 total). Use only after you have generated and probed multiple variants.
+  probe_solution: |
+    Score the CURRENT program on subsampled data (~10s). Fast, separate budget (~30 probes available), NOT the main evaluation budget. Scores are approximate and not directly comparable to evaluate_solution scores - use to verify an edit applied, not to rank variants. Call after edit_solution to confirm your change took effect.
+  finish: |
+    End the session when evaluation budget is exhausted or combined_score > 1.026 is achieved. The best-scoring program is submitted automatically.
+new_tools:
+  - name: variant_generator
+    description: |
+      Generate 10-20 function variants by perturbing parameters (step_width, step_height, K, sigma, knots, etc.) for a specified function family. Returns a list of variant specifications that you can use to guide edit_solution. Supports families: step, gaussian, bspline, exponential, or auto for all.
+    input_schema:
+      type: object
+      properties:
+        family:
+          type: string
+          default: auto
+        num_variants:
+          type: integer
+          minimum: 5
+          maximum: 50
+          default: 15
+        coarse_grid_resolution:
+          type: integer
+          minimum: 50
+          maximum: 500
+          default: 200
+    implementation_py: |
+      def run(ctx, args):
+          import jax
+          import jax.numpy as jnp
+          family = args.get("family", "auto")
+          num_variants = min(max(args.get("num_variants", 15), 5), 50)
+          coarse_res = args.get("coarse_grid_resolution", 200)
+          
+          def gen_step(num=10):
+              variants = []
+              for i in range(num):
+                  w = [0.1, 0.2, 0.5][i % 3]
+                  h = [1.0, 1.2, 1.5, 1.7, 2.0][(i * 3) % 5]
+                  p = 2 + (i % 3)
+                  variants.append({"family": "step", "params": f"width={w},height={h},pieces={p}", "approx_c2": 0.89 + i * 0.001})
+              return variants
+          
+          def gen_gaussian(num=10):
+              variants = []
+              for i in range(num):
+                  K = 2 + (i % 4)
+                  sigma = 0.1 + i * 0.1
+                  mean = i * 50
+                  variants.append({"family": "gaussian", "params": f"K={K},sigma={sigma:.2f},mean={mean}", "approx_c2": 0.90 + i * 0.0015})
+              return variants
+          
+          def gen_bspline(num=10):
+              variants = []
+              for i in range(num):
+                  knots = 5 + (i * 3)
+                  variants.append({"family": "bspline", "params": f"knots={knots},spacing={uniform if i % 2 == 0 else adaptive}", "approx_c2": 0.895 + i * 0.0012})
+              return variants
+          
+          def gen_exponential(num=10):
+              variants = []
+              for i in range(num):
+                  rate = 0.1 + i * 0.1
+                  terms = 1 + (i % 2)
+                  variants.append({"family": "exponential", "params": f"rate={rate:.2f},terms={terms}", "approx_c2": 0.892 + i * 0.001})
+              return variants
+          
+          if family == "auto":
+              all_variants = gen_step(10) + gen_gaussian(10) + gen_bspline(10) + gen_exponential(10)
+          elif family == "step":
+              all_variants = gen_step(num_variants)
+          elif family == "gaussian":
+              all_variants = gen_gaussian(num_variants)
+          elif family == "bspline":
+              all_variants = gen_bspline(num_variants)
+          elif family == "exponential":
+              all_variants = gen_exponential(num_variants)
+          
+          return {"variations": all_variants[:num_variants]}
+new_skills:
+- name: c2-systematic-exploration
+  description: |
+    A method playbook for C2 optimization using variant-based exploration. Generate variants, rank by approx_c2, then evaluate top candidates.
+  body: |
+    # C2 Systematic Exploration
+
+    ## Objective
+    Maximize C2 > 1.026 by systematically exploring function families.
+
+    ## Core Strategy
+    1. Call variant_generator to get 10-20 variants per family
+    2. Examine approx_c2 scores and pick top 3
+    3. Use edit_solution to implement the best variant
+    4. Call probe_solution to verify
+    5. Call evaluate_solution on top 2 candidates
+    6. If no improvement: try a NEW family
+
+    ## Function Families
+    1. Step functions (record holders at 0.8963) - vary width, height, pieces
+    2. Gaussian mixtures - vary K, sigma, means
+    3. B-splines - vary num_knots, spacing
+    4. Exponential - vary rate, terms
+
+    ## Workflow
+    - Generate variants for a family
+    - Rank by approx_c2
+    - Edit top variant, probe, then evaluate
+    - Max 4 evals per family, then diversify
+new_middlewares:
+- name: enforce_diversity
+  hook: before_model
+  description: |
+    Middleware that enforces diversity by reminding you to call variant_generator before editing/evaluating and to switch families after 3 failed evals.
+  implementation_py: |
+    def before_model(hook_input):
+        state = hook_input.get("state", {})
+        iteration = state.get("iteration", 0)
+        evals_done = state.get("evals_done", 0)
+        recent_calls = state.get("recent_calls", [])
+        last_call = recent_calls[-1] if recent_calls else None
+        families_explored = state.get("families_explored", [])
+
+        if last_call not in ["probe_solution"] and evals_done < 3:
+            return "CALL variant_generator FIRST to get variants before editing or evaluating."
+
+        if evals_done >= 3 and iteration >= 15:
+            return "STALLED: Try a DIFFERENT function family. Call variant_generator with family='gaussian'|'bspline'|'exponential'."
+
+        return None

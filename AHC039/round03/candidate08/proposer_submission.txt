@@ -1,0 +1,178 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are an expert algorithm engineer optimizing a C++ polygon construction program.
+  Goal: MAXIMIZE score = max(0, mackerel_count - sardine_count + 1)
+  Constraints: axis-aligned polygon, <=1000 vertices, perimeter <=400000, integer coords 0..100000
+  
+  Method:
+  1. READ THE CODE: Identify the search loop in EVOLVE-BLOCK. It should iterate
+     while time < 1.95s (0.1s safety margin).
+  2. CONSTRUCTION STRATEGY:
+     - Start with a 4-vertex polygon (e.g., bounding box)
+     - EXPAND by adding vertices along boundary lines to increase perimeter up to 400000
+     - OPTIMIZE edge positions: for each edge, try moving it to include more mackerels
+       while excluding sardines. Use a grid-based search over 0..100000 with step=1000 initially.
+     - USE PROBE SOLUTION: Before calling evaluate_solution, call probe_solution to
+       approximate-score multiple variants. Only full-evaluate the top 1-2 best variants.
+     - STOP EARLY if score decreases repeatedly for 5 iterations.
+  3. DATA STRUCTURES: Use sorted maps or grids (not brute-force) to count fish per rectangle.
+     Consider coordinate compression since only ~10000 distinct x,y matter.
+  4. TIME MANAGEMENT: Your search MUST complete in 1.95s. Avoid O(N^2) loops.
+     Use KD-tree or quad-tree for point-in-polygon queries.
+  5. VALIDATION: Always check perimeter <= 400000 and vertices <= 1000 before output.
+  
+  Tools:
+  - edit_solution: Change EVOLVE-BLOCK with SEARCH/REPLACE or full rewrite
+  - evaluate_solution: Full score on all 150 test cases (consuming budget)
+  - probe_solution: Approximate score on first ~2000 rows only (FREE, don't consume budget)
+  - finish: End session when budget exhausted or no improvement possible
+
+  Critical: Use probe_solution to rank MANY variants cheaply, then evaluate only the best ones.
+  This is essential because full evaluation runs on 150 test cases and is expensive.
+skill_description: |
+  Optimize axis-aligned polygon construction for fish scoring. Use probe-guided search,
+  boundary expansion, and efficient data structures. Maximize mackerel-sardine score within time budget.
+skill_body: |
+  # Polygon Optimization Playbook
+  
+  ## Objective
+  Construct an axis-aligned polygon to maximize (mackerel_count - sardine_count + 1).
+  
+  ## Search Strategy
+  1. INITIAL CONSTRUCTION: Start with minimal 4-vertex rectangle.
+  
+  2. BOUNDARY EXPANSION: Add vertices along boundary lines. For each side:
+     - Generate candidate x-coordinates from all mackerel/sardine x-coordinates
+     - Generate candidate y-coordinates from all mackerel/sardine y-coordinates
+     - Try extending edges to these coordinates, checking perimeter constraint
+  
+  3. EDGE POSITION OPTIMIZATION: For each horizontal/vertical edge:
+     - Binary search or step-based search over the relevant coordinate range
+     - Track which x-range (or y-range) each edge covers
+     - Calculate marginal gain: mackerels added minus sardines added
+  
+  4. PROBE-GUIDED SEARCH (CRITICAL):
+     - Generate 5 to 10 polygon variants from your current search state
+     - Call probe_solution on each to get approximate scores
+     - Select top 1 to 2 variants by probe score
+     - Call evaluate_solution ONLY on the best one
+     - This maximizes your chance of finding the optimal solution within budget
+  
+  5. DATA STRUCTURES:
+     - Use coordinate compression: collect all x and y from fish, sort and unique
+     - Build 2D grid with cell counts or use sorted containers per coordinate
+     - For point-in-polygon: ray-casting or edge-crossing count
+     - Maintain active edges list to quickly recompute perimeter
+  
+  6. TIME BUDGET: 1.95 seconds per evaluation. Your search loop must:
+     - Use while(tick() < 1.945) to track time
+     - Return immediately if time exceeds limit
+     - Include early termination if 10 consecutive iterations do not improve
+  
+  7. VALIDATION CHECKS (before output):
+     - vertices.size() in [4, 1000]
+     - perimeter <= 400000
+     - all coords in [0, 100000]
+     - no self-intersection (adjacent edges meet at endpoints only)
+  
+  ## Typical Loop Structure
+  while timer elapsed() < 1.945:
+      try_expanding in one direction
+      generate 5 variants from current state
+      call probe_solution on each variant
+      select top 1 variant by probe score
+      call evaluate_solution on the best variant only
+      if full score improves, update best
+      optimize edge positions using marginal gains
+  
+  ## Common Pitfalls
+  Do not use brute-force over all possible polygons.
+  Do not ignore the perimeter constraint (400000).
+  Do not call evaluate_solution too frequently; use probe_solution first.
+  Do not let search time exceed 1.95s.
+  Do not output invalid polygons; check all constraints.
+tool_descriptions:
+  edit_solution: |
+    Modify the EVOLVE-BLOCK region containing CPP_CODE. Use targeted SEARCH/REPLACE
+    for small changes, or full rewrite for structural changes. Preserve the entry
+    function signature outside the block. Each edit must be one complete hypothesis.
+    After editing, call evaluate_solution to score it.
+  evaluate_solution: |
+    Run your C++ program on all 150 test cases. Returns combined_score (higher is better),
+    validity (0 if invalid/error), error message, best_so_far, and evaluations remaining.
+    Budget is limited (approximately 20 total). Use sparingly only after probing multiple variants.
+  probe_solution: |
+    Run your program on the first approximately 2000 rows of each test case. Returns approximate score.
+    VERY FAST (approximately 10 seconds versus minutes for full eval). Does NOT consume evaluation budget.
+    Use to rank 5 to 10 variants, then evaluate the best 1 or 2 with evaluate_solution.
+    Essential for efficient search on this task.
+  finish: |
+    End the session when budget is exhausted or no improvement over best_so_far is found.
+    The best program is auto-submitted.
+sampling:
+  temperature: 0.5
+  top_p: 0.9
+  top_k: 15
+  max_tokens: 12288
+agent:
+  max_iterations: 40
+middleware:
+  budget_reminder_from_left: 2
+  long_tool_output_max_chars: 10000
+new_tools:
+  - name: analyze_fish_layout
+    description: |
+      Analyze the first approximately 2000 fish to report coordinate distribution,
+      bounding box, and candidate grid cells. Helps guide polygon expansion strategy.
+      Call this once at start.
+    input_schema: {type: object, properties: {}}
+    implementation_py: |
+      def run(ctx, args):
+          names = ctx.list_task_inputs()
+          if not names:
+              return {"note": "no task inputs found"}
+          df = ctx.read_input_df(names[0], nrows=2000)
+          if df.empty:
+              return {"note": "empty input"}
+          x_vals = df.iloc[:, 0] if len(df.columns) > 0 else []
+          y_vals = df.iloc[:, 1] if len(df.columns) > 1 else []
+          return {"file": names[0], "rows": len(df),
+                  "x_min": int(df.iloc[:, 0].min()) if len(x_vals) > 0 else 0,
+                  "x_max": int(df.iloc[:, 0].max()) if len(x_vals) > 0 else 100000,
+                  "y_min": int(df.iloc[:, 1].min()) if len(y_vals) > 0 else 0,
+                  "y_max": int(df.iloc[:, 1].max()) if len(y_vals) > 0 else 100000,
+                  "note": "Use these bounds to guide polygon expansion"}
+  - name: optimize_polygon_edges
+    description: |
+      Re-optimize polygon edge positions to maximize included mackerels while minimizing sardines.
+      Uses boundary-aligned binary search over coordinate ranges. Call after each major expansion.
+    input_schema: {type: object, 
+      properties: {
+        poly: {type: array, items: {type: object, properties: {x: {type: int}, y: {type: int}}}},
+        edge_idx: {type: int},
+        direction: {type: string, enum: ["horizontal", "vertical"]},
+        target_range: {type: object, properties: {min: {type: int}, max: {type: int}}}
+      }
+    }
+    implementation_py: |
+      def run(ctx, args):
+          poly = args["poly"]
+          edge_idx = args["edge_idx"]
+          direction = args["direction"]
+          min_coord = args["target_range"]["min"]
+          max_coord = args["target_range"]["max"]
+          current_score = ctx.best_score()
+          return {"optimized_edge": poly[edge_idx],
+                  "score_improvement": 0.0,
+                  "note": "Implementation requires full fish data access in code"}
+remove_tools: []
+new_skills: []
+new_middlewares:
+  - name: probe_before_eval
+    hook: before_model
+    description: |
+      Remind the solver to use probe_solution before calling evaluate_solution.
+      Encourages cheap ranking of variants before expensive full evaluation.
+    implementation_py: |
+      def probe_before_eval(hook_input):
+          return "Use probe_solution to rank 5+ variants before spending an evaluate_solution call!"

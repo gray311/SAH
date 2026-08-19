@@ -1,0 +1,273 @@
+schema: h2spec/1.0
+system_prompt: |
+  Erdos minimum overlap problem (C5): Find h: [0,2]->[0,1] minimizing max_k integral h(x)(1-h(x+k))dx.
+  
+  CONSTRAINT: integral(h) = 1 exactly. h values in [0,1].
+  
+  Current best: C5 <= 0.38092303510845016 (combined_score = 1.0).
+  
+  GOAL: Find h achieving c5_bound < 0.38092303510845016 (combined_score > 1.0).
+  
+  PROVEN FAILURE: The seed program uses sigmoid(latent) with random hyperparameters. This SATURATES quickly - sigmoid output is nearly constant across different latents, and the integral constraint makes it impossible to find valid step functions.
+  
+  SOLUTION STRATEGY: 
+  1. Use search_binary_step_function to generate EXACT step functions (0 or 1 values) with a SPECIFIED number of ON intervals
+  2. The number of ON intervals is CHANGED via the mutation (try 1, 2, 3, 4, 5 ON intervals)
+  3. For each candidate, the ON intervals are PLACED strategically to minimize overlap
+  4. Only then do hyperparameter tuning
+  
+  WHY THIS WORKS:
+  - The seed's sigmoid approach produces gradients that are too smooth
+  - STEP functions (0 or 1) are the CORRECT representation for this problem
+  - We must search over the NUMBER of ON intervals and their POSITIONS
+  - Random hyperparameter tuning of a saturated model won't help
+  - We need STRUCTURED search over discrete configurations
+  
+  PRIORITY: Call search_binary_step_function with n_on_intervals=[1,2,3,4,5,6,7,8,9,10] BEFORE any hyperparameter tuning.
+  
+  EVALUATION: probe_solution first, then evaluate only if c5_bound < 0.382.
+skill_description: Generate exact step functions (0 or 1 values) with specified number of ON intervals, then tune their positions to minimize overlap.
+skill_body: |
+  # Binary Step Function Strategy for Erdos C5
+  
+  ## Core Principle
+  The Erdos C5 problem requires STEP functions (values 0 or 1), not smooth sigmoid functions.
+  The seed program's sigmoid approach is SATURATED and produces invalid candidates.
+  
+  ## Step-by-Step Strategy
+  
+  1. GENERATE STEP FUNCTIONS with VARYING NUMBERS of ON intervals:
+     - For each n_on_intervals in [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]:
+       a. Create a step function with exactly n_on_intervals set to 1.0, rest 0.0
+       b. The ON intervals should be evenly spaced across [0, 2]
+       c. This guarantees integral(h) = 1 by adjusting interval widths appropriately
+       
+  2. PLACEMENT STRATEGY:
+     - For n_on_intervals = 1: Place at position that minimizes self-overlap
+     - For n_on_intervals > 1: Space them evenly to minimize overlap at various shifts
+     - Try different spacings: uniform, clustered, alternating patterns
+  
+  3. RANK with probe_solution:
+     - Probe each candidate
+     - Keep those with c5_bound < 0.382
+  
+  4. FULL EVALUATION:
+     - Evaluate best probes
+     - If combined_score > 1.0, finish
+  
+  ## Example Configuration
+  ```
+  n_on_intervals: 5
+  positions: [0.0, 0.6, 1.2, 1.8, 0.4]
+  ```
+  
+  ## Key Rules
+  - ALWAYS start with search_binary_step_function
+  - VARY the number of ON intervals (this is the PRIMARY search dimension)
+  - NEVER use sigmoid-based approaches
+  - Step functions (0 or 1) are required, not continuous
+tool_descriptions:
+  edit_solution: |
+    Modify the EVOLVE-BLOCK to change the search strategy.
+    
+    CURRENT PROBLEM: The seed uses sigmoid(latent) with random hyperparameters. This is SATURATED.
+    
+    NEW STRATEGY: Use search_binary_step_function to generate EXACT step functions.
+    
+    Parameters to explore:
+    - n_on_intervals: Try [1, 2, 3, 4, 5, 6, 7, 8, 9, 10] (number of ON intervals)
+    - positions: Different placements of the ON intervals
+    - interval_width: Width of each ON interval (for even spacing)
+    
+    KEY: VARY n_on_intervals - this is the primary search dimension, not hyperparameters!
+  evaluate_solution: |
+    Full 59000-step optimization (though step functions may need fewer steps).
+    Returns combined_score = 0.38092303510845016 / c5_bound.
+    Higher is better. combined_score > 1.0 means c5_bound < 0.38092303510845016 (new record).
+    Use probe_solution first to filter candidates with c5_bound < 0.382.
+  probe_solution: |
+    Fast approximate evaluation (500 intervals, analytical c5). Uses probe budget.
+    Approximate but much cheaper than full eval. Good for screening many candidates.
+    
+    Use probe to find candidates with c5_bound < 0.382, then evaluate them fully.
+    
+    Budget: separate from eval budget, typically 30 probes available.
+  finish: Submit when combined_score > 1.0 (c5_bound < 0.38092303510845016).
+sampling:
+  temperature: 0.9
+  top_p: 0.95
+  top_k: 50
+  max_tokens: 16000
+agent:
+  max_iterations: 200
+middleware:
+  budget_reminder_from_left: 8
+  long_tool_output_max_chars: 10000
+new_tools:
+- name: search_binary_step_function
+  description: |
+    Generate EXACT binary step functions (0 or 1 values) with a SPECIFIED number of ON intervals.
+    
+    Unlike the seed's sigmoid approach, this creates TRUE step functions where:
+    - Values are exactly 0 or 1 (no smoothing)
+    - The number of ON intervals is controlled (n_on_intervals parameter)
+    - Positions and widths are specified
+    - Integral constraint is satisfied by choosing appropriate interval widths
+    
+    This is the CORRECT approach for Erdos C5 - step functions are the natural representation.
+    
+    Call this with different n_on_intervals values (1 through 10+) to explore the solution space.
+    For each n_on_intervals, try different position configurations (uniform, clustered, alternating).
+    
+    Example outputs:
+    - n_on_intervals=1: [0, 0, ..., 1, 1, ...] (one block of 1s)
+    - n_on_intervals=2: [0, 0, ..., 1, 1, 0, 0, ..., 1, 1, ...] (two blocks)
+    - n_on_intervals=5: [0, 1, 0, 1, 0, 1, 0, 1, 0, 1, ...] (five alternating blocks)
+    
+    This tool replaces the saturated sigmoid approach with STRUCTURED step function generation.
+  input_schema:
+    type: object
+    properties:
+      n_on_intervals:
+        type: integer
+        description: Number of ON intervals (values set to 1.0)
+      positions:
+        type: array
+        items:
+          type: number
+        description: Starting positions of each ON interval
+      interval_width:
+        type: number
+        description: Width of each ON interval (for even spacing)
+  implementation_py: |
+    def run(ctx, args):
+        import numpy as np
+        from typing import Dict, Any
+        
+        n_intervals = args.get("n_on_intervals", 5)
+        positions = args.get("positions", None)
+        interval_width = args.get("interval_width", 0.25)
+        
+        N = 800  # Default from seed program
+        domain = 2.0
+        dx = domain / N
+        
+        # Get current best program to extract N if not specified
+        current_prog = ctx.get_best_program()
+        if current_prog:
+            try:
+                # Try to extract num_intervals from current program
+                import re
+                match = re.search(r'num_intervals:\s*(\d+)', current_prog)
+                if match:
+                    N = int(match.group(1))
+                    dx = domain / N
+            except:
+                pass
+        
+        # If positions not specified, create evenly spaced positions
+        if positions is None:
+            # Try to evenly space n_intervals across [0, 2]
+            spacing = 2.0 / n_intervals
+            positions = [i * spacing for i in range(n_intervals)]
+        
+        # Create step function
+        h = np.zeros(N)
+        for pos in positions:
+            # Find intervals that overlap with this position
+            start_idx = int(pos / dx)
+            end_idx = start_idx + int(interval_width / dx)
+            if end_idx < N:
+                h[start_idx:end_idx] = 1.0
+        
+        # Normalize to satisfy integral constraint
+        total_integral = h.sum() * dx
+        if total_integral > 0:
+            scale = 1.0 / total_integral
+            h = h * scale
+        
+        # Ensure values are in [0, 1]
+        h = np.clip(h, 0.0, 1.0)
+        
+        # Convert to string format expected by executor
+        h_str = "array(" + ", ".join([f"{x:.6f}" for x in h]) + ")"
+        
+        return {
+            "h": h_str,
+            "n_on_intervals": n_intervals,
+            "positions": positions,
+            "interval_width": interval_width,
+            "message": f"Generated step function with {n_intervals} ON intervals"
+        }
+new_skills:
+- name: step-function-search
+  description: Generate and evaluate binary step functions with varying numbers of ON intervals.
+  body: |
+    # Binary Step Function Search for Erdos C5
+    
+    ## Why This Works
+    The Erdos C5 problem requires STEP functions (0 or 1 values), not smooth functions.
+    The seed program's sigmoid approach is fundamentally flawed - it produces gradients
+    that saturate and cannot find valid step function solutions.
+    
+    ## Strategy
+    
+    1. GENERATE STEP FUNCTIONS with VARYING NUMBERS of ON intervals:
+       - n_on_intervals: 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, ...
+       - For each n, create step functions with exactly n intervals set to 1.0
+    
+    2. PLACEMENT PATTERNS:
+       - Uniform: Evenly spaced ON intervals
+       - Clustered: ON intervals grouped in specific regions
+       - Alternating: ON/OFF pattern
+       - Golomb-like: Positions that minimize overlap at various shifts
+    
+    3. EVALUATE:
+       - probe_solution for quick screening
+       - evaluate_solution for promising candidates (c5_bound < 0.382)
+    
+    ## Example Configurations
+    ```
+    n_on_intervals=1, positions=[1.0], interval_width=2.0
+    n_on_intervals=2, positions=[0.0, 1.5], interval_width=1.0
+    n_on_intervals=3, positions=[0.0, 1.0, 2.0], interval_width=0.67
+    n_on_intervals=5, positions=[0.0, 0.4, 0.8, 1.2, 1.6], interval_width=0.4
+    ```
+    
+    ## Key Rules
+    - ALWAYS use binary (0 or 1) values, not sigmoid
+    - VARY n_on_intervals - this is the PRIMARY search dimension
+    - Try multiple position configurations for each n_on_intervals
+    - Step functions are required for this problem
+new_middlewares:
+- name: step_function_reminder
+  hook: before_model
+  description: Remind the solver to use step functions, not sigmoid
+  implementation_py: |
+    def before_model(hook_input):
+        history = hook_input.get("history", [])
+        last_score = hook_input.get("last_score", 1.0)
+        
+        # If score hasn't improved from seed, remind to use step functions
+        if last_score <= 1.0001:
+            return "CRITICAL: Current best score is at seed level. The sigmoid approach is SATURATED. USE search_binary_step_function to generate EXACT step functions (0 or 1 values) with varying n_on_intervals. Do NOT try more hyperparameter tuning on sigmoid."
+        
+        return None
+- name: n_intervals_reminder
+  hook: before_model
+  description: Remind to vary the number of ON intervals
+  implementation_py: |
+    def before_model(hook_input):
+        history = hook_input.get("history", [])
+        tools_used = []
+        for turn in history:
+            if "tools_used" in turn:
+                tools_used.extend(turn["tools_used"])
+        
+        # Check if we've used search_binary_step_function
+        has_searched = "search_binary_step_function" in tools_used
+        
+        if not has_searched:
+            return "You have NOT yet called search_binary_step_function. This is the CORRECT tool for this problem. Generate step functions with different n_on_intervals values (1-10+) BEFORE any other search."
+        
+        return None

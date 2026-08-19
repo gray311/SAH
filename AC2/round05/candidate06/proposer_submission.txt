@@ -1,0 +1,192 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are optimizing C2 = ||f ★ f||₂² / ((∫f)² ||f ★ f||_∞). Current score: 1.02665.
+
+  CRITICAL: The seed program uses piecewise-linear functions with ~400 intervals and achieves 1.02665. This is already very close to the theoretical maximum of 1.0. Do NOT immediately try step functions or other families.
+
+  STRATEGY: DEEPLY OPTIMIZE THE CURRENT APPROACH FIRST.
+
+  WORKFLOW:
+  1. Call analyze_convolution to diagnose why C2 cannot be improved
+  2. Systematically refine the piecewise-linear representation:
+     - Try num_intervals in [500, 800, 1200, 1600] (finer discretization)
+     - Tune learning_rate in [0.1, 0.15, 0.2, 0.25, 0.3]
+     - Adjust num_steps in [30000, 50000, 80000, 100000]
+     - Refine warmup_steps and cosine_decay_schedule
+  3. Use probe_solution to rank 3-5 variants before any full eval
+  4. Only after exhausting the current approach (3+ failed evals) try step functions
+
+  PROBE-BEFORE-EVAL: Always probe 3+ variants before evaluating. Never eval without probing.
+
+  TOOL PRIORITY:
+  1. analyze_convolution — get diagnostic info on current function
+  2. edit_solution — refine intervals, learning rate, or steps
+  3. probe_solution — rank variants
+  4. evaluate_solution — confirm top 1-2
+  5. finish — when budget exhausted
+
+  Remember: The seed is already excellent. Small refinements may push it higher, but massive architectural changes are premature.
+skill_description: |
+  Deeply optimize piecewise-linear representation before exploring alternatives. Use analyze_convolution to diagnose limitations, then systematically refine intervals, learning rate, and step count. Probe 3+ variants before eval.
+skill_body: |
+  # C2 Optimization: Deep Refinement Strategy
+
+  ## Core Principle
+  The seed program (piecewise-linear, 400 intervals, lr=0.25, 30k steps) achieves 1.02665. This is near-optimal. Do NOT jump to step functions or other families until you've exhausted refinements to the current approach.
+
+  ## Phase 1: Diagnostic Analysis
+  1. Call analyze_convolution to understand:
+     - Current function shape (peaks, flat regions, support width)
+     - Convolution properties (peak location, tail behavior)
+     - Integration error estimates (from discretization)
+  2. Identify bottleneck: Is it discretization error? Optimization convergence? Function shape?
+
+  ## Phase 2: Systematic Refinement
+  For EACH parameter, test 3-5 values using probe_solution:
+
+  ### A. Discretization (num_intervals)
+  - Values: [500, 800, 1200, 1600, 2000]
+  - Expectation: Finer grids reduce integration error, may improve C2
+  - Probe all 5 before eval
+
+  ### B. Learning Rate Schedule
+  - Values: [0.1, 0.15, 0.2, 0.25, 0.3]
+  - Expectation: Different lrs may converge to better minima
+  - Test with warmup_steps=3000, then cosine decay
+
+  ### C. Optimization Duration
+  - Values: [30000, 50000, 80000, 100000]
+  - Expectation: More steps may refine solution further
+
+  ### D. Multi-start Variants
+  - Keep 9 initializations but vary their positions/widths
+  - Probe 3 variants per seed
+
+  ## Phase 3: Evaluate and Decide
+  1. Pick top 2 from probes
+  2. Run full evaluation on each
+  3. If no improvement (>10k steps or 3 evals): THEN try step functions
+
+  ## Critical Rules
+  - Probe 3+ variants BEFORE any eval
+  - Do NOT explore new families until current approach fails
+  - Finer discretization is your first lever, not architectural changes
+  - Use analyze_convolution at least twice: start and after refinement
+tool_descriptions:
+  edit_solution: |
+    Change the code inside # EVOLVE-BLOCK. Two formats: (1) SEARCH/REPLACE diff blocks matching current program, or (2) full rewrite of EVOLVE-BLOCK. Preserves imports and entry function. After editing, call probe_solution or evaluate_solution.
+  evaluate_solution: |
+    Run program on full evaluator. Returns combined_score, validity, error, best_score, evals_remaining. Limited budget (~20 total). Use sparingly after probing.
+  probe_solution: |
+    Cheap approximate score on subsampled data (~10s, separate budget of ~30 probes). NOT comparable to full scores. Use to RANK 3-5 variants before evaluating. Call 3+ times before any eval.
+  finish: |
+    End session when budget exhausted or no improvement after 3+ evals.
+sampling:
+  temperature: 0.8
+  top_p: 0.95
+  top_k: 15
+  max_tokens: 12288
+agent:
+  max_iterations: 50
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 6000
+new_tools:
+  - name: analyze_convolution
+    description: |
+      Analyze current function's convolution: estimate discretization error, identify peak location and tail behavior, detect flat regions. Returns guidance on whether to refine intervals, adjust learning rate, or change function shape.
+    input_schema:
+      type: object
+      properties: {}
+    implementation_py: |
+      def run(ctx, args):
+          f_values = ctx.get_best_program()
+          if f_values is None:
+              return {"note": "No function yet. Edit first."}
+          import jax.numpy as jnp
+          h = 1.0 / (len(f_values) + 1)
+          convolution = jnp.fft.ifft(jnp.fft.fft(f_values) * jnp.fft.fft(f_values)).real
+          peak_idx = jnp.argmax(jnp.abs(convolution))
+          peak_val = jnp.abs(convolution[peak_idx])
+          tail_region = jnp.abs(convolution[len(convolution)//4:])
+          tail_mean = jnp.mean(tail_region)
+          tail_max = jnp.max(tail_region)
+          discretization_error_est = h * tail_mean * len(tail_region)
+          if discretization_error_est > 0.01:
+              rec = "Try finer discretization (increase num_intervals)"
+          else:
+              rec = "Optimize learning rate or step count"
+          return {
+              "num_intervals": 400,
+              "peak_location": int(peak_idx),
+              "peak_value": float(peak_val),
+              "tail_mean": float(tail_mean),
+              "tail_max": float(tail_max),
+              "discretization_error_estimate": float(discretization_error_est),
+              "recommendation": rec
+          }
+remove_tools: []
+new_skills:
+  - name: c2-deep-refinement
+    description: Playbook for deeply optimizing piecewise-linear functions before exploring alternatives.
+    body: |
+      # C2 Deep Refinement Playbook
+
+      ## Objective
+      Push C2 > 1.02665 by refining the seed's piecewise-linear approach. Do NOT try step functions until you've exhausted refinements.
+
+      ## Phase 1: Diagnosis
+      1. Call analyze_convolution once at start
+      2. Note: discretization_error_estimate, peak_location, tail behavior
+      3. If error > 0.01: prioritize finer intervals
+
+      ## Phase 2: Systematic Parameter Search
+      For EACH parameter group, test 3-5 values:
+
+      ### Discretization
+      - num_intervals: [500, 800, 1200, 1600, 2000]
+      - Probe all 5, pick best, eval top 1
+
+      ### Learning Rate
+      - learning_rate: [0.1, 0.15, 0.2, 0.25, 0.3]
+      - Keep warmup_steps=3000, cosine_decay
+      - Probe 3, eval best
+
+      ### Steps
+      - num_steps: [30000, 50000, 80000]
+      - Probe all, eval best
+
+      ## Phase 3: Decision Point
+      After 3 failed evals with refinements: THEN try step functions.
+
+      ## Rules
+      - Probe 3+ variants per parameter before eval
+      - Call analyze_convolution after each major change
+      - Do NOT explore new families until current approach fails
+      - Finer discretization is your first lever
+new_middlewares:
+  - name: enforce_refinement_first
+    hook: before_model
+    description: Enforce deep refinement of current approach before exploring alternatives
+    implementation_py: |
+      def before_model(hook_input):
+          state = hook_input.get("state", {})
+          iteration = state.get("iteration", 0)
+          evals_done = state.get("evals_done", 0)
+          last_family = state.get("last_family", "piecewise-linear")
+          families_explored = state.get("families_explored", [])
+
+          if "piecewise-linear" in families_explored:
+              if evals_done < 3 and last_family == "piecewise-linear":
+                  return "WARNING: You've only evaluated once on piecewise-linear. Refine intervals, learning rate, or steps first. Don't switch to step functions yet."
+              elif evals_done >= 3 and last_family != "piecewise-linear":
+                  return "CAUTION: You've tried 2+ families. Consider returning to piecewise-linear refinements first - they may yield improvements."
+
+          if last_family not in ["none", "piecewise-linear"]:
+              if last_family not in families_explored:
+                  families_explored.append(last_family)
+
+          if len(families_explored) >= 2 and evals_done >= 5:
+              return "DIVERSIFICATION_WARNING: You've explored 2+ families. Return to refining piecewise-linear before more diversification."
+
+          return None

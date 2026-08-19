@@ -1,0 +1,284 @@
+schema: h2spec/1.0
+system_prompt: |
+  Erdos minimum overlap problem: find h: [0,2]->[0,1] minimizing max_k integral h(x)(1-h(x+k))dx.
+
+  Constraint: integral(h) = 1 exactly.
+
+  Current best: C5 <= 0.38092303510845016.
+
+  Goal: Beat seed score (c5_bound < 0.380923).
+
+  Strategy:
+
+  1. CALL generate_single_candidate to get ONE valid h(x) with integral=1.0
+
+  2. CALL probe_solution to get fast c5_approx (500 intervals)
+
+  3. If c5_approx < 0.38, CALL evaluate_solution for full score
+
+  4. If evaluate returns improvement, KEEP it and iterate:
+
+     - Use edit_solution to try small mutations to the winner
+     - Common mutations: shift peaks, adjust peak heights, merge adjacent intervals
+     - Always check integral=1.0 after editing
+
+  5. If c5_approx >= 0.38, CALL generate_single_candidate again (different pattern)
+
+  6. Use hill-climbing: refine ONE good candidate before exploring new ones.
+
+  7. Total: 10-20 iterations with 2-3 evals each = 20-60 evals (we have 30).
+
+  Key: Quality over quantity. Find one good candidate and refine it.
+skill_description: |
+  Generate diverse step-function candidates for Erdos optimization.
+
+  Call generate_single_candidate once per iteration.
+  Verify integral=1.0. Call probe_solution for fast screening.
+skill_body: |
+  # Erdos Optimization Method
+
+  ## Objective
+  Minimize C5 = max_k integral(h(x)(1-h(x+k)))dx over [0,2]
+
+  ## Constraints
+  1. h(x) in [0,1]
+  2. integral(h) = 1.0 exactly
+
+  ## Candidate Generation Strategy
+
+  Use structured patterns, not random noise:
+
+  1. **Bipartite patterns**: Two separated regions of h=1
+     - Example: h(x)=1 for x in [0,1] U [1.5,2], 0 otherwise
+     - This gives integral=2, so scale to get integral=1
+
+  2. **Tri-modal patterns**: Three narrow peaks
+     - Place peaks at optimal spacing to minimize overlap
+     - Spacing: ~0.4 between peak centers
+
+  3. **Golomb ruler patterns**: Peaks at positions with minimal pairwise distances
+     - Classic Golomb ruler positions: [0,1,3,6] normalized to [0,2]
+
+  ## Validation Checklist
+
+  Before calling evaluate_solution:
+  - integral(h) must be exactly 1.0 (within 0.001 tolerance)
+  - max(h) must be <= 1.0
+  - min(h) must be >= 0.0
+
+  ## Editing Strategy
+
+  When improving a candidate:
+  1. Identify the interval with highest overlap contribution
+  2. Try shifting it left/right by 0.05-0.1
+  3. Try splitting a wide peak into two narrower peaks
+  4. Try merging two adjacent narrow peaks into one
+  5. Always re-normalize to maintain integral=1.0
+
+  ## Probing Strategy
+
+  - Use probe_solution (500 intervals) for fast screening
+  - If c5_approx < 0.38, do full evaluation
+  - If c5_approx >= 0.38, discard and generate new candidate
+
+  ## Budget Management
+
+  - Max 30 full evaluations
+  - Use probe to filter before full eval
+  - Refine ONE good candidate before exploring new ones
+tool_descriptions:
+  edit_solution: 'Modify EVOLVE-BLOCK to change hyperparameters or code structure.
+
+    For single-candidate testing: set num_restarts=1, seed_start=0.
+
+    For multi-candidate testing: keep num_restarts=3.'
+  evaluate_solution: 'Run full 59000-step optimization on a candidate. Returns combined_score = 0.38092303510845016 / c5_bound.
+
+    Higher is better. combined_score > 1.0 means a new record.'
+  probe_solution: Fast approximate evaluation (500 intervals, analytical c5). Uses probe budget.
+  finish: Submit when combined_score > 1.0 (c5_bound < 0.38092303510845016).
+sampling:
+  temperature: 0.5
+  top_p: 0.95
+  top_k: 30
+  max_tokens: 12000
+agent:
+  max_iterations: 40
+middleware:
+  budget_reminder_from_left: 3
+  long_tool_output_max_chars: 8000
+new_tools:
+- name: score_pattern
+  description: |
+    Compute approximate c5_bound for a short pattern description WITHOUT training.
+    Parses pattern keywords (bipartite, tri-modal, golomb) and generates an h(x).
+    Returns integral, c5_bound_approx, and validity status.
+    Use this for fast pattern exploration before full evaluation.
+  input_schema:
+    type: object
+    properties:
+      pattern_type:
+        type: string
+        description: One of bipartite, tri_modal, golomb, gaussian
+      peak_positions:
+        type: array
+        items:
+          type: number
+        description: Peak center positions (optional, auto-generated if not provided)
+      num_peaks:
+        type: integer
+        default: 2
+        description: Number of peaks (1-5)
+  implementation_py: |
+    def run(ctx, args):
+        import numpy as np
+        N = 800
+        domain = 2.0
+        dx = domain / N
+
+        def compute_c5(h):
+            j_val = 1.0 - h
+            h_padded = np.pad(h, (0, N))
+            j_padded = np.pad(j_val, (0, N))
+            corr_fft = np.fft.fft(h_padded) * np.conj(np.fft.fft(j_padded))
+            correlation = np.fft.ifft(corr_fft).real
+            return float(np.max(correlation * dx))
+
+        def normalize(h):
+            integral = float(np.sum(h) * dx)
+            if integral > 0:
+                return h / integral
+            return h
+
+        pattern_type = args.get("pattern_type", "bipartite")
+        peak_positions = args.get("peak_positions", None)
+        num_peaks = args.get("num_peaks", 2)
+
+        if peak_positions is None:
+            if pattern_type == "bipartite":
+                peak_positions = [0.2, 1.8]
+            elif pattern_type == "tri_modal":
+                peak_positions = [0.4, 1.0, 1.6]
+            elif pattern_type == "golomb":
+                # Normalize Golomb ruler [0,1,3,6] to [0,2]
+                ruler = [0, 1, 3, 6]
+                min_r, max_r = 0, 6
+                peak_positions = [((p - min_r) / (max_r - min_r)) * 2 for p in ruler[:num_peaks]]
+            elif pattern_type == "gaussian":
+                peak_positions = [0.5, 1.0, 1.5]
+            else:
+                peak_positions = [0.5, 1.5]
+
+        # Build h from peaks using Gaussian bumps
+        h = np.zeros(N)
+        sigma = 0.15
+        for pos in peak_positions:
+            indices = (np.arange(N) * dx)
+            mask = np.abs(indices - pos) < 0.1
+            h = h.at[mask].add(4.0)
+
+        # Add small noise for diversity
+        h = h + np.random.normal(0, 0.05, N)
+        h = np.clip(h, 0.001, 5.0)
+
+        # Normalize
+        h = normalize(h)
+
+        integral = float(np.sum(h) * dx)
+        c5 = compute_c5(h)
+
+        # Check constraints
+        valid = (0.99 <= integral <= 1.01) and (0 <= h.min() and h.max() <= 1.1)
+
+        return {
+            "pattern_type": pattern_type,
+            "integral": integral,
+            "c5_bound_approx": c5,
+            "valid": valid,
+            "num_peaks": len(peak_positions),
+            "h_sample": h[:100].tolist()  # Return small sample
+        }
+new_skills:
+- name: hill-climbing-erdos
+  description: |
+    Refine a good Erdos candidate using targeted mutations.
+    Use when probe_score < 0.38. Try peak shifts, splits, merges.
+    Always maintain integral=1.0.
+  body: |
+    # Hill-Climbing for Erdos Optimization
+
+    ## When to use this skill
+    Use after generate_single_candidate returns a candidate with:
+    - integral ≈ 1.0
+    - c5_bound_approx < 0.38
+
+    ## Mutation Types (try in order)
+
+    ### 1. Peak Shift
+    - Select the peak that contributes most to overlap
+    - Shift it by ±0.05, ±0.1, ±0.15
+    - Re-normalize to maintain integral=1.0
+    - Call probe_solution after each shift
+
+    ### 2. Peak Split
+    - If a peak is wide (>0.25 width), split into two
+    - Place new peak at ±0.08 from original
+    - Scale heights to maintain integral
+
+    ### 3. Peak Merge
+    - If two peaks are close (<0.2 apart), merge them
+    - Place new peak at midpoint
+    - Scale height appropriately
+
+    ### 4. Peak Height Adjustment
+    - Increase height of smallest peak
+    - Decrease height of largest peak
+    - Re-normalize
+
+    ## Validation After Edit
+    - Check integral is still ~1.0
+    - Check h values in [0,1]
+    - Call probe_solution to verify improvement
+
+    ## Example Workflow
+    1. Candidate has 2 peaks at [0.2, 1.8]
+    2. Shift first peak to 0.25
+    3. Call probe_solution: c5 = 0.375 (improvement!)
+    4. Call evaluate_solution for full score
+    5. If better, keep and iterate
+
+    ## Budget Tip
+    - Use 2-3 probe calls before 1 full eval
+    - Stop when c5_bound_approx >= 0.38
+sampling:
+  temperature: 0.5
+  top_p: 0.95
+  top_k: 30
+  max_tokens: 12000
+agent:
+  max_iterations: 40
+middleware:
+  budget_reminder_from_left: 3
+  long_tool_output_max_chars: 8000
+new_middlewares:
+- name: probe_before_eval
+  hook: before_model
+  description: |
+    Remind solver to use probe_solution before expensive evaluate_solution.
+    Helps avoid wasting evals on bad candidates.
+  implementation_py: |
+    def before_model(hook_input):
+        state = hook_input.get("state", {})
+        evals_left = state.get("evals_left", 0)
+        probes_used = state.get("probes_used", 0)
+
+        if evals_left >= 1:
+            return (
+                f"Before evaluate_solution: use probe_solution first!\n"
+                f"Evaluations remaining: {evals_left}\n"
+                f"Probes used: {probes_used} / 30\n"
+                f"Aim for c5 < 0.36 before full eval."
+            )
+        elif evals_left == 0:
+            return "No evaluations left! Generate new candidates or call finish()."
+        return None

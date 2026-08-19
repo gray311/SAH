@@ -1,0 +1,164 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are an expert in functional analysis optimizing C2 = ||f★f||₂² / ((∫f)² ||f★f||_∞).
+  
+  CRITICAL INSIGHT: The current record (1.03896) was achieved by step functions. 
+  This suggests DISCONTINUOUS functions have structural advantages for this inequality.
+  
+  STRATEGY: DON'T randomly explore smooth families (Gaussian, splines, oscillatory). 
+  These likely have fundamental disadvantages vs step functions.
+  
+  INSTEAD:
+  1. Analyze the convolution structure of step functions using analyze_convolution_patterns
+  2. Identify what makes step functions work (e.g., symmetric edges, specific height ratios)
+  3. Apply targeted mutations to step-function patterns: asymmetric heights, multi-level edges, localized bumps
+  4. If stuck after 8 iterations, try a COMPLETELY different step-function architecture
+  5. Never spend 5+ evals on a smooth function family - it won't beat step functions
+  
+  Use probe_solution to rank step-function variants BEFORE full evaluation. You have 30 probes!
+  
+  Budget: 30 evals, 30 probes. Use probes to filter before spending evals.
+
+skill_description: Step-function pattern mutation with convolution-aware analysis. Focus on asymmetric heights, multi-level structures, and localized features within the step-function family.
+skill_body: |
+  # C2 Maximizer: Step-Function Refinement Protocol
+  
+  ## Why Step Functions Work
+  
+  Step functions create convolution peaks at specific locations while maintaining low ||f||_∞. 
+  The key is balancing the L2 norm (favoring spread) vs L∞ norm (favoring concentration).
+  
+  ## Mutation Strategy
+  
+  ### Phase 1: Analysis (Iteration 1)
+  1. Call analyze_convolution_patterns on the seed to understand current structure
+  2. Note: edge symmetry, height distribution, spacing ratios
+  
+  ### Phase 2: Targeted Mutations
+  
+  **Mutation Type A: Asymmetric Height Adjustment**
+  - Make left/right step heights different (e.g., 1.50 → 1.55 left, 1.45 right)
+  - This breaks symmetry and may reduce constructive interference at center
+  
+  **Mutation Type B: Multi-Level Enhancement**
+  - Add intermediate height levels between main steps (e.g., base=1.40, middle=1.80, top=2.00)
+  - Creates richer convolution structure
+  
+  **Mutation Type C: Localized Bumps**
+  - Add small triangular/plateau bumps in unused regions
+  - Increases ||f★f||₂ without significantly affecting ||f★f||_∞
+  
+  **Mutation Type D: Edge Refinement**
+  - Sharpen transition regions (narrower steps)
+  - Smooth transition regions (wider steps with gradients)
+  
+  ### Phase 3: Iteration
+  
+  1. Generate 2-3 variants per mutation type
+  2. Use probe_solution to rank them (30 probes!)
+  3. Evaluate top 1-2 per type with evaluate_solution
+  4. If no improvement after 3 mutation types: restart from Phase 1 with fresh patterns
+  
+  ## Critical Rules
+  
+  - NEVER exhaustively refine one variant - keep exploring new mutations
+  - Use probes to filter losers BEFORE full evaluation
+  - If stuck after 10 iterations, try COMPLETELY new step-function architectures
+  - Smooth functions (Gaussian, splines) are unlikely to beat the record - focus on steps
+
+tool_descriptions:
+  edit_solution: |
+    Modify the EVOLVE-BLOCK to implement a step-function mutation.
+    
+    TARGETED EDITS:
+    - **Asymmetric heights**: Change left/right step heights to be different (e.g., 1.50 → 1.55, 1.45)
+    - **Multi-level**: Add intermediate steps with heights between min and max
+    - **Localized bumps**: Add small plateaus in unused regions using at[].set()
+    - **Edge refinement**: Adjust step boundaries by ±5-10%
+    
+    Use SEARCH/REPLACE for precise edits. Start with small perturbations (±0.05 on heights).
+    
+  evaluate_solution: |
+    Full evaluation. Returns combined_score.
+    
+    Call ONCE per variant after probing. Budget: 30 evals total.
+    Ensure your variant implements a complete step-function pattern with non-negative values.
+    
+  probe_solution: |
+    Approximate score on subsampled data. CHEAP and SEPARATE BUDGET!
+    
+    You have 30 PROBE calls. Use them to RANK ALL variants BEFORE full evaluation.
+    Rank step-function variants with probes, then evaluate only the top 1-2 per mutation type.
+    This maximizes your limited evaluation budget.
+    
+  finish: |
+    Report the best C₂ achieved and the mutation type (asymmetric, multi-level, bumps, edges).
+    
+new_tools:
+  - name: analyze_convolution_patterns
+    description: |
+      Analyze the convolution structure of the current best function to identify 
+      promising features for mutation. Returns structural metrics that guide targeted step-function refinements.
+      
+      Key outputs: edge_symmetry (left vs right step heights), height_variance, 
+      concentration_ratio (how much energy is at peak), and recommended mutation types.
+    input_schema:
+      type: object
+      properties: {}
+    implementation_py: |
+      def run(ctx, args):
+          best_f = ctx.get_best_program()
+          if best_f is None:
+              return {"note": "No best program found, analyzing seed"}
+          # Parse program to extract function parameters
+          import re
+          # Look for key parameters in the EVOLVE-BLOCK
+          height_matches = re.findall(r'heights?\s*=\s*jnp\.array\(\[([^\]]+)\]\)', best_f)
+          level_matches = re.findall(r'levels?\s*=\s*jnp\.array\(\[([^\]]+)\]\)', best_f)
+          width_matches = re.findall(r'(?:left|right|interval|width|start|end)\s*=\s*int\(([^.]+)\s*\*\s*n\)', best_f)
+          
+          # Extract numeric values
+          params = {}
+          if height_matches:
+              params['heights'] = [float(x) for x in re.findall(r'([\d.]+)', height_matches[0])]
+          if level_matches:
+              params['levels'] = [float(x) for x in re.findall(r'([\d.]+)', level_matches[0])]
+          if width_matches:
+              params['widths'] = [float(x) for x in width_matches]
+          
+          # Compute structural metrics
+          structure = {}
+          if 'heights' in params and len(params['heights']) >= 2:
+              left_h, right_h = params['heights'][:2]
+              structure['edge_symmetry'] = abs(left_h - right_h) / max(left_h, right_h) if max(left_h, right_h) > 0 else 0.0
+              structure['height_diff'] = left_h - right_h
+          
+          if 'levels' in params:
+              levels = params['levels']
+              if len(levels) >= 1:
+                  structure['height_variance'] = float((sum((h - sum(levels)/len(levels))**2 for h in levels) / len(levels)) ** 0.5)
+          
+          structure['recommended_mutations'] = []
+          if structure.get('edge_symmetry', 0) < 0.1:
+              structure['recommended_mutations'].append('asymmetric_heights')
+          if len(params.get('levels', [])) < 3:
+              structure['recommended_mutations'].append('multi_level')
+          if structure.get('height_variance', 0) < 0.1:
+              structure['recommended_mutations'].append('localized_bumps')
+          
+          return {
+              "best_program_sample": best_f[:500],
+              "structure": structure,
+              "note": "Use recommended_mutations to guide your next edits. Focus on step-function patterns."
+          }
+
+sampling:
+  temperature: 0.6
+  top_p: 0.90
+  top_k: 15
+  max_tokens: 14000
+agent:
+  max_iterations: 50
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 12000

@@ -1,0 +1,59 @@
+schema: h2spec/1.0
+system_prompt: |
+  Erdos minimum overlap problem (C5): Find h: [0,2]->[0,1] minimizing max_k integral h(x)(1-h(x+k))dx.
+
+  CONSTRAINT: integral(h) = 1 exactly. h values in [0,1].
+
+  Current best: C5 <= 0.38092303510845016 (combined_score = 1.0).
+
+  GOAL: Find h achieving c5_bound < 0.38092303510845016 (combined_score > 1.0).
+
+  FAILURE DIAGNOSIS: The current harness fails because it relies on "correlation_analyzer" which PARSES the program text to extract h values. This parsing is UNRELIABLE on JAX programs that use jnp arrays, latent vectors, or FFT-based computations. The solver cannot call correlation_analyzer on 7 of 8 attempts because it cannot extract h from the code, so it never gets actionable feedback.
+
+  NEW STRATEGY: Instead of parsing code, use a STRUCTURED MUTATION APPROACH:
+
+  1. Start with the SEED program's initialization patterns (Patterns 0-14 in _get_best_initialization)
+  2. Generate DIVERSE INITIAL POINTS by varying:
+     - The threshold values in threshold-based patterns
+     - The peak positions and widths in multi-modal patterns
+     - The spacing in Golomb ruler-like patterns
+  3. For each candidate, compute the INTEGRAL directly (no parsing needed) by:
+     - Extracting the sigmoid latent vector from the program
+     - Computing h = sigmoid(latent), then integral(h) = sum(h) * dx
+     - Adjusting the latent to satisfy integral(h) = 1 by scaling
+  4. Evaluate candidates with the FASTEST APPROACH: reduce num_intervals from 800 to 100 for quick probing
+  5. Only expand to full resolution (800 intervals) if c5_bound < 0.375
+
+  KEY INSIGHT: The solver doesn't need to "analyze" - it needs to GENERATE diverse initializations and quickly check their c5_bound. Avoid any tool that requires parsing the program text. Use the EVOLVE-BLOCK's built-in _get_best_initialization method variations.
+
+  WORKFLOW:
+  1. Create 5-10 diverse initializations by modifying seed patterns (change thresholds, peak positions, spacings)
+  2. For each, temporarily set num_intervals=100 in Hyperparameters
+  3. Run a short optimization (num_steps=5000) with integral penalty=100
+  4. Call probe_solution to get fast c5_bound estimate
+  5. Keep top 3 candidates, expand to num_intervals=800, run full optimization (num_steps=120000, penalty=61)
+  6. If combined_score > 1.0, finish
+skill_description: Generate diverse initial step functions from seed patterns, check integral constraint directly, use low-resolution probing before full evaluation.
+skill_body: "# Structured Initialization Strategy for Erdos C5\n\n## Why Random Fails\nRandom hyperparameter tuning doesn't work because:\n1. The seed program has BUILT-IN initialization patterns that are more effective than random\n2. We need to VARY these patterns, not add random noise\n3. Integral constraint (sum(h) = 1) is hard to satisfy with random mutations\n\n## Phase 1: Generate Diverse Initializations\n\nDo NOT call any \"analyze\" tools. Instead:\n\n1. START with the seed program's _get_best_initialization method\n2. VARY the PATTERN PARAMETERS:\n   - Threshold patterns: Change threshold values (e.g., x > 0.5 -> x > 0.3, x > 0.7)\n   - Multi-modal patterns: Change peak positions (e.g., centers at 0.4,1.0,1.6 -> 0.3,0.9,1.5)\n   - Golomb ruler: Change mark positions and widths\n   - Bipartite: Change split point (a = 0.5 -> a = 0.3, 0.6, 0.7)\n\n3. Generate 5-10 variants with DIFFERENT parameter combinations\n\n## Phase 2: Quick Integral Check (NO PARSING NEEDED)\n\nFor each variant, use the program's OWN methods:\n1. Run with num_intervals=100 (faster)\n2. Call the program's _compute_c5_bound(h) method\n3. Check integral: integral(h) = sum(h) * dx where dx = 2.0 / num_intervals\n4. If integral != 1, scale h: h = h / sum(h) * (target_integral / current_integral)\n\n## Phase 3: Low-Resolution Probing\n\n1. Set num_intervals=100, num_steps=5000, penalty_strength=100\n2. Run short optimization\n3. Call probe_solution to get fast c5_bound estimate\n4. If c5_bound < 0.375, proceed to Phase 4\n\n## Phase 4: Full Evaluation\n\n1. Expand to num_intervals=800\n2. Set num_steps=120000, penalty_strength=61\n3. Run full optimization\n4. If combined_score > 1.0, finish\n\n## Key Rules\n- NEVER call tools that parse program text (unreliable on JAX)\n- ALWAYS vary seed pattern parameters, not random noise\n- Use num_intervals=100 for quick screening, 800 for final eval\n- Keep penalty_strength high (100+) for low-resolution, moderate (61) for final\n- Generate 5-10 diverse candidates before any evaluation"
+tool_descriptions:
+  edit_solution: 'Modify EVOLVE-BLOCK Hyperparameters. To change initialization: modify _get_best_initialization patterns (thresholds, peak positions). To adjust resolution: change num_intervals (100 for probe, 800 for final). To tune: adjust penalty_strength (100+ for low-res, 61 for final), num_steps (5000 for probe, 120000 for final). Key: VARY pattern parameters, don''t add random noise.'
+  evaluate_solution: 'Full optimization with num_intervals=800, num_steps=120000, penalty_strength=61. Returns combined_score = 0.38092303510845016 / c5_bound. combined_score > 1.0 means new record. Only call after probe_solution confirms c5_bound < 0.375.'
+  probe_solution: 'Fast optimization with num_intervals=100, num_steps=5000, penalty_strength=100. Returns approximate c5_bound. Use to screen candidates before full eval. Budget: separate from eval budget. Call after generating diverse initializations.'
+  finish: 'Submit when combined_score > 1.0 (c5_bound < 0.38092303510845016). Must pass after full evaluation.'
+sampling:
+  temperature: 0.8
+  top_p: 0.9
+  top_k: 30
+  max_tokens: 16000
+agent:
+  max_iterations: 80
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 8000
+new_tools: []
+new_skills: []
+new_middlewares:
+- name: diversity_enforcement
+  hook: before_model
+  description: Enforce generation of diverse pattern variations before any evaluation.
+  implementation_py: "def before_model(hook_input):\n    history = hook_input.get(\"history\", [])\n    if len(history) == 0:\n        return \"First call: Generate 5-10 diverse initializations by varying SEED PATTERN PARAMETERS (thresholds, peak positions, spacings). Do NOT call analysis tools. Use num_intervals=100 for speed.\" \n    last_turn = history[-1]\n    tools_used = last_turn.get(\"tools_used\", [])\n    if \"evaluate_solution\" in tools_used or \"probe_solution\" in tools_used:\n        return \"You evaluated without generating diverse candidates first! Generate 3-5 new pattern variations with different parameters before evaluating.\"\n    if \"probe_solution\" in tools_used:\n        return \"You probed without checking integral constraint! For each candidate, verify integral(h) = 1 by computing sum(h) * dx where dx = 2.0/num_intervals. Adjust by scaling h if needed.\"\n    return None"

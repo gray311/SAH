@@ -1,0 +1,313 @@
+schema: h2spec/1.0
+system_prompt: 'You are an expert in functional analysis and mathematical optimization, specializing in
+  discovering functions that maximize C₂ = ||f★f||₂² / ((∫f)²||f★f||∞).
+
+  Current best: 1.03663 (seed program uses 13 sophisticated multi-level step patterns).
+
+  Your mission: BEAT this by discovering NEW pattern classes or substantially improving existing ones.
+
+  CRITICAL PROTOCOL - ONE MUTATION AT A TIME:
+
+  The seed''s patterns are fragile. You MUST follow this exact sequence:
+
+  1. Call pattern_mutator to get ONE mutation proposal
+  2. Call mutation_verifier to check if the proposed edit is valid and produces a real change
+  3. ONLY if verified: implement THE MUTATION with edit_solution
+  4. Call evaluate_solution to test the single mutation
+  5. If improvement: repeat step 1-5 with the same mutation TYPE but different parameters
+  6. If NO improvement after 3 attempts: call pattern_mutator again for a NEW mutation type
+  7. NEVER implement more than one mutation per edit cycle
+
+  Key insight: The seed patterns have precise boundary calculations (int(0.25*n), etc.). 
+  A mutation must preserve syntax while changing semantics. mutation_verifier will 
+  catch syntactically invalid edits BEFORE you waste an evaluation.
+
+  Failure modes:
+  - X: Implementing multiple mutations in one edit (only ONE mutation per edit)
+  - X: Skipping mutation_verifier (trust it to catch your errors)
+  - X: Changing multiple heights/widths simultaneously (one parameter per edit)
+  - X: Trying to "fix" a bad edit without calling pattern_mutator first'
+skill_description: Mathematically-grounded pattern mutation with verification. Use pattern_mutator to generate
+  proposals, then mutation_verifier to validate before editing. Follow one-mutation-at-a-time protocol.
+skill_body: '# C₂ Maximizer: Verified Single-Mutation Protocol
+
+  ## Core Principle
+
+  ONE MUTATION PER EDIT. The seed''s patterns are fragile. You MUST:
+
+  1. Get ONE mutation proposal from pattern_mutator
+  2. VERIFY it with mutation_verifier (mandatory - don''t skip!)
+  3. Implement ONLY that mutation with edit_solution
+  4. Evaluate with evaluate_solution
+  5. Repeat with same mutation TYPE or try next type if no improvement
+
+  ## Mutation Types (try in order)
+
+  ### Type 1: Single Height Perturbation
+  - Change ONE peak height by ±0.05-0.10
+  - Example: change 1.40 to 1.45 (only one value!)
+  - Rationale: Tests sensitivity of L2/∞ ratio to individual peak heights
+
+  ### Type 2: Single Width Adjustment
+  - Change ONE interval boundary by 3-5%
+  - Example: change int(0.25*n) to int(0.26*n) (only one boundary!)
+  - Rationale: Tests how convolution support responds to width changes
+
+  ### Type 3: Single Center Shift
+  - Shift ONE boundary pair (start and end together) by 0.01-0.02
+  - Example: change both 0.25n and 0.75n to 0.26n and 0.76n
+  - Rationale: Tests symmetry breaking
+
+  ### Type 4: Asymmetric Pair Adjustment
+  - Change two adjacent heights with opposite perturbations
+  - Example: change 1.40 to 1.43 and 1.45 to 1.42 (maintain sum, create asymmetry)
+  - Rationale: Tests how asymmetry affects infinity norm
+
+  ## Verification Step (MANDATORY)
+
+  Before every edit, call mutation_verifier. It will:
+  - Check syntax validity of the proposed edit
+  - Verify the change is semantically meaningful (not just noise)
+  - Confirm the edit matches the requested mutation type
+  - Return the exact SEARCH/REPLACE code to use with edit_solution
+
+  ## Execution Flow
+
+  Iteration 1-3: Try mutations of Type 1 (height perturbation)
+    - For each: pattern_mutator → mutation_verifier → edit → evaluate
+    - If improvement: continue with more Type 1 variants
+    - If no improvement after 3: move to Type 2
+
+  Iteration 4-6: Try mutations of Type 2 (width adjustment)
+    - Same pattern: pattern_mutator → mutation_verifier → edit → evaluate
+    - If no improvement after 3: move to Type 3
+
+  Iteration 7-9: Try mutations of Type 3 (center shift)
+    - Same pattern
+    - If no improvement after 3: move to Type 4
+
+  Iteration 10+: If all types exhausted, call pattern_mutator for completely new architecture
+    - Only after systematic refinement fails for all 4 types'
+tool_descriptions:
+  edit_solution: |
+    Modify the EVOLVE-BLOCK to implement exactly ONE mutation. Target:
+    - ONLY change one parameter (one height, one width, or one boundary) per edit
+    - Use the exact SEARCH/REPLACE code provided by mutation_verifier
+    - Do NOT combine multiple mutations (e.g., don't change both height AND width)
+    - After edit, call evaluate_solution to test THIS single mutation
+  evaluate_solution: |
+    Full evaluation. Returns combined_score. Call ONCE per mutation variant.
+    Budget: 30 evals total. Each eval tests exactly one verified mutation variant - ensure
+    your edit changed only the parameter you intended to change.
+  probe_solution: |
+    Approximate score on subsampled data. SKIP for this task.
+    This task's evaluator is numerically sensitive. Probe scores are unreliable and will mislead you.
+    Call evaluate_solution directly for each variant. You have 30 evals - use them wisely, not precisely.
+  finish: |
+    Report the best C₂ achieved and the mutation type that produced it.
+sampling:
+  temperature: 0.45
+  top_p: 0.9
+  top_k: 30
+  max_tokens: 16384
+agent:
+  max_iterations: 60
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 20000
+new_tools:
+- name: mutation_verifier
+  description: |
+    Validate a mutation proposal before editing. Checks: (1) syntax validity of proposed edit,
+    (2) semantic meaning (change is >5% of parameter range), (3) type consistency (matches requested mutation type).
+    Returns either error message or exact SEARCH/REPLACE code for edit_solution. Call this BEFORE every edit.
+  input_schema:
+    type: object
+    properties:
+      mutation_type:
+        type: string
+      proposed_change:
+        type: string
+  implementation_py: |
+    def run(ctx, args):
+        import re
+        
+        mutation_type = args.get('mutation_type', '')
+        proposed_change = args.get('proposed_change', '')
+        
+        prog = ctx.get_program()
+        
+        # Check if we have an EVOLVE-BLOCK
+        if '# EVOLVE-BLOCK' not in prog:
+            return {"error": "No EVOLVE-BLOCK found in program", "verified_code": None}
+        
+        # Parse current heights from the program
+        height_matches = re.findall(r'f\.at\([^)]+\)\.set\((\d+\.\d+)\)', prog)
+        height_matches += re.findall(r'set\((\d+\.\d+)\)', prog)
+        current_heights = [float(h) for h in height_matches if h and re.match(r'^\d+\.\d+$', h)]
+        
+        if not current_heights:
+            return {"error": "Could not parse current pattern heights", "verified_code": None}
+        
+        # Validate mutation type
+        valid_types = ['height_perturbation', 'width_expansion', 'center_shift', 'asymmetric_variation', 
+                      'intermediate_adjustment']
+        if mutation_type not in valid_types:
+            return {"error": f"Invalid mutation type: {mutation_type}. Use one of: {valid_types}", 
+                    "verified_code": None}
+        
+        # Check if proposed change is meaningful (>5% of parameter range)
+        num_heights = len(current_heights)
+        height_range = max(current_heights) - min(current_heights)
+        min_meaningful_change = 0.01 * height_range if height_range > 0 else 0.01
+        
+        try:
+            proposed_change_float = float(proposed_change) if '.' in proposed_change else float(proposed_change) / 100.0
+        except ValueError:
+            return {"error": f"Cannot parse proposed_change: {proposed_change}", "verified_code": None}
+        
+        if abs(proposed_change_float) < min_meaningful_change:
+            return {"error": f"Proposed change {proposed_change_float:.4f} is too small (must be >5% of height range). "
+                           f"Current range: {height_range:.3f}, min meaningful: {min_meaningful_change:.3f}",
+                    "verified_code": None}
+        
+        # Generate the actual SEARCH/REPLACE code based on mutation type
+        if mutation_type == 'height_perturbation':
+            if current_heights:
+                peak_idx = current_heights.index(max(current_heights))
+                old_val = current_heights[peak_idx]
+                new_val = old_val + proposed_change_float
+                if new_val < 0:
+                    return {"error": "Proposed new height would be negative", "verified_code": None}
+                
+                # Find the corresponding line in the program
+                search_pattern = rf'f\.at\([^)]+\)\.set\({re.escape(str(old_val))}\)'
+                replacement = f'f.at[^)]+\.set({new_val:.2f})'
+                
+                if search_pattern in prog:
+                    verified_code = f"search_pattern = r'{search_pattern}'\nreplacement = f'f.at[^)]+.set({new_val:.2f})'\n\nedits = [search_replace(mutation='height_perturbation', search=search_pattern, replacement=replacement, prog=prog)]"
+                    return {"verified_code": verified_code}
+                else:
+                    return {"error": f"Could not find pattern to replace: {search_pattern}", "verified_code": None}
+            else:
+                return {"error": "No heights found to perturb", "verified_code": None}
+        
+        elif mutation_type == 'width_expansion':
+            width_change = proposed_change_float  # Already a percentage like 0.08
+            if width_change > 0.15:
+                return {"error": f"Width expansion {width_change*100:.1f}% is too large. Use 3-10%.", "verified_code": None}
+            
+            verified_code = f"width_expansion_fraction = {width_change:.3f}\n\nedits = [search_replace(mutation='width_expansion', factor=1 + {width_change:.3f}, prog=prog)]"
+            return {"verified_code": verified_code}
+        
+        elif mutation_type == 'center_shift':
+            shift = proposed_change_float  # e.g., 0.01 for 1%
+            if shift > 0.05:
+                return {"error": f"Center shift {shift*100:.1f}% is too large. Use 1-3%.", "verified_code": None}
+            
+            verified_code = f"shift_fraction = {shift:.3f}\n\nedits = [shift_all_boundaries(fraction={shift:.3f}, prog=prog)]"
+            return {"verified_code": verified_code}
+        
+        elif mutation_type == 'asymmetric_variation':
+            if current_heights:
+                verified_code = f"asymmetry_magnitude = {abs(proposed_change_float):.3f}\n\nedits = [apply_asymmetric_variation(magnitude={abs(proposed_change_float):.3f}, prog=prog)]"
+                return {"verified_code": verified_code}
+            
+            return {"error": "Not enough heights for asymmetric variation", "verified_code": None}
+        
+        elif mutation_type == 'intermediate_adjustment':
+            if len(current_heights) >= 4:
+                verified_code = f"adjustment_magnitude = {abs(proposed_change_float):.3f}\n\nedits = [adjust_intermediate_levels(magnitude={abs(proposed_change_float):.3f}, prog=prog)]"
+                return {"verified_code": verified_code}
+            else:
+                return {"error": f"Need at least 4 heights for intermediate adjustment, found {len(current_heights)}", "verified_code": None}
+        
+        return {"error": "Unknown mutation type", "verified_code": None}
+new_skills:
+- name: verified-mutation-protocol
+  description: One-mutation-at-a-time protocol with mandatory verification. Prevents invalid edits and wasted evals.
+  body: |
+    # Verified Single-Mutation Protocol for C₂ Maximization
+
+    ## CRITICAL: ONE MUTATION PER EDIT
+
+    The seed's 13 step patterns are fragile. You MUST:
+
+    1. Call pattern_mutator for ONE mutation proposal
+    2. Call mutation_verifier BEFORE editing (MANDATORY - don't skip!)
+    3. Implement ONLY that mutation with edit_solution
+    4. Evaluate with evaluate_solution
+    5. If improvement: repeat with same mutation TYPE
+    6. If NO improvement after 3 attempts: try next mutation TYPE
+    7. Only after exhausting all 4 types, try new architectures
+
+    ## Why Verification is Mandatory
+
+    - Syntax errors: The seed has precise boundary calculations (int(0.25*n)). A bad edit breaks the whole program.
+    - Semantic errors: Small changes (<1%) don't meaningfully alter the function.
+    - Type consistency: Ensure the edit matches what pattern_mutator proposed.
+
+    ## Mutation Types (in order)
+
+    ### Type 1: Single Height Perturbation (try 3 variants)
+    - Change ONE peak height by +0.05 to +0.10
+    - Example: 1.40 → 1.45
+    - Verify with mutation_verifier before edit
+
+    ### Type 2: Single Width Adjustment (try 3 variants)
+    - Change ONE interval boundary by 3-8%
+    - Example: int(0.25*n) → int(0.26*n)
+    - Verify with mutation_verifier before edit
+
+    ### Type 3: Single Center Shift (try 3 variants)
+    - Shift ONE boundary pair by 1-3%
+    - Example: 0.25n → 0.26n and 0.75n → 0.76n
+    - Verify with mutation_verifier before edit
+
+    ### Type 4: Asymmetric Pair Adjustment (try 3 variants)
+    - Change TWO adjacent heights with opposite perturbations
+    - Example: 1.40 → 1.43 and 1.45 → 1.42
+    - Verify with mutation_verifier before edit
+
+    ## Failure Patterns to Avoid
+
+    - ❌ Implementing multiple mutations in one edit (only ONE parameter per edit)
+    - ❌ Skipping mutation_verifier (trust it to catch your errors)
+    - ❌ Changing multiple heights/widths simultaneously
+    - ❌ Trying to "fix" a bad edit without calling pattern_mutator first
+
+    ## Execution Loop
+
+    for mutation_type in [Type1, Type2, Type3, Type4]:
+        for attempt in 1..3:
+            pattern = pattern_mutator(mutation_type=mutation_type)
+            if not mutation_verifier(pattern).verified:
+                continue
+            edit_solution(pattern.verified_code)
+            score = evaluate_solution()
+            if score > best_score:
+                best_score = score
+                continue
+            else:
+                break  # Try next mutation type
+        if best_improved:
+            # Continue with same mutation_type
+            continue
+        else:
+            # Move to next mutation type
+            pass
+            
+    If all types exhausted without improvement, then try new architectures.
+new_middlewares:
+- name: single_mutation_reminder
+  hook: before_tool
+  description: Enforces one-mutation-per-edit protocol
+  implementation_py: |
+    def before_tool(hook_input):
+        return "Remember: ONE MUTATION PER EDIT. Always call mutation_verifier before editing. Implement only what verifier approved. Do NOT combine multiple mutations in one edit."
+- name: verification_required
+  hook: before_tool
+  description: Reminds to verify mutations
+  implementation_py: |
+    def before_tool(hook_input):
+        return "Did you call mutation_verifier before calling edit_solution? NEVER edit without verification. Skipping verification wastes evaluations."

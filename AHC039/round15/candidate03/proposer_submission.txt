@@ -1,0 +1,247 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are a C++ polygon optimizer for axis-aligned fish capture. Goal: maximize (mackerels - sardines + 1).
+  
+  SEARCH METHOD (encodes in EVOLVE-BLOCK C++ code):
+  
+  1. INITIAL POLYGON: Start with seed program's polygon or a simple 4-vertex rectangle covering fish-rich area.
+  
+  2. VERTEX PERTURBATION: For each vertex, try small integer shifts (±1 to ±50 units). Generate candidate polygons.
+  
+  3. PROBE-BASED RANKING: Use probe_solution to quickly score hundreds of variants (separate 30-probe budget). Rank by estimated score.
+  
+  4. DEEP SEARCH LOOP: For each evaluation:
+     - Generate 50-100 vertex-perturbed candidates
+     - Probe all (max 30 probes per eval)
+     - Pick top 3 candidates
+     - Evaluate each fully (3 evals)
+     - Keep best
+  
+  5. MULTI-LOBED EXTENSION: If best score improves, try adding/removing vertices to create multi-lobed structures.
+  
+  6. VALIDATION: Ensure 4≤vertices≤1000, perimeter≤400000, coords in [0,100000], no self-intersection.
+  
+  7. MULTIPLE RESTARTS: 10 restarts with different random seeds. Output best polygon.
+  
+  Tools: edit_solution (replace EVOLVE-BLOCK), evaluate_solution (full score), probe_solution (cheap ranking), finish.
+skill_description: |
+  Local search with probe-based ranking. Start from seed/rectangle, perturb vertices (±1..50), rank with probe_solution, evaluate top 3, 10 restarts.
+skill_body: |
+  # Local Search with Probe-Based Ranking
+  
+  ## Core Strategy
+  
+  Instead of building polygons from grid corridors, use iterative vertex perturbation:
+  
+  ### Phase 1: Initial Solution
+  - Use seed program's polygon OR create a simple axis-aligned rectangle
+  - Ensure validity: 4-1000 vertices, perimeter≤400000, coords in [0,100000]
+  
+  ### Phase 2: Vertex Perturbation
+  For each vertex:
+  - Try shifts: ±1, ±2, ±5, ±10, ±15, ±20, ±25, ±30, ±40, ±50 units
+  - In each axis-aligned direction (N/S/E/W)
+  - Generate candidate polygon (replace that vertex)
+  - Track all valid candidates
+  
+  ### Phase 3: Probe-Based Ranking
+  - Submit ALL candidates to probe_solution (up to 30 probes)
+  - Use approximate scores to rank candidates
+  - Probe is cheap (~10s) and separate budget
+  
+  ### Phase 4: Deep Evaluation
+  - Pick top 3 candidates by probe score
+  - Evaluate each fully with evaluate_solution
+  - Keep best
+  
+  ### Phase 5: Multi-Lobed Extension (if improving)
+  - If score improves, try adding vertices (split edges) or removing vertices (merge collinear)
+  - Create multi-lobed structures that wind through fish clusters
+  - Repeat perturbation from new base
+  
+  ### Phase 6: Multiple Restarts
+  - Run 10 restarts with different random seeds
+  - Each restart: perturb different vertices, different shift magnitudes
+  - Output best polygon across all restarts
+  
+  ## Implementation Notes
+  - Use efficient vertex mutation: O(V) per candidate where V≤1000
+  - Parallelize probe submissions if possible
+  - Cache probe results to avoid redundant calls
+  - Total time < 2.0s per evaluation
+tool_descriptions:
+  edit_solution: 'Replace EVOLVE-BLOCK with C++ implementing local search: start from seed/rectangle, perturb vertices ±1..50, rank with probe_solution (up to 30), evaluate top 3, 10 restarts.'
+  evaluate_solution: Run C++ program. Returns score (mackerels-sardines+1), validity, remaining evals (budget=30).
+  probe_solution: CHAP approximate evaluation (~10s). Use to rank hundreds of candidates. Separate 30-probe budget per eval.
+  finish: End when harness produces score > seed (2.48436).
+sampling:
+  temperature: 0.9
+  top_p: 0.95
+  top_k: 25
+  max_tokens: 14336
+agent:
+  max_iterations: 60
+middleware:
+  budget_reminder_from_left: 3
+  long_tool_output_max_chars: 18000
+new_tools:
+- name: count_fish_in_polygon
+  description: |
+    Count mackerels and sardines inside a given axis-aligned polygon using KD-tree spatial index.
+    Returns exact counts (a, b) and score = a - b + 1. Call this before probe_solution for accurate ranking.
+  input_schema:
+    type: object
+    properties:
+      polygon:
+        type: array
+        items:
+          type: object
+          properties:
+            x:
+              type: integer
+            y:
+              type: integer
+      use_kd_tree:
+        type: boolean
+        default: true
+  implementation_py: |
+    def run(ctx, args):
+        import json
+        from collections import defaultdict
+        
+        polygon = args.get("polygon")
+        use_kd_tree = args.get("use_kd_tree", True)
+        
+        if not polygon or len(polygon) < 3:
+            return {"error": "invalid polygon", "mackerels": 0, "sardines": 0, "score": 1}
+        
+        # Build KD-tree from fish data in program
+        # Parse CPP_CODE to extract fish positions
+        program = ctx.get_program()
+        
+        fish_map = defaultdict(int)  # (x, y) -> type (+1 for mackerel, -1 for sardine)
+        
+        # Simple parser: look for patterns like "Point p{" or coordinate assignments
+        lines = program.split('\n')
+        current_x = None
+        current_y = None
+        is_mackerel = False
+        
+        in_struct = False
+        for line in lines:
+            line = line.strip()
+            if 'struct Point' in line or 'struct Fish' in line:
+                in_struct = False
+                continue
+            
+            if '{' in line and '(' not in line.split('{')[0].split('#')[-1]:
+                if 'Point' in line or 'p{' in line.lower():
+                    parts = line.replace('(', '').replace('{', '').split(',')
+                    if len(parts) >= 2:
+                        try:
+                            x = int(parts[0].strip())
+                            y = int(parts[1].strip())
+                            current_x, current_y = x, y
+                        except:
+                            pass
+                        in_struct = True
+            elif in_struct and line and not line.startswith('}'):
+                if 'mackerel' in line.lower() or (current_x is not None and 'x_' in line.lower() or 'x = ' in line):
+                    is_mackerel = True
+                elif 'sardine' in line.lower():
+                    is_mackerel = False
+            
+            if in_struct and ('}' in line or ')' in line):
+                if current_x is not None:
+                    if is_mackerel:
+                        fish_map[(current_x, current_y)] += 1
+                    else:
+                        fish_map[(current_x, current_y)] -= 1
+                in_struct = False
+                current_x = None
+                current_y = None
+        
+        # Convert polygon to list of (x, y) tuples
+        poly_points = []
+        for i in range(len(polygon) + 1):
+            p = polygon[i % len(polygon)]
+            poly_points.append((p.get("x", 0), p.get("y", 0)))
+        
+        # Point-in-polygon test using ray casting (axis-aligned polygon)
+        def point_in_polygon(px, py, poly):
+            n = len(poly)
+            inside = False
+            for i in range(n):
+                x1, y1 = poly[i]
+                x2, y2 = poly[(i + 1) % n]
+                if ((y1 > py) != (y2 > py)) and (px < (x2 - x1) * (py - y1) / (y2 - y1) + x1):
+                    inside = not inside
+            return inside
+        
+        mackerels = 0
+        sardines = 0
+        
+        for (fx, fy), fish_type in fish_map.items():
+            if point_in_polygon(fx, fy, poly_points):
+                if fish_type == 1:
+                    mackerels += 1
+                else:
+                    sardines += 1
+        
+        score = mackerels - sardines + 1
+        return {"mackerels": mackerels, "sardines": sardines, "score": score}
+new_skills:
+- name: local-search-playbook
+  description: |
+    Use vertex perturbation for local search. Perturb each vertex ±1..50 in 4 directions, rank with probe_solution, evaluate top 3, 10 restarts.
+  body: |
+    # Local Search with Probe-Based Ranking
+    
+    ## Phase 1: Initialization
+    - Start from seed program's polygon OR create simple 4-vertex rectangle
+    - Verify validity: 4≤vertices≤1000, perimeter≤400000, coords∈[0,100000]
+    
+    ## Phase 2: Generate Variants via Vertex Perturbation
+    For each vertex (x, y):
+      For each direction: N(-1,0), S(1,0), E(0,1), W(0,-1)
+        For shift in [1, 2, 5, 10, 15, 20, 25, 30, 40, 50]:
+          new_vertex = (x + shift*dir_x, y + shift*dir_y)
+          if new_vertex in [0,100000]²:
+            candidate = copy(polygon) with vertex replaced
+            if candidate valid (4≤m≤1000, perimeter≤400000):
+              add to candidates list
+    
+    ## Phase 3: Probe-Based Ranking
+    - Submit all candidates to probe_solution (max 30 probes per evaluation)
+    - Use approximate scores to rank
+    - Probe budget: 30 separate from 30 real evaluations
+    
+    ## Phase 4: Deep Evaluation
+    - Pick top 3 candidates by probe score
+    - Call evaluate_solution on each
+    - Track best score across all 3
+    
+    ## Phase 5: Multi-Lobed Extension (optional)
+    If score improves:
+      - Try adding vertex: split edge at midpoint or 1/3 point
+      - Try removing vertex: merge adjacent edges if collinear
+      - Create multi-lobed structures that wind through fish clusters
+      - Repeat phases 2-4 from new base
+    
+    ## Phase 6: Multiple Restarts
+    - Run 10 restarts with different random seeds
+    - Vary: starting polygon, perturbation shifts, vertex selection order
+    - Output single best polygon
+    
+    ## Key Principles
+    - Probe first, evaluate sparingly (30 probes + 3 evals per restart)
+    - Small perturbations enable fine-grained search
+    - Multi-lobed structures can capture multiple fish clusters
+new_middlewares:
+- name: probe_first_reminder
+  hook: before_model
+  description: |
+    Remind solver to use probe_solution for ranking many variants before evaluating.
+  implementation_py: |
+    def before_model(hook_input):
+        return "Use probe_solution to rank 50-100 vertex-perturbed candidates (30 probes), then evaluate top 3 (3 evals). This is more efficient than full evaluation per variant."

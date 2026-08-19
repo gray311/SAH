@@ -1,0 +1,164 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are a C++ polygon optimizer for axis-aligned fish capture. Goal: maximize (mackerels - sardines + 1).
+
+  KEY INSIGHT: The seed uses KD-trees for fast point-in-rectangle queries. ENHANCE IT instead of replacing with slow grid methods.
+
+  SEARCH METHOD (encodes in EVOLVE-BLOCK C++ code):
+
+  1. KD-TREE BASED APPROACH (seed foundation):
+     - Build KD-tree from fish positions for O(log N) rectangle queries
+     - This is already efficient; don't replace with full grid scans
+
+  2. SPARSE GRID AUGMENTATION:
+     - Add 25x25 grid ONLY at high-density mackerel regions (cells with >3 mackerels)
+     - Use grid for O(1) density checks, KD-tree for exact counts
+     - This avoids O(200x200) grid construction cost
+
+  3. FOCUSED SEARCH:
+     - Run 5 restarts (not 15-20) with different seed points from high-density cells
+     - Each restart: pick 2-3 random high-density cells, try expanding from each
+     - Save time compared to many small restarts
+
+  4. EFFICIENT EDGE PERTURBATIONS:
+     - For each edge, try shifts: ±3, ±7, ±11 units only (smaller for faster iteration)
+     - Use KD-tree for O(log N) rectangle queries during hill climb
+     - Stop hill climbing after 2 rounds (not 3)
+
+  5. VALIDATION:
+     - Output valid polygon (4-1000 vertices, integer coords in [0,100000], perimeter ≤400000)
+     - Use KVH validator for self-intersection check
+
+  Tools:
+  - edit_solution: Replace EVOLVE-BLOCK with complete C++ using KD-tree + sparse grid + focused search
+  - evaluate_solution: Run C++ program, get score. Each run has ~2.0s window.
+  - probe_solution: Use KD-tree for quick score estimates during exploration
+  - finish: Submit when you have a working KD-tree enhanced solution with 5 restarts
+
+  CRITICAL: Total execution must be <2.0s per evaluation. The seed's KD-tree approach is fast; enhance it, don't replace it.
+skill_description: |
+  KD-tree enhanced polygon optimization. Use seed's KD-tree efficiently, add sparse grid at high-density regions only, 5 focused restarts with ±3,±7,±11 shifts, 2 hill climb rounds.
+skill_body: |
+  # KD-Tree Enhanced Polygon Strategy
+
+  ## Phase 1: Data Structures (Key Improvement)
+  - Build KD-tree from all fish positions (seed's O(N log N) approach)
+  - Add sparse 25x25 grid ONLY at cells with >3 mackerels (not full 200x200)
+  - KD-tree handles exact rectangle queries in O(log N)
+  - Sparse grid handles quick density checks in O(1) where needed
+
+  ## Phase 2: Focused Search (Key Improvement)
+  - Identify top 30 high-density mackerel cells from KD-tree queries
+  - Run 5 restarts (not 15-20) with random selections from these cells
+  - Each restart: try 2-3 starting cells, build initial polygon candidates
+  - Save ~70% time vs seed's 15-20 restarts
+
+  ## Phase 3: Efficient Hill Climbing (Key Improvement)
+  For each candidate polygon:
+  - For each edge (up to 1000 vertices):
+    * Try shifts: ±3, ±7, ±11 units (smaller than seed's ±5..25)
+    * Use KD-tree rectangle query for O(log N) scoring
+    * Keep shift maximizing mackerels - sardines
+  - Repeat 2 rounds (not 3) - faster convergence with smaller steps
+
+  ## Phase 4: Polygon Construction
+  - Ensure 4 <= vertices <= 1000
+  - Integer coordinates in [0,100000]
+  - Perimeter <= 400,000
+  - No self-intersection (KVH check)
+
+  ## Phase 5: Final Selection
+  - Track best polygon across all 5 restarts
+  - Output single best polygon
+  - Total time per evaluation: < 2.0s
+
+  ## Why This Works
+  - Seed's KD-tree is already efficient; we enhance, don't replace
+  - Sparse grid augmentation only where high density exists
+  - Fewer restarts (5 vs 15-20) saves significant time
+  - Smaller perturbations (±3,±7,±11) converge faster per iteration
+  - Fewer hill climbing rounds (2 vs 3) reduces computation
+tool_descriptions:
+  edit_solution: 'Replace EVOLVE-BLOCK with C++ implementing KD-tree enhanced polygon optimization:
+
+    1. Build KD-tree from fish positions for O(log N) rectangle queries
+
+    2. Add sparse 25x25 grid only at high-density mackerel regions (>3 mackerels)
+
+    3. Run 5 restarts with 2-3 high-density cell seeds each
+
+    4. For each edge, try shifts ±3, ±7, ±11 units
+
+    5. Hill climb 2 rounds per candidate
+
+    6. Validate: 4-1000 vertices, integer coords [0,100000], perimeter ≤400000, no self-intersection
+
+    Ensure <2.0s execution. Enhance seed, don''t replace with slow grid.'
+  evaluate_solution: Run C++ program. Returns score (mackerels-sardines+1), validity, and remaining evaluations (budget=30). Each run has ~2.0s search window.
+  probe_solution: Use KD-tree for quick score estimates during exploration. Faster than full eval.
+  finish: End when you have submitted a working KD-tree enhanced solution with 5 restarts.
+sampling:
+  temperature: 1.1
+  top_p: 0.9
+  top_k: 20
+  max_tokens: 12288
+agent:
+  max_iterations: 50
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 15000
+new_tools:
+- name: quick_score_region
+  description: 'Quickly count fish in a rectangle using KD-tree. Returns mackerels, sardines, and score. Use for hill-climbing exploration, not final scoring.'
+  input_schema:
+    type: object
+    properties:
+      min_x:
+        type: integer
+      max_x:
+        type: integer
+      min_y:
+        type: integer
+      max_y:
+        type: integer
+  implementation_py: |
+    def run(ctx, args):
+        min_x = args.get("min_x", 0)
+        max_x = args.get("max_x", 100000)
+        min_y = args.get("min_y", 0)
+        max_y = args.get("max_y", 100000)
+        
+        # Query KD-tree to get fish indices in rectangle
+        indices = ctx.query_kdtree_rectangle(min_x, max_x, min_y, max_y)
+        
+        if not indices:
+            return {"mackerels": 0, "sardines": 0, "score": 0}
+        
+        # Count by type using best program context
+        program = ctx.get_program()
+        # Use KD-tree fish_struct_idx values to determine type
+        # Mackerels are indices 0 to N-1, Sardines are N to 2N-1 in input
+        mackerels = 0
+        sardines = 0
+        
+        for idx in indices:
+            # Get fish coordinates and check type based on original input order
+            # Simplified: KD-tree stores fish_struct_idx which maps to input order
+            if idx < 5000:  # Assuming N=5000 mackerels
+                mackerels += 1
+            else:
+                sardines += 1
+        
+        return {
+            "mackerels": mackerels,
+            "sardines": sardines,
+            "score": mackerels - sardines
+        }
+new_skills: []
+new_middlewares:
+- name: time_warning
+  hook: before_model
+  description: Warn executor to prioritize speed and use KD-tree for quick scoring
+  implementation_py: |
+    def before_model(hook_input):
+        return "Use KD-tree for O(log N) queries. 5 restarts max. Small shifts ±3,±7,±11. Target <2.0s per eval. Enhance seed, don't replace."

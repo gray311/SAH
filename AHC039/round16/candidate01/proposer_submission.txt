@@ -1,0 +1,326 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are a C++ polygon optimizer for axis-aligned fish capture. Goal: maximize (mackerels - sardines + 1).
+
+  CRITICAL INSIGHT: The seed's grid-based corridor expansion fails because:
+  1. Grid resolution (cell_size=500) is too coarse to detect fine-grained sardine clusters
+  2. Corridor expansion gets stuck in local optima by avoiding all S>M+2 cells
+  3. Hill climbing with fixed ±5..25 shifts misses larger beneficial moves
+
+  NEW STRATEGY: Multi-resolution density estimation with adaptive mutation.
+
+  SEARCH METHOD:
+
+  1. MULTI-RESOLUTION GRID ANALYSIS:
+     - Build THREE grids: coarse (100x100, cell_size=1000), medium (200x200, cell_size=500), fine (500x500, cell_size=200)
+     - For each grid, compute density maps and identify high-mackerel, low-sardine regions
+     - Cross-validate across resolutions to find robust clusters
+
+  2. ADAPTIVE POLYGON GROWTH:
+     - From seed points, grow polygons using adaptive step sizes (not fixed corridor expansion)
+     - Step size = min(cell_size_of_coarsest_grid, 500) initially, then adapt based on local density
+     - Prioritize directions with high mackerel density and low sardine density
+     - Allow temporary sardine penalties if they enable much larger mackerel captures
+
+  3. GEOIDAL SHAPING:
+     - Instead of rigid corridors, build "geoidal" shapes: polygons that expand preferentially in directions
+       where the density gradient favors mackerel capture
+     - Use convex hull approximations of dense mackerel regions, then fill gaps with sardine-aware padding
+
+  4. POWER LAW MUTATION:
+     - For hill climbing, try shifts following power law distribution: ±(base * k^α) where α∈[0.3,0.7]
+     - This tries small, medium, and large shifts in non-uniform proportions
+     - Use 5 refinement rounds instead of 3
+
+  5. INTELLIGENT RESTART:
+     - Instead of random perturbation, analyze final grid maps and restart from most promising grid cells
+     - Use coarse grid to find broad regions, medium grid to refine, fine grid to pinpoint
+     - Run 25 restarts (not 15-20) with memory of previous failures
+
+  6. VALIDATION:
+     - Output valid polygon only (4-1000 vertices, integer coords, perimeter ≤ 400,000)
+     - Use point-in-polygon check for self-intersection validation
+
+  Tools:
+  - edit_solution: Replace EVOLVE-BLOCK with complete C++ implementing multi-resolution adaptive growth
+  - evaluate_solution: Run C++ program, get score (budget=30, ~2.0s per run)
+  - probe_solution: Use with subsampled evaluation on promising candidates before full eval
+  - finish: Submit when you've encoded working multi-resolution adaptive growth with power-law mutation
+
+  KEY DIFFERENCE from seed: Multi-resolution analysis avoids coarse-grained pitfalls, adaptive mutation explores broader search space.
+skill_description: Multi-resolution density estimation with adaptive polygon growth and power-law mutation.
+skill_body: '# Multi-Resolution Adaptive Polygon Growth
+
+  ## Phase 1: Multi-Resolution Grid Analysis
+
+  - Build THREE grids covering [0,100000]x[0,100000]:
+    * Coarse: 100x100, cell_size=1000 (for broad region identification)
+    * Medium: 200x200, cell_size=500 (for cluster detection)
+    * Fine: 500x500, cell_size=200 (for fine-grained analysis)
+
+  - For each grid, count mackerels (M) and sardines (S)
+  - Compute density maps and identify regions with:
+    * High M density
+    * Low S density (S < 0.5*M or similar threshold)
+    * Favorable M-S ratio
+
+  - Cross-validate: A cell is robust if it shows positive density in at least 2/3 resolutions
+
+  ## Phase 2: Adaptive Polygon Growth
+
+  From each robust seed region, grow polygons adaptively:
+
+  - Initial step size = min(cell_size of coarsest grid, 500)
+  - At each growth step:
+    * Evaluate 8 directions (N,S,E,W + diagonals as combinations)
+    * Score each direction by local density gradient
+    * Move in best direction with current step size
+    * After 3-5 steps, reduce step size by factor 1.5-2.0
+    * Increase step size if encountering strong mackerel clusters
+
+  - Allow temporary sardine penalties: if a direction leads to significantly larger mackerel capture, accept short-term S increase
+
+  ## Phase 3: Geoidal Shaping
+
+  - After initial growth, refine shape using convex hull concepts:
+    * Compute approximate convex hull of mackerel-rich vertices
+    * Fill concavities with straight segments (axis-aligned when possible)
+    * Ensure all edges remain axis-aligned (perpendicular to coordinate axes)
+
+  ## Phase 4: Power Law Hill Climbing
+
+  For each candidate polygon:
+
+  - Define base shift = edge_length / 10 (adaptive to polygon size)
+  - Try shifts following power law: ±(base * k^alpha) for k=1,2,3,4,5 and alpha sampled from [0.3, 0.7]
+  - This creates a distribution with:
+    * More small shifts (fine-tuning)
+    * Fewer large shifts (major improvements)
+  - For each shift, compute score using medium-resolution grid query
+  - Keep shift that maximizes score
+  - Repeat for 5 refinement rounds (not 3)
+
+  ## Phase 5: Intelligent Restart
+
+  - Analyze final medium-resolution grid from successful runs
+  - Identify top 10-15 cells by robust density score
+  - For each restart:
+    * Pick one top cell
+    * Apply small random perturbation (±50 in coordinates)
+    * Grow adaptive polygon from this seed
+    * Perform power-law hill climbing
+  - Run 25 restarts total
+  - Track best polygon across all restarts
+
+  ## Phase 6: Validation
+
+  - Ensure 4 <= vertices <= 1000
+  - Ensure all coordinates in [0, 100000]
+  - Ensure perimeter <= 400,000
+  - Check for self-intersection using point-in-polygon tests
+  - Output last valid polygon in format: m then m lines of "x y"
+
+  ## C++ Implementation Notes
+
+  - Use fixed-size 3D array for three grids (memory-efficient)
+  - Pre-compute all counts in O(N)
+  - Rectangle query = sum of grid cells (O(1) with prefix sums)
+  - Adaptive step-size logic in growth function
+  - Power-law shift generation in hill climber
+  - Total time per evaluation: < 2.0s
+  - Use std::random_device for seed generation
+tool_descriptions:
+  edit_solution: |
+    Replace EVOLVE-BLOCK with C++ implementing multi-resolution adaptive growth:
+
+    1. Build 3 grids (100x100, 200x200, 500x500), compute density maps
+
+    2. Identify robust high-density cells (positive in >=2/3 grids)
+
+    3. From seeds, grow polygons with adaptive step sizes (start at 500, decay by 1.5-2x)
+
+    4. Allow temporary sardine penalties for large mackerel gains
+
+    5. Geoidal shaping: convex hull approximation with axis-aligned segments
+
+    6. Power-law hill climbing: shifts +/- (base * k^alpha) for alpha in [0.3,0.7], 5 rounds
+
+    7. 25 intelligent restarts from top grid cells
+
+    8. Validate and output best polygon
+  evaluate_solution: Run C++ program. Returns score (mackerels-sardines+1), validity, and remaining evaluations (budget=30). Each run has ~2.0s search window.
+  probe_solution: Use for subsampled evaluation of promising candidates before spending full eval budget. Score is approximate but useful for ranking.
+  finish: End when you have working multi-resolution adaptive growth with power-law mutation and 25 restarts.
+sampling:
+  temperature: 0.9
+  top_p: 0.95
+  top_k: 30
+  max_tokens: 14336
+agent:
+  max_iterations: 60
+middleware:
+  budget_reminder_from_left: 3
+  long_tool_output_max_chars: 18000
+new_tools:
+- name: analyze_density
+  description: Multi-resolution density analysis. Builds 3 grids (100x100, 200x200, 500x500), counts fish per cell, computes density maps, and returns top robust cells (positive in >=2/3 grids).
+  input_schema:
+    type: object
+    properties:
+      max_cells:
+        type: integer
+        default: 50
+    required: []
+  implementation_py: |
+    def run(ctx, args):
+        max_cells = args.get("max_cells", 50)
+        program_text = ctx.get_program()
+        fish_data = []
+        for line in program_text.split('\n'):
+            line = line.strip()
+            if line.startswith('fish['):
+                try:
+                    content = line.replace('fish[', '').replace(']', '')
+                    if ',mackerel' in content:
+                        parts = content.replace(',mackerel', '').split(',')
+                        x, y = int(parts[0]), int(parts[1])
+                        fish_data.append((x, y, 1))
+                    elif ',sardine' in content:
+                        parts = content.replace(',sardine', '').split(',')
+                        x, y = int(parts[0]), int(parts[1])
+                        fish_data.append((x, y, -1))
+                except:
+                    continue
+        
+        grids = [
+            (100, 100, 1000),
+            (200, 200, 500),
+            (500, 500, 200),
+        ]
+        
+        grid_count = [[[(0, 0) for _ in range(g[1])] for _ in range(g[0])] for g in grids]
+        
+        for x, y, ftype in fish_data:
+            for g_idx, (gx, gy, _) in enumerate(grids):
+                cx, cy = x // gx, y // gy
+                if 0 <= cx < gx and 0 <= cy < gy:
+                    grid_count[g_idx][cy][cx] = (1, ftype) if ftype == 1 else (0, ftype)
+        
+        robust_cells = []
+        base_size = 500
+        for r in range(base_size):
+            for c in range(base_size):
+                cells_info = []
+                for g_idx, (gx, gy, _) in enumerate(grids):
+                    r_g, c_g = r // (gy/g_idx*100), c // (cx/g_idx*100) if g_idx > 0 else r, c
+                    if r_g < gy and c_g < gx:
+                        m, s = grid_count[g_idx][r_g][c_g]
+                        cells_info.append((m, s, r_g, c_g))
+                
+                if len(cells_info) < 3:
+                    continue
+                
+                positive_count = sum(1 for m, s, _, _ in cells_info if m >= s)
+                if positive_count >= 2:
+                    total_m = sum(m for m, s, _, _ in cells_info)
+                    total_s = sum(s for m, s, _, _ in cells_info)
+                    robust_cells.append({
+                        "row": r,
+                        "col": c,
+                        "m": total_m,
+                        "s": total_s,
+                        "score": total_m - total_s,
+                        "grids_covered": positive_count
+                    })
+        
+        robust_cells.sort(key=lambda x: x["score"], reverse=True)
+        return {
+            "top_cells": robust_cells[:max_cells],
+            "total_fish": len(fish_data),
+            "grids_built": len(grids)
+        }
+remove_tools: []
+new_skills:
+- name: multi-resolution-growth
+  description: Use multi-resolution analysis to identify robust mackerel clusters, grow polygons with adaptive step sizes, apply power-law mutation for hill climbing.
+  body: |
+    # Multi-Resolution Adaptive Growth Strategy
+
+    ## Overview
+
+    This strategy builds upon the seeds grid-based approach but addresses its limitations through:
+    - Multi-resolution analysis to avoid coarse-grained pitfalls
+    - Adaptive step-size growth for more flexible polygon shapes
+    - Power-law mutation for more diverse hill climbing
+
+    ## Detailed Method
+
+    ### Step 1: Multi-Resolution Density Estimation
+
+    Build three grids over [0,100000]x[0,100000]:
+    - Coarse: 100x100 (cell_size=1000) - for broad region identification
+    - Medium: 200x200 (cell_size=500) - for cluster detection
+    - Fine: 500x500 (cell_size=200) - for fine-grained analysis
+
+    Count mackerels (M) and sardines (S) in each cell. A cell is robust if it has M>=S in at least 2 of the 3 grids.
+
+    ### Step 2: Adaptive Polygon Growth
+
+    From each robust seed cell:
+
+    1. Initialize step_size = 500 (or min of coarsest grid cell size)
+    2. For each of 4 cardinal directions:
+       - Score the direction by checking the next 3-5 cells
+       - Prefer directions with high M density and low S density
+       - If a direction has strong potential, grow in that direction
+    3. After 3-5 growth steps:
+       - Reduce step_size by factor 1.5-2.0
+       - Continue growth if still viable
+    4. Allow temporary sardine penalties: if a direction leads to significantly more mackerels (>=20% increase), accept short-term S increase
+    5. Stop when: out of bounds, no improvement for 5+ steps, or perimeter exceeds 400,000
+
+    ### Step 3: Geoidal Shaping
+
+    - Approximate the convex hull of mackerel-rich vertices
+    - Fill concavities with axis-aligned segments where possible
+    - Ensure no self-intersections
+
+    ### Step 4: Power-Law Hill Climbing
+
+    For each candidate polygon:
+
+    1. For each edge, compute base_shift = edge_length / 10
+    2. Try shifts following power law distribution:
+       - For k = 1, 2, 3, 4, 5 and alpha sampled from [0.3, 0.7]:
+         - shift = +/- (base_shift * k^alpha)
+         - Clamp to valid coordinate range
+         - Compute score using medium-resolution grid query
+    3. Keep the shift that maximizes score
+    4. Repeat for 5 refinement rounds
+    5. Output the refined polygon
+
+    ### Step 5: Intelligent Restart
+
+    1. Analyze final medium-resolution grid from all runs
+    2. Identify top 10-15 cells by robust density score
+    3. For each of 25 restarts:
+       - Pick a top cell
+       - Apply small random perturbation (+-50 in coordinates)
+       - Grow adaptive polygon from this seed
+       - Perform power-law hill climbing
+    4. Track best polygon across all restarts
+
+    ### Step 6: Validation
+
+    - Output 4 <= vertices <= 1000
+    - All coordinates in [0, 100000]
+    - Perimeter <= 400,000
+    - No self-intersection (check with point-in-polygon tests)
+new_middlewares:
+- name: resolution_reminder
+  hook: before_model
+  description: generated middleware to remind solver about multi-resolution strategy
+  implementation_py: |
+    def before_model(hook_input):
+        return "Use multi-resolution density analysis (100x100, 200x200, 500x500 grids), grow polygons with adaptive step sizes (start 500, decay 1.5-2x), power-law mutation (alpha in [0.3,0.7]), and 25 intelligent restarts from robust cells."
+'

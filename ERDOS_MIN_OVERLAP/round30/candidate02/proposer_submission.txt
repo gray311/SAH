@@ -1,0 +1,78 @@
+schema: h2spec/1.0
+system_prompt: 'Erdos minimum overlap problem (C5): Find h: [0,2]->[0,1] minimizing max_k integral h(x)(1-h(x+k))dx.
+
+CONSTRAINT: integral(h) = 1 exactly. h values in [0,1].
+
+Current best: C5 <= 0.38092303510845016 (combined_score = 1.0).
+
+GOAL: Find h achieving c5_bound < 0.38092303510845016 (combined_score > 1.0).
+
+KEY INSIGHT: The seed program has 14+ fixed patterns, but we need to systematically explore NEW architectural choices for step functions (number of steps, step locations, and their values), not just vary hyperparameters.
+
+STRATEGY:
+
+1. FIRST, USE construct_step_function to build step functions with controlled architecture (specify num_steps, step locations, and values)
+
+2. CALL probe_solution on each to get approximate C5 bounds
+
+3. CALL evaluate_solution on the BEST 2-3 candidates (those with c5_bound < 0.375)
+
+4. If no success, THEN vary hyperparameters of the training loop
+
+5. NEVER waste evals on random latents - always use structured construction first
+
+EVALUATE ONLY when c5_bound < 0.375 (combined_score > 1.01)
+
+Use construct_step_function to get architecturally-controlled initializations in one call.'
+skill_description: Construct step functions with controlled architecture (num_steps, step locations, values), screen with probe_solution, evaluate top candidates. Focus on systematic exploration of step function designs.
+skill_body: '# Erdos C5 Optimization Strategy\n\n## Phase 1: Architectural Construction (MOST IMPORTANT)\n\n1. CALL construct_step_function with specific architecture:\n   - Specify num_steps (start with 5-10 steps, not 800 intervals)\n   - Specify step locations (e.g., [0.0, 0.5, 1.0, 1.5, 2.0])\n   - Specify step values (e.g., [0.5, 0.5, 0.5, 0.5, 0.5] to satisfy integral=1)\n\n2. EXAMINE the constructed candidate:\n   - Verify integral = 1 (tool ensures this)\n   - Check c5_bound from FFT approximation\n\n3. CALL evaluate_solution if c5_bound < 0.375\n   - Full evaluation takes 59000 steps\n   - Save probes budget\n\n4. If evaluate shows combined_score <= 1.0:\n   - Try different architectures (more steps, different locations)\n   - Try bipartite (1 step), triangular (2 steps), multi-peak (3-5 steps)\n\n## Phase 2: Hyperparameter Tuning (only if Phase 1 fails)\n\nIf Phase 1 yields no improvement, THEN tune:\n- num_intervals: 400, 800, 1600\n- base_learning_rate: 0.001, 0.005, 0.01\n- penalty_strength: 40, 80, 120\n\n## Key Rules\n- ALWAYS use construct_step_function FIRST\n- NEVER call evaluate_solution on c5_bound > 0.375\n- Try architectures with 1, 2, 3, 5, 7, 10 steps systematically\n- If stuck, try completely different step locations'
+tool_descriptions:
+  edit_solution: 'Modify EVOLVE-BLOCK hyperparameters systematically.\n\nFor single-candidate testing: set num_restarts=1, num_steps=30000-60000.\n\nFor diversity: keep num_restarts=3-5.\n\nFor fine-grained search: increase num_intervals to 1600 or 3200.\n\nFor stronger integral constraint: increase penalty_strength to 80-120.\n\nFor exploration: try base_learning_rate in [0.001, 0.005, 0.01, 0.02].\n\nKey: Test ONE hyperparameter change at a time.'
+  evaluate_solution: Full 59000-step optimization. Returns combined_score = 0.38092303510845016 / c5_bound.\n\nHigher is better. combined_score > 1.0 means c5_bound < 0.38092303510845016 (new record).\n\nUse probe_solution first to filter candidates with c5_bound < 0.382.
+  probe_solution: 'Fast approximate evaluation (500 intervals, analytical c5). Uses probe budget.\n\nApproximate but much cheaper than full eval. Good for screening many candidates.\n\nUse probe to find candidates with c5_bound < 0.382, then evaluate them fully.\n\nBudget: separate from eval budget, typically 30 probes available.'
+  finish: Submit when combined_score > 1.0 (c5_bound < 0.38092303510845016).
+sampling:
+  temperature: 0.7
+  top_p: 0.95
+  top_k: 25
+  max_tokens: 14000
+agent:
+  max_iterations: 80
+middleware:
+  budget_reminder_from_left: 6
+  long_tool_output_max_chars: 10000
+new_tools:
+- name: construct_step_function
+  description: 'Construct a step function h with specified architecture (num_steps, step_locations, step_values) that satisfies integral(h)=1 exactly. Each step function has a precomputed c5_bound via FFT. Returns the step function parameters and its approximate C5 bound. Use this to systematically explore different architectural choices for step functions rather than relying on the seed''s random pattern generation.'
+  input_schema:
+    type: object
+    properties:
+      num_steps:
+        type: integer
+        description: 'Number of steps in the step function (1-20 recommended). Lower num_steps means simpler function.'
+        default: 5
+      step_locations:
+        type: array
+        description: 'The x-coordinates where steps occur in [0, 2]. Should have num_steps + 1 values including endpoints.'
+        items:
+          type: number
+        default:
+          - 0.0
+          - 0.5
+          - 1.0
+          - 1.5
+          - 2.0
+      temperature:
+        type: number
+        description: 'Sampling temperature for initial step value exploration'
+        default: 0.5
+  implementation_py: 'def run(ctx, args):\n    import numpy as np\n    import math\n    \n    num_steps = args.get("num_steps", 5)\n    step_locations = args.get("step_locations", None)\n    temperature = args.get("temperature", 0.5)\n    \n    domain = 2.0\n    N = 800\n    dx = domain / N\n    \n    if step_locations is None:\n        # Default: evenly spaced steps\n        step_locations = [i * domain / num_steps for i in range(num_steps + 1)]\n    \n    # Ensure locations are in [0, 2]\n    step_locations = [max(0.0, min(2.0, loc)) for loc in step_locations]\n    step_locations = sorted(list(set(step_locations)))\n    \n    # Generate step values that sum to 1 over [0, 2]\n    # Create a step function by sampling at midpoints of intervals\n    def create_step_function(values, locations):\n        h = np.zeros(N)\n        cumulative_width = 0.0\n        prev_val = 0.0\n        for i in range(len(locations) - 1):\n            mid = (locations[i] + locations[i+1]) / 2.0\n            interval_width = locations[i+1] - locations[i]\n            idx_start = int(mid / dx)\n            idx_end = int((mid + 0.5 * dx) / dx)\n            if idx_end > idx_start:\n                count = idx_end - idx_start\n                h[idx_start:idx_end] = values[i]\n        return h\n    \n    # Try multiple random value assignments and pick the one closest to integral=1\n    best_values = None\n    best_error = float("inf")\n    \n    for _ in range(100):\n        # Sample step values from a distribution\n        if temperature > 0:\n            sampled = np.random.uniform(-1.0, 2.0, num_steps) * temperature\n        else:\n            sampled = np.ones(num_steps) / 3.0\n        \n        # Normalize to satisfy integral constraint approximately\n        total = np.sum(sampled)\n        if total > 0:\n            normalized = sampled / total\n            # Check integral\n            integral_approx = np.sum(normalized) * domain / num_steps\n            error = abs(integral_approx - 1.0)\n            if error < best_error:\n                best_error = error\n                best_values = normalized.tolist()\n    \n    # Ensure integral is exactly 1 by scaling\n    if best_values is not None:\n        best_values = np.array(best_values)\n        current_integral = np.sum(best_values)\n        if current_integral > 0:\n            best_values = best_values / current_integral\n        else:\n            best_values = np.ones(num_steps) / num_steps\n    \n    # Convert to step function on N intervals\n    h_arr = np.zeros(N)\n    for i in range(num_steps):\n        start_loc = step_locations[i]\n        end_loc = step_locations[i+1] if i < num_steps else 2.0\n        if end_loc <= start_loc:\n            continue\n        start_idx = int(start_loc / dx)\n        end_idx = int(end_loc / dx)\n        if end_idx > start_idx:\n            h_arr[start_idx:end_idx] = best_values[i]\n    \n    # Compute C5 bound via FFT\n    h_padded = np.pad(h_arr, (0, N))\n    j_padded = np.pad(1.0 - h_arr, (0, N))\n    corr = np.fft.ifft(np.fft.fft(h_padded) * np.conj(np.fft.fft(j_padded))).real\n    c5_bound = np.max(corr * dx)\n    \n    # Clamp h to [0, 1]\n    h_arr = np.clip(h_arr, 0.0, 1.0)\n    \n    # Recompute C5 with clamped values\n    h_padded = np.pad(h_arr, (0, N))\n    j_padded = np.pad(1.0 - h_arr, (0, N))\n    corr = np.fft.ifft(np.fft.fft(h_padded) * np.conj(np.fft.fft(j_padded))).real\n    c5_bound = np.max(corr * dx)\n    \n    candidates = [{\n        "h": h_arr.tolist(),\n        "num_steps": num_steps,\n        "step_locations": step_locations,\n        "step_values": best_values.tolist() if best_values is not None else [1.0/num_steps]*num_steps,\n        "c5_bound": float(c5_bound),\n        "integral": float(np.sum(h_arr) * dx),\n        "architecture": f"{{num_steps}} steps at locations {step_locations}"\n    }]\n    \n    return {"candidates": candidates, "num_candidates": 1}'
+new_skills:
+- name: architecture-first-search
+  description: Systematically explore step function architectures (1, 2, 3, 5, 7, 10 steps) with construct_step_function, screen with probe_solution, evaluate best.
+  body: '# Architecture-First Search for Erdos C5\n\n## Core Principle\nThe seed program uses random pattern generation, but we need to SYSTEMATICALLY explore step function ARCHITECTURES (number of steps, step locations, step values).\n\n## Step-by-Step Workflow\n\n1. CALL construct_step_function with num_steps=1 (bipartite)\n   - Step locations: [0, 0.5, 2] or similar\n   - This gives the simplest possible function\n\n2. CALL construct_step_function with num_steps=3, 5, 7, 10\n   - Try different numbers of steps systematically\n   - Each time, try different step locations\n\n3. SCREEN with probe_solution\n   - Run probe on each architecture\n   - Keep those with c5_bound < 0.375\n\n4. EVALUATE top candidates\n   - Call evaluate_solution on best candidates\n   - If combined_score > 1.0, finish\n\n5. If stuck, try step_locations variations:\n   - Bipartite: [0, a, 2] for different a\n   - Tri-partite: [0, a, b, 2]\n   - Golomb-like: [0, 0.4, 0.8, 1.2, 1.6, 2]\n\n## Avoid Common Mistakes\n- Do NOT call evaluate_solution on c5_bound > 0.375\n- Do NOT skip trying different num_steps values\n- Do NOT rely on the seed''s random patterns first\n- ALWAYS use construct_step_function to control architecture'
+new_middlewares:
+- name: architecture_reminder
+  hook: before_model
+  description: Reminds solver to explore different step function architectures before hyperparameter tuning
+  implementation_py: 'def before_model(hook_input):\n    history = hook_input.get("history", [])\n    \n    # Check if construct_step_function has been called with varied num_steps\n    if not history:\n        return "First call: Try construct_step_function with num_steps=1 (bipartite), then num_steps=3, 5, 7, 10. Explore architectures before tuning hyperparameters."\n    \n    # Check if we''ve tried only 1 architecture\n    architectures = set()\n    for turn in history:\n        tools = turn.get("tools_used", [])\n        if "construct_step_function" in tools:\n            result = turn.get("tool_results", {})\n            for cand in result.get("candidates", []):\n                arch = cand.get("architecture", "")\n                num_steps = cand.get("num_steps", 1)\n                architectures.add(num_steps)\n    \n    if len(architectures) <= 1 and "construct_step_function" in [str(t) for t in tools]:\n        return f"You''ve only tried num_steps={list(architectures)[0] if architectures else ''}. Try num_steps=3, 5, 7, 10 to explore more architectures."\n    \n    return None'

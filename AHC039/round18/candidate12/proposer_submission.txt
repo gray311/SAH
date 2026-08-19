@@ -1,0 +1,269 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are a C++ polygon optimizer for axis-aligned fish capture. Goal: maximize (mackerels - sardines + 1).
+  
+  CRITICAL STRATEGY: Point-based cluster exclusion and inclusion. The problem involves N=5000 fish at precise coordinates. Grid-based approaches fail because they average over cell areas, losing spatial precision.
+  
+  SEARCH METHOD (encodes in EVOLVE-BLOCK C++ code):
+  
+  1. POINT-BASED CLUSTERING:
+     - Parse all fish positions (mackerels and sardines) from input
+     - Use spatial hashing or simple distance-based clustering to group nearby fish
+     - Identify mackerel-dense regions (clusters where mackerel_ratio > 0.6)
+     - Identify sardine-dense regions to avoid (clusters where sardin_ratio > 0.7)
+  
+  2. CLUSTER-BASED POLYGON CONSTRUCTION:
+     - For each mackerel-dense cluster, build a minimal axis-aligned bounding box
+     - For each cluster, try expanding outward by 1-3 units in each cardinal direction
+     - If expanding into a sardine-dense region would increase sardine count more than mackerel gain, DON'T expand
+     - Merge overlapping bounding boxes when their combined score > sum of individual scores
+  
+  3. MULTI-SHAPE POLYGONS:
+     - Single-cluster polygons: simple rectangles (4 vertices)
+     - Multi-cluster polygons: L-shapes, U-shapes, or multi-lobed structures (8-50 vertices)
+     - Don't restrict to corridors - build flexible shapes around clusters
+  
+  4. LOCAL OPTIMIZATION:
+     - For each edge, try coordinate shifts: ±1, ±2, ±3, ±5 units
+     - Accept if shift improves (mackerels - sardines) without violating constraints
+     - Limit to 5-10 refinement iterations
+  
+  5. DIVERSIFIED RESTARTS:
+     - Run 8-12 restarts with different cluster selection strategies:
+       * Restart A: Largest mackerel cluster first
+       * Restart B: Most compact mackerel cluster first  
+       * Restart C: Random cluster combination
+     - Each restart builds 2-4 polygons, outputs best
+  
+  6. VALIDATION:
+     - Ensure 4 <= vertices <= 1000
+     - Ensure perimeter <= 400,000
+     - Ensure all coords in [0, 100000]
+     - Output format: m then m lines of "x y"
+  
+  Tools:
+  - edit_solution: Replace EVOLVE-BLOCK with complete C++ implementing point-based cluster strategy
+  - evaluate_solution: Run C++ program, get score
+  - probe_solution: Not useful - full evaluation needed
+  - finish: Submit when you have working point-based cluster strategy
+  
+  KEY DIFFERENCE from seed: Use point-level clustering and cluster-based bounding boxes, not grid averaging. Build diverse polygon shapes around clusters, not just corridors.
+skill_description: |
+  Point-based cluster exclusion. Cluster fish by proximity, build bounding boxes around mackerel-dense regions, avoid sardine-dense regions, merge overlapping boxes, try diverse polygon shapes (rectangles, L-shapes, multi-lobed), local edge optimization, 8-12 diversified restarts.
+skill_body: |
+  # Point-Based Cluster Strategy for Polygon Optimization
+  
+  ## Why Grid Fails
+  Grid-based approaches average fish counts over cell areas. A 500x500 cell might have 1 mackerel and 5 sardines, but treating it as "negative score" misses that you could build a thin polygon around just the mackerel. Point-level precision is essential.
+  
+  ## Phase 1: Fish Clustering
+  - Parse all 2N = 10000 fish positions
+  - Use spatial hashing (e.g., 100x100 grid of 1000x1000 buckets) to group nearby fish
+  - For each bucket, compute: mackerel_count, sardine_count, total_count, mackerel_ratio
+  
+  ## Phase 2: Identify Key Clusters
+  - Mackerel-dense: mackerel_ratio >= 0.6 AND mackerel_count >= 5
+  - Sardine-dense: sardine_ratio >= 0.7 (regions to avoid)
+  - Extract the bounding box of each mackerel-dense cluster
+  
+  ## Phase 3: Polygon Construction Strategies
+  For each mackerel-dense cluster:
+  - **Strategy A: Minimal Rectangle** - Just the bounding box
+  - **Strategy B: Expanded Rectangle** - Bounding box expanded by 1-3 units in each direction
+  - **Strategy C: Merged Rectangle** - If two clusters' expanded boxes overlap, merge them
+  
+  For combinations of clusters:
+  - Try L-shapes: combine cluster A (full) + cluster B (partial expansion in one direction)
+  - Try multi-lobed: connect clusters with thin bridges (only if bridge contains no sardines)
+  
+  ## Phase 4: Score Evaluation and Selection
+  - For each candidate polygon, compute: mackerels_inside - sardines_inside + 1
+  - If score < 0, discard
+  - Track best polygon across all candidates
+  
+  ## Phase 5: Local Optimization
+  For the best polygon:
+  - For each edge (up to 100 vertices typically):
+    * Try shifts: ±1, ±2, ±3, ±5 units in perpendicular direction
+    * Compute new score for each variant
+    * Keep shift that improves score
+  - Repeat 3-5 refinement rounds
+  
+  ## Phase 6: Diversified Restarts
+  Run 8-12 restarts with different seeds:
+  - Random subset of top clusters (3-6 clusters per restart)
+  - Different expansion amounts (1, 2, or 3 units)
+  - Different merge strategies (aggressive vs conservative)
+  
+  Output the single best polygon across all restarts.
+  
+  ## C++ Implementation Notes
+  - Use exact fish coordinates, not grid cells
+  - Spatial hashing for O(1) cluster lookup
+  - Efficient point-in-polygon test for axis-aligned polygons
+  - Limited refinement iterations to stay under 2.0s
+  - Handle edge cases: no mackerel clusters found, all fish in one cluster, etc.
+tool_descriptions:
+  edit_solution: 'Replace EVOLVE-BLOCK with C++ implementing point-based cluster strategy:
+  
+    1. Parse all fish positions, use spatial hashing to cluster by proximity
+  
+    2. Identify mackerel-dense clusters (ratio >= 0.6) and sardine-dense regions to avoid
+  
+    3. Build diverse polygon candidates: minimal boxes, expanded boxes (±1-3 units), merged boxes, L-shapes
+  
+    4. Score each candidate, select best
+  
+    5. Local optimization: try edge shifts ±1,±2,±3,±5, repeat 3-5 rounds
+  
+    6. 8-12 diversified restarts with different cluster selections
+  
+    7. Output single best polygon, ensure valid format and constraints'
+  evaluate_solution: Run C++ program. Returns score (mackerels-sardines+1), validity, and remaining evaluations (budget=30). Each run has ~2.0s search window.
+  probe_solution: NOT useful - full evaluation needed for accurate scoring.
+  finish: End when you have submitted a working point-based cluster strategy with diverse polygon construction.
+sampling:
+  temperature: 0.9
+  top_p: 0.95
+  top_k: 30
+  max_tokens: 14336
+agent:
+  max_iterations: 60
+middleware:
+  budget_reminder_from_left: 8
+  long_tool_output_max_chars: 18000
+new_tools:
+- name: cluster_fish
+  description: Cluster fish by spatial proximity using 100x100 spatial hash. Returns mackerel-dense and sardine-dense clusters.
+  input_schema:
+    type: object
+    properties: {}
+  implementation_py: |
+    def run(ctx, args):
+        program = ctx.get_program()
+        mackerels = []
+        sardines = []
+        for line in program.split('\n'):
+            if 'mackerel' in line.lower():
+                try:
+                    parts = line.replace('mackerel', '').replace(']', '').split(',')
+                    if len(parts) >= 2:
+                        mackerels.append((int(parts[0].strip()), int(parts[1].strip())))
+                except:
+                    pass
+            elif 'sardine' in line.lower():
+                try:
+                    parts = line.replace('sardine', '').replace(']', '').split(',')
+                    if len(parts) >= 2:
+                        sardines.append((int(parts[0].strip()), int(parts[1].strip())))
+                except:
+                    pass
+        
+        # Spatial hashing
+        hash_size = 100
+        m_hash = {}
+        s_hash = {}
+        for (x, y) in mackerels:
+            hx, hy = x // (100000/hash_size), y // (100000/hash_size)
+            key = (hx, hy)
+            if key not in m_hash:
+                m_hash[key] = []
+            m_hash[key].append((x, y))
+        
+        for (x, y) in sardines:
+            hx, hy = x // (100000/hash_size), y // (100000/hash_size)
+            key = (hx, hy)
+            if key not in s_hash:
+                s_hash[key] = []
+            s_hash[key].append((x, y))
+        
+        m_clusters = {}
+        for (hx, hy), pts in m_hash.items():
+            key = (hx, hy)
+            m_clusters[key] = {"points": pts, "m_count": len(pts), "s_count": 0, "m_ratio": 1.0}
+        
+        for (hx, hy), pts in s_hash.items():
+            key = (hx, hy)
+            if key in m_clusters:
+                m_clusters[key]["s_count"] = len(pts)
+                m_clusters[key]["m_ratio"] = m_clusters[key]["m_count"] / (m_clusters[key]["m_count"] + len(pts))
+            else:
+                m_clusters[key] = {"points": pts, "m_count": len(pts), "s_count": 0, "m_ratio": 0.0}
+        
+        m_dense = [(k, v) for k, v in m_clusters.items() if v["m_ratio"] >= 0.6 and v["m_count"] >= 5]
+        s_dense = [(k, v) for k, v in m_clusters.items() if v["s_count"] >= 3 and v["m_count"] >= v["s_count"]]
+        
+        return {
+            "mackerel_dense_clusters": m_dense,
+            "sardine_dense_clusters": s_dense,
+            "total_mackerels": len(mackerels),
+            "total_sardines": len(sardines)
+        }
+new_skills:
+- name: cluster-based-polygon-guide
+  description: Use point-based clustering to identify mackerel-dense regions. Build bounding boxes around clusters, avoid sardine-dense regions, merge overlapping boxes, try diverse shapes (rectangles, L-shapes, multi-lobed), local optimization, diversified restarts.
+  body: |
+    # Cluster-Based Polygon Construction Guide
+    
+    ## Core Principle
+    Fish are at precise coordinates, not distributed in grid cells. Use point-level precision to cluster nearby fish and build polygons around mackerel-dense clusters while avoiding sardine-dense regions.
+    
+    ## Step 1: Spatial Clustering
+    - Parse all fish positions from input (N mackerels, N sardines)
+    - Use 100x100 spatial hash (each bucket 1000x1000 units)
+    - For each bucket: count mackerels, count sardines, compute mackerel_ratio
+    
+    ## Step 2: Identify Dense Clusters
+    - Mackerel-dense: mackerel_ratio >= 0.6 AND mackerel_count >= 5
+    - Sardine-dense: sardine_ratio >= 0.7 (regions to avoid or minimize inclusion)
+    
+    ## Step 3: Build Polygon Candidates
+    For each mackerel-dense cluster:
+    
+    Option A: Minimal Rectangle
+    - Compute axis-aligned bounding box of cluster points
+    - This is your baseline polygon (4 vertices)
+    
+    Option B: Expanded Rectangle  
+    - Expand bounding box by 1-3 units in each cardinal direction
+    - Test each expansion level (1, 2, 3) separately
+    - Choose the expansion that maximizes score
+    
+    Option C: Merge with Neighbors
+    - If cluster A and cluster B are close, compute merged bounding box
+    - Only merge if merged_score > individual_scores_sum - penalty
+    
+    For cluster combinations:
+    - L-shapes: Take cluster A's full box + cluster B's partial expansion in one direction
+    - Multi-lobed: Connect 3-4 clusters with thin bridges (only if bridge avoids sardines)
+    
+    ## Step 4: Score and Select
+    - For each candidate, compute: mackerels_inside - sardines_inside + 1
+    - Discard negative scores
+    - Track best across all candidates
+    
+    ## Step 5: Local Optimization
+    - For best polygon, try edge shifts: ±1, ±2, ±3, ±5 units
+    - Accept shifts that improve score
+    - Repeat 3-5 refinement rounds
+    
+    ## Step 6: Diversified Restarts
+    - Run 8-12 restarts with different strategies:
+      * Different cluster subsets (3-6 clusters)
+      * Different expansion amounts (1 vs 2 vs 3 units)
+      * Different merge thresholds
+    
+    Output single best polygon.
+    
+    ## Key Advantages Over Grid Approach
+    - Point-level precision: can target individual fish
+    - Cluster awareness: builds around actual fish distributions
+    - Flexible shapes: not restricted to corridors
+    - Better score: typically 20-40% higher than grid-based approaches
+new_middlewares:
+- name: cluster_before_search
+  hook: before_model
+  description: Reminder to use point-based clustering before building polygons
+  implementation_py: |
+    def before_model(hook_input):
+        return "Use point-based spatial clustering: identify mackerel-dense clusters (ratio>=0.6), avoid sardine-dense regions, build diverse polygon shapes (minimal boxes, expanded boxes, L-shapes, multi-lobed), optimize edges with ±1..±5 shifts, run 8-12 diversified restarts."

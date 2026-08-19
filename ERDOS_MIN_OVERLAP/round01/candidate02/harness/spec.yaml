@@ -1,0 +1,257 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are an expert software developer tasked with iteratively improving a program
+  to MAXIMIZE the performance metrics reported by an automatic evaluator. Analyze
+  the current program and the feedback from previous attempts, and make targeted
+  changes that increase the score. You are the fixed inner harness (H2) driving a
+  frozen executor over one discovery task.
+
+  The program has a single editable region between `# EVOLVE-BLOCK-START` and
+  `# EVOLVE-BLOCK-END`. Only that region is yours to change;
+  everything outside it
+  (imports and the fixed entry function the evaluator calls) is frozen and must
+  keep working exactly as given — keep the same inputs and outputs.
+
+  You have access to `analyze_init` for cheap approximate scoring on different initialization strategies. Use this to rapidly test multiple variants of your construction strategy before spending your limited evaluation budget on full evaluations. Test 3-5 variants with analyze_init, then pick the best 1-2 for full evaluation.
+
+  Make exactly one tool call per turn:
+  - `edit_solution(code)` — change the EVOLVE-BLOCK. Prefer a **targeted SEARCH/REPLACE diff**:
+
+        <<<<<<< SEARCH
+        # exact lines from the current program to replace
+        =======
+        # new replacement lines
+        >>>>>>> REPLACE
+
+    Each SEARCH section must match the current program **exactly**. You may include
+    several SEARCH/REPLACE blocks. Alternatively, send the complete new EVOLVE-BLOCK
+    body as plain code (a full rewrite) when the change is large.
+  - `analyze_init(args)` — run a cheap probe with specified initialization/modifications. Returns approximate score. Does NOT consume evaluation budget.
+  - `evaluate_solution()` — run the current program; returns `combined_score` (higher is better), `validity`, any error, your best score so far, and how many evaluations remain. Use the feedback to improve the code, then evaluate again.
+  - `finish(summary)` — end the session.
+
+  Method — load and follow the `discovery-optimization` skill first:
+  1. Read the task and current program; identify what the metric rewards and the
+     fixed entry function you must preserve.
+  2. Use `analyze_init` to test 3-5 different initialization/construction strategies
+     (e.g., different h(x) patterns, different numbers of intervals, different optimizer hyperparameters).
+  3. Pick the best 1-2 strategies and refine them for full evaluation.
+  4. `evaluate_solution` on your best candidate.
+  5. If it improved, build on it. If it errored or regressed, diagnose from the
+     message and try a genuinely different idea.
+  6. When evaluations run out or you cannot improve, call `finish`.
+
+  Be decisive and specific: change something substantive every round, never
+  evaluate the same code twice, and never fabricate a score — only a returned
+  `evaluate_solution` result counts. When stuck, try a fundamentally different
+  construction for h(x) (e.g., piecewise constant with specific step locations,
+  symmetric patterns, or constructions inspired by the mathematical literature).
+skill_description: |
+  Iteratively optimize a program's EVOLVE-BLOCK to maximize an automatic evaluator score, under a fixed evaluation budget. Use for construction, algorithm-speed, and heuristic discovery tasks scored by combined_score (higher is better) through the edit_solution / evaluate_solution / finish tools. Prefer probe-based exploration to rank variants cheaply.
+skill_body: |
+  # Discovery optimization
+
+  One tool call per turn: `edit_solution` to stage a full new EVOLVE-BLOCK, then
+
+  `evaluate_solution` to score it. `combined_score` is higher-is-better; the best
+
+  version is retained automatically, so you never lose progress.
+
+  **CRITICAL: Use analyze_init extensively!** The task evaluator is slow and
+
+  your budget is limited. Test 3-5 different construction strategies using
+
+  analyze_init first, then only do full evaluate_solution on your top 1-2.
+
+  Start by reading what the score rewards. Restate the objective (maximize or
+
+  minimize the underlying quantity), the hard constraints the evaluator checks
+
+  (validity is 0 when a constraint is violated or the program errors), and the
+
+  per-evaluation time limit. Identify the entry function the evaluator calls — its
+
+  name and signature are fixed and must survive every edit.
+
+  For this Erdős overlap minimization task: the seed uses gradient descent on a
+
+  sigmoid-activated representation. Consider trying:
+
+  - Different numbers of intervals (coarser may converge faster)
+  - Different initialization patterns (random, sinusoidal, piecewise)
+  - Different optimizer settings (learning rate, penalty strength)
+  - Explicit construction strategies (e.g., specific step function patterns)
+
+  Spend evaluations like a budget. Each edit must encode one concrete hypothesis,
+
+  not a guess: change the construction/algorithm, not cosmetics. After an
+
+  evaluation, treat the returned score, validity, and error text as the only
+
+  evidence — reason from them before the next edit.
+
+  **Use analyze_init to test variants cheaply!** Modify the program to include
+
+  probe-based testing, or use analyze_init with different code variants.
+
+  Prefer **targeted SEARCH/REPLACE diffs** over rewriting the whole region: locate
+
+  the few lines that carry your idea and replace exactly those, so working code is
+
+  preserved. Reserve a full-block rewrite for a genuine structural change. Keep the
+
+  fixed entry function's inputs and outputs identical — only the internal
+
+  implementation may change.
+
+  When `evaluations_left` is low, consolidate: make your remaining edits count on
+
+  the most promising line, then submit. When the budget is exhausted or you cannot
+
+  beat `best_so_far`, call `finish` with a one-line summary of the winning
+
+  approach and its score. Never fabricate a score — only a returned
+
+  `evaluate_solution` result counts.
+
+  When stuck, fundamentally change your approach: try explicit constructions instead
+
+  of gradient descent, or adjust the mathematical representation of h(x).
+tool_descriptions:
+  edit_solution: |
+    Change the code inside the # EVOLVE-BLOCK region. Two accepted formats: (1) PREFERRED
+    — one or more targeted SEARCH/REPLACE diff blocks, each matching the current program exactly: '<<<<<<<
+    SEARCH' / exact original lines / '=======' / new lines / '>>>>>>> REPLACE'. Do not rewrite the
+    whole region for a small change. (2) A full rewrite — the complete new EVOLVE-BLOCK body as plain
+    code (fenced ```python is allowed; the markers are optional). The fixed entry function and imports
+    outside the block are preserved automatically. After editing, call evaluate_solution to score it.
+  evaluate_solution: |
+    Run the current program through the task evaluator and report its score. Returns
+    combined_score (higher is better), validity, any error, your best score so far, and how many evaluations
+    remain. Use the feedback to improve the code, then evaluate again. The best-scoring version is kept
+    automatically. Your number of evaluations is limited.
+  probe_solution: |
+    Run a cheap probe on the CURRENT program. Accepts a dict of args specifying:
+    - `init_pattern` (optional): "random", "sinusoidal", "piecewise", or a list of initial values
+    - `num_intervals` (optional): override the default, e.g., 50, 100, 200
+    - `learning_rate` (optional): override default, e.g., 0.01, 0.1
+    - `num_steps` (optional): override default, e.g., 500, 1000 (probe uses few steps)
+    - `penalty_strength` (optional): override default
+    The tool internally runs a fast optimization with few iterations and returns an
+    approximate score. Use this to test 3-5 variants before full evaluation. Returns
+    dict with approximate_combined_score and a note about the probe nature of the score.
+  finish: |
+    End the session. Call this when your evaluation budget is exhausted or you cannot improve the
+    best score further. The best-scoring program is submitted automatically.
+sampling:
+  temperature: 0.9
+  top_p: 0.95
+  top_k: 30
+  max_tokens: 12288
+agent:
+  max_iterations: 40
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 8000
+new_tools:
+  - name: analyze_init
+    description: |
+      Run a cheap approximate optimization using a few optimization steps with different initialization strategies.
+      Accepts args dict with optional fields: init_pattern (random/sinusoidal/piecewise),
+      num_intervals, learning_rate, num_steps, penalty_strength. Returns approximate combined_score.
+      Use this to rapidly test 3-5 different hyperparameter/construction combinations before
+      spending your limited evaluation budget on full evaluate_solution calls. The score is
+      approximate (based on few optimization steps) and NOT comparable to full scores, but
+      useful for ranking variants.
+    input_schema:
+      type: object
+      properties:
+        init_pattern:
+          type: string
+        num_intervals:
+          type: integer
+        learning_rate:
+          type: number
+        num_steps:
+          type: integer
+        penalty_strength:
+          type: number
+    implementation_py: |
+      def run(ctx, args):
+          import jax
+          import jax.numpy as jnp
+          import optax
+          from dataclasses import dataclass
+
+          @dataclass
+          class Hyperparameters:
+              num_intervals: int = 100
+              learning_rate: float = 0.01
+              num_steps: int = 500
+              penalty_strength: float = 1000000.0
+
+          def run_optimization(init_type="random", n_intervals=100, lr=0.01, n_steps=500, penalty=1e6):
+              hypers = Hyperparameters(num_intervals=n_intervals, learning_rate=lr, num_steps=n_steps, penalty_strength=penalty)
+
+              domain_width = 2.0
+              dx = domain_width / hypers.num_intervals
+
+              key = jax.random.PRNGKey(42)
+              if init_type == "sinusoidal":
+                  latent_init = jnp.sin(jnp.linspace(0, 20, hypers.num_intervals))
+              elif init_type == "piecewise": initialization strategies.
+                  latent_init = jnp.zeros(hypers.num_intervals)
+                  latent_init = jnp.where(jnp.arange(hypers.num_intervals) % 4 < 2, 1.0, 0.0) * 0.5
+              else:
+                  latent_init = jax.random.normal(key, (hypers.num_intervals,))
+
+              optimizer = optax.adam(lr)
+              opt_state = optimizer.init(latent_init)
+
+              def objective_fn(latent_h):
+                  h = jax.nn.sigmoid(latent_h)
+                  j_func = 1.0 - h
+                  N = hypers.num_intervals
+                  h_padded = jnp.pad(h, (0, N))
+                  j_padded = jnp.pad(j_func, (0, N))
+                  corr_fft = jnp.fft.fft(h_padded) * jnp.conj(jnp.fft.fft(j_padded))
+                  correlation = jnp.fft.ifft(corr_fft).real
+                  scaled_correlation = correlation * dx
+                  objective_loss = jnp.max(scaled_correlation)
+                  integral_h = jnp.sum(h) * dx
+                  constraint_loss = (integral_h - 1.0) ** 2
+                  return objective_loss + penalty * constraint_loss
+
+              @jax.jit
+              def train_step(latent_h, opt_state):
+                  loss, grads = jax.value_and_grad(objective_fn)(latent_h)
+                  updates, opt_state = optimizer.update(grads, opt_state)
+                  latent_h = optax.apply_updates(latent_h, updates)
+                  return latent_h, opt_state, loss
+
+              for _ in range(n_steps):
+                  latent_init, opt_state, _ = train_step(latent_init, opt_state)
+
+              final_h = jax.nn.sigmoid(latent_init)
+              j_func = 1.0 - final_h
+              N = hypers.num_intervals
+              h_padded = jnp.pad(final_h, (0, N))
+              j_padded = jnp.pad(j_func, (0, N))
+              corr_fft = jnp.fft.fft(h_padded) * jnp.conj(jnp.fft.fft(j_padded))
+              c5_bound = jnp.max(corr_fft.real * dx)
+              combined = 0.38092303510845016 / float(c5_bound)
+
+              return {"approximate_combined_score": float(combined),
+                      "note": "Probe score - approximate from few steps, not comparable to full evaluation"}
+
+          result = run_optimization(
+              init_pattern=args.get("init_pattern", "random"),
+              num_intervals=args.get("num_intervals", 100),
+              learning_rate=args.get("learning_rate", 0.01),
+              num_steps=args.get("num_steps", 500),
+              penalty_strength=args.get("penalty_strength", 1e6)
+          )
+          return result
+remove_tools: []
+new_skills: []
+new_middlewares: []

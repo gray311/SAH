@@ -1,0 +1,130 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are an expert software developer tasked with iteratively improving a program
+  to MAXIMIZE the performance metrics reported by an automatic evaluator. Analyze
+  the current program and the feedback from previous attempts, and make targeted
+  changes that increase the score. You are the fixed inner harness (H2) driving a
+  frozen executor over one discovery task.
+
+  The program has a single editable region between `# EVOLVE-BLOCK-START` and
+  `# EVOLVE-BLOCK-END`. Only that region is yours to change.
+
+  Make exactly one tool call per turn:
+  - `edit_solution(code)` — change the EVOLVE-BLOCK. Prefer a SEARCH/REPLACE diff.
+  - `evaluate_solution()` — run the current program; returns combined_score (higher is better), validity, error, best_so_far, and evaluations left.
+  - `analyze_grid_density()` — NEW TOOL: Computes a coarse-grained histogram of mackerels vs sardines density on a grid overlay. Returns grid cells with density scores, recommended polygon anchors. Uses 200x200 grid over [0,100000]x[0,100000]. Call this ONCE at program start to guide construction.
+  - `probe_solution()` — cheap subsampled score (~2000 points, separate budget).
+  - `finish(summary)` — end the session.
+
+  Method:
+  1. Run analyze_grid_density() first. Use its output to identify high-density mackerel regions.
+  2. Design a polygon that maximizes mackerel coverage while minimizing sardine coverage.
+  3. Implement an internal search loop in your C++ code that tries multiple polygon configurations (rectangles, L-shapes, U-shapes) guided by the grid analysis.
+  4. Keep your internal search bounded to fit within the 1.95s time limit.
+  5. Evaluate and iterate. When stuck, try a fundamentally different polygon topology.
+  6. Use finite, deterministic strategies: precompute candidate shapes, iterate through them.
+
+  Prefer explicit, deterministic constructions over open-ended internal search. Your C++ program must implement a time-based search loop.
+skill_description: |
+  Iteratively optimize a program's EVOLVE-BLOCK to maximize combined_score (higher is better). Use with a new analyze_grid_density tool to guide polygon construction for fish-capture tasks.
+tool_descriptions:
+  edit_solution: |
+    Change the EVOLVE-BLOCK code. Use SEARCH/REPLACE diffs for targeted edits, or full rewrites for structural changes. The fixed entry function and imports outside the block are preserved.
+  evaluate_solution: |
+    Run the program and return combined_score (higher is better), validity, error, best_so_far, and evaluations left.
+  probe_solution: |
+    Cheap score on ~2000-subsampled data. Does not consume evaluation budget.
+  finish: |
+    End the session.
+sampling:
+  temperature: 0.9
+  top_p: 0.95
+  top_k: 30
+  max_tokens: 12288
+agent:
+  max_iterations: 50
+middleware:
+  budget_reminder_from_left: 2
+  long_tool_output_max_chars: 12000
+new_tools:
+  - name: analyze_grid_density
+    description: |
+      Computes a 200x200 grid overlay over [0,100000]², counting mackerels vs sardines per cell.
+      Returns: grid density matrix (mackerel_count - sardine_count per cell), list of top 20 positive cells (recommended polygon anchors), top 20 negative cells (most sardine-heavy), bounding box, and statistics.
+      Uses 5000 fish on 40000 cells -> fast (~O(N)). Call this ONCE at program start to guide polygon construction.
+      The solver should use this to:
+      - Start polygon around highest-density positive cells
+      - Expand into adjacent positive cells, contract around negative cells
+      - Try multiple shapes (rectangle, L, U, multi-lobed) and guide internal search
+      - Prune polygon candidates that avoid positive/high cells
+    input_schema: {type: object, properties: {}}
+    implementation_py: |
+      def run(ctx, args):
+          names = ctx.list_task_inputs()
+          if not names:
+              return {"error": "no inputs"}
+          
+          mackerels = []
+          rows_m = ctx.read_input_sample(names[0], nrows=2000)
+          for line in rows_m.strip().split('\n')[:2000]:
+              parts = line.split()
+              if len(parts) >= 2:
+                  mackerels.append({'x': int(parts[0]), 'y': int(parts[1]), 'type': 1})
+          
+          sardines = []
+          rows_s = ctx.read_input_sample(names[1], nrows=2000)
+          for line in rows_s.strip().split('\n')[:2000]:
+              parts = line.split()
+              if len(parts) >= 2:
+                  sardines.append({'x': int(parts[0]), 'y': int(parts[1]), 'type': -1})
+          
+          all_fish = mackerels + sardines
+          GRID_SIZE = 200
+          RANGE = 100000
+          CELL_SIZE = RANGE // GRID_SIZE
+          
+          grid_m = [[0]*GRID_SIZE for _ in range(GRID_SIZE)]
+          grid_s = [[0]*GRID_SIZE for _ in range(GRID_SIZE)]
+          
+          for f in all_fish:
+              cx = f['x'] // CELL_SIZE
+              cy = f['y'] // CELL_SIZE
+              if 0 <= cx < GRID_SIZE and 0 <= cy < GRID_SIZE:
+                  if f['type'] == 1:
+                      grid_m[cy][cx] += 1
+                  else:
+                      grid_s[cy][cx] += 1
+          
+          positive_cells = []
+          negative_cells = []
+          
+          for cy in range(GRID_SIZE):
+              for cx in range(GRID_SIZE):
+                  cell_m = grid_m[cy][cx]
+                  cell_s = grid_s[cy][cx]
+                  center_x = cx * CELL_SIZE + CELL_SIZE // 2
+                  center_y = cy * CELL_SIZE + CELL_SIZE // 2
+                  density = cell_m - cell_s
+                  if density > 0:
+                      positive_cells.append({'cx': cx, 'cy': cy, 'm': cell_m, 's': cell_s, 'density': density, 'center_x': center_x, 'center_y': center_y})
+                  if cell_s > 0:
+                      negative_cells.append({'cx': cx, 'cy': cy, 'm': cell_m, 's': cell_s, 'density': density, 'center_x': center_x, 'center_y': center_y})
+          
+          positive_cells.sort(key=lambda x: x['density'], reverse=True)
+          negative_cells.sort(key=lambda x: x['s'], reverse=True)
+          
+          min_x = min(f['x'] for f in all_fish) if all_fish else 0
+          max_x = max(f['x'] for f in all_fish) if all_fish else RANGE
+          min_y = min(f['y'] for f in all_fish) if all_fish else 0
+          max_y = max(f['y'] for f in all_fish) if all_fish else RANGE
+          
+          return {
+              'top_positive': positive_cells[:20],
+              'top_negative': negative_cells[:20],
+              'bbox': {'min_x': min_x, 'max_x': max_x, 'min_y': min_y, 'max_y': max_y},
+              'total_fish': len(all_fish),
+              'hint': 'Start polygon around top_positive cells. Avoid top_negative cells.'
+          }
+remove_tools: []
+new_skills: []
+new_middlewares: []

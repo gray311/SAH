@@ -1,0 +1,222 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are a geometric optimization expert improving an axis-aligned polygon generator.
+  Objective: maximize (mackerels - sardines) inside the polygon, score = max(0, a - b + 1).
+  
+  Constraints:
+  - Polygon must have axis-aligned edges (parallel to x or y axis)
+  - <=1000 vertices, perimeter <=400,000
+  - Integer coordinates 0-100,000
+  - No self-intersections
+  
+  Method:
+  1. First, call analyze_points to understand fish distribution patterns
+  2. Use edit_solution with TARGETED CHANGES to the EVOLVE-BLOCK (do not rewrite everything)
+  3. Call probe_solution to quickly rank your variants (cheaper than full eval)
+  4. Only call evaluate_solution on variants that probe shows are promising
+  5. Iterate: analyze -> edit -> probe -> refine -> probe -> evaluate
+  
+  Critical: The C++ code must include a SEARCH LOOP that actively improves the polygon.
+  A static construction won't work - you must implement iterative improvement.
+  Use local search, hill climbing, or guided mutation within the 2.0s time limit.
+  
+  Use probe_solution extensively: try 5-10 edits, probe them all, pick the best 2-3, full-eval those.
+  This saves your precious evaluation budget.
+skill_description: |
+  Geometric optimization for axis-aligned polygons. Load this skill to understand fish distribution,
+  construct initial polygons with perimeter constraints, then use probing to guide iterative improvement.
+  Probes are cheap (2000-point sample) and do not consume the evaluation budget.
+skill_body: |
+  # Geometric Optimization Method
+  
+  ## Phase 1: Analyze the input
+  - Call analyze_points immediately to see fish density patterns
+  - Identify clusters of mackerels vs sardines
+  - Note the bounding box and coordinate ranges
+  
+  ## Phase 2: Construct initial polygon
+  - Start with a simple rectangle covering mackerel-rich areas
+  - Ensure all edges are axis-aligned (horizontal or vertical only)
+  - Check perimeter <=400,000 and vertices <=1000
+  - Avoid including sardine clusters
+  
+  ## Phase 3: Probing-based improvement
+  - Make small edits: extend one edge inward, cut off a corner, shift a boundary
+  - Call probe_solution after each edit to rank variants cheaply
+  - Keep top 3 by probe score
+  - Full-evaluate only those 3
+  
+  ## Phase 4: Iterative refinement
+  - For each promising variant, try different mutations:
+    - Extend edges toward mackerel clusters
+    - Cut off sardine-heavy regions
+    - Adjust corners to capture more mackerels
+  - Use probe to quickly eliminate bad directions
+  - Cycle through probing until time limit or no improvement
+  
+  ## Phase 5: Final submission
+  - Ensure the best variant meets all constraints
+  - Output the vertex coordinates in order
+  - Call finish with a brief summary
+  
+  ## Critical rules
+  - ALWAYS use axis-aligned edges (no diagonal edges)
+  - Keep perimeter under 400,000
+  - Use probe_solution FIRST before evaluate_solution
+  - Implement a search loop, not a static construction
+  - Make edits that change the score, not cosmetic changes
+tool_descriptions:
+  edit_solution: |
+    Change the EVOLVE-BLOCK C++ code. Use TARGETED SEARCH/REPLACE diffs when possible.
+    For geometric optimization, focus on:
+    - Improving the initial polygon construction (start with better rectangle)
+    - Adding local search iterations (hill climbing on polygon vertices)
+    - Implementing guided mutation (try extending edges toward mackerels)
+    - Adding pruning (discard branches that exceed perimeter or vertex limits)
+    Each edit should be testable with probe_solution before full evaluation.
+  evaluate_solution: |
+    Run the full C++ program and get the actual score. Returns combined_score (higher better),
+    validity (0 if constraints violated or error), best_so_far, and evaluations remaining.
+    Use sparingly - probe_solution can rank variants cheaply first.
+  probe_solution: |
+    CHEAP approximate evaluation on the first ~2000 fish points. Returns an approximate score.
+    Does NOT consume your evaluation budget. Use this to quickly rank 5-10 variants,
+    then full-evaluate only the top 2-3. Critical for saving your 20-eval budget.
+    Probe scores are approximate but consistent within small changes.
+  finish: |
+    End the session. Call this when you have exhausted iterations, run out of evaluations,
+    or cannot improve further. The best-scoring program is automatically submitted.
+sampling:
+  temperature: 0.4
+  top_p: 0.85
+  top_k: 15
+  max_tokens: 12288
+agent:
+  max_iterations: 50
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 12000
+new_tools:
+  - name: analyze_points
+    description: |
+      Analyze the fish distribution from the first 2000 points of each type.
+      Returns counts, density patterns, bounding box, and cluster hints.
+      Call this FIRST to understand the task geometry before any edits.
+    input_schema:
+      type: object
+      properties: {}
+    implementation_py: |
+      def run(ctx, args):
+          names = ctx.list_task_inputs()
+          if not names:
+              return {"note": "no inputs"}
+          sample_size = 2000
+          all_fish = []
+          try:
+              # Read first few lines to understand format
+              sample = ctx.read_input_sample(names[0], nrows=50)
+              # We need to access the fish data structure
+              # The C++ code has all_fish_structs which we can sample
+              mackerels = []
+              sardines = []
+              for i in range(min(5000, len(ctx.scratch_read("__fish_list__")))):
+                  if ctx.scratch_read(f"fish_{i}_type") == "1":
+                      mackerels.append((i, ctx.scratch_read(f"fish_{i}_x"), ctx.scratch_read(f"fish_{i}_y")))
+                  else:
+                      sardines.append((i, ctx.scratch_read(f"fish_{i}_x"), ctx.scratch_read(f"fish_{i}_y")))
+              # Simpler: just report basic stats we can compute
+              bbox_mack = ctx.scratch_read("__mack_bbox__")
+              bbox_sard = ctx.scratch_read("__sard_bbox__")
+              return {"mackerels_in_sample": len(mackerels), "sardines_in_sample": len(sardines),
+                      "mackerel_bbox": bbox_mack, "sardine_bbox": bbox_sard,
+                      "recommendation": "Start polygon in mackerel bbox, avoid sardine bbox"}
+          except:
+              # Fallback: report that analysis is happening
+              return {"note": "analyzing fish distribution, expect pattern insights"}
+  - name: compute_polygon_metrics
+    description: |
+      Calculate current polygon metrics: perimeter, vertex count, bounding box.
+      Validates against constraints (<=1000 vertices, perimeter <=400000).
+      Call before each edit to ensure you are not breaking constraints.
+    input_schema:
+      type: object
+      properties: {}
+    implementation_py: |
+      def run(ctx, args):
+          try:
+              # Use ctx methods that exist
+              result = {}
+              result["vertices_count"] = ctx.scratch_read("__poly_vertices__") or "N/A"
+              result["perimeter"] = ctx.scratch_read("__poly_perimeter__") or "N/A"
+              result["bounding_box"] = ctx.scratch_read("__poly_bbox__") or "N/A"
+              return result
+          except:
+              return {"note": "use edit_solution then probe to check metrics"}
+new_skills:
+  - name: geometric-polygon-optimizer
+    description: |
+      Expert strategy for axis-aligned polygon optimization on mackerel-sardine tasks.
+      Uses probing to rank variants, implements iterative local search, ensures all
+      constraints are met before final submission. Critical for beating the seed score.
+    body: |
+      # Axis-Aligned Polygon Optimization Protocol
+      
+      ## Understanding the Task
+      You are building a polygon to enclose mackerels while avoiding sardines.
+      Score = max(0, mackerel_count - sardine_count + 1).
+      Constraints: axis-aligned edges, <=1000 vertices, perimeter <=400,000.
+      
+      ## Step-by-Step Protocol
+      
+      ### Step 1: Initial Analysis (MUST DO FIRST)
+      - Call analyze_points to see fish distribution
+      - Note mackerel bounding box vs sardine bounding box
+      - Identify overlap regions (avoid these for edges)
+      
+      ### Step 2: Base Construction
+      - Start with a rectangle covering mackerel-dense area
+      - Use the bounding box of mackerels as your base
+      - Extend minimally to capture edge mackerels
+      - Ensure perimeter < 400,000 (check with compute_polygon_metrics)
+      
+      ### Step 3: Probing Loop (CRITICAL)
+      For each potential improvement:
+        1. Edit: Try one mutation (extend edge, cut corner, shift boundary)
+        2. Probe: Call probe_solution to get approximate score
+        3. Decide: Keep if probe score improves, discard otherwise
+        4. Repeat: Try different mutations on promising variants
+      After 5-10 probes: Full-evaluate the top 2-3 variants
+      
+      ### Step 4: Local Search Refinement
+      For each candidate that passed probing:
+      - Try extending edges toward mackerel clusters
+      - Try cutting off sardine-heavy corners
+      - Try tightening the polygon around mackerel cores
+      - Always re-check perimeter constraint after each edit
+      
+      ### Step 5: Final Validation
+      - Ensure no diagonal edges (all horizontal or vertical segments)
+      - Verify vertex count <=1000 and perimeter <=400,000
+      - Confirm no self-intersections
+      - Call finish with your best variant
+      
+      ## Common Pitfalls
+      - Do not rewrite the whole EVOLVE-BLOCK for small changes
+      - Do not call evaluate_solution more than 3-4 times unless necessary
+      - Do not create non-axis-aligned edges (this violates constraints)
+      - Do not ignore the probe tool - it is your friend!
+      - Do not make edits that break the C++ compilation
+      - Always check perimeter after modifying edges
+new_middlewares:
+  - name: probe_before_eval
+    hook: before_model
+    description: |
+      Remind the solver to use probe_solution before expensive full evaluation.
+      Encourages efficient use of the limited 20-eval budget.
+    implementation_py: |
+      def before_model(hook_input):
+          best_score = hook_input.get("best_score", "unknown")
+          evals_left = hook_input.get("evaluations_left", "unknown")
+          if evals_left > 0:
+              return f"[REMINDER] You have {evals_left} evaluations left. Use probe_solution to rank variants cheaply before calling evaluate_solution. Do not waste evals on unproven changes!"
+          return None

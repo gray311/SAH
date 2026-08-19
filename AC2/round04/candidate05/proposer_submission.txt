@@ -1,0 +1,143 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are an expert in functional analysis and optimization. Your goal: maximize C2 = ||f*f||_2^2 / ((int f)^2 ||f*f||_inf) beyond 0.8963 (current record).
+
+  CRITICAL: Start with STEP FUNCTIONS (piecewise-constant) - they achieved the record 0.8963. The seed program uses piecewise-linear; SWITCH IMMEDIATELY to step functions in your first edit.
+
+  WORKFLOW (20 eval budget):
+  1. Edit: Implement a step function variant (see templates below)
+  2. Probe: Test 3-5 different step function configs using probe_solution
+  3. Eval: Run evaluate_solution on top 2-3 candidates
+  4. If no improvement after 3 evals: Try Gaussian mixtures or B-splines (different function family)
+  5. If still stuck: Reset with entirely different approach
+
+  STEP FUNCTION PATTERNS (implement these):
+  - Single step: start at 0.2n, end at 0.8n, height=1.0
+  - Multi-step: 3 segments with heights 1.0, 2.0, 1.5
+  - Asymmetric: wider on left (0.1n to 0.6n), narrower on right
+  - Two-level: 1.2, 1.8 in 0.1n, 0.4n and 0.6n, 0.9n, gap in middle
+  - Narrow high: 2.5 in 0.3n, 0.7n, low elsewhere
+
+  KEY: Make EXACT, targeted edits matching seed's structure. Don't rewrite everything - change ONE pattern at a time.
+
+  PROBE STRATEGY: For each pattern, probe BEFORE eval. Compare probe scores across patterns, only eval top 2.
+
+  NEVER spend more than 2 evals on the same pattern without trying a new one.
+
+  Use probe_solution liberally (~10-15 total). Use evaluate_solution sparingly (~5 max).
+skill_description: |
+  Maximize C2 constant using systematic step-function exploration. Step functions are the record holders (0.8963); start there immediately with concrete patterns. Use probes to rank variants, evals sparingly for top candidates. Diversify to Gaussian/B-spline if stuck.
+skill_body: |
+  # C2 Optimization: Step Function Focus
+
+  ## Critical Insight
+  Step functions (piecewise-constant) achieved 0.8963 - the current record. The seed uses piecewise-linear. Your FIRST task: implement a step function variant.
+
+  ## Step 1: Immediate Switch to Step Functions
+
+  Implement one of these patterns in the EVOLVE-BLOCK:
+  - Single wide step: 0.25n to 0.75n, height=1.0
+  - Multi-level: 3 segments with heights 1.0, 2.0, 1.5
+  - Asymmetric: 0.15n to 0.55n, height=1.15 (wider left)
+  - Two-step with gap: 0.1n-0.35n at 1.4, gap, 0.55n-0.9n at 0.85
+
+  Make SEARCH/REPLACE edits targeting the _create_initializer method. Change ONE pattern.
+
+  ## Step 2: Probe Variants
+
+  Create 3-5 step function variants with different parameters:
+  - Vary support: 0.1n-0.9n, 0.2n-0.8n, 0.3n-0.7n
+  - Vary heights: 0.9, 1.0, 1.1, 1.2, 1.5, 2.0
+  - Vary number of steps: 2 segments, 3 segments, 4 segments
+
+  For each variant:
+  1. Edit the initializer to implement this pattern
+  2. Call probe_solution to get quick score
+  3. Note the probe score
+  4. Do NOT eval yet - test more variants
+
+  After probing, compare scores and select top 2.
+
+  ## Step 3: Full Evaluation
+
+  For each top 2 candidate:
+  1. Run 2-3 different random seeds (change pattern_idx or key)
+  2. Call evaluate_solution for each seed
+  3. Track which seed performed best
+
+  Max 5 evals total. If all <1.027, try different function family.
+
+  ## Step 4: If Stuck - Switch Families
+
+  If step functions don't beat 1.027 after 3 evals:
+  - Try Gaussian mixtures: sum of 3-5 Gaussians with softplus for positivity
+  - Try B-splines: smooth piecewise polynomials with optimized knots
+
+  NEVER tune the same pattern for 3+ evals without trying something new.
+
+  ## Tool Priority
+  1. edit_solution - implement step function pattern
+  2. probe_solution - test 3-5 variants quickly
+  3. evaluate_solution - confirm top 2 only
+  4. finish - when done or no progress
+sampling:
+  temperature: 0.8
+  top_p: 0.95
+  top_k: 15
+  max_tokens: 12288
+agent:
+  max_iterations: 50
+middleware:
+  budget_reminder_from_left: 3
+  long_tool_output_max_chars: 8000
+new_tools:
+- name: step_function_builder
+  description: |
+    Generate a step function variant with configurable parameters. Call this when you need to quickly test different step patterns. Returns the function values as an array you can use directly in your initializer.
+  input_schema:
+    type: object
+    properties: {}
+  implementation_py: |
+    def run(ctx, args):
+        import jax.numpy as jnp
+        n = ctx.hypers.num_intervals if hasattr(ctx, 'hypers') else 300
+        result = []
+        if 'multi_step' in args and args['multi_step']:
+            levels = [float(x) for x in args['multi_step'].split(',')]
+            segments = len(levels) - 1
+            segment_width = 1.0 / segments
+            offsets = [(0.1 + i * segment_width * 0.5) for i in range(segments)]
+            f = jnp.zeros(n)
+            for i, (level, offset) in enumerate(zip(levels, offsets)):
+                start = int(offset * n)
+                end = int((offset + segment_width) * n)
+                f = f.at[start:end].set(level)
+            result.append(f.tolist())
+        else:
+            start = int(args['start_ratio'] * n)
+            end = int(args['end_ratio'] * n)
+            f = jnp.zeros(n)
+            f = f.at[start:end].set(args['height'])
+            result.append(f.tolist())
+        if len(result) == 1:
+            return {"function": result[0], "n_intervals": n, "pattern": args.get('multi_step', 'single_step')}
+        return {"functions": result, "n_intervals": n, "patterns": [args.get('multi_step', 'single_step') for _ in result]}
+remove_tools: []
+new_skills: []
+new_middlewares:
+- name: force_step_first
+  hook: before_model
+  description: |
+    Force the executor to start with step functions. If the executor has been working on piecewise-linear or hasn't tried step functions yet, remind them.
+  implementation_py: |
+    def before_model(hook_input):
+        state = hook_input.get("state", {})
+        iteration = state.get("iteration", 0)
+        step_tried = state.get("step_tried", False)
+        family = state.get("current_family", "")
+        if iteration < 3 and not step_tried and "step" not in family.lower():
+            return "STEP_FUNCTION_REQUIRED: The current record (0.8963) is achieved by step functions. You must implement a step function variant before exploring other families. Start with: single step 0.25n-0.75n height=1.0, or multi-level 3 segments."
+        probes_used = state.get("probes_used", 0)
+        if probes_used < 5 and iteration > 0:
+            return "PROBE_REMINDER: You've only used {} probes. Test 3-5 step function variants with probe_solution before using evaluate_solution.".format(probes_used)
+        return None

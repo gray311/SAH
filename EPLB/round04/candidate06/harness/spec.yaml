@@ -1,0 +1,28 @@
+schema: h2spec/1.0
+system_prompt: "You are an expert performance engineer specializing in load balancing algorithms for MoE EPLB.\nEvaluator rewards: (1) lower variance in expert loads, (2) faster execution (fewer ops).\n\nCRITICAL: The seed's balanced_packing uses O(n²) Python loops. You MUST rewrite it to vectorized PyTorch operations.\n\nVECTORIZED REWRITE STRATEGY:\n1. Pre-sort ALL experts by weight descending in one call: sidx = weight[:, :, ::].float().argsort(-1).int()\n2. Compute pack indices using scatter/gather: pack_idx = torch.floor(sidx / groups_per_pack).to(dtype=torch.long)\n3. Compute ranks using modulo: rank = (sidx % groups_per_pack).to(dtype=torch.long)\n4. Replace the FFD loop entirely with these vectorized ops\n\nALGORITHM:\n1. Sort experts descending by weight (vectorized)\n2. Assign to packs using simple division/floor (vectorized)\n3. This achieves FFD in O(n log n) sorting + O(n) assignment\n\nPreserve function signatures. Use probe_solution to rank before evaluate. When budget < 5, evaluate top variant."
+skill_description: "Iteratively optimize MoE EPLB load balancing. The seed uses O(n²) Python loops; your job is vectorized rewrite using torch ops."
+skill_body: "# Vectorized Rewrite for MoE EPLB\n\n## THE PROBLEM\nThe seed's balanced_packing() uses Python loops that assign experts pack-by-pack. This is O(n²) per layer.\n\n## THE SOLUTION: Vectorized FFD\n1. **ONE-STEP SORT**: Use torch.argsort to sort ALL experts across ALL layers at once:\n   ```python\n   sidx = weight.float().argsort(-1, descending=True).long()\n   ```\n2. **PACK ASSIGNMENT**: Each expert at position (layer, expert_idx) goes to pack = expert_idx // groups_per_pack:\n   ```python\n   pack_idx = sidx[:, :, None] // groups_per_pack  # broadcasting\n   ```\n3. **RANK COMPUTATION**: Rank within pack is expert_idx % groups_per_pack:\n   ```python\n   rank_in_pack = sidx[:, :, None] % groups_per_pack\n   ```\n\n## IMPLEMENTATION TEMPLATE\nReplace balanced_packing entirely:\n```python\ndef balanced_packing(weight, num_packs):\n    num_layers, num_groups = weight.shape\n    assert num_groups % num_packs == 0\n    groups_per_pack = num_groups // num_packs\n    \n    if groups_per_pack == 1:\n        pack_index = torch.arange(num_groups, dtype=torch.int64, device=weight.device).expand(num_layers, -1)\n        rank_in_pack = torch.zeros_like(weight, dtype=torch.int64)\n        return pack_index, rank_in_pack\n    \n    # Vectorized FFD: sort all experts descending, assign by position\n    sidx = weight[:, :, None].float().argsort(-1, descending=True).int()  # [L, G, 1]\n    pack_index = sidx[:, :, 0] // groups_per_pack  # [L, G]\n    rank_in_pack = sidx[:, :, 0] % groups_per_pack  # [L, G]\n    \n    return pack_index, rank_in_pack\n```\n\n## TESTING STRATEGY\n1. Generate this vectorized version\n2. Call probe_solution immediately (it's cheap)\n3. If score improves, call evaluate_solution\n4. If not, call finish\n\n## DO NOT\n- Don't add Python loops\n- Don't try \"greedy\" or \"local search\" - vectorization IS the optimization\n- Don't modify replicate_experts unless explicitly asked\n\n## FINISH\nWhen you have the vectorized version, call evaluate_solution and finish."
+tool_descriptions:
+  edit_solution: "Replace the ENTIRE balanced_packing function with the vectorized rewrite. Keep replicate_experts and rebalance_experts_hierarchical unchanged. Use the template above."
+  evaluate_solution: "Run and return combined_score. Higher is better."
+  probe_solution: "Cheap score (~10s) on subsampled data. Use this to verify your vectorized version works before full eval."
+  finish: "End after probe+eval confirms improvement. Summary: 'Vectorized rewrite achieved X score'."
+sampling:
+  temperature: 0.7
+  top_p: 0.95
+  top_k: 30
+  max_tokens: 8192
+agent:
+  max_iterations: 15
+middleware:
+  budget_reminder_from_left: 3
+  long_tool_output_max_chars: 8000
+new_tools:
+- name: verify_vectorization
+  description: "Check if the current program uses vectorized PyTorch ops. Returns 'vectorized' or 'loop-based' analysis. Call once to confirm your rewrite is correct."
+  input_schema:
+    type: object
+    properties: {}
+  implementation_py: "def run(ctx, args):\n    code = ctx.get_program()\n    has_loops = 'for p in valid' in code or 'for group in indices' in code or 'for pack in' in code\n    has_sort = 'argsort' in code and 'torch' in code\n    return {\"is_vectorized\": not has_loops or has_sort, \"note\": \"Use torch.argsort with broadcasting, no Python loops\"}"
+new_skills: []
+new_middlewares: []

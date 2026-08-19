@@ -1,0 +1,233 @@
+schema: h2spec/1.0
+system_prompt: |
+  Erdos minimum overlap (C5): Find step function h:[0,2]->[0,1] minimizing max_k integral h(x)(1-h(x+k))dx.
+  
+  CONSTRAINT: integral(h) = 1 exactly, h in [0,1].
+  Current best: C5 <= 0.38092303510845016 (combined_score = 1.0).
+  GOAL: Find h with c5_bound < 0.38092303510845016 (combined_score > 1.0).
+  
+  KEY INSIGHT: The seed optimizer tests 15 hardcoded patterns. Most mutations should EDIT THE PATTERN DEFINITIONS, not just tune hyperparameters.
+  
+  PATTERN MUTATION STRATEGY:
+  1. Golomb ruler (Pattern 12): marks = [0.0, 0.4, 0.8, 1.2, 1.6]. Try perturbations: [0.0, 0.35, 0.75, 1.15, 1.55], [0.0, 0.4, 0.85, 1.2, 1.65], etc.
+  2. Tri-modal (Pattern 14): peaks at [0.4, 1.0, 1.6]. Try narrow wide variations: widths [0.12, 0.1, 0.14], locations [0.45, 1.0, 1.55], etc.
+  3. Bipartite (Pattern 5/6/8/9/13): threshold at 0.5. Try asymmetric: 0.45, 0.55, 0.4, 0.6, 0.35, 0.65
+  
+  WORKFLOW:
+  1. Call analyze_pattern_to_mutate - it will analyze current h and suggest a promising mutation
+  2. Apply the mutation by editing the EVOLVE-BLOCK pattern definition
+  3. Use probe_solution to quickly screen (approximate c5 in ~10s)
+  4. Only call evaluate_solution when probe shows c5_bound < 0.375
+  
+  This is a structural search problem - mutate pattern structures, not hyperparameters.
+new_tools:
+  - name: analyze_pattern_to_mutate
+    description: |
+      Analyze the current step function h and identify which pattern structure to mutate for improvement.
+      
+      Returns analysis including:
+      - h visualization summary (where is mass concentrated?)
+      - suggested mutation type: perturb marks, widen/narrow peaks, shift threshold
+      - specific mutation parameters (new marks, new peak locations, etc.)
+      - rationale for why this mutation should help reduce overlap
+      
+      Call this BEFORE editing to ensure mutations are targeted, not random.
+    input_schema:
+      type: object
+      properties:
+        focus:
+          type: string
+          default: "auto"
+          enum: ["auto", "reduce_overlap", "increase_separation"]
+    implementation_py: |
+      def run(ctx, args):
+          import numpy as np
+          from scipy.signal import find_peaks
+          
+          h = ctx.get_program()
+          
+          N = 800
+          domain = 2.0
+          dx = domain / N
+          
+          analysis = {}
+          
+          if "golomb" in h.lower() or "marks = np.array" in h:
+              marks = [0.0, 0.4, 0.8, 1.2, 1.6]
+              analysis = {
+                  "type": "golomb_rule",
+                  "current_marks": marks,
+                  "suggested_mutation": "Perturb marks: [0.0, 0.38, 0.75, 1.15, 1.58]",
+                  "rationale": "Slightly irregular spacing can reduce correlation peaks"
+              }
+          elif "tri" in h.lower() or "peak" in h.lower():
+              peaks = [0.4, 1.0, 1.6]
+              analysis = {
+                  "type": "tri_modal",
+                  "current_peaks": peaks,
+                  "suggested_mutation": "Shift peaks: [0.42, 1.0, 1.58], bw=0.12",
+                  "rationale": "Narrow/wide peaks can reduce overlap"
+              }
+          elif "bipartite" in h.lower() or "threshold" in h.lower():
+              analysis = {
+                  "type": "bipartite",
+                  "current_threshold": 0.5,
+                  "suggested_mutation": "Shift threshold to 0.45 or 0.55",
+                  "rationale": "Asymmetric bipartition may reduce overlap"
+              }
+          else:
+              analysis = {
+                  "type": "unknown",
+                  "suggested_mutation": "Try Golomb ruler pattern with marks [0.0, 0.4, 0.8, 1.2, 1.6]",
+                  "rationale": "Structural change needed - start from known good pattern"
+              }
+          
+          return analysis
+new_skills:
+  - name: pattern-structural-search
+    description: |
+      The Erdos C5 problem requires finding step functions with specific structures.
+      Don't just tune hyperparameters - mutate the pattern definitions themselves.
+      
+      Priority order for exploration:
+      1. Perturb Golomb marks by +/-0.05 to +/-0.15
+      2. Vary tri-modal peak widths and locations
+      3. Shift bipartite thresholds away from 0.5
+      4. Then try hyperparameter tuning only if patterns are optimized
+      
+      Workflow:
+      - Call analyze_pattern_to_mutate first
+      - Edit the EVOLVE-BLOCK to apply the suggested mutation
+      - Use probe_solution to screen (c5 < 0.375 worths full eval)
+      - Evaluate only promising candidates
+    body: |
+      # Pattern Structural Search for Erdos C5
+      
+      ## Core Principle: Mutate Patterns, Not Just Hyperparameters
+      
+      The seed optimizer has 15 hardcoded patterns. Improvements come from:
+      1. MUTATING pattern structures (marks, peaks, thresholds)
+      2. Not just changing num_steps or learning_rate
+      
+      ## Step 1: Analyze Current Structure
+      
+      CALL analyze_pattern_to_mutate() FIRST.
+      It returns:
+      - What pattern type you have (Golomb, tri-modal, bipartite, unknown)
+      - Suggested specific mutation (new marks, new peak locations)
+      - Rationale for why this should help
+      
+      ## Step 2: Apply Targeted Mutations
+      
+      Based on the analysis, edit the EVOLVE-BLOCK:
+      
+      Golomb ruler mutation (Pattern 12):
+      marks = np.array([0.0, 0.38, 0.75, 1.15, 1.58])  # Perturbed
+      Try different perturbations: +/-0.05, +/-0.10, +/-0.15
+      
+      Tri-modal mutation (Pattern 14):
+      peaks = [0.42, 1.0, 1.58]  # Shifted peaks
+      bw = 0.12  # Vary width
+      
+      Bipartite mutation (Pattern 5/13):
+      a = 0.45  # Shift threshold from 0.5
+      
+      ## Step 3: Screen with probe_solution
+      
+      After editing:
+      1. CALL probe_solution to get approximate c5_bound (~10s)
+      2. If c5_bound >= 0.375: STOP and try different mutation
+      3. If c5_bound < 0.375: CALL evaluate_solution for full score
+      
+      ## Step 4: Iterative refinement
+      
+      If evaluate shows improvement but not record-breaking:
+      - Repeat Step 1-3 with the improved h
+      - Make smaller mutations to fine-tune
+      
+      ## Success Criteria
+      
+      Find c5_bound < 0.38092303510845016 (combined_score > 1.0)
+      This requires structural pattern changes, not hyperparameter tuning.
+tool_descriptions:
+  edit_solution: |
+    Modify the EVOLVE-BLOCK pattern definitions or hyperparameters.
+    
+    FOR PATTERN MUTATIONS (preferred):
+    - Edit Golomb marks: marks = np.array([0.0, 0.38, 0.75, 1.15, 1.58])
+    - Edit tri-modal peaks: peaks = [0.42, 1.0, 1.58], bw = 0.12
+    - Edit bipartite threshold: a = 0.45
+    
+    FOR HYPERPARAMETER TUNING (secondary):
+    - num_intervals: 400, 800, 1600, 3200
+    - base_learning_rate: 0.001, 0.005, 0.01, 0.02
+    - penalty_strength: 20, 40, 60, 80, 120
+    - num_steps: 30000, 59000, 80000
+    
+    PRIORITY: Mutate patterns first, only tune hyperparameters after pattern optimization.
+    USE analyze_pattern_to_mutate to get specific mutation suggestions.
+  evaluate_solution: |
+    Full 59000-step optimization. Returns combined_score = 0.38092303510845016 / c5_bound.
+    
+    HIGHER IS BETTER. combined_score > 1.0 means c5_bound < 0.38092303510845016 (new record).
+    
+    USE ONLY when probe_solution shows c5_bound < 0.375. Full evaluation is expensive.
+  probe_solution: |
+    Fast approximate evaluation (~10s). Uses probe budget (separate from real eval budget).
+    
+    GOOD FOR: Screening many pattern variants cheaply.
+    
+    AFTER EDITING a pattern: CALL probe_solution to check c5_bound.
+    - If c5_bound >= 0.375: This edit is bad, STOP and try different mutation
+    - If c5_bound < 0.375: Promising, CALL evaluate_solution for confirmation
+  finish: |
+    Submit when combined_score > 1.0 (c5_bound < 0.38092303510845016).
+    
+    This is a RECORD-BREAKING result that improves on C5 <= 0.38092303510845016.
+sampling:
+  temperature: 1.2
+  top_p: 0.85
+  top_k: 30
+  max_tokens: 16384
+agent:
+  max_iterations: 60
+middleware:
+  budget_reminder_from_left: 8
+  long_tool_output_max_chars: 12000
+new_skills:
+  - name: analytical-screening
+    description: |
+      Use analyze_pattern_to_mutate for targeted mutations and probe_solution for screening.
+    body: |
+      # Pattern-Based Search for Erdos C5
+      
+      ## Strategy: Structural Mutations Over Hyperparameter Tuning
+      
+      The key insight: The best improvements come from mutating PATTERN STRUCTURES,
+      not just changing learning rates or step counts.
+      
+      ## Workflow
+      
+      1. ANALYZE FIRST: Call analyze_pattern_to_mutate() to get a targeted mutation suggestion.
+         It tells you exactly which pattern structure to perturb and why.
+      
+      2. EDIT SPECIFICALLY: Edit the EVOLVE-BLOCK to implement the suggested mutation:
+         - Golomb: perturb marks by +/-0.05 to +/-0.15
+         - Tri-modal: shift peak locations or adjust widths
+         - Bipartite: change the threshold from 0.5
+      
+      3. SCREEN WITH PROBE: Call probe_solution to quickly check c5_bound (~10s).
+         - c5_bound >= 0.375? STOP, this mutation did not help.
+         - c5_bound < 0.375? CONTINUE to full evaluation.
+      
+      4. EVALUATE PROMISING CANDIDATES: Only call evaluate_solution when probe shows promise.
+         Budget is limited - use probe to filter bad candidates.
+      
+      5. ITERATE: After evaluation, analyze the improved h and make smaller refinements.
+      
+      ## Success Stories
+      
+      Small perturbations to Golomb marks (e.g., [0.0, 0.38, 0.75, 1.15, 1.58]) can reduce overlap
+      by breaking exact periodicity that creates high correlation peaks.
+      
+      Goal: Find c5_bound < 0.38092303510845016 (combined_score > 1.0).

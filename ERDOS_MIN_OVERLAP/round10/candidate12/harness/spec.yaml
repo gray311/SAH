@@ -1,0 +1,256 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are solving the Erdos minimum overlap problem: minimize max_k integral h(x)(1-h(x+k)) dx
+  for a step function h: [0,2] -> [0,1] with integral(h)=1.
+  
+  Current best bound: C5 <= 0.38092303510845016
+  
+  CRITICAL INSIGHT: The seed program's hyperparameter sweep strategy is insufficient. 
+  The problem requires STRUCTURAL innovations in the initial step function design, not just 
+  tuning learning rates or penalty strengths. The optimizer struggles because:
+  - 800 intervals is too coarse for fine structure
+  - Fixed seed-based restarts explore the same regions
+  - Standard initialization patterns don't match optimal constructions
+  
+  STRATEGY: Replace hyperparameter sweep with STRUCTURED INITIALIZATION SEARCH
+  1. START by calling generate_erdos_constructs to get 5-6 mathematically principled 
+     initializations (bimodal, Golomb-based, finite-field patterns)
+  2. Use ONLY 1000-3000 steps per restart (the seed's 59k is wasteful)
+  3. INCREASE num_restarts to 10-20 to explore diverse structures
+  4. Use generate_erdos_constructs whenever stuck - it generates fundamentally different 
+     patterns each call, breaking out of local minima
+  5. After each restart, probe with probe_solution to check constraint satisfaction
+  6. Evaluate top 2 variants with evaluate_solution
+  
+  Focus: STRUCTURAL DIVERSITY > Hyperparameter tuning. Generate new constructions, not
+  just tuned parameters.
+skill_description: |
+  Structured initialization search for Erdos optimizer. Instead of sweeping hyperparameters,
+  generate mathematically principled initializations from known construction strategies,
+  run short optimizations, and iterate with diverse restarts.
+skill_body: |
+  # Erdos Minimum Overlap - Structured Initialization Strategy
+  
+  ## Why Structure Matters More Than Hyperparameters
+  
+  The seed optimizer uses 12 initialization patterns but they're all variations on 
+  basic themes (periodic, triangular, Gaussian). The problem's optimal solution likely 
+  uses a fundamentally different structure that these patterns don't capture.
+  
+  ## Winning Strategy: Diverse Structural Search
+  
+  ### Phase 1: Generate Diverse Constructions (Use All 30 Evals)
+  1. Call generate_erdos_constructs to get 5-6 structurally different initializations
+     - These are mathematically principled, not random
+     - Each has a different "shape" (bimodal, Golomb, finite-field, etc.)
+  
+  2. For each construction:
+     - EDIT the EVOLVE-BLOCK: set num_intervals=400 (coarser for faster iteration)
+     - EDIT: num_steps=3000 (short optimization runs)
+     - EDIT: num_restarts=1 (single focused optimization per variant)
+     - Call probe_solution to check constraint satisfaction quickly
+     - If constraint satisfied, call evaluate_solution
+  
+  3. After testing all constructions, pick the best-scoring one and refine it
+  
+  ### Phase 2: Iterative Refinement
+  - Once a promising structure is found, incrementally:
+    - Increase num_intervals to 800 or 1600 for finer resolution
+    - Increase num_steps to 10000-20000 for better convergence
+    - Add SMALL perturbations to the initialization (add/subtract small noise)
+    - Try slightly different parameter values in the construction
+  
+  ### Phase 3: Structure Mutation
+  If still stuck:
+  - Call generate_erdos_constructs again (gets NEW constructions each time)
+  - Try combining elements from multiple constructions
+  - Experiment with num_intervals=1600, 2000, 2500 for different resolutions
+  
+  ## Key Principles
+  
+  1. STRUCTURAL DIVERSITY > Parameter Tweaking
+     - A completely different structure beats a finely tuned similar one
+     - generate_erdos_constructs provides this diversity
+  
+  2. Short, Many Iterations > Long, Few
+     - 20 restarts × 3000 steps explores more than 1 restart × 60000 steps
+  
+  3. Use probe_solution to quickly filter constraint violations
+  
+  4. Each evaluation should test a NEW structural variant
+tool_descriptions:
+  edit_solution: |
+    Modify the EVOLVE-BLOCK region to change structure parameters or generate new initializations 
+    using generate_erdos_constructs. This tool edits the code that defines the optimization 
+    parameters and initialization patterns.
+  evaluate_solution: |
+    Run full evaluation, returns combined_score. This is the official evaluator that 
+    computes the exact C5 bound and constraint satisfaction. Each call uses from your budget.
+  probe_solution: |
+    Quick approximate evaluation to screen constraint satisfaction and rough quality. 
+    Uses subsampled data, so it's much faster but scores are approximate. Perfect for 
+    screening many variants before calling evaluate_solution.
+  finish: |
+    Submit final solution when combined_score greater than 1.0 or all strategies exhausted. 
+    Provide a summary of what constructions and parameters were tried.
+sampling:
+  temperature: 1.2
+  top_p: 0.95
+  top_k: 30
+  max_tokens: 14000
+agent:
+  max_iterations: 80
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 8000
+new_tools:
+- name: generate_erdos_constructs
+  description: |
+    Generate 5-6 mathematically principled step function initializations for the Erdos problem.
+    Each construction uses a different structural strategy (bimodal peaks, Golomb ruler spacing,
+    finite field constructions, alternating patterns). Returns dict with keys indicating
+    construction type, each containing a latent vector h where sigmoid(h) gives valid h(x) in [0,1].
+    Call this when you need fundamentally new structures, not just parameter tweaks.
+  input_schema:
+    type: object
+    properties: {}
+  implementation_py: |
+    def run(ctx, args):
+        import numpy as np
+        N = 400
+        domain = 2.0
+        dx = domain / N
+        rng = np.random.default_rng(123)
+        constructions = {}
+        
+        # Construction 1: Tight bimodal with peaks at 0.25 and 0.75
+        x = np.linspace(0, domain, N)
+        latent1 = np.zeros(N)
+        latent1[x < 0.4] = 5.0
+        latent1[(x >= 0.4) & (x < 0.6)] = -3.0
+        latent1[(x >= 0.6) & (x < 0.8)] = 5.0
+        latent1[x >= 0.8] = -3.0
+        latent1 = latent1 + rng.normal(size=N) * 0.3
+        constructions['bimodal_tight'] = latent1
+        
+        # Construction 2: Three-level pattern
+        x = np.linspace(0, domain, N)
+        latent2 = np.zeros(N)
+        latent2[x < 1/3] = -2.0
+        latent2[(x >= 1/3) & (x < 2/3)] = 3.0
+        latent2[x >= 2/3] = -2.0
+        latent2 = latent2 + rng.normal(size=N) * 0.2
+        constructions['triple_pattern'] = latent2
+        
+        # Construction 3: Golomb ruler-inspired (marks at 0, 1/4, 2/5, 9/10, 1)
+        x = np.linspace(0, domain, N)
+        marks = np.array([0.0, 0.25, 0.4, 0.9, 1.0])
+        latent3 = np.zeros(N)
+        for m in marks:
+            latent3 = latent3 + 4.0 * np.exp(-((x - m) / 0.08) ** 2 * 10)
+        latent3 = latent3 - np.mean(latent3)
+        latent3 = latent3 + rng.normal(size=N) * 0.2
+        constructions['golomb_5'] = latent3
+        
+        # Construction 4: Alternating blocks
+        x = np.linspace(0, domain, N)
+        latent4 = np.zeros(N)
+        for i in range(4):
+            start = i * 0.5 / 2
+            end = (i + 1) * 0.5 / 2
+            if i % 2 == 0:
+                latent4[(x >= start) & (x < end)] = 3.0
+            else:
+                latent4[(x >= start) & (x < end)] = -3.0
+        latent4 = latent4 + rng.normal(size=N) * 0.3
+        constructions['alternating_4'] = latent4
+        
+        # Construction 5: Asymmetric bimodal
+        x = np.linspace(0, domain, N)
+        latent5 = np.zeros(N)
+        latent5[x < 0.3] = -3.0
+        latent5[(x >= 0.3) & (x < 0.7)] = 4.0
+        latent5[x >= 0.7] = -3.0
+        latent5 = latent5 + rng.normal(size=N) * 0.3
+        constructions['asymmetric_bimodal'] = latent5
+        
+        return {"constructions": constructions, 
+                "keys": list(constructions.keys()),
+                "note": "Each construction uses a different structural strategy to escape local minima"}
+new_skills:
+- name: structured-search-playbook
+  description: |
+    Guide the solver to use diverse structural initializations instead of hyperparameter sweeps.
+    Call generate_erdos_constructs to get fundamentally different function shapes, optimize each
+    briefly, and evaluate. Iterate with new constructions when stuck.
+  body: |
+    # Structured Search Playbook for Erdos Minimum Overlap
+    
+    ## Core Principle: Structure Beats Parameters
+    
+    The Erdos problem's optimal solutions have specific structural properties that random
+    or parametric variations don't discover. You must GENERATE new structures, not just tune
+    existing ones.
+    
+    ## Method: Diverse Structural Search
+    
+    ### Step 1: Generate Diverse Constructions
+    Call generate_erdos_constructs() to get 5-6 structurally different initializations:
+    - Each has a fundamentally different "shape"
+    - Examples: bimodal, Golomb-based, finite-field, alternating patterns
+    - These are designed to break out of standard local minima
+    
+    ### Step 2: Short-Focus Optimization
+    For each construction:
+    - Set num_intervals=400 (fast iteration)
+    - Set num_steps=2000-3000 (quick convergence attempt)
+    - Set num_restarts=1 (focused search)
+    - Set base_learning_rate=0.01 (good exploration)
+    - Set penalty_strength=100-500 (reasonable constraint enforcement)
+    
+    ### Step 3: Quick Screening
+    Call probe_solution for each variant to:
+    - Check if constraint (∫h=1) is approximately satisfied
+    - Get rough quality estimate
+    - Skip variants that clearly fail constraints
+    
+    ### Step 4: Full Evaluation
+    For variants that pass screening:
+    - Call evaluate_solution for full score
+    - Record the best combined_score
+    
+    ### Step 5: Refinement Loop
+    After testing all constructions:
+    - Pick the best-scoring variant
+    - Call generate_erdos_constructs() again for NEW constructions
+    - Optionally refine the best variant:
+      * Increase num_intervals to 800 for finer resolution
+      * Increase num_steps to 10000 for better convergence
+      * Add small noise to break out of new local minima
+    - Continue until combined_score > 1.0 or budget exhausted
+    
+    ## When to Use This Strategy
+    
+    - ALWAYS at the start: you have no good structure
+    - WHEN STUCK: if your score hasn't improved for 5+ iterations
+    - BEFORE GIVING UP: try one more batch of diverse constructions
+    
+    ## What Makes This Different From Hyperparameter Sweeps
+    
+    - Hyperparameter sweeps: same structure, different parameters (low-dimensional search)
+    - Structured search: different structures entirely (high-dimensional, diverse search)
+    - The problem needs structural innovation, not parameter tuning
+new_middlewares:
+- name: remind_structural_diversity
+  hook: before_model
+  description: |
+    Remind the solver to prioritize generating new structural constructions over 
+    hyperparameter tweaks when stuck at similar scores.
+  implementation_py: |
+    def before_model(hook_input):
+        current_score = hook_input.get("current_score", 0)
+        best_score = hook_input.get("best_score", 0)
+        iterations = hook_input.get("iteration", 0)
+        if iterations > 10 and best_score - current_score < 0.001:
+            return "You've been stuck at the same score for 10+ iterations. Call generate_erdos_constructs to get fundamentally NEW structural patterns, not just parameter tweaks. The problem requires structural innovation."
+        return None

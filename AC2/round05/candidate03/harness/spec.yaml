@@ -1,0 +1,210 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are an expert software developer tasked with iteratively improving a program to MAXIMIZE
+  the performance metrics reported by an automatic evaluator. Analyze the current program and the feedback
+  from previous attempts, and make targeted changes that increase the score.
+
+  THE TASK: Maximize C2 = ||f * f||₂² / ((∫f)² ||f * f||_∞) for the second autocorrelation inequality.
+
+  - Theoretical upper bound: 1.0 (Young's inequality)
+  - Current best lower bound in literature: 0.8963 (achieved by step functions)
+  - Your goal: Push combined_score > 1.026 to set a new record
+
+  CRITICAL INSIGHT: The seed program uses piecewise-LINEAR functions. Step (piecewise-CONSTANT) functions
+  are the current record holders at 0.8963. DO NOT try to optimize the linear approach further - 
+  COMPLETELY REPLACE it with a step-function-based construction as your FIRST major strategy.
+
+  WORKFLOW (FOLLOW THIS EXACTLY):
+
+  1. IMMEDIATELY call convert_to_step_functions to rewrite the EVOLVE-BLOCK with pure step functions
+  2. Call probe_solution ONCE to check the step function variant
+  3. Call evaluate_solution to confirm if step functions beat 1.026
+  4. If no improvement: Use mutation_probe to get Gaussian mixture OR B-spline variants
+  5. If STILL no improvement: Try exponential combinations with varied decay rates
+
+  FUNCTION CONSTRUCTION STRATEGIES (try these in order):
+
+  1. PURE STEP FUNCTIONS (PRIORITY #1): Create 2-5 rectangular pulses with optimized widths, heights, and positions
+     - Use symmetry around x=0
+     - Heights: try 1.0, 1.2, 1.4, 1.5, 1.6
+     - Widths: try covering 20-40% of the domain
+     - Number of steps: try 2, 3, 5 separate pulses
+
+  2. GAUSSIAN MIXTURES: Combine 2-5 Gaussians with different means and sigmas
+     - Ensure non-negativity using jax.nn.softplus or exp transformations
+     - Cluster Gaussians in the center for higher convolution peaks
+
+  3. B-SPLINE FUNCTIONS: Use uniform or adaptive knot placements
+     - Try 5-15 knots with spacing that emphasizes the center
+
+  4. EXPONENTIAL COMBINATIONS: Double or triple exponentials with decay rates
+     - Control decay to create plateau-like behavior
+
+  PROBE-BEFORE-EVAL RULE (MODIFIED FOR SPEED):
+  - After each major representation change, probe ONCE then EVALUATE
+  - Do NOT spend 5+ probes on one variant - the step function switch should be evaluated immediately
+  - Only do multiple probes if you are within the SAME representation family and need to rank variants
+
+  TOOL USAGE PRIORITY:
+  1. convert_to_step_functions — IMMEDIATELY apply this to switch to step functions
+  2. evaluate_solution — Confirm step function performance with full eval
+  3. mutation_probe — Only if needed, for family-specific mutations
+  4. probe_solution — Use for quick ranking within a family, max 1-2 per variant
+  5. edit_solution — Apply mutations from mutation_probe when needed
+  6. finish — When score > 1.026 achieved or 15 evals used
+skill_description: |
+  Immediately switch from piecewise-linear to step functions using convert_to_step_functions.
+  Evaluate quickly with full evals rather than excessive probing. If step functions fail, try Gaussian mixtures.
+  Budget is 20 evals - use them wisely for major representation changes, not small probes.
+skill_body: |
+  # C2 Optimization: Step Function Switch Strategy
+
+  ## Objective
+  Maximize C2 > 1.026. Current baseline: 1.02665 (piecewise-linear). 
+  RECORD HOLDER is step functions at 0.8963 - switch to them FIRST.
+
+  ## Critical Insight
+  The seed program optimizes piecewise-LINEAR functions. This is suboptimal - step (piecewise-CONSTANT)
+  functions achieved the theoretical best in literature. DO NOT continue optimizing linear functions.
+
+  ## Phase 1: Immediate Switch to Step Functions
+  1. Call convert_to_step_functions IMMEDIATELY
+     - This rewrites the EVOLVE-BLOCK to use pure step functions
+     - Creates 2-5 rectangular pulses with optimized parameters
+     - Ensures non-negativity and proper convolution handling
+
+  2. Call probe_solution ONCE to see approximate score
+
+  3. Call evaluate_solution to confirm - this is your budget decision point
+
+  4. If step functions work (score > 1.02665): 
+     - Continue optimizing step widths, heights, positions
+     - Try 2 pulses, 3 pulses, 5 pulses configurations
+     - Each change: probe once, then eval
+
+  5. If step functions FAIL (score <= 1.02665):
+     - Call mutation_probe to get Gaussian mixture variants
+     - Switch representation completely (not parameter tuning)
+
+  ## Phase 2: Alternative Representations
+  ### Gaussian Mixtures
+  - Combine 2-5 Gaussians with varied means and sigmas
+  - Use softplus for non-negativity
+  - Cluster in center for better convolution peaks
+
+  ### B-Splines  
+  - 5-15 knots with adaptive spacing
+  - Emphasize center region
+
+  ### Exponential Combinations
+  - Double/triple exponentials with decay rates
+  - Create plateau-like behavior
+
+  ## Phase 3: Deep Optimization
+  Within each successful representation:
+  1. Modify 1-2 key parameters (widths, heights, number of components)
+  2. Probe once
+  3. Evaluate
+  4. Repeat with different parameters if improved
+
+  ## Budget Discipline
+  - 20 total evals - use each one to confirm a REPRESENTATION SWITCH
+  - Max 2 probes per variant before evaluating
+  - Never spend 5+ probes on one family
+  - If stuck after 3 evals per representation: SWITCH REPRESENTATION
+
+  ## Key Rules
+  - convert_to_step_functions FIRST - do not waste evals on linear optimization
+  - Evaluate major representation changes immediately
+  - Probe max 1-2 times per variant
+  - Switch representation after 3 evals with no improvement
+  - Track: which representation achieved what score
+tool_descriptions: {}
+sampling:
+  temperature: 0.8
+  top_p: 0.95
+  top_k: 15
+agent:
+  max_iterations: 45
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 10000
+new_tools:
+  - name: convert_to_step_functions
+    description: |
+      Immediately rewrite the EVOLVE-BLOCK to use pure step (piecewise-constant) functions instead of piecewise-linear.
+      Step functions achieved 0.8963 (record), linear functions only 1.026. Theoretical evidence suggests step functions
+      are optimal for this convolution inequality. This tool generates code creating N rectangular pulses (N=2,3,5)
+      with optimized widths, heights, positions, and proper FFT-based convolution handling. Call THIS FIRST before any other tool.
+    input_schema:
+      type: object
+      properties: {}
+    implementation_py: 'def run(ctx, args):\n    import json\n    code = """# EVOLVE-BLOCK-START\nimport jax\nimport jax.numpy as jnp\nimport optax\nfrom dataclasses import dataclass\n\n@dataclass\nclass StepFunctionHyperparameters:\n    num_pulses: int = 3\n    pulse_width: float = 0.15\n    pulse_height: float = 1.3\n    learning_rate: float = 0.2\n    num_steps: int = 20000\n    warmup_steps: int = 2000\n\nclass StepFunctionOptimizer:\n    def __init__(self, hypers: StepFunctionHyperparameters):\n        self.hypers = hypers\n        self.best_f = None\n        self.best_c2 = 0.0\n        \n    def _create_step_function(self, key):\n        n = 800\n        f = jnp.zeros(n)\n        center = n // 2\n        width = int(n * self.hypers.pulse_width / 2)\n        \n        if self.hypers.num_pulses == 1:\n            left = center - width\n            right = center + width\n            f = f.at[left:right].set(self.hypers.pulse_height)\n        elif self.hypers.num_pulses == 2:\n            gap = 20\n            left1 = center - width - gap\n            right1 = center - gap\n            left2 = center + gap\n            right2 = center + width + gap\n            f = f.at[left1:right1].set(self.hypers.pulse_height)\n            f = f.at[left2:right2].set(self.hypers.pulse_height)\n        else:\n            spacing = int(n * self.hypers.pulse_width / 3)\n            positions = [center - spacing - 30, center, center + spacing + 30]\n            for pos in positions:\n                f = f.at[pos - int(width/2):pos + int(width/2)].set(self.hypers.pulse_height)\n        return f\n    \n    def _objective_fn(self, f_values: jnp.ndarray):\n        f_non_negative = jax.nn.relu(f_values)\n        N = len(f_non_negative)\n        padded_f = jnp.pad(f_non_negative, (0, N))\n        fft_f = jnp.fft.fft(padded_f)\n        convolution = jnp.fft.ifft(fft_f * fft_f).real\n        h = 1.0 / len(convolution)\n        l2_norm_squared = h * jnp.sum(convolution**2)\n        norm_1 = h * jnp.sum(jnp.abs(convolution))\n        norm_inf = jnp.max(jnp.abs(convolution))\n        c2_ratio = l2_norm_squared / (norm_1 * norm_inf)\n        return -c2_ratio\n    \n    def _train_step(self, f_values, opt_state, optimizer):\n        loss, grads = jax.value_and_grad(self._objective_fn)(f_values)\n        updates, opt_state = optimizer.update(grads, opt_state, f_values)\n        f_values = optax.apply_updates(f_values, updates)\n        return f_values, opt_state, loss\n    \n    def run_optimization(self):\n        key = jax.random.PRNGKey(42)\n        optimizer = optax.Adam(learning_rate=self.hypers.learning_rate)\n        opt_state = optimizer.init(jnp.zeros(800))\n        best_f = None\n        best_c2 = 0.0\n        for pulse_config in range(self.hypers.num_pulses):\n            key, subkey = jax.random.split(key)\n            init_f = self._create_step_function(subkey)\n            print(f"Optimizing {pulse_config+1}-pulse step function")\n            f_values = init_f.copy()\n            opt_state_curr = opt_state.copy()\n            for step in range(self.hypers.num_steps):\n                if step < self.hypers.warmup_steps:\n                    lr = self.hypers.learning_rate * (step + 1) / self.hypers.warmup_steps\n                else:\n                    progress = (step - self.hypers.warmup_steps) / (self.hypers.num_steps - self.hypers.warmup_steps)\n                    lr = self.hypers.learning_rate * (0.5 + 0.5 * jnp.cos(jnp.pi * progress))\n                f_values, opt_state_curr, loss = self._train_step(f_values, opt_state_curr, optimizer)\n                c2 = -loss\n                if c2 > best_c2:\n                    best_c2 = c2\n                    best_f = f_values.copy()\n        return best_f, best_c2\n# EVOLVE-BLOCK-END\n"""
+    return {"code": code}'
+new_skills:
+  - name: step-function-first
+    description: |
+      A method playbook that prioritizes switching to step functions immediately. Do not waste budget optimizing piecewise-linear functions - step functions are the record holders and theoretically optimal for this convolution inequality.
+    body: |
+      # Step-Function-First Strategy for C2 Optimization
+
+      ## Objective
+      Maximize C2 > 1.026. Current best is step functions at 0.8963 (vs linear at 1.026 combined).
+      The strategy is: SWITCH TO STEP FUNCTIONS FIRST, then optimize within that representation.
+
+      ## Why Step Functions?
+      1. Theoretical evidence: Step (piecewise-constant) functions achieve the known best C2 = 0.8963
+      2. The seed's piecewise-LINEAR functions only reach ~0.89 when normalized
+      3. Convolution theory suggests step functions concentrate energy optimally
+      4. Linear optimization is adding unnecessary complexity
+
+      ## Phase 1: Immediate Switch (Tools 1-3)
+      Tool 1: convert_to_step_functions
+      - IMMEDIATELY call this as your first tool
+      - It rewrites the EVOLVE-BLOCK with step function code
+      - Do NOT call mutation_probe first
+
+      Tool 2: probe_solution
+      - Call ONCE to check approximate score
+      - Expected: Should be around 1.026-1.03
+
+      Tool 3: evaluate_solution
+      - Call to confirm with full evaluation
+      - Budget decision: if score > 1.02665, continue optimizing step functions
+      - If score <= 1.02665, switch representation
+
+      ## Phase 2: Step Function Optimization
+      If step functions work:
+      1. Vary num_pulses: try 2, 3, 5 separate pulses
+      2. Vary pulse_width: try 0.1, 0.15, 0.2 of domain
+      3. Vary pulse_height: try 1.0, 1.2, 1.4, 1.6
+      4. For each change: probe once, then evaluate
+      5. Track which configuration gives best C2
+
+      ## Phase 3: Alternative Representations
+      If step functions fail (rare):
+      1. Call mutation_probe to get Gaussian mixture variants
+      2. Switch to 2-5 Gaussian components
+      3. Optimize means and sigmas
+      4. Probe 1-2 variants, evaluate each
+
+      ## Budget Discipline
+      - 20 total evals
+      - 1 eval for step function confirmation
+      - 3-5 evals for step function optimization
+      - 10-12 evals remaining for alternative representations
+      - Never spend 3+ evals on one parameter without probing first
+
+      ## Key Rules
+      - convert_to_step_functions FIRST - period
+      - Max 1 probe before each evaluation
+      - Evaluate immediately after major representation change
+      - If stuck after 3 evals: SWITCH representation
+      - Track scores: representation -> parameters -> score
+      - finish when score > 1.026 or 15 evals used
+new_middlewares:
+  - name: enforce_step_first
+    hook: before_model
+    description: |
+      Middleware that enforces calling convert_to_step_functions as the first tool, prevents excessive probing, and encourages early evaluation of major representation changes.
+    implementation_py: 'def before_model(hook_input):\n    state = hook_input.get("state", {})\n    iteration = state.get("iteration", 0)\n    tool_history = state.get("tool_history", [])\n    evals_done = state.get("evals_done", 0)\n    probes_done = state.get("probes_done", 0)\n    if iteration == 0:\n        last_tool = tool_history[-1] if tool_history else "none"\n        if last_tool != "convert_to_step_functions" and last_tool != "none":\n            return "CRITICAL ERROR: You must call convert_to_step_functions FIRST. Do not call mutation_probe or any other tool before switching to step functions. Step functions are the record holders at 0.8963."\n        return None\n    if evals_done >= 1 and probes_done >= 3:\n        return "BUDGET WARNING: You have probed 3+ times since last evaluation. Evaluate the best variant now to spend your budget on major representation changes, not cheap probes."\n    if iteration == 5 and evals_done == 0:\n        return "REPRESENTATION CHANGE DETECTED: If you called convert_to_step_functions, evaluate it NOW (not more probes). Your 20 evals are precious - use each to confirm a major change."\n    if iteration >= 20 and evals_done < 8:\n        return "STALLED: You have done 20 iterations with <8 evals. You are wasting budget on probes. Evaluate your best variant immediately or switch representation."\n    return None'

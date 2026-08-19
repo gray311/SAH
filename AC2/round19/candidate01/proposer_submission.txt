@@ -1,0 +1,237 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are an expert in functional analysis and mathematical optimization for the C2 constant.
+  C2 = ||f*f||2^2 / ((int f)^2 ||f*f||_inf), where f: R->R is non-negative.
+  
+  Current best: 0.8962799441554086 (achieved by step functions). Your harness achieved 1.042.
+  
+  CRITICAL INSIGHT: The seed's step patterns are carefully tuned. DON'T abandon them randomly.
+  STRATEGY: systematically explore STRUCTURAL VARIANTS of the seed architecture:
+  
+  PHASE 1 (iterations 1-20): SEED-ADAPTED DIVERSITY
+  1. Start from the SEED architecture (the 11 step patterns that achieve 1.042)
+  2. Use structural_mutator to generate variants by perturbing: peak heights (+/-0.1), widths (+/-0.05), positions (+/-0.03)
+  3. Generate 8 variants per iteration, probe ALL 8 (8 probes/iteration)
+  4. Evaluate TOP 2 by probe score
+  5. Track which perturbations improve score - learn the direction
+  
+  PHASE 2 (iterations 21-30): FOCUSED ASCENT
+  1. Take the best variant from Phase 1
+  2. Apply targeted mutations in DIRECTION of improvement (e.g., if increasing height helped, try higher)
+  3. Probe all 5, evaluate top 1
+  4. If no improvement after 5 iterations: jump to Phase 3
+  
+  PHASE 3 (iterations 31-40): ARCHITECTURE EVOLUTION
+  1. Only if Phase 2 stalls: combine successful mutations into a new base
+  2. Generate 4 variants with moderate perturbations
+  3. Probe all, evaluate top 2
+  
+  RULES:
+  - NEVER start from random Gaussian/B-spline - they won't beat the tuned seed
+  - Always use structural_mutator to explore local variations
+  - If probe < 1.0, skip full eval and try next variant
+  - Track which perturbations work; reuse them
+  
+  TOOLS:
+  - structural_mutator: Generate controlled variants from current best by perturbing heights/widths/positions
+  - probe_solution: Use to rank 8-10 variants before any full eval (30 total budget)
+  - evaluate_solution: Call ONLY after probing and confirming probe > 1.0
+  - edit_solution: Edit EVOLVE-BLOCK with variant code
+skill_description: |
+  Seed-adapted structural exploration. Start from the proven 1.042 seed architecture, use structural_mutator to generate controlled variants (perturb heights/widths/positions), probe to rank, and climb toward better C2. Only jump to new architectures when local search exhausts potential.
+skill_body: |
+  # C2 Maximizer: Seed-Adapted Structural Exploration
+  
+  ## Core Principle
+  The seed's step functions achieve 1.042 because they are carefully tuned. Don't abandon them randomly.
+  Systematically explore STRUCTURAL VARIANTS by perturbing key parameters.
+  
+  ## Phase 1: Seed-Adapted Diversity (iterations 1-20)
+  
+  Step 1: Analyze Current Best
+  - Call structural_mutator on your best function to get 8 variants
+  - Each variant perturbs: peak heights (+/-0.1), widths (+/-0.05), positions (+/-0.03)
+  
+  Step 2: Probe-Based Filtering
+  - Call probe_solution on ALL 8 candidates (8 probes)
+  - Identify top 2 by probe score
+  - Skip full eval if probe < 1.0
+  
+  Step 3: Evaluate and Learn
+  - Call evaluate_solution on top 2
+  - Track which perturbations improved score (e.g., "increasing middle height helped")
+  - Use this to guide next iteration's mutations
+  
+  Step 4: Iterate
+  - Generate 8 new variants with perturbations in successful directions
+  - Continue until iteration 20 or improvement
+  
+  ## Phase 2: Focused Ascent (iterations 21-30)
+  
+  1. Take best variant from Phase 1
+  2. Apply SMALL targeted mutations (+/-0.05 height, +/-0.02 width, +/-0.01 position) in direction of improvement
+  3. Probe all 5, evaluate top 1
+  4. If no improvement after 5 iterations: go to Phase 3
+  
+  ## Phase 3: Architecture Evolution (iterations 31-40)
+  
+  1. Only if Phase 2 stalls: combine successful mutations into a new base function
+  2. Generate 4 variants with moderate perturbations (+/-0.1, +/-0.08, +/-0.05)
+  3. Probe all, evaluate top 2
+  
+  ## Key Rules
+  - START FROM SEED - it's already tuned!
+  - Use structural_mutator for controlled exploration, not random generation
+  - Probe 8-10 variants before spending full evals
+  - Track which perturbations work; reuse successful patterns
+  - Only jump to new families if local search exhausts after 5+ failed evals
+tool_descriptions:
+  edit_solution: "Edit the EVOLVE-BLOCK. For structural variants: perturb seed step patterns by changing peak heights (+/-0.1), widths (+/-0.05 fraction), and positions (+/-0.03 fraction). Use jax.nn.softplus or max(0,·) for non-negativity. Example: if seed has height 1.50 at [0.25*600:0.75*600], try 1.45 and 1.55 variants."
+  evaluate_solution: "Full evaluation. Budget: 30 total. Call ONLY after probe_solution ranking and only if probe > 1.0. Evaluate top 1-2 variants by probe score."
+  probe_solution: "Approximate score on 10% subsample. FAST. Use to rank 8-10 structural variants before full eval. You have 30 probes - spend them to explore variants within the seed architecture, not to confirm one candidate."
+  finish: Report best combined_score, the winning structural variant (which perturbations improved C2), and key insights from perturbation analysis.
+sampling:
+  temperature: 0.7
+  top_p: 0.95
+  top_k: 30
+  max_tokens: 16384
+agent:
+  max_iterations: 40
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 12000
+new_tools:
+- name: structural_mutator
+  description: |
+    Generate 8 controlled structural variants from the current best function by perturbing:
+    - Peak heights: +/-0.1 (e.g., 1.50 -> 1.45, 1.55)
+    - Peak widths: +/-0.05 fraction (e.g., 0.50 width -> 0.475, 0.525)
+    - Peak positions: +/-0.03 fraction (e.g., 0.25 position -> 0.22, 0.28)
+    
+    Preserves the seed's step-function structure while exploring local landscape.
+    Call this at start of each iteration to get 8 variants for probing.
+  input_schema:
+    type: object
+    properties: {}
+  implementation_py: |
+    def run(ctx, args):
+        import random
+        random.seed(42)
+        best_f = ctx.get_best_program()
+        f_vals = jax.numpy.array([float(x) for x in best_f.strip().split()])
+        n = len(f_vals)
+        
+        # Parse step structure: find regions with constant values
+        # Simple heuristic: find boundaries where value changes significantly
+        boundaries = []
+        for i in range(1, n):
+            if abs(f_vals[i] - f_vals[i-1]) > 0.1:
+                boundaries.append(i)
+        
+        variants = []
+        # Create 8 variants with different perturbations
+        perturbation_types = [
+            {'name': 'height_up', 'delta_h': 0.1, 'delta_w': 0.0, 'delta_p': 0.0},
+            {'name': 'height_down', 'delta_h': -0.1, 'delta_w': 0.0, 'delta_p': 0.0},
+            {'name': 'width_up', 'delta_h': 0.0, 'delta_w': 0.05, 'delta_p': 0.0},
+            {'name': 'width_down', 'delta_h': 0.0, 'delta_w': -0.05, 'delta_p': 0.0},
+            {'name': 'pos_up', 'delta_h': 0.0, 'delta_w': 0.0, 'delta_p': 0.03},
+            {'name': 'pos_down', 'delta_h': 0.0, 'delta_w': 0.0, 'delta_p': -0.03},
+            {'name': 'height_width', 'delta_h': 0.05, 'delta_w': 0.05, 'delta_p': 0.0},
+            {'name': 'all_combo', 'delta_h': 0.08, 'delta_w': 0.03, 'delta_p': 0.02},
+        ]
+        
+        for ptype in perturbation_types:
+            variant_f = f_vals.copy()
+            for i, b in enumerate(boundaries[:-1]):
+                if i % 3 == 0:  # Perturb every 3rd boundary
+                    h = variant_f[b:b+1]
+                    w_end = boundaries[i+1] if i+1 < len(boundaries) else n
+                    width = w_end - b
+                    
+                    # Apply perturbations
+                    new_h = h + ptype['delta_h']
+                    new_w = width + width * ptype['delta_w']
+                    new_p = b + width * ptype['delta_p']
+                    
+                    # Clip to valid range
+                    new_h = max(0.1, min(3.0, new_h))
+                    new_w = max(0.01, min(0.99, new_w))
+                    new_p = max(b, min(w_end - 1, new_p))
+                    
+                    # Apply to variant
+                    variant_f[b:new_p] = new_h
+            
+            variants.append({
+                'name': ptype['name'],
+                'description': f"Perturb: height={ptype['delta_h']:+.2f}, width={ptype['delta_w']:+.2f}, pos={ptype['delta_p']:+.2f}",
+                'code': f"# Variants: height={ptype['delta_h']:+.2f}, width={ptype['delta_w']:+.2f}, pos={ptype['delta_p']:+.2f}\n# Perturbed version of best function"
+            })
+        
+        return {'variants': variants, 'note': 'Use probe_solution to rank these 8 variants before full eval'}
+new_skills:
+- name: perturbation-protocol
+  description: Systematically perturb seed step functions to explore local landscape. Track which perturbations improve C2.
+  body: |
+    # Perturbation Protocol for C2 Maximization
+    
+    ## Core Principle
+    The seed's step functions are carefully tuned. Don't abandon them.
+    Systematically perturb heights, widths, and positions to explore local landscape.
+    
+    ## When to Perturb (trigger conditions)
+    1. At start of each iteration (use structural_mutator to get 8 variants)
+    2. When probe scores show consistent direction (e.g., height increases always help)
+    3. When stuck at same score for 3+ iterations
+    
+    ## Perturbation Types
+    1. Height perturbations: +/-0.1 on peak values
+       - If increasing middle peak improved C2, try higher in next iteration
+       - If decreasing side peaks helped, apply to similar positions
+    
+    2. Width perturbations: +/-0.05 fraction of current width
+       - Wider peaks might improve L2 norm
+       - Narrower peaks might reduce ||f*f||_inf
+    
+    3. Position perturbations: +/-0.03 fraction of domain
+       - Shift peaks to better align with convolution structure
+       - Asymmetric shifts might create better interference patterns
+    
+    ## Execution Flow
+    1. Call structural_mutator on current best to get 8 variants
+    2. Probe ALL 8 (8 probes per iteration)
+    3. Evaluate top 2 by probe score
+    4. Track which perturbations improved score
+    5. Next iteration: apply successful perturbations, discard failed ones
+    
+    ## Key Rule
+    NEVER random perturbations. Track which directions work and repeat them.
+    If all 8 variants fail to improve after 3 iterations: jump to new architecture family.
+new_middlewares:
+- name: enforce_seed_adaptation
+  hook: before_tool
+  description: Enforce starting from seed architecture, not random generation
+  implementation_py: |
+    def before_tool(hook_input):
+        iteration = hook_input.get("iteration", 0)
+        tool_name = hook_input.get("tool_name", "")
+        
+        # Warn if trying to generate completely new architecture
+        if tool_name in ["generate_candidates", "edit_solution"]:
+            return "Reminder: Start from SEED architecture (the 1.042 step patterns). Use structural_mutator for controlled variants, not random Gaussian/B-spline generation. Seed is already tuned!"
+        
+        return None
+- name: track_perturbation_success
+  hook: after_tool
+  description: Track which perturbations succeed to guide future mutations
+  implementation_py: |
+    def after_tool(hook_input):
+        tool_name = hook_input.get("tool_name", "")
+        result = hook_input.get("result", {})
+        score = result.get("score", result.get("combined_score", 0))
+        
+        # If evaluation succeeded, remind about tracking
+        if score > 1.0 and tool_name == "evaluate_solution":
+            return "Great! Track which perturbation (height/width/pos change) achieved this score. Reuse it in next iteration."
+        
+        return None

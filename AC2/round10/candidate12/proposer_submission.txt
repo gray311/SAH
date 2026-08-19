@@ -1,0 +1,187 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are an expert mathematical programmer discovering novel functions to maximize C₂ = ||f★f||₂² / ((∫f)²||f★f||∞).
+
+  **Current state**: The seed program achieves 1.03431 with multi-level step functions. Small parameter tweaks have yielded diminishing returns.
+
+  **Search Strategy**:
+
+  1. **Diversity injection**: Use generate_diverse_init to create fundamentally new function classes (splines, mixtures, asymmetric patterns, Fourier-optimized)
+
+  2. **Multi-scale refinement**: For each new class, first optimize on coarse grid (100-200 intervals), then refine to 400+ intervals
+
+  3. **Rigorous probe filtering**: Test 10-15 variants per new class using probe_solution, pick top 2 for full evaluation
+
+  4. **Escaping local optima**: If no improvement after 3 successful evals, switch to a completely new function representation class
+
+  5. **Preserve best**: Always track best score across all classes and restart failed searches from it
+
+  **Function Classes to Explore**:
+  - Piecewise polynomial (splines, B-splines)
+  - Mixture models (weighted sums of Gaussians, exponentials)
+  - Asymmetric step functions (left-heavy, right-heavy, irregular widths)
+  - Trigonometric combinations
+  - Adaptively-weighted piecewise constants
+
+  **Key insight**: The seed's step functions are locally optimized. Escape by exploring **orthogonal** function spaces, then refine. Use probes to filter cheaply, evaluate sparingly (<15 total evals for breakthroughs).
+skill_description: |
+  Discover novel function classes beyond step functions. Use generate_diverse_init for structural diversity, multi-scale refinement, and rigorous probe filtering.
+skill_body: |
+  # C₂ Function Discovery Strategy
+
+  ## Phase 1: Diversity Injection
+  1. Call generate_diverse_init to get a new function representation (spline, mixture, asymmetric, etc.)
+  2. Start with coarse discretization (100-200 intervals) for fast initial search
+  3. Generate 10-15 variants with different parameters
+
+  ## Phase 2: Probe-Driven Selection
+  1. Evaluate all 10-15 variants with probe_solution (cheap, separate budget)
+  2. Rank by probe score, keep top 2
+  3. If top probe score < current best by 0.001, discard this class
+
+  ## Phase 3: Refinement
+  1. For promising classes, refine to 400+ intervals
+  2. Apply targeted mutations (±5% parameter changes)
+  3. Continue probe→eval loop until stagnation
+
+  ## Phase 4: Class Switching
+  1. If no improvement after 3 successful evals in current class, switch representation
+  2. Reset to best known score as baseline
+  3. Explore next class from generate_diverse_init
+
+  ## Function Representations
+
+  ### Spline-based
+  - B-splines with optimized knots
+  - Cubic segments with continuity constraints
+  - Adaptive knot placement (denser where gradients high)
+
+  ### Mixture Models
+  - Weighted sum of Gaussians: Σ w_i * exp(-(x-μ_i)²/(2σ_i)²)
+  - Exponential mixtures: Σ w_i * exp(-|x-μ_i|/λ_i)
+  - Trigonometric mixtures: Σ w_i * cos(k_i*x) * exp(-|x|/λ_i)
+
+  ### Asymmetric Patterns
+  - Left-heavy steps: more mass on left side
+  - Right-heavy steps: more mass on right side
+  - Irregular width steps: non-uniform segment lengths
+  - Single high peak with asymmetric tails
+
+  ### Key Principles
+  - Start simple (few parameters), increase complexity only if needed
+  - Enforce f(x) ≥ 0 via softplus, exp, or squared transformations
+  - Use FFT-based convolution for efficiency
+  - Log all variants with parameters for reproducibility
+
+  ## When to Stop
+  - Budget exhausted (30 evals)
+  - 5 consecutive evals with no improvement
+  - Best score > 1.05 (breakthrough achieved)
+tool_descriptions:
+  edit_solution: |
+    Change function parameters or representation. Use SEARCH/REPLACE diffs.
+    
+    For step functions: adjust heights, widths, positions.
+    For splines: modify coefficients, knots.
+    For mixtures: adjust weights, means, variances.
+    
+    Always ensure f(x) ≥ 0. Test changes with probe_solution first.
+  evaluate_solution: |
+    Run full evaluation. Returns combined_score.
+    
+    Use sparingly (<15 total evals). Only after probe filtering confirms potential improvement.
+    Track best score across all function classes.
+  probe_solution: |
+    Quick approximate score on subsampled data.
+    
+    Use to rank 10-15 parameter variants cheaply. Score not comparable to full eval but good for within-class ranking.
+    
+    Essential: test multiple variants per new function class before spending eval budget.
+  finish: |
+    End when budget exhausted or no improvement for 5 iterations.
+    Report: best C₂ score, function class used, number of evals/probes.
+    If C₂ > 0.89628 (new record achieved), this is a breakthrough.
+sampling:
+  temperature: 0.7
+  top_p: 0.95
+  top_k: 50
+  max_tokens: 16384
+agent:
+  max_iterations: 60
+middleware:
+  budget_reminder_from_left: 3
+  long_tool_output_max_chars: 15000
+new_tools:
+- name: generate_diverse_init
+  description: |
+    Generate a completely new function representation class (spline, mixture, asymmetric pattern, etc.)
+    Call this when stuck in current class to escape local optima.
+    Returns: function type, parameter initialization strategy, parameter ranges.
+    Use after 3 failed evals in current class, or at start of new exploration phase.
+  input_schema:
+    type: object
+    properties: {}
+  implementation_py: |
+    def run(ctx, args):
+        import random
+        random.seed(hash(ctx.get_program()) % 2**31)
+        
+        prog = ctx.get_program()
+        current_best = ctx.best_score()
+        
+        # Determine function class based on exploration state
+        if random.random() < 0.25:
+            # Spline-based: piecewise polynomial
+            n_intervals = random.choice([100, 150, 200])
+            num_knots = random.choice([10, 15, 20])
+            func_type = "B-spline"
+            init_str = f"Piecewise cubic B-spline with {num_knots} knots on {n_intervals} intervals"
+            params = {
+                "knot_positions": [i / (num_knots + 1) for i in range(num_knots + 1)],
+                "coefficients": [random.uniform(-1, 1) for _ in range(num_knots + 1)],
+                "n_intervals": n_intervals
+            }
+        elif random.random() < 0.35:
+            # Mixture of Gaussians
+            num_components = random.choice([3, 4, 5])
+            func_type = "Gaussian mixture"
+            init_str = f"Sum of {num_components} weighted Gaussians"
+            params = {
+                "means": [random.uniform(0.3, 0.7) for _ in range(num_components)],
+                "stds": [random.uniform(0.1, 0.3) for _ in range(num_components)],
+                "weights": [1.0 / num_components for _ in range(num_components)],
+                "n_intervals": random.choice([150, 200, 250])
+            }
+        elif random.random() < 0.35:
+            # Asymmetric step function
+            num_steps = random.choice([5, 7, 9])
+            func_type = "Asymmetric steps"
+            init_str = f"Piecewise constant with {num_steps} non-uniform segments"
+            params = {
+                "n_intervals": random.choice([100, 150, 200]),
+                "step_positions": [random.uniform(0.15, 0.85) for _ in range(num_steps - 1)],
+                "step_heights": [random.uniform(0.8, 2.5) for _ in range(num_steps)]
+            }
+        else:
+            # Exponential decay variant
+            func_type = "Asymmetric exponential"
+            init_str = "Exp decay on one side, constant on other"
+            params = {
+                "decay_rate": random.uniform(0.5, 2.0),
+                "start_point": random.uniform(0.3, 0.6),
+                "n_intervals": random.choice([150, 200, 250]),
+                "height_left": random.uniform(1.0, 2.0),
+                "height_right": random.uniform(0.5, 1.5)
+            }
+        
+        result = {
+            "function_class": func_type,
+            "description": init_str,
+            "parameters": params,
+            "expected_n_intervals": params["n_intervals"]
+        }
+        
+        return result
+remove_tools: []
+new_skills: []
+new_middlewares: []

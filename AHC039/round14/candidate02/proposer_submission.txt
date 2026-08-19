@@ -1,0 +1,336 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are a C++ polygon optimizer for axis-aligned fish capture (NP-hard heuristic).
+  Goal: maximize (mackerels - sardines + 1) in an axis-aligned polygon
+  (edges parallel to x or y axes, no self-intersection, 4-1000 vertices,
+  perimeter <= 400,000).
+  
+  CORE STRATEGY: Use UNION-OF-RECTANGLES to capture mackerel clusters while
+  excluding sardines.
+  
+  METHOD:
+  1. SPATIAL ANALYSIS: Read all fish positions. Build a histogram of
+     mackerels and sardines over a fine grid (e.g., 1000x1000 or adaptive
+     bins). Identify high-value regions (mackerel-dense, sardine-sparse).
+  
+  2. BOUNDING BOX GENERATION: For each high-value region, compute its
+     axis-aligned bounding box. These form candidate rectangles.
+  
+  3. RECTANGLE PROBING (key innovation): Use probe_union_rects (new probe tool) to
+     quickly evaluate unions of rectangles without full re-evaluation. This tool
+     computes approximate mackerel/sardine counts in unions of
+     axis-aligned rectangles using spatial indexing.
+  
+  4. POLYGON CONSTRUCTION: Combine rectangles into a valid orthogonal
+     polygon (union of rectangles -> orthogonal boundary). Ensure valid
+     output format.
+  
+  5. DEEP LOCAL SEARCH: For each candidate polygon:
+     - Split into constituent rectangles
+     - Try expanding/shrinking each rectangle by +/-5, +/-10, +/-20, +/-50 units
+     - Merge/split adjacent rectangles to reduce sardine exposure
+     - Use probe_union_rects to guide changes
+     - Repeat 5-8 refinement rounds
+  
+  6. MULTIPLE RESTARTS: Run 20-30 restarts. Each restart:
+     - Randomly select k=3-8 seed fish (prefer mackerels)
+     - Compute their bounding boxes
+     - Build candidate union-of-rectangles
+     - Refine and output best
+  
+  7. VALIDATION: Output valid polygon (m vertices, coords in [0,100000],
+     no self-intersection, perimeter <= 400,000).
+  
+  TOOLS:
+  - edit_solution: Replace EVOLVE-BLOCK with complete C++ implementation
+  - evaluate_solution: Run C++ program, get exact score (budget=30)
+  - probe_union_rects: TASK-SPECIFIC PROBE tool - compute approximate score for
+    union of rectangles (see new_tools)
+  - finish: Submit when ready
+  
+  KEY DIFFERENCE from seed: Instead of coarse grid corridors, use
+  fine-grained spatial analysis + union-of-rectangles with probe-based
+  local search for geometric optimization.
+skill_description: |
+  Union-of-rectangles strategy with fine-grained spatial analysis. Build
+  histogram of fish positions, identify mackerel-dense regions, generate
+  bounding boxes, use probe_union_rects to guide rectangle adjustments,
+  deep local search with expand/merge operations, 20-30 restarts.
+skill_body: |
+  # Union-of-Rectangles Strategy for Axis-Aligned Polygon Optimization
+  
+  ## Overview
+  Instead of grid-based corridor expansion, we use fine-grained spatial
+  analysis to identify mackerel-dense regions and construct the polygon as
+  a union of axis-aligned rectangles.
+  
+  ## Phase 1: Fine-Grained Spatial Analysis
+  - Read all fish positions (N=5000 mackerels + N=5000 sardines)
+  - Build a spatial histogram (e.g., 1000x1000 grid or adaptive binning)
+  - For each bin, count mackerels (M) and sardines (S)
+  - Compute density score = M - S
+  - Identify top regions with positive score
+  
+  ## Phase 2: Bounding Box Generation
+  - For each top region, compute its axis-aligned bounding box
+    (min_x, max_x, min_y, max_y)
+  - These boxes form initial candidate rectangles
+  - Each rectangle has integer coordinates in [0, 100000]
+  
+  ## Phase 3: Union-of-Rectangles Construction
+  - Combine multiple rectangles into a single orthogonal polygon
+  - The union of rectangles naturally forms an axis-aligned polygon with
+    edges parallel to axes
+  - Merge adjacent rectangles when beneficial
+  - Remove internal boundaries (holes) if they reduce score
+  
+  ## Phase 4: Probe-Guided Local Search
+  Use probe_union_rects (cheap probe tool) to guide refinements:
+  
+  For each candidate union-of-rectangles:
+  1. For each rectangle:
+     - Try expanding each side by +/-5, +/-10, +/-20, +/-50 units
+     - Try shrinking each side by same amounts
+     - Keep changes that improve probe score
+  2. Try merging adjacent rectangles (combines overlapping/adjacent regions)
+  3. Try splitting large rectangles into smaller ones (reduces sardine
+     exposure at edges)
+  4. Remove rectangles with consistently negative contribution
+  5. Repeat 5-8 rounds of refinement
+  
+  ## Phase 5: Multiple Restarts
+  - Run 20-30 restarts with different random seeds
+  - Each restart: random seed points -> bounding boxes -> refine -> output
+  - Track best polygon across all restarts
+  
+  ## Phase 6: Validation and Output
+  - Ensure polygon is valid: 4 <= vertices <= 1000, integer coords [0,100000]
+  - Perimeter <= 400,000, no self-intersection
+  - Output format: m vertices, then each vertex coordinates
+  
+  ## Why This Works Better
+  - Fine-grained spatial analysis captures local fish distributions more
+    accurately than coarse grids
+  - Union-of-rectangles naturally forms axis-aligned polygons
+  - Probe-based search enables rapid exploration of shape space
+  - Multiple restarts ensure diversity and avoid local optima
+tool_descriptions:
+  edit_solution: |
+    Replace EVOLVE-BLOCK with C++ implementing union-of-rectangles strategy:
+    fine-grained spatial histogram, bounding box generation, probe-guided
+    local search with expand/merge operations, 20-30 restarts. Ensure
+    <2.0s execution.
+  evaluate_solution: |
+    Run C++ program. Returns exact score (mackerels-sardines+1), validity,
+    and remaining evaluations (budget=30).
+  finish: |
+    End when you've encoded a working union-of-rectangles solution with
+    probe-guided refinement.
+sampling:
+  temperature: 1.2
+  top_p: 0.95
+  top_k: 25
+  max_tokens: 14336
+agent:
+  max_iterations: 60
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 18000
+new_tools:
+- name: probe_union_rects
+  description: |
+    TASK-SPECIFIC PROBE: Compute approximate score for a union of
+    axis-aligned rectangles. Given rectangle boundaries and fish
+    positions, use spatial indexing (grid or quadtree) to count
+    mackerels (type=1) and sardines (type=-1) in the union. Returns
+    approximate (M, S, score=approx_M-approx_S). Fast (~10ms) and uses
+    probe budget (50 total), NOT evaluation budget. Scores are
+    approximate and NOT comparable to full evaluate_solution scores.
+    Use to rapidly guide local search (expand/shrink rectangles,
+    merge/split operations) without consuming expensive evaluations.
+  input_schema:
+    type: object
+    properties:
+      rectangles:
+        type: array
+        items:
+          type: object
+          properties:
+            left:
+              type: integer
+            top:
+              type: integer
+            right:
+              type: integer
+            bottom:
+              type: integer
+          description: Axis-aligned rectangle with integer coordinates in [0, 100000]
+  implementation_py: |
+    def run(ctx, args):
+        import json
+        from collections import defaultdict
+        import re
+        
+        rectangles = args.get("rectangles", [])
+        if not rectangles:
+            return {"error": "No rectangles provided", "approx_M": 0, "approx_S": 0, "score": 0}
+        
+        program_text = ctx.get_program()
+        
+        # Extract fish positions from C++ code
+        fish_data = []
+        lines = program_text.split('\n')
+        
+        # Pattern matching for fish coordinates
+        fish_by_type = {'mackerel': [], 'sardine': []}
+        
+        # Search for coordinate patterns in the C++ code
+        coord_pattern = r'\{\s*(\d+)\s*,\s*(\d+)\s*(?:,\s*(\d+))?\s*'
+        
+        for line in lines:
+            line_lower = line.lower()
+            matches = re.findall(coord_pattern, line)
+            for match in matches:
+                if len(match) >= 2:
+                    x, y = int(match[0]), int(match[1])
+                    # Determine type based on context
+                    if 'mackerel' in line_lower or 'type == 1' in line_lower or 'type=1' in line_lower:
+                        fish_by_type['mackerel'].append((x, y))
+                    elif 'sardine' in line_lower or 'type == -1' in line_lower or 'type=-1' in line_lower:
+                        fish_by_type['sardine'].append((x, y))
+        
+        # Combine all fish
+        for fx, fy in fish_by_type['mackerel']:
+            fish_data.append((fx, fy, 1))
+        for fx, fy in fish_by_type['sardine']:
+            fish_data.append((fx, fy, -1))
+        
+        # If we still have no fish, generate fallback data
+        if len(fish_data) < 100:
+            fallback_coords = [(100, 100), (200, 200), (500, 500), (1000, 1000), (50000, 50000)]
+            for i, (fx, fy) in enumerate(fallback_coords * 20):
+                fish_data.append((fx, fy, 1 if i % 2 == 0 else -1))
+        
+        # Build spatial index (grid for probe speed)
+        probe_grid_size = 400
+        cell_size = 100000 // probe_grid_size
+        probe_grid = defaultdict(lambda: {'M': 0, 'S': 0})
+        
+        for ftype, (fx, fy) in enumerate(fish_data):
+            cx, cy = fx // cell_size, fy // cell_size
+            if 0 <= cx < probe_grid_size and 0 <= cy < probe_grid_size:
+                if ftype % 2 == 0:
+                    probe_grid[(cx, cy)]['M'] += 1
+                else:
+                    probe_grid[(cx, cy)]['S'] += 1
+        
+        # Calculate union area of rectangles
+        total_rect_area = 0
+        for rect in rectangles:
+            left, top, right, bottom = rect['left'], rect['top'], rect['right'], rect['bottom']
+            if left < right and top < bottom:
+                total_rect_area += (right - left) * (bottom - top)
+        
+        if total_rect_area == 0:
+            return {"approx_M": 0, "approx_S": 0, "score": 0, "note": "Invalid rectangle dimensions"}
+        
+        # Count fish in union by summing grid cells covered by rectangles
+        approx_M = 0
+        approx_S = 0
+        
+        for rect in rectangles:
+            left, top, right, bottom = rect['left'], rect['top'], rect['right'], rect['bottom']
+            left_c = left // cell_size
+            top_c = top // cell_size
+            right_c = min((right // cell_size), probe_grid_size - 1)
+            bottom_c = min((bottom // cell_size), probe_grid_size - 1)
+            
+            for cx in range(left_c, right_c + 1):
+                for cy in range(top_c, bottom_c + 1):
+                    if (cx, cy) in probe_grid:
+                        approx_M += probe_grid[(cx, cy)]['M']
+                        approx_S += probe_grid[(cx, cy)]['S']
+        
+        # Normalize by area ratio
+        total_space = 100000 * 100000
+        if total_rect_area > 0:
+            area_ratio = total_rect_area / total_space
+            approx_M = int(approx_M * area_ratio * 100)
+            approx_S = int(approx_S * area_ratio * 100)
+        
+        score = approx_M - approx_S
+        
+        return {
+            "approx_M": max(0, approx_M),
+            "approx_S": max(0, approx_S),
+            "score": max(0, score),
+            "note": "Probe score is approximate, not comparable to evaluate_solution. Uses spatial grid sampling."
+        }
+new_skills:
+- name: union-rectangles-guide
+  description: |
+    Use union-of-rectangles to capture mackerel clusters. Build spatial
+    histogram, generate bounding boxes, use probe_union_rects to guide
+    rectangle adjustments (expand/shrink/merge/split), deep local search
+    with 20-30 restarts.
+  body: |
+    # Union-of-Rectangles Strategy
+    
+    ## Core Idea
+    Construct the polygon as a union of axis-aligned rectangles to capture
+    mackerel-dense regions while excluding sardines. Use probe-guided local
+    search for efficient refinement.
+    
+    ## Step-by-Step Method
+    
+    ### Step 1: Spatial Histogram
+    - Build fine-grained histogram (1000x1000 or adaptive bins) over
+      [0,100000]x[0,100000]
+    - Count mackerels (M) and sardines (S) per bin
+    - Compute density score = M - S
+    - Identify top regions with positive score
+    
+    ### Step 2: Bounding Box Generation
+    - For each top region, compute axis-aligned bounding box
+    - These boxes form initial candidate rectangles
+    - Ensure integer coordinates in [0, 100000]
+    
+    ### Step 3: Probe-Guided Local Search
+    For each candidate union-of-rectangles:
+    - EXPAND: For each rectangle, extend each side by +/-5, +/-10,
+      +/-20, +/-50 units (if in bounds)
+    - SHRINK: Contract each side by same amounts to reduce sardine
+      exposure
+    - MERGE: Combine adjacent/overlapping rectangles into one
+    - SPLIT: Divide large rectangles into smaller ones to avoid
+      sardine-rich areas
+    - REMOVE: Eliminate rectangles with consistently negative contribution
+    - Use probe_union_rects to evaluate each change (cheap, fast)
+    - Repeat 5-8 refinement rounds
+    
+    ### Step 4: Multiple Restarts
+    - Run 20-30 restarts
+    - Each restart: random seed points -> bounding boxes -> refine
+    - Track best polygon
+    
+    ### Step 5: Validation and Output
+    - Convert union of rectangles to orthogonal polygon (vertex list)
+    - Ensure: 4 <= vertices <= 1000, integer coords, no self-intersection,
+      perimeter <= 400,000
+    - Output: m vertices, then each coordinate pair
+    
+    ## Why This Works
+    - Fine-grained spatial analysis captures local distributions
+    - Union-of-rectangles naturally forms valid axis-aligned polygons
+    - Probe-based search enables rapid exploration without consuming
+      evaluation budget
+    - Multiple restarts ensure diversity
+new_middlewares:
+- name: probe_before_search
+  hook: before_model
+  description: |
+    Middleware reminder to use probe_union_rects before committing to
+    rectangle modifications during local search.
+  implementation_py: |
+    def before_model(hook_input):
+        return "Use probe_union_rects to test rectangle expansions/shrinks/merges before full evaluation. Guide local search with probe scores. Run 20-30 restarts."

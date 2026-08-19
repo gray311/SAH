@@ -1,0 +1,175 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are an expert in functional analysis and mathematical optimization for the C2 constant:
+  C2 = ||f★f||2^2 / ((∫f)^2 ||f★f||_∞), where f: R→R is non-negative.
+  
+  Current best: 0.8962799441554086 (step function by AlphaEvolve, reported as combined_score 1.03841).
+  
+  Your mission: FIND A COMPLETELY NEW FUNCTION CLASS that beats the step-function record.
+  
+  Critical insight: The step-function solutions are LOCAL optima. To break through, you MUST explore
+  DIFFERENT function architectures entirely, not just refine existing patterns.
+  
+  Exploration Strategy:
+  
+  1. At iteration 1, call generate_candidates to get 3-5 diverse function proposals across DIFFERENT
+     families (Gaussian mixtures, B-spline basis, piecewise-linear, oscillatory with decay,
+     mixture models).
+  
+  2. For each proposal, decide: use probe_solution to quickly rank them (30 probe budget!), then
+     evaluate only the top 3-5 promising ones.
+  
+  3. Do NOT refine one function type exhaustively before trying new types. Parallel exploration
+     beats sequential refinement.
+  
+  4. After exhausting probes for a function class, try a completely new architecture.
+  
+  5. Function constraints: f(x)>=0, ∫f>0, numerically stable convolution.
+  
+  6. If you get stuck (no improvement after 10 iterations), explicitly try a NEW function class.
+  
+  Tools:
+  - edit_solution: implement your chosen function
+  - evaluate_solution: full score, budget-limited (use sparingly)
+  - probe_solution: approx score on 10% subsample, 30-budget, FAST. USE THIS TO RANK BEFORE EVALUATE.
+  - generate_candidates: get diverse function proposals across multiple families.
+sampling:
+  temperature: 0.7
+  top_p: 0.95
+  top_k: 50
+  max_tokens: 16384
+agent:
+  max_iterations: 60
+middleware:
+  budget_reminder_from_left: 3
+  long_tool_output_max_chars: 15000
+new_tools:
+- name: generate_candidates
+  description: |
+    Generate 3-5 diverse function proposals across DIFFERENT mathematical families for C2 maximization.
+    Families to explore: Gaussian mixtures, B-spline basis, piecewise-linear, oscillatory with decay,
+    convex combinations of simple functions. Returns ready-to-edit code snippets for each.
+  input_schema:
+    type: object
+    properties: {}
+  implementation_py: |
+    def run(ctx, args):
+        import random
+        random.seed(42)
+        proposals = []
+        
+        # Family 1: Gaussian mixtures
+        proposals.append({
+            "family": "gaussian_mixture",
+            "description": "Weighted sum of Gaussians: f(x) = sum w_i * exp(-((x-mu_i)^2)/(2*sigma_i^2))",
+            "code_snippet": "import jax.numpy as jnp\nimport jax\n\nf_values = jnp.linspace(-3, 3, 600)\nmu = jnp.array([0.0, 1.2, -1.0])\nsigma = jnp.array([0.5, 0.7, 0.6])\nweights = jnp.array([0.4, 0.3, 0.3])\nf = weights[None,:] @ jnp.exp(-((f_values[:,None] - mu)[None,:,:])**2 / (2*sigma**2[None,:]))",
+            "rationale": "Smooth functions may achieve better ||f★f||2^2 / ||f★f||_∞ ratio than sharp steps"
+        })
+        
+        # Family 2: B-spline basis
+        proposals.append({
+            "family": "bspline",
+            "description": "B-spline with optimized control points and knots",
+            "code_snippet": "import jax.numpy as jnp\nimport jax\nfrom scipy.interpolate import splev, splrep\n\nn_control = 50\nknots = jnp.linspace(-1, 1, 20)\ncontrols = jnp.random.uniform(0.5, 2.0, n_control)\ncontrols = jax.nn.softplus(controls)\nf_values = jnp.linspace(-3, 3, 600)\nfit = splev(f_values, knots, s=0, k=3, dx=1, w=controls)\nf = jnp.maximum(f, 0)",
+            "rationale": "Splines offer flexible smooth transitions; optimize control points for C2"
+        })
+        
+        # Family 3: Piecewise-linear
+        proposals.append({
+            "family": "piecewise_linear",
+            "description": "Linear segments connecting vertices, optimized for shape",
+            "code_snippet": "import jax.numpy as jnp\n\nf_values = jnp.linspace(-3, 3, 600)\nn_vertices = 30\nvertices = jnp.linspace(-2, 2, n_vertices)\nheights = 0.5 + 0.5 * jnp.sin(jnp.linspace(0, 2*jnp.pi, n_vertices))\nf = jnp.piecewise(f_values, [(f_values <= x) for x in vertices[:-1]], \n                  [lambda x: heights[i] * (x - vertices[i]) / (vertices[i+1] - vertices[i]) for i in range(n_vertices-1)])\nf = jnp.maximum(f, 0)",
+            "rationale": "Piecewise-linear can mimic step functions with smoother transitions, potentially better norms"
+        })
+        
+        # Family 4: Oscillatory with decay
+        proposals.append({
+            "family": "oscillatory_decay",
+            "description": "f(x) = (1 + alpha * cos(beta*x)) * exp(-gamma*|x|)",
+            "code_snippet": "import jax.numpy as jnp\nimport jax\n\nf_values = jnp.linspace(-5, 5, 800)\nalpha = 0.3\nbeta = 4.0\ngamma = 0.8\nf = (1 + alpha * jnp.cos(beta * f_values)) * jnp.exp(-gamma * jnp.abs(f_values))\nf = jnp.maximum(f, 1e-6)",
+            "rationale": "Oscillatory functions create structured convolutions; decay ensures integrability"
+        })
+        
+        # Family 5: Multi-level improved step
+        proposals.append({
+            "family": "multi_level_improved",
+            "description": "Multi-level step with optimized heights and asymmetric structure",
+            "code_snippet": "import jax.numpy as jnp\nimport jax\n\nf_values = jnp.linspace(-3, 3, 600)\nn = len(f_values)\nlevels = [0.5, 1.2, 2.0, 1.2, 0.5]\npositions = jnp.array([0.10, 0.30, 0.50, 0.70, 0.90])\nf = f_values\nfor i in range(len(positions) - 1):\n    start = int(positions[i] * n)\n    end = int(positions[i+1] * n)\n    f = f.at[start:end].set(levels[i])\nf = jnp.maximum(f, 0)",
+            "rationale": "Refined multi-level steps with asymmetric heights may beat simple step patterns"
+        })
+        
+        return {
+            "proposals": proposals,
+            "note": "Use probe_solution to rank these quickly before full evaluation."
+        }
+new_skills:
+- name: diverse-exploration-protocol
+  description: Parallel exploration across function families with probe-based filtering.
+  body: |
+    # Diverse Exploration Protocol for C2 Maximization
+    
+    ## Core Principle
+    
+    The step-function record is a LOCAL optimum. To beat it, you MUST explore DIFFERENT function
+    architectures in PARALLEL, not sequentially refine one type.
+    
+    ## Phase 1: Diverse Generation (Iteration 1)
+    
+    1. Call generate_candidates to get 3-5 proposals across DIFFERENT families.
+    
+    2. Families to explore:
+       - Gaussian mixtures (smooth, multi-peaked)
+       - B-spline basis (flexible smooth transitions)
+       - Piecewise-linear (controlled smoothness)
+       - Oscillatory with decay (structured convolutions)
+       - Improved multi-level steps
+    
+    3. EXPECTATION: At least one family should beat the step-function record.
+    
+    ## Phase 2: Probe-Based Filtering
+    
+    1. For each proposal, call probe_solution to get approximate scores.
+    
+    2. You have 30 probes - use them to RANK all proposals BEFORE spending full evaluations.
+    
+    3. Select top 3-5 by probe score for full evaluation.
+    
+    4. If a probe score is < current best, SKIP full evaluation and try a different proposal.
+    
+    ## Phase 3: Full Evaluation & Refinement
+    
+    1. For each top proposal, call evaluate_solution ONCE to confirm.
+    
+    2. If a proposal beats the record: refine it slightly (small mutations), but DON'T exhaust it.
+    
+    3. If no proposal beats the record: generate a NEW set of candidates from a different angle.
+    
+    ## Phase 4: Stalled Recovery
+    
+    If stuck after 10 iterations:
+    - Call generate_candidates again
+    - Try completely new families (e.g., if only tried smooth functions, try sharp ones)
+    - Mix and match: combine elements from successful proposals
+    
+    ## Key Rule
+    
+    PARALLEL EXPLORATION > SEQUENTIAL REFINEMENT. When one type fails, immediately switch to a new type.
+    Do not spend 5+ iterations refining a function family that is not beating the record.
+new_middlewares:
+- name: probe_before_eval
+  hook: before_tool
+  description: Ensures probe is used before evaluate to filter variants efficiently.
+  implementation_py: |
+    def before_tool(hook_input):
+        if "evaluate_solution" in hook_input.get("tool_name", ""):
+            return "IMPORTANT: Have you called probe_solution for this variant first? Use probes to filter before spending full evaluations. You have 30 probes!"
+        return None
+- name: family_diversity_reminder
+  hook: before_model
+  description: Reminds the solver to try new function families when stuck.
+  implementation_py: |
+    def before_model(hook_input):
+        iterations = hook_input.get("iteration", 0)
+        if iterations >= 15:
+            return "You've done many iterations. Have you tried DIFFERENT function families (Gaussian, spline, oscillatory, etc.)? Don't refine the same type endlessly."
+        return None

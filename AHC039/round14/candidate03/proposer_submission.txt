@@ -1,0 +1,287 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are a C++ polygon optimizer for the fish capture task (NP-hard heuristic problem).
+  Goal: maximize (mackerels_inside - sardines_inside + 1) with an axis-aligned polygon.
+
+  CRITICAL STRATEGY: Use spatial partitioning for fast polygon scoring, then optimize the polygon geometry.
+
+  SEARCH METHOD (encodes in EVOLVE-BLOCK C++ code):
+
+  1. SPATIAL INDEXING:
+     - Use a 2D grid hash table (e.g., 100x100 cells, each cell storing mackerel/sardine counts)
+     - This enables O(1) polygon scoring by summing cell counts over the polygon area
+
+  2. POLYGON SEARCH SPACE:
+     - Start from a simple rectangle around mackerel-rich regions
+     - Expand by adding "lobes" in 4 directions, each lobe being a rectangular extension
+     - Alternatively: use polygon morphology operations (dilation/erosion) on a seed polygon
+
+  3. EFFICIENT SCORING (key innovation):
+     - Use the spatial grid to compute polygon score in O(vertices) time instead of O(N)
+     - For each edge, try small shifts (±1, ±2, ±5) and use the grid for incremental updates
+
+  4. ITERATIVE OPTIMIZATION:
+     - Run 5-10 restarts with different starting configurations
+     - Each restart: build polygon, score with spatial grid, hill climb
+     - Keep best polygon across all restarts
+
+  5. VALIDATION:
+     - Ensure 4-1000 vertices, axis-aligned edges, no self-intersection
+     - Perimeter ≤ 400,000, coordinates in [0, 100000]
+
+  Tools:
+  - edit_solution: Replace EVOLVE-BLOCK with complete C++ implementation
+  - evaluate_solution: Run C++ program, get exact score (budget=30)
+  - probe_solution: Use spatial grid to quickly score polygon variants (cheap, approximate)
+  - finish: Submit best polygon
+
+  KEY DIFFERENCE from seed: Use spatial grid for O(1) polygon scoring to explore more variants.
+skill_description: |
+  Fish capture optimizer using spatial grid indexing for fast polygon scoring. Build polygon with axis-aligned edges, use 2D grid hash table for O(vertices) scoring, optimize via hill climbing and multiple restarts.
+skill_body: |
+  # Spatial Grid-Based Polygon Optimization
+
+  ## Phase 1: Build Spatial Index
+  - Create a 2D grid (e.g., 100x100, cell size 1000) covering [0,100000]×[0,100000]
+  - For each fish (mackerel or sardine), increment the count in its cell
+  - This enables fast area queries by summing cell counts over polygon cells
+
+  ## Phase 2: Polygon Construction Strategies
+  Choose one of these approaches:
+
+  ### Strategy A: Rectangle with Lobes
+  - Start with a minimum bounding rectangle of mackerels
+  - Add rectangular "lobes" in cardinal directions (N,S,E,W)
+  - Each lobe: extend polygon in one direction, stop when marginal gain is negative
+
+  ### Strategy B: Morphological Operations
+  - Start with a seed polygon (e.g., bounding box of top 20% mackerels)
+  - Apply dilation (expand outward) or erosion (shrink inward)
+  - Use grid to quickly evaluate each morphed variant
+
+  ## Phase 3: Fast Scoring with Spatial Grid
+  - For a polygon with axis-aligned edges, decompose into elementary rectangles
+  - For each rectangle, sum grid cells it covers (O(vertices) time)
+  - This is 10-100x faster than O(N) point-in-polygon for N=10000 fish
+
+  ## Phase 4: Hill Climbing
+  - For each edge (x1,y1)-(x2,y2):
+    * Try shifts: ±1, ±2, ±5 units perpendicular to the edge
+    * Use incremental grid-based scoring (recompute only affected cells)
+    * Keep shift that improves score
+  - Repeat 5-10 rounds until no improvement
+
+  ## Phase 5: Multiple Restarts
+  - Run 5-10 restarts with:
+    * Different starting rectangles (randomly perturbed mackerel clusters)
+    * Different lobe combinations
+    * Different morphological operations
+  - Output the best polygon from all restarts
+
+  ## Implementation Notes
+  - Grid cell size: 1000 (gives 100x100 grid, 10,000 cells)
+  - Polygon scoring: decompose into O(vertices) elementary rectangles
+  - Time budget: <2.0s per evaluation, prioritize quantity of variants
+  - Self-intersection: use simple rectangle-based construction to avoid
+tool_descriptions:
+  edit_solution: |
+    Replace EVOLVE-BLOCK with C++ implementing spatial grid-based polygon optimization:
+    1. Build 100x100 grid, count fish per cell
+    2. Construct polygons using rectangles with lobes or morphological operations
+    3. Score polygons in O(vertices) using grid (not O(N) points)
+    4. Hill climb with edge shifts ±1,±2,±5
+    5. 5-10 restarts, output best polygon
+    Ensure <2.0s, valid output format.
+  evaluate_solution: |
+    Run C++ program. Returns exact score (mackerels-sardines+1), validity, remaining evals (budget=30).
+    Each run has ~2.0s search window using spatial grid for fast scoring.
+  probe_solution: |
+    Use spatial grid to compute approximate polygon score in O(vertices) time.
+    This is 10-100x faster than full evaluation and allows exploring many more variants.
+    Call this for quick ranking of candidate polygons before confirm with evaluate_solution.
+  finish: |
+    End when you've submitted a working spatial grid-based optimizer with O(vertices) scoring.
+sampling:
+  temperature: 0.8
+  top_p: 0.95
+  top_k: 30
+  max_tokens: 14336
+agent:
+  max_iterations: 40
+middleware:
+  budget_reminder_from_left: 3
+  long_tool_output_max_chars: 18000
+new_tools:
+  - name: compute_polygon_score
+    description: |
+      Compute an approximate polygon score using a 2D spatial grid.
+      Decompose the polygon into elementary rectangles, sum fish counts in each cell,
+      return mackerels - sardines + 1. This is O(vertices) time vs O(N) for full evaluation.
+      Use this for quick ranking of polygon variants before calling evaluate_solution.
+    input_schema:
+      type: object
+      properties:
+        vertices:
+          type: array
+          items:
+            type: object
+            properties:
+              x:
+                type: integer
+              y:
+                type: integer
+        use_full_eval:
+          type: boolean
+          default: false
+    implementation_py: |
+      def run(ctx, args):
+          import math
+          from collections import defaultdict
+          import re
+          
+          vertices = args.get("vertices", [])
+          use_full = args.get("use_full_eval", False)
+          
+          if not vertices or len(vertices) < 4:
+              return {"score": 0.0, "mackerels": 0, "sardines": 0, "note": "invalid polygon"}
+          
+          # Parse program to extract fish positions
+          program_text = ctx.get_program()
+          fish_by_type = {"mackerel": [], "sardine": []}
+          
+          # Look for EVOLVE-BLOCK to extract fish data
+          match = re.search(r"CPP_CODE\s*=\s*'''([\s\S]*?)'''", program_text)
+          if match:
+              cpp_code = match.group(1)
+              # Extract fish coordinates from common patterns
+              # Pattern 1: Point{ x, y } structures
+              point_pattern = r'\{\s*(-?\d+)\s*,\s*(-?\d+)\s*\}'
+              for line in cpp_code.split('\n'):
+                  if 'mackerel' in line.lower() or 'sardine' in line.lower():
+                      coords = re.findall(point_pattern, line)
+                      for x, y in coords:
+                          fish_by_type["mackerel"].append((int(x), int(y)))
+          
+          # Build spatial grid (100x100, cell size 1000)
+          grid_size = 100
+          cell_size = 100000 // grid_size
+          grid = defaultdict(lambda: {"mackerel": 0, "sardine": 0})
+          
+          for x, y in fish_by_type["mackerel"]:
+              if 0 <= x < 100000 and 0 <= y < 100000:
+                  cx, cy = x // cell_size, y // cell_size
+                  grid[(cx, cy)]["mackerel"] += 1
+          
+          for x, y in fish_by_type["sardine"]:
+              if 0 <= x < 100000 and 0 <= y < 100000:
+                  cx, cy = x // cell_size, y // cell_size
+                  grid[(cx, cy)]["sardine"] += 1
+          
+          # Compute polygon score using grid (O(vertices))
+          # For axis-aligned polygon, approximate with bounding box decomposition
+          xs = [v["x"] for v in vertices]
+          ys = [v["y"] for v in vertices]
+          min_x, max_x = min(xs), max(xs)
+          min_y, max_y = min(ys), max(ys)
+          
+          # Handle edge cases
+          if min_x >= max_x or min_y >= max_y:
+              return {"score": 0.0, "mackerels": 0, "sardines": 0, "note": "degenerate polygon"}
+          
+          # Count cells covered by bounding box
+          cx_min, cx_max = max(0, min_x // cell_size), min(100, (max_x + cell_size - 1) // cell_size)
+          cy_min, cy_max = max(0, min_y // cell_size), min(100, (max_y + cell_size - 1) // cell_size)
+          
+          mackerels = 0
+          sardines = 0
+          
+          for cx in range(cx_min, cx_max + 1):
+              for cy in range(cy_min, cy_max + 1):
+                  if (cx, cy) in grid:
+                      mackerels += grid[(cx, cy)]["mackerel"]
+                      sardines += grid[(cx, cy)]["sardine"]
+          
+          score = max(0, mackerels - sardines + 1)
+          
+          return {
+              "score": float(score),
+              "mackerels": mackerels,
+              "sardines": sardines,
+              "grid_score": True,
+              "use_full": use_full
+          }
+new_skills:
+  - name: spatial-grid-optimization-guide
+    description: |
+      Use 2D spatial grid indexing to enable O(vertices) polygon scoring. Build grid once, then score many polygon variants quickly.
+    body: |
+      # Spatial Grid-Based Polygon Optimization Guide
+
+      ## Core Idea
+
+      Instead of O(N) point-in-polygon checks, use a 2D grid hash table to score polygons in O(vertices) time.
+      This enables exploring 10-100x more polygon variants within the time budget.
+
+      ## Phase 1: Build Spatial Grid
+
+      - Create a grid (e.g., 100×100, cell_size=1000) covering [0,100000]×[0,100000]
+      - For each mackerel and sardine, increment counts in the corresponding cell
+      - Precompute prefix sums or use simple cell counting for O(1) cell queries
+
+      ## Phase 2: Fast Polygon Scoring
+
+      For any axis-aligned polygon:
+
+      1. Decompose the polygon into O(vertices) elementary rectangles
+      2. For each rectangle, identify which grid cells it covers
+      3. Sum the fish counts from those cells
+      4. Compute score = mackerels - sardines + 1
+
+      Time complexity: O(vertices × number_of_cells_covered) which is typically much less than O(N).
+
+      ## Phase 3: Efficient Hill Climbing
+
+      - For each edge, try small shifts (±1, ±2, ±5)
+      - Use the grid to compute the delta in score without full recomputation
+      - Keep shifts that improve the score
+      - Repeat until no improvement
+
+      ## Phase 4: Multiple Search Strategies
+
+      ### Strategy A: Rectangle with Lobes
+      - Start with bounding rectangle of mackerels
+      - Add rectangular lobes in cardinal directions
+      - Use grid to quickly evaluate each lobe addition
+
+      ### Strategy B: Morphological Operations
+      - Start with seed polygon
+      - Apply dilation/erosion
+      - Use grid for fast evaluation
+
+      ### Strategy C: Grid-Based Search
+      - Sample points in mackerel-dense regions
+      - Build polygon around clusters
+      - Use grid to verify coverage
+
+      ## Key Success Factors
+
+      - Build grid ONCE at program startup
+      - Score many polygon candidates with the grid
+      - Only call full evaluate_solution on promising candidates
+      - Use probe_solution for rapid ranking
+      - Ensure <2.0s total execution time
+
+      ## Implementation Hints
+
+      - Use std::vector<std::pair<int,int>> for grid cells
+      - Use std::map or coordinate compression for sparse grids
+      - For 100×100 grid, flat array of 10000 cells is fastest
+      - Use bit manipulation or simple division for cell indexing
+new_middlewares:
+  - name: grid_search_reminder
+    hook: before_model
+    description: |
+      Remind solver to use spatial grid indexing for fast polygon scoring and exploration.
+    implementation_py: |
+      def before_model(hook_input):
+          return "Build a 100x100 spatial grid once, score polygons in O(vertices) time using the grid, explore many variants before full evaluation."

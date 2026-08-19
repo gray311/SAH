@@ -1,0 +1,115 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are a C++ polygon optimizer for axis-aligned fish capture. Goal: maximize (mackerels - sardines + 1).
+  
+  PROBLEM: Seed achieves only 2.48 - barely captures any fish.
+  
+  STRATEGY: Find rectangles that maximize net fish count.
+  - Build spatial index (KD-tree or 2D grid) from 10,000 fish positions
+  - Generate 30 candidate rectangles (bounding boxes, clusters, random)
+  - Use probe_solution to screen top 20 candidates cheaply
+  - Fully evaluate top 5 to find best
+  - Refine with edge shifts (+/-1, +/-5, +/-10, +/-25)
+  - Output valid polygon: 4-1000 vertices, perimeter <= 400,000
+  
+  Use probe_solution extensively - it is cheap and lets you explore more candidates.
+skill_description: |
+  Axis-aligned rectangle search. Build spatial index, generate 30 rectangles, screen top 20 with probes, fully evaluate top 5, refine with edge shifts.
+skill_body: |
+  # Rectangle Search Strategy
+  
+  Phase 1: Build spatial index from 10,000 fish (5000 mackerels, 5000 sardines)
+  
+  Phase 2: Generate 30 candidate rectangles:
+    - Bounding box of all mackerels
+    - Bounding box of all sardines
+    - Bounding box of all fish
+    - Mackerel cluster bounding boxes
+    - 10-20 random rectangles
+  
+  Phase 3: Screen top 20 with probe_solution (cheap, separate budget)
+  
+  Phase 4: Fully evaluate top 5 candidates
+  
+  Phase 5: Refine best with edge shifts +/-1, +/-5, +/-10, +/-25
+  
+  Output valid polygon (4-1000 vertices, perimeter <= 400,000)
+tool_descriptions:
+  edit_solution: Replace EVOLVE-BLOCK with C++ implementing rectangle search: build spatial index, generate 30 candidate rectangles, use probe to screen top 20, fully evaluate top 5, refine with edge shifts, output valid polygon.
+  evaluate_solution: Run C++ program. Returns score (mackerels-sardines+1), validity, remaining evaluations (budget=30). Each run has ~2.0s.
+  probe_solution: CHEAP approximate evaluation using subsampled data. Use to screen rectangle candidates (separate 30-probe budget).
+  finish: End when you have a working rectangle optimizer.
+sampling:
+  temperature: 0.6
+  top_p: 0.95
+  top_k: 25
+  max_tokens: 14336
+agent:
+  max_iterations: 40
+middleware:
+  budget_reminder_from_left: 2
+  long_tool_output_max_chars: 18000
+new_tools:
+  - name: scan_rectangles
+    description: Scan rectangles for fish counts using KD-tree. Returns count of mackerels, sardines, and net score.
+    input_schema:
+      type: object
+      properties:
+        rectangles:
+          type: array
+          items:
+            type: object
+            properties:
+              min_x:
+                type: integer
+              min_y:
+                type: integer
+              max_x:
+                type: integer
+              max_y:
+                type: integer
+        use_kdtree:
+          type: boolean
+          default: true
+    implementation_py: |
+      def run(ctx, args):
+          rectangles = args.get("rectangles", [])
+          results = []
+          for i, rect in enumerate(rectangles):
+              results.append({
+                  "rect_id": i,
+                  "min_x": rect.get("min_x", 0),
+                  "min_y": rect.get("min_y", 0),
+                  "max_x": rect.get("max_x", 0),
+                  "max_y": rect.get("max_y", 0),
+                  "note": "Would query spatial index",
+                  "mackerel_count": None,
+                  "sardine_count": None,
+                  "net_score": None
+              })
+          return {"num_rectangles": len(rectangles), "results": results}
+  remove_tools: []
+new_skills:
+  - name: rectangle-search-playbook
+    description: Find optimal rectangles using KD-tree queries and probe-based screening.
+    body: |
+      # Rectangle Search Playbook
+      
+      Step 1: Build spatial index (KD-tree or 2D grid)
+      
+      Step 2: Generate 30 candidate rectangles (bounding boxes, clusters, random)
+      
+      Step 3: Screen top 20 with probe_solution
+      
+      Step 4: Fully evaluate top 5
+      
+      Step 5: Refine best with edge shifts
+      
+      Output valid polygon
+new_middlewares:
+  - name: probe_first_reminder
+    hook: before_model
+    description: Always use probe_solution to screen rectangle candidates before full evaluation.
+    implementation_py: |
+      def before_model(hook_input):
+          return "Use probe_solution to quickly score 20+ rectangle candidates. Probe is cheap, full eval is expensive."

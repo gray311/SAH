@@ -1,0 +1,120 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are a C++ optimizer for the axis-aligned fish capture problem. Goal: maximize (mackerels inside - sardines inside + 1).
+
+  STRATEGY: Rectangle union with KD-tree scoring and probe-based screening.
+
+  PHASE 1 - GRID SAMPLING:
+  - Build a sparse grid (e.g., 100x100 cells of 1000x1000) over [0,100000]x[0,100000]
+  - For each cell, use probe_solution to estimate mackerel/sardine count (subsample the fish list)
+  - Identify top 30 cells with highest (M-S)
+
+  PHASE 2 - RECTANGLE CONSTRUCTION:
+  - From top cells, try to form rectangles by expanding in 4 directions
+  - Each rectangle should be at least 200x200 to avoid boundary effects
+  - Limit: can create up to 5 disjoint rectangles (total perimeter <= 400,000)
+
+  PHASE 3 - PROBE-GUIDED SEARCH:
+  - For each candidate rectangle configuration, call probe_solution for fast scoring
+  - Try edge perturbations: +/-10, +/-50, +/-100 units
+  - Keep top 3 probe scores, then do 1 full evaluate_solution
+
+  PHASE 4 - DEEP HILL CLIMBING:
+  - For winning candidates: refine rectangle boundaries using binary search
+  - Try to merge adjacent rectangles if beneficial
+  - Use KD-tree for O(log N) fish counting in rectangles
+
+  PHASE 5 - MULTIPLE RESTARTS:
+  - Run 25 restarts with different random seeds
+  - Each restart: perturb seed selection, build rectangles, probe-filter, evaluate
+  - Output best polygon across all restarts
+
+  TOOLS:
+  - edit_solution: Replace EVOLVE-BLOCK with this strategy
+  - evaluate_solution: Full score (uses 1 of 30 budget)
+  - probe_solution: Cheap approximate score (up to 30 probes, does not consume eval budget)
+  - finish: Submit when you have encoded rectangle-union search with probing
+
+  CONSTRAINTS: 4-1000 vertices, integer coords in [0,100000], no self-intersection, perimeter <= 400,000.
+
+  KEY INNOVATION: Use probe_solution to screen many rectangle candidates before full evaluation. This enables exploring 100+ rectangle configurations per eval while staying under 2.0s.
+skill_description: |
+  Rectangle union with KD-tree and probe-based screening. Build sparse grid, use probes to rank candidate rectangles, combine into disjoint rectangles, deep hill climb with edge refinement, 25 restarts.
+skill_body: |
+  # Rectangle Union with Probe Screening
+
+  ## Core Idea
+  Instead of corridor expansion, use **rectangle union**: find optimal axis-aligned rectangles that cover mackerel-rich areas, combine up to 5 disjoint rectangles.
+
+  ## Phase 1: Sparse Grid Sampling
+  - 100x100 grid over [0,100000]x[0,100000] (cell_size=1000)
+  - For each cell, use probe_solution with subsampling to estimate M and S
+  - Track cell score = M - S
+  - Identify top 30 cells
+
+  ## Phase 2: Rectangle Construction
+  For each top cell, expand into a rectangle:
+  - Start from cell center
+  - Expand E/W until: boundary, 0 score, or another rectangle
+  - Expand N/S similarly
+  - Minimum rectangle: 200x200
+  - Maximum rectangles: 5 (to stay within perimeter budget)
+
+  ## Phase 3: Probe-Guided Ranking
+  For each candidate rectangle configuration:
+  1. Call probe_solution for fast approximate scoring (~10s)
+  2. Try edge shifts: +/-10, +/-50, +/-100 units in each direction
+  3. Keep top 3 configurations by probe score
+  4. Evaluate the best 1-2 with evaluate_solution
+
+  ## Phase 4: KD-Tree Hill Climbing
+  - Each rectangle uses KD-tree for O(log N) exact fish counting
+  - Binary search for optimal edge positions
+  - Try merging adjacent rectangles if (M-S) increases
+
+  ## Phase 5: Restart Strategy
+  - 25 restarts with different seeds
+  - Perturb top-30 cell selection randomly
+  - Always keep global best
+
+  ## Implementation Notes
+  - Use KD-tree for efficient rectangle queries (already in seed)
+  - Probe-based screening reduces evaluation budget waste
+  - Output valid polygon: list of rectangles as consecutive vertices
+  - Perimeter = sum of perimeters of all rectangles
+tool_descriptions:
+  edit_solution: |
+    Replace EVOLVE-BLOCK with rectangle-union strategy:
+    1. Build 100x100 grid, use probe to estimate M-S per cell
+    2. From top 30 cells, expand to rectangles (min 200x200)
+    3. Limit to 5 disjoint rectangles (perimeter <= 400,000)
+    4. Use probe to screen candidates, evaluate best
+    5. KD-tree hill climbing for edge refinement
+    6. 25 restarts, output best polygon
+    Ensure <2.0s execution.
+  evaluate_solution: |
+    Run C++ program. Returns score (mackerels-sardines+1), validity, and remaining evaluations (budget=30).
+  probe_solution: |
+    Cheap approximate score using subsampling (up to 30 probes). Uses KD-tree estimation on subsampled fish. Does NOT consume eval budget.
+  finish: |
+    End when you have encoded rectangle-union search with probe screening.
+sampling:
+  temperature: 0.8
+  top_p: 0.95
+  top_k: 30
+  max_tokens: 16384
+agent:
+  max_iterations: 80
+middleware:
+  budget_reminder_from_left: 3
+  long_tool_output_max_chars: 20000
+new_tools: []
+new_skills: []
+new_middlewares:
+  - name: probe_reminder
+    hook: before_model
+    description: |
+      generated middleware to remind solver to use probe before eval
+    implementation_py: |
+      def before_model(hook_input):
+          return "Call probe_solution to screen rectangle candidates before evaluate. Try edge shifts +/-10, +/-50, +/-100. Use KD-tree for fast counting. 25 restarts."

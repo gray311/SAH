@@ -1,0 +1,237 @@
+schema: h2spec/1.0
+system_prompt: |
+  Erdos minimum overlap problem: You must EDIT the seed optimizer's _get_best_initialization method to ADD new pattern variations that it can evaluate.
+
+  The seed optimizer already has 15 patterns. It will train EACH pattern for 59000 steps and return the best result.
+
+  Your job: Edit the EVOLVE-BLOCK to INSERT new, diverse pattern initializations into _get_best_initialization.
+
+  Pattern types to try:
+  - Concentrated peaks (delta-like functions at specific points)
+  - Broad flat regions with sharp transitions
+  - Multiple-step functions (piecewise constant with different step heights)
+  - Asymmetric patterns (e.g., high on [0, 0.3], low on [1.7, 2])
+  - Sinusoidal with different frequencies
+
+  After editing, call edit_solution to apply changes, then evaluate_solution to see if combined_score > 1.0.
+
+  Budget: 30 evaluations total. Each edit->evaluate cycle costs 1 eval.
+
+  Goal: Find h with c5_bound < 0.38092303510845016 (combined_score > 1.0).
+skill_description: |
+  Edit the seed optimizer's _get_best_initialization method to add new pattern variations. Each pattern is trained for 59000 steps.
+skill_body: |
+  # Strategy: Edit _get_best_initialization to Add New Patterns
+
+  ## Why Edit, Not Generate?
+
+  The seed optimizer has a fixed _get_best_initialization method that generates initializations and trains each for 59000 steps.
+  You cannot "generate candidates" separately - you must EDIT THIS CODE to add new patterns it can train.
+
+  ## Pattern Categories to Insert
+
+  1. **Concentrated Peaks**: Place most probability mass at a single narrow region
+     - h(x) ~ 1 for x in [c-0.1, c+0.1], ~0 elsewhere
+     - Try centers at: 0.1, 0.5, 0.9, 1.2, 1.6, 1.9
+
+  2. **Asymmetric Step Functions**: 
+     - High on [0, 0.33], low on [0.67, 2] (integral constraint: area ~1)
+
+  3. **Sinusoidal Variants**: sin(pi*x), sin(2*pi*x) with different phases
+
+  ## Editing Technique
+
+  1. Find the existing pattern block in _get_best_initialization
+  2. Add a new pattern block after the last existing pattern
+  3. Each pattern must use jax.lax.stop_gradient, sigmoid, and compute c5 bound
+  4. Call edit_solution with the new code
+
+  ## Evaluation Strategy
+
+  1. Edit to add 1 new pattern per iteration
+  2. Run edit_solution to apply the edit
+  3. Call evaluate_solution once (the optimizer will try all patterns)
+  4. If combined_score improves (>1.0), try similar patterns
+  5. With 30 evals, you can test ~15 new patterns
+
+  ## Concrete Pattern Example
+
+  # Pattern 15: Concentrated peak at 0.25
+  key, subkey = jax.random.split(key)
+  x = jnp.linspace(0, 2, N)
+  c = 0.25
+  latent = jnp.zeros(N)
+  mask = jnp.abs(x - c) < 0.12
+  latent = latent.at[mask].set(6.0)
+  latent = latent.at[~mask].set(-6.0)
+  latent = latent + jax.random.normal(subkey, (N,)) * 0.3
+  latent = jax.lax.stop_gradient(latent)
+  h = jax.nn.sigmoid(latent)
+  j_val = 1.0 - h
+  h_padded = jnp.pad(h, (0, N))
+  j_padded = jnp.pad(j_val, (0, N))
+  corr_fft = jnp.fft.fft(h_padded) * jnp.conj(jnp.fft.fft(j_padded))
+  correlation = jnp.fft.ifft(corr_fft).real
+  obj = jnp.max(correlation * self.dx)
+  if obj < best_obj:
+      best_obj = obj
+      best_latent = latent
+
+  ## Try Different Centers
+
+  Change c to: 0.25, 0.5, 0.75, 1.25, 1.5, 1.75
+tool_descriptions:
+  edit_solution: |
+    Edit the EVOLVE-BLOCK to add new patterns to _get_best_initialization.
+    
+    To add a pattern, insert a new pattern block after the last existing pattern (Pattern 14).
+    Use the example pattern template above, changing the center value.
+  evaluate_solution: |
+    Run full 59000-step optimization. Returns combined_score > 1.0 for new records.
+  probe_solution: |
+    Approximate c5 bound using 500 intervals.
+  finish: |
+    Submit when combined_score > 1.0.
+sampling:
+  temperature: 0.5
+  top_p: 0.95
+  top_k: 30
+  max_tokens: 12000
+agent:
+  max_iterations: 40
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 6000
+new_tools:
+  - name: generate_pattern_edit
+    description: |
+      Generate a Python code snippet to insert into _get_best_initialization.
+      The snippet implements a new pattern variation for the Erdos optimizer.
+      Call with pattern_type and center, then use output with edit_solution.
+    input_schema:
+      type: object
+      properties:
+        pattern_type:
+          type: string
+          default: "concentrated_peak"
+        center:
+          type: number
+          default: 0.5
+    implementation_py: |
+      def run(ctx, args):
+          import math
+          pattern_type = args.get("pattern_type", "concentrated_peak")
+          center = args.get("center", 0.5)
+          return {
+              "pattern_code": "# Pattern 15: {type} at {c}\n"
+                             "key, subkey = jax.random.split(key)\n"
+                             "x = jnp.linspace(0, 2, N)\n"
+                             "c = {c}\n"
+                             "latent = jnp.zeros(N)\n"
+                             "mask = jnp.abs(x - c) < 0.12\n"
+                             "latent = latent.at[mask].set(6.0)\n"
+                             "latent = latent.at[~mask].set(-6.0)\n"
+                             "latent = latent + jax.random.normal(subkey, (N,)) * 0.3\n"
+                             "latent = jax.lax.stop_gradient(latent)\n"
+                             "h = jax.nn.sigmoid(latent)\n"
+                             "j_val = 1.0 - h\n"
+                             "h_padded = jnp.pad(h, (0, N))\n"
+                             "j_padded = jnp.pad(j_val, (0, N))\n"
+                             "corr_fft = jnp.fft.fft(h_padded) * jnp.conj(jnp.fft.fft(j_padded))\n"
+                             "correlation = jnp.fft.ifft(corr_fft).real\n"
+                             "obj = jnp.max(correlation * self.dx)\n"
+                             "if obj < best_obj:\n"
+                             "    best_obj = obj\n"
+                             "    best_latent = latent".replace("{type}", pattern_type).replace("{c}", str(center))
+          }
+new_skills:
+  - name: pattern-edit-strategy
+    description: |
+      Edit the seed optimizer's _get_best_initialization to add new pattern variations.
+      Focus on concentrated peaks at different centers.
+    body: |
+      # Pattern Edit Strategy for Erdos Optimization
+
+      ## Understanding the Problem
+
+      The seed optimizer's _get_best_initialization method already has 15 patterns.
+      Each pattern is trained for 59000 steps. The best result across all patterns is returned.
+
+      To improve, you must ADD new patterns that the optimizer can evaluate.
+
+      ## Why Edit, Not Generate?
+
+      - The optimizer trains each pattern for 59000 steps
+      - You cannot "generate candidates" separately
+      - You must EDIT the code to add new patterns
+
+      ## Best Pattern Type: Concentrated Peaks
+
+      Place most probability mass at a single narrow region.
+      Try centers at: 0.25, 0.5, 0.75, 1.25, 1.5, 1.75
+
+      ## Editing Process
+
+      1. Call generate_pattern_edit with pattern_type="concentrated_peak" and a center value
+      2. The tool returns a code snippet
+      3. Insert the pattern block into _get_best_initialization (after Pattern 14)
+      4. Call edit_solution to apply the edit
+      5. Call evaluate_solution (tests all patterns)
+      6. If combined_score > 1.0, try similar patterns with different centers
+
+      ## Example
+
+      Add this new pattern:
+
+      # Pattern 15: concentrated_peak at 0.25
+      key, subkey = jax.random.split(key)
+      x = jnp.linspace(0, 2, N)
+      c = 0.25
+      latent = jnp.zeros(N)
+      mask = jnp.abs(x - c) < 0.12
+      latent = latent.at[mask].set(6.0)
+      latent = latent.at[~mask].set(-6.0)
+      latent = latent + jax.random.normal(subkey, (N,)) * 0.3
+      latent = jax.lax.stop_gradient(latent)
+      h = jax.nn.sigmoid(latent)
+      j_val = 1.0 - h
+      h_padded = jnp.pad(h, (0, N))
+      j_padded = jnp.pad(j_val, (0, N))
+      corr_fft = jnp.fft.fft(h_padded) * jnp.conj(jnp.fft.fft(j_padded))
+      correlation = jnp.fft.ifft(corr_fft).real
+      obj = jnp.max(correlation * self.dx)
+      if obj < best_obj:
+          best_obj = obj
+          best_latent = latent
+
+      ## Budget Management
+
+      - 30 total evals
+      - 1 eval per edit->evaluate cycle
+      - Test ~15 new patterns
+new_middlewares:
+  - name: focus_on_edits
+    hook: before_model
+    description: |
+      Remind the solver to focus on editing the optimizer code.
+      The seed optimizer can't use external candidates - new patterns must be in the code.
+    implementation_py: |
+      def before_model(hook_input):
+          state = hook_input.get("state", {})
+          evals_left = state.get("evals_left", 0)
+          edit_count = state.get("edit_count", 0)
+          if evals_left >= 3 and edit_count < 5:
+              return (
+                  "You have evals left and haven't edited much.\\n"
+                  "Call generate_pattern_edit to get new pattern code.\\n"
+                  "Insert it into _get_best_initialization and edit the EVOLVE-BLOCK.\\n"
+                  "Don't waste evals on analytical screening.\\n"
+                  "Test concentrated peaks at centers 0.25, 0.5, 0.75, 1.25, 1.5, 1.75."
+              )
+          elif evals_left >= 1:
+              return (
+                  f"{evals_left} eval left.\\n"
+                  "Edit to add a new pattern.\\n"
+                  "Or try a new pattern center value."
+              )
+          return None

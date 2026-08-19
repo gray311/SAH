@@ -1,0 +1,73 @@
+schema: h2spec/1.0
+system_prompt: "You are an expert software developer specializing in Mixture-of-Expert (MoE) load balancing algorithms. Your task is to improve an Expert Parallelism Load Balancer (EPLB) implementation to maximize a combined score that rewards both load balance quality AND algorithm execution efficiency.\n\nThe program has a single editable EVOLVE-BLOCK. Only code inside that region is yours to change. Keep the fixed entry function and imports outside it intact.\n\nYour two objectives:\n1. Improve load balancing: reduce variance in expert load distribution across GPUs\n2. Improve efficiency: reduce the algorithm's own runtime (perfect balancing is NP-hard, so good approximations are needed)\n\nThe evaluator measures both metrics and combines them into a single score (higher is better). A score of 0.127+ is achievable.\n\nTools available:\n- edit_solution(code) — Change the EVOLVE-BLOCK. Prefer targeted SEARCH/REPLACE diffs.\n- evaluate_solution() — Run the current program; returns combined_score, validity, errors, best_so_far, and evaluations_left.\n- probe_solution() — Fast approximate evaluation on ~2000 rows; does NOT consume evaluation budget. Use to rank variants cheaply before full evaluation.\n- analyze_eplb_inputs() — ONE-TIME task input inspection. Sample the weight matrices to understand their shape, dimension ratios, and value distributions. Call this ONCE before editing.\n\nMethod:\n1. Call analyze_eplb_inputs() first to see the weight matrix shapes (num_moe_layers, num_logical_experts), group sizes, and expert weight distributions.\n2. Based on the data, hypothesize a specific improvement: reduce a loop complexity, add early termination, use better tie-breaking, or optimize tensor operations.\n3. Apply ONE targeted edit (or ONE new subroutine in the EVOLVE-BLOCK).\n4. Probe multiple variants to compare, then evaluate the best one.\n5. When evaluations are low, consolidate on the most promising variant.\n6. Call finish when done.\n\nImportant: The EPLB uses balanced_packing() for grouping, replicate_experts() for adding replicas, and rebalance_experts_hierarchical() as the main function. Look for O(n²) loops, redundant tensor creations, or inefficient tie-breaking logic.\n\nMake changes that trade off slightly less perfect balancing for significantly faster runtime, or vice versa, depending on which metric the evaluator weights more heavily."
+skill_description: "Optimize MoE EPLB algorithms for better load balance and execution efficiency. Use analyze_eplb_inputs to understand input structure, then systematically improve the balanced_packing, replicate_experts, or rebalance_experts_hierarchical functions."
+skill_body: "# MoE EPLB Optimization Strategy\n\n## Objective\nMaximize the combined score that balances load quality and algorithm efficiency. The evaluator rewards:\n- Lower variance in expert load across GPUs\n- Faster execution time of the rebalancing algorithm\n\n## Step 1: Analyze Inputs\nCall `analyze_eplb_inputs()` ONCE to inspect the weight matrix dimensions and value distributions. Typical inputs are [num_moe_layers, num_logical_experts] tensors, often with 16-64 experts per group.\n\n## Step 2: Identify Bottlenecks\nLook for:\n- O(n²) loops in `balanced_packing()`: the inner loop checking all packs for every group\n- Redundant tensor allocations: creating full-sized tensors before use\n- Inefficient tie-breaking: scanning all packs instead of tracking minimums\n- Memory access patterns: CPU vs GPU operations, transpose operations\n\n## Step 3: Targeted Improvements\nTry ONE of these per edit:\n1. **Vectorize the pack assignment**: Replace inner loops with `torch.argmin()` or `torch.sort()`\n2. **Add early termination**: If all packs have equal items, stop assigning\n3. **Optimize tie-breaking**: Track min-weight packs in a priority structure\n4. **Reduce tensor size**: Create tensors only when needed, reuse where possible\n5. **Better initialization**: Start with equal-weight packs instead of -1\n\n## Step 4: Verify\n- Use `probe_solution()` to test multiple variants quickly (separate budget)\n- Only run `evaluate_solution()` on your best 1-2 variants\n- Never rewrite the whole EVOLVE-BLOCK for small changes — use SEARCH/REPLACE\n\n## Key insight\nThe current seed algorithm is O(L × E²) where L=layers, E=experts. With 20 evals, you need O(1) edits that each provide measurable gains. Small loop optimizations compound.\n\n## Entry function\nPreserve the exact entry function the evaluator calls. Only modify code inside # EVOLVE-BLOCK-START and # EVOLVE-BLOCK-END.\n\n## Tool reminders\n- `edit_solution`: Use SEARCH/REPLACE for targeted edits. Full rewrites only for structural changes.\n- `evaluate_solution`: Score returns combined_score (higher=better), validity, error, best_so_far, evaluations_left.\n- `probe_solution`: Fast (~10s) approximate score on subsampled data. Does NOT use evaluation budget.\n- `analyze_eplb_inputs`: Call ONCE at start. Returns matrix dimensions and stats. Does NOT consume evaluation budget.\n- `finish`: Call when done or budget exhausted.\n\nRemember: Perfect balancing is NP-hard. Good enough that's fast is often better than perfect that's slow."
+tool_descriptions:
+  edit_solution: 'Change the EVOLVE-BLOCK. Use targeted SEARCH/REPLACE diffs for small changes. Format: <<<<<<< SEARCH / exact lines / ======= / new lines / >>>>>>> REPLACE. Or send full rewrite if structural. Keep fixed entry function intact.'
+  evaluate_solution: 'Run the EPLB algorithm and return combined_score (load balance + efficiency, higher is better). Returns: score, validity, error, best_so_far, evaluations_left. Budget: 20 evals total.'
+  probe_solution: 'Fast approximate evaluation (~10s, ~2000 rows) on subsampled data. Separate 30-probe budget, does NOT consume evaluation budget. Use to rank variants before full evaluation. Scores are approximate and NOT comparable to evaluate_solution.'
+sampling:
+  temperature: 0.5
+  top_p: 0.9
+  top_k: 15
+  max_tokens: 12288
+agent:
+  max_iterations: 50
+middleware:
+  budget_reminder_from_left: 2
+  long_tool_output_max_chars: 10000
+new_tools:
+  - name: analyze_eplb_inputs
+    description: |
+      Sample the task's weight matrices to understand the EPLB input structure.
+      Returns: num_moe_layers, num_logical_experts, group_size (from num_groups), 
+      num_groups, num_nodes estimate, device type, weight min/max/mean/std stats.
+      Call this ONCE at the start of your session before any edits.
+    input_schema: {type: object, properties: {}}
+    implementation_py: |
+      def run(ctx, args):
+          names = ctx.list_task_inputs()
+          if not names:
+              return {"error": "no task inputs found"}
+          # Take the largest input file as the weight matrix
+          names_sorted = sorted(names, key=len)
+          input_name = names_sorted[-1]
+          df = ctx.read_input_df(input_name, nrows=10000)
+          if df.empty:
+              return {"error": "input file is empty or not parseable"}
+          try:
+              rows, cols = df.shape
+              # Infer parameters from the data
+              # The weight matrix is [num_moe_layers, num_logical_experts]
+              num_moe_layers = rows
+              num_logical_experts = cols
+              # Assume num_groups is a divisor of num_logical_experts (e.g., 2, 4, 8)
+              num_groups = 8
+              num_logical_experts_div = num_logical_experts // num_groups
+              # Estimate num_nodes from typical vLLM configs
+              num_nodes = 2
+              # Extract statistics
+              weight_stats = df.describe(include='number').to_dict()
+              mean_vals = [float(w) for w in weight_stats['mean'][:cols]]
+              min_vals = [float(w) for w in weight_stats['min'][:cols]]
+              max_vals = [float(w) for w in weight_stats['max'][:cols]]
+              std_vals = [float(w) for w in weight_stats['std'][:cols]]
+              return {
+                  "num_moe_layers": num_moe_layers,
+                  "num_logical_experts": num_logical_experts,
+                  "num_groups": num_groups,
+                  "num_nodes": num_nodes,
+                  "device": "cuda",
+                  "weight_stats": {
+                      "mean": mean_vals[:10],
+                      "min": min_vals[:10],
+                      "max": max_vals[:10],
+                      "std": std_vals[:10]
+                  },
+                  "total_elements": rows * cols
+              }
+          except Exception as e:
+              return {"error": str(e)}
+remove_tools: []
+new_skills: []
+new_middlewares: []

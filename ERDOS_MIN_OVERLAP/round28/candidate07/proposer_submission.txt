@@ -1,0 +1,157 @@
+schema: h2spec/1.0
+system_prompt: |
+  Erdos minimum overlap problem (C5): Find h: [0,2]->[0,1] minimizing max_k integral h(x)(1-h(x+k))dx.
+
+  CONSTRAINT: integral(h) = 1 exactly. h values in [0,1].
+
+  Current best: C5 <= 0.38092303510845016 (combined_score = 1.0).
+
+  GOAL: Find h achieving c5_bound < 0.38092303510845016 (combined_score > 1.0).
+
+  RECOMMENDED STRATEGY: 
+
+  1. IMMEDIATELY call generate_ready_candidates to get 3 integral-constrained initializations with precomputed c5_bound scores.
+
+  2. CALL evaluate_solution on ALL candidates with c5_bound < 0.385 (lenient threshold to catch improvements).
+
+  3. If no improvement, CREATE NEW PATTERNS by modifying structure:
+     - Try MORE marks in Golomb pattern (6-8 marks at optimal spacing)
+     - Try different bipartite split points: a in [0.3, 0.7]
+     - Try 4-modal patterns (4 narrow peaks)
+     - Try block patterns: k consecutive intervals at 1, rest at 0, normalized
+
+  4. If still stuck, THEN try hyperparameter variations (num_intervals, learning_rate, penalty_strength).
+
+  5. USE generate_ready_candidates again with temperature=0.8 if stuck, to get different patterns.
+
+  6. Key insight: The seed optimizer trains for 59000 steps from random initializations. We need BETTER INITIALIZATIONS, not better training. The analytical candidates from generate_ready_candidates are ready to train immediately.
+
+  7. Evaluate candidates with c5_bound < 0.385 (about 1.5% below current best) - full training can push them over the edge.
+
+  8. If stuck, restart with fundamentally different pattern structures (more marks, different modality count, different block configurations).
+skill_description: |
+  Find better C5 bounds by exploring diverse pattern initializations. Use generate_ready_candidates for cheap screening, evaluate promising candidates fully, then explore new pattern structures if needed. Focus on structural variety, not hyperparameter tuning.
+skill_body: |
+  # Finding Better C5 Bounds: Pattern Exploration Strategy
+
+  ## Core Principle
+
+  The seed optimizer trains for 59000 steps from various pattern initializations. Our goal is to find INITIALIZATIONS that, when trained, achieve c5_bound < 0.380923.
+
+  The analytical tool generate_ready_candidates creates 3 integral-constrained candidates with precomputed c5_bound scores. These are READY TO TRAIN immediately - no hyperparameter search needed.
+
+  ## Step 1: Analytical Screening (Do This FIRST)
+
+  1. CALL generate_ready_candidates(temperature=0.5) - this gives 3 ready-to-train candidates
+  2. CHECK their c5_bound values:
+     - If ANY have c5_bound < 0.385, these are promising starts
+     - Call evaluate_solution on ALL such candidates (up to 3 evals)
+  3. The analytical c5_bound is computed exactly (no training), so we can trust these values
+
+  ## Step 2: Why Train These Candidates?
+
+  - generate_ready_candidates creates candidates that are:
+    - Already sigmoid-scaled (h values in [0,1])
+    - Already integral-normalized (sum(h)*dx = 1.0 exactly)
+    - c5_bound computed via FFT (exact, no approximation)
+  - These candidates may have c5_bound slightly above 0.380923, but 59000 steps of training could push them below
+  - Example: c5_bound = 0.382 might train down to 0.379 - combined_score > 1.0!
+
+  ## Step 3: If No Improvement - Create NEW PATTERNS
+
+  The tool generate_ready_candidates uses fixed patterns (Golomb, Bipartite, Tri-modal). We need to explore MORE:
+
+  ### Pattern Variation 1: More Golomb Marks
+  Original has 4 marks at [0.0, 0.45, 1.2, 1.8]. Try:
+  - 5 marks: [0.0, 0.4, 0.8, 1.2, 1.6] (equally spaced)
+  - 6 marks: [0.0, 0.33, 0.67, 1.0, 1.33, 1.67]
+  - 7 marks: [0.0, 0.28, 0.57, 0.86, 1.14, 1.43, 1.72]
+
+  ### Pattern Variation 2: Different Bipartite Splits
+  Try different split points a:
+  - a = 0.3: h=1 on [0,0.3), h=0 on [0.3,2)
+  - a = 0.4: h=1 on [0,0.4), h=0 on [0.4,2)
+  - a = 0.5: h=1 on [0,0.5), h=0 on [0.5,2)
+  - a = 0.6: h=1 on [0,0.6), h=0 on [0.6,2)
+  - a = 0.7: h=1 on [0,0.7), h=0 on [0.7,2)
+
+  Remember: integral must be 1, so adjust heights or normalize!
+
+  ### Pattern Variation 3: 4-Modal (4 Peaks)
+  Instead of 3 peaks at [0.4, 1.0, 1.6], try 4 peaks:
+  - [0.3, 0.8, 1.2, 1.7] - spread evenly
+  - [0.2, 0.7, 1.2, 1.7] - slightly left-biased
+  - [0.0, 0.5, 1.0, 1.5] - left to right
+
+  ### Pattern Variation 4: Block Patterns
+  - 2 blocks: h=1 on [0,a), h=0 on [a,2), then add a small block at the end
+  - 3 blocks: h=1 on [0,a), h=0 on [a,b), h=1 on [b,2)
+
+  ## Step 4: Hyperparameters (Last Resort)
+
+  Only vary hyperparameters if all pattern exploration fails:
+  - num_intervals: 400, 800, 1600 (coarser to finer)
+  - base_learning_rate: 0.001, 0.003, 0.006 (conservative to moderate)
+  - penalty_strength: 40, 60, 100 (weaker to stronger)
+  - num_steps: 30000, 59000, 100000 (short to long)
+
+  ## Step 5: Temperature Variation
+
+  If stuck with generate_ready_candidates:
+  - CALL with temperature=0.8 to get more diverse candidates
+  - Then evaluate those with c5_bound < 0.385
+
+  ## Expected Workflow
+
+  1. First iteration: generate_ready_candidates - evaluate top candidates
+  2. If no success: manually edit code to add new patterns (more marks, different modality)
+  3. Use generate_ready_candidates again with temp=0.8
+  4. Only then: try hyperparameter variations
+  5. Submit when combined_score > 1.0
+
+  ## Why This Works
+
+  - Analytical screening finds candidates we would otherwise miss
+  - Structural pattern diversity explores different regions of the function space
+  - Lenient threshold (0.385) catches candidates that can improve with training
+  - Training (59000 steps) can refine a good initialization to beat the current best
+tool_descriptions:
+  edit_solution: |
+    Modify EVOLVE-BLOCK to create new pattern initializations.
+
+    For Golomb patterns: change the marks array (e.g., 5 marks at [0,0.4,0.8,1.2,1.6]).
+
+    For bipartite patterns: change the split point a (e.g., a=0.4 or a=0.6).
+
+    For multi-modal patterns: change peak positions (e.g., 4 peaks at [0.3,0.8,1.2,1.7]).
+
+    For block patterns: add sequential blocks with different values, then normalize.
+
+    Key: Focus on STRUCTURAL changes, not hyperparameter tuning. The structure of h matters more than training details.
+  evaluate_solution: |
+    Full 59000-step optimization. Returns combined_score = 0.38092303510845016 / c5_bound.
+
+    Higher is better. combined_score > 1.0 means c5_bound < 0.38092303510845016 (new record).
+
+    Use after generate_ready_candidates returns candidates with c5_bound < 0.385.
+  probe_solution: |
+    Fast approximate evaluation (500 intervals, analytical c5). Uses probe budget.
+
+    Approximate but much cheaper than full eval. Good for screening many candidates.
+
+    Budget: separate from eval budget, typically 30 probes available.
+  finish: |
+    Submit when combined_score > 1.0 (c5_bound < 0.38092303510845016).
+sampling:
+  temperature: 1.3
+  top_p: 0.9
+  top_k: 30
+  max_tokens: 16000
+agent:
+  max_iterations: 60
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 10000
+new_tools: []
+remove_tools: []
+new_skills: []

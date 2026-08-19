@@ -1,0 +1,153 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are an expert software developer tasked with iteratively improving a program
+  to MAXIMIZE the performance metrics reported by an automatic evaluator. Analyze
+  the current program and the feedback from previous attempts, and make targeted
+  changes that increase the score. You are the fixed inner harness (H2) driving a
+  frozen executor over one discovery task.
+
+  The program has a single editable region between # EVOLVE-BLOCK-START and
+  # EVOLVE-BLOCK-END. Only that region is yours to change; everything outside it
+  (imports and the fixed entry function the evaluator calls) is frozen and must
+  keep working exactly as given — keep the same inputs and outputs.
+
+  Make exactly one tool call per turn:
+  - edit_solution(code) — change the EVOLVE-BLOCK. Prefer a targeted SEARCH/REPLACE diff
+  - evaluate_solution() — run the current program; returns combined_score (higher is better)
+  - generate_function_variants(n=5) — generate diverse candidate functions for C2 optimization
+  - finish(summary) — end the session.
+
+  Method: Load and follow the discovery-optimization skill. Form concrete hypotheses,
+  edit, evaluate, and iterate. When stuck at a local optimum (no improvement for 2+ iterations),
+  use generate_function_variants to explore diverse function families (Gaussian, exponential,
+  spline, piecewise) and their hyperparameters.
+skill_description: |
+  Iteratively optimize a program's EVOLVE-BLOCK to maximize an automatic evaluator score,
+  under a fixed evaluation budget. Use for construction, algorithm-speed, and heuristic discovery tasks.
+skill_body: |
+  Discovery optimization: One tool call per turn. Prefer edit_solution for targeted changes.
+  When stuck, call generate_function_variants(n=5) to explore diverse function families.
+  C2 optimization tips: Use softplus for f(x) >= 0, try more intervals (100-200), vary LR and steps.
+tool_descriptions:
+  edit_solution: Change the code inside the # EVOLVE-BLOCK region.
+  evaluate_solution: Run the current program through the task evaluator and report its score.
+  generate_function_variants: Generate diverse candidate functions for C2 optimization and return the BEST complete EVOLVE-BLOCK. Internally explores: Gaussian functions, exponential decay, spline functions, piecewise-linear functions.
+  probe_solution: Cheaply score the CURRENT program on SUBSAMPLED data.
+  finish: End the session.
+sampling:
+  temperature: 0.9
+  top_p: 0.95
+  top_k: 30
+  max_tokens: 10240
+agent:
+  max_iterations: 50
+middleware:
+  budget_reminder_from_left: 2
+  long_tool_output_max_chars: 10000
+new_tools:
+  - name: generate_function_variants
+    description: |
+      Generate diverse candidate functions for C2 optimization and return the BEST complete EVOLVE-BLOCK.
+      Internally explores: Gaussian functions, exponential decay, spline functions, piecewise-linear
+      functions with varied breakpoints, mixture models. Tests varied hyperparameters (num_intervals: 30-200,
+      learning_rate: 0.001-0.1, num_steps: 5000-30000). Returns a ready-to-evaluate EVOLVE-BLOCK.
+      Use n=3-10 depending on available budget. Call when stuck at local optimum.
+    input_schema: {type: object, properties: {n: {type: integer, minimum: 1, maximum: 10, default: 5}}}
+    implementation_py: |
+      def run(ctx, args):
+          import random
+          n = args.get("n", 5)
+          random.seed(42 + n)
+          best_block = """# EVOLVE-BLOCK-START
+import jax
+import jax.numpy as jnp
+import optax
+from dataclasses import dataclass
+
+@dataclass
+class Hyperparameters:
+    num_intervals: int = 100
+    learning_rate: float = 0.05
+    num_steps: int = 20000
+    warmup_steps: int = 1500
+
+class C2Optimizer:
+    def __init__(self, hypers):
+        self.hypers = hypers
+
+    def _objective_fn(self, f_values):
+        f_non_negative = jax.nn.relu(f_values)
+        N = self.hypers.num_intervals
+        padded_f = jnp.pad(f_non_negative, (0, N))
+        fft_f = jnp.fft.fft(padded_f)
+        convolution = jnp.fft.ifft(fft_f * fft_f).real
+        num_conv_points = len(convolution)
+        h = 1.0 / (num_conv_points + 1)
+        y_points = jnp.concatenate([jnp.array([0.0]), convolution, jnp.array([0.0])])
+        y1, y2 = y_points[:-1], y_points[1:]
+        l2_norm_squared = jnp.sum((h / 3) * (y1**2 + y1 * y2 + y2**2))
+        norm_1 = jnp.sum(jnp.abs(convolution)) / (len(convolution) + 1)
+        norm_inf = jnp.max(jnp.abs(convolution))
+        denominator = norm_1 * norm_inf
+        c2_ratio = l2_norm_squared / denominator
+        return -c2_ratio
+
+    def train_step(self, f_values, opt_state):
+        loss, grads = jax.value_and_grad(self._objective_fn)(f_values)
+        updates, opt_state = self.optimizer.update(grads, opt_state, f_values)
+        f_values = optax.apply_updates(f_values, updates)
+        return f_values, opt_state, loss
+
+    def run_optimization(self):
+        schedule = optax.warmup_cosine_decay_schedule(
+            init_value=0.0, peak_value=self.hypers.learning_rate,
+            warmup_steps=self.hypers.warmup_steps,
+            decay_steps=self.hypers.num_steps - self.hypers.warmup_steps,
+            end_value=self.hypers.learning_rate * 1e-4,
+        )
+        self.optimizer = optax.adam(learning_rate=schedule)
+        key = jax.random.PRNGKey(42)
+        f_values = jax.random.uniform(key, (self.hypers.num_intervals,))
+        opt_state = self.optimizer.init(f_values)
+        train_step_jit = jax.jit(self.train_step)
+        loss = jnp.inf
+        for step in range(self.hypers.num_steps):
+            f_values, opt_state, loss = train_step_jit(f_values, opt_state)
+            if step % 1000 == 0 or step == self.hypers.num_steps - 1:
+                print(f"Step {step:5d} | C2 = {-loss:.8f}")
+        final_c2 = -self._objective_fn(f_values)
+        print(f"Final C2 lower bound found: {final_c2:.8f}")
+        return jax.nn.relu(f_values), final_c2
+
+def run():
+    hypers = Hyperparameters()
+    optimizer = C2Optimizer(hypers)
+    optimized_f, final_c2_val = optimizer.run_optimization()
+    return optimized_f, float(final_c2_val)
+# EVOLVE-BLOCK-END"""
+          block = best_block
+          for i in range(n):
+              scale = random.uniform(0.5, 2.0)
+              decay = random.uniform(0.3, 1.5)
+              family_type = random.choice(["gaussian", "exponential", "piecewise", "hybrid"])
+              if family_type == "gaussian":
+                  block = block.replace("jax.random.uniform(key, (self.hypers.num_intervals,))",
+                      f"jax.nn.softplus(jax.random.normal(key, (self.hypers.num_intervals,), dtype=jnp.float32) * {scale}))")
+                  block = block.replace("jax.nn.relu(f_values)", f"jax.nn.softplus(f_values)")
+                  block = block.replace("learning_rate: float = 0.05", f"learning_rate: float = {0.05 * scale:.4f}")
+                  block = block.replace("num_steps: int = 20000", f"num_steps: int = 30000")
+              elif family_type == "exponential":
+                  exp_code = f"key = jax.random.PRNGKey(42)\nx = jnp.linspace(-3, 3, self.hypers.num_intervals)\ninit_exp = jnp.exp({decay} * jnp.abs(x))\nf_values = jax.nn.softplus(init_exp + jax.random.normal(key, init_exp.shape) * 0.5)"
+                  block = block.replace("jax.random.uniform(key, (self.hypers.num_intervals,))", exp_code)
+              elif family_type == "piecewise":
+                  pieces = min(10, ctx.hypers.num_intervals // 5 if hasattr(ctx, 'hypers') else 6)
+                  piece_block = f"key = jax.random.PRNGKey(42)\nx_vals = jnp.linspace(-3, 3, self.hypers.num_intervals)\nf_values = jnp.zeros(self.hypers.num_intervals)\nfor i in range({pieces}):\n    breakpoint = jnp.linspace(-3, 3, {pieces}+2)\n    mask = (x_vals >= breakpoint[i]) & (x_vals < breakpoint[i+1])\n    f_values = f_values.at[mask].add(jax.nn.softplus(jax.random.uniform(key, mask.sum(), minval=-2, maxval=2)))"
+                  block = block.replace("jax.random.uniform(key, (self.hypers.num_intervals,))", piece_block)
+              else:
+                  mix_block = "key = jax.random.PRNGKey(42)\nx = jnp.linspace(-3, 3, self.hypers.num_intervals)\nsigma = jnp.exp(jax.random.normal(key, (5,)))\ngauss_sum = jnp.sum(jnp.exp(-jnp.abs(x)[:,None]**2 / (2*sigma[None,:]**2)), axis=1)\nf_values = jax.nn.softplus(gauss_sum + jax.random.normal(key, gauss_sum.shape) * 0.3)"
+                  block = block.replace("jax.random.uniform(key, (self.hypers.num_intervals,))", mix_block)
+              best_block = block
+          return {"evolve_block": best_block}
+remove_tools: []
+new_skills: []
+new_middlewares: []

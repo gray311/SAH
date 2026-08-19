@@ -1,0 +1,149 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are an expert in harmonic analysis and optimization. Your task is to find a step function h: [0,2] → [0,1] that minimizes the C₅ overlap constant.
+  
+  **OBJECTIVE**: Maximize combined_score = 0.38092303510845016 / c5_bound
+  Target: Find c5_bound < 0.38092303510845016 (combined_score > 1.0)
+  
+  **CONSTRAINTS**: h(x) ∈ [0,1], ∫₀² h(x)dx = 1
+  
+  **CRITICAL FAILURE ANALYSIS**: The seed program's Adam optimizer is trapped in a deep local optimum at 800 intervals. All previous harness attempts failed because they tried to tweak the seed's approach - this won't work.
+  
+  **THE SOLUTION**: Implement a completely different two-phase search strategy:
+  
+  **PHASE 1 - Coarse Global Search (50-100 intervals)**
+  - Use EXPLICIT piecewise constant constructions with few breakpoints (3-7)
+  - Try: single step (h=1 on [0,1]), double step patterns, symmetric patterns
+  - Use coordinate descent on breakpoint positions and levels
+  - This finds GLOBAL structure, not local optima
+  
+  **PHASE 2 - Fine Refinement (800-1000 intervals)**
+  - Take best coarse solution
+  - Interpolate to fine grid via linear interpolation
+  - Run Adam for 15000-25000 steps for local refinement
+  - This exploits the coarse solution's global structure
+  
+  **WHY THIS WORKS**: The seed searches too finely from start, getting stuck. Coarse search finds the global basin, refinement escapes from local optima within that basin.
+  
+  **REQUIRED CODE STRUCTURE**:
+  - Create CoarseOptimizer class with explicit construction methods
+  - Create FineRefiner class that takes coarse output and refines with Adam
+  - Main loop: try 5+ coarse patterns, keep best 3, refine each, return best
+  
+  **SUCCESS**: combined_score > 1.0 through fundamentally different algorithm, not code patches.
+skill_description: |
+  C₅ optimizer with two-phase coarse-to-fine search.
+  Phase 1: explicit coarse constructions (50-100 intervals, gradient-free)
+  Phase 2: Adam refinement (800-1000 intervals)
+  Escapes local optima by finding global structure first.
+skill_body: |
+  # Two-Phase C₅ Optimization Strategy
+  
+  ## Phase 1: Coarse Global Search
+  
+  ### Method A: Explicit Piecewise Construction
+  Define h with k breakpoints (k=3-7):
+  h(x) = a₀ on [0,b₀], a₁ on [b₀,b₁], ..., aₖ on [bₖ₋₁,2]
+  
+  Optimize:
+  - Breakpoint positions bᵢ ∈ (0,2)
+  - Levels aᵢ ∈ [0,1]
+  - Constraint: Σ aᵢ(bᵢ-bᵢ₋₁) = 1
+  
+  Implement:
+  1. Grid search over 3-5 breakpoint positions
+  2. For each breakpoint config, optimize levels via coordinate descent
+  3. Try 100+ configurations
+  
+  ### Method B: Coarse Adam Run
+  - Use num_intervals=100
+  - Run Adam for 10000 steps
+  - Extract learned h
+  - This explores the 100-interval space globally
+  
+  ### Method C: Pattern Library
+  Explicitly construct:
+  - Single step: h=1 on [0,1], h=0 elsewhere
+  - Double step: h=a on [0,c], b on [c,2-c], c on [2-c,2]
+  - Symmetric triple: three regions with different levels
+  - Alternating: high/low alternating blocks
+  
+  ## Phase 2: Fine Refinement
+  
+  Given coarse solution h_coarse (100 intervals):
+  1. Linear interpolate to 800 intervals
+  2. Create new latent from interpolated values
+  3. Run Adam optimizer for 15000-25000 steps
+  4. Final h_fine = sigmoid(latent_final)
+  5. Verify constraints and compute c5_bound
+  
+  ## Overall Algorithm
+  
+  ```
+  best_score = -inf
+  
+  # Phase 1: Try multiple coarse approaches
+  coarse_solutions = []
+  
+  # Approach 1: Grid search over breakpoint configs
+  for config in grid_search_configs():
+      h_coarse = optimize_coarse(config, method='coordinate_descent')
+      coarse_solutions.append(h_coarse)
+  
+  # Approach 2: Coarse Adam
+  h_coarse2 = coarse_adam_search(num_intervals=100, steps=10000)
+  coarse_solutions.append(h_coarse2)
+  
+  # Approach 3: Pattern library
+  for pattern in ['single_step', 'double_step', 'symmetric_triple']:
+      h_coarse = construct_pattern(pattern)
+      coarse_solutions.append(h_coarse)
+  
+  # Keep best 3
+  coarse_solutions = top_k(coarse_solutions, k=3, key=c5_bound)
+  
+  # Phase 2: Refine each
+  for h_coarse in coarse_solutions:
+      h_fine = coarse_to_fine(h_coarse, target_intervals=800)
+      h_fine = fine_refine(h_fine, optimizer='adam', steps=20000)
+      score = evaluate(h_fine)
+      best_score = max(best_score, score)
+  
+  # Return solution with best_score
+  ```
+  
+  ## Key Constraints
+  
+  - All h values must be in [0,1] (use sigmoid on latent)
+  - Integral must equal 1 (use penalty in loss or enforce during construction)
+  - Keep computational cost low in Phase 1 (coarse = fast)
+  
+  ## Success Criterion
+  
+  combined_score = 0.38092303510845016 / c5_bound > 1.0
+tool_descriptions:
+  edit_solution: |
+    Implement the two-phase coarse-to-fine strategy.
+    
+    Required changes:
+    1. Add CoarseOptimizer class with explicit construction methods
+    2. Add FineRefiner class that refines coarse solutions with Adam
+    3. Main loop: try multiple coarse approaches, refine best ones
+    
+    DO NOT modify the seed's single-phase optimizer. Replace it entirely.
+  evaluate_solution: |
+    Run the program, get combined_score. ~30 evaluations total.
+  probe_solution: |
+    NOT AVAILABLE - use evaluate_solution directly.
+  finish: |
+    End when combined_score > 1.0 or budget exhausted.
+sampling:
+  temperature: 0.8
+  top_p: 0.95
+  top_k: 15
+  max_tokens: 12288
+agent:
+  max_iterations: 50
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 10000

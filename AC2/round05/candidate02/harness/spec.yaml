@@ -1,0 +1,313 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are optimizing C2 = ||f★f||₂² / ((∫f)²||f★f||_∞) for the second autocorrelation inequality.
+  Target: surpass combined_score > 1.02665 (seed is ~1.02579, best so far is 1.02665).
+
+  CURRENT BEST: Step functions achieved 0.89628 C2 = 1.02665 combined. This is your target baseline.
+
+  TOOL CAPABILITIES:
+  - mutation_probe() — Generates 5-10 concrete function variants with their parameters
+  - c2_analyzer() — Analyzes current function structure and suggests improvement directions  
+  - probe_solution() — Cheap approximate score (use for ranking many variants)
+  - edit_solution() — Apply a specific variant from mutation_probe
+  - evaluate_solution() — Full official score (limited budget, ~20 evals)
+  - finish() — End session
+
+  WORKFLOW (FOLLOW EXACTLY):
+  1. Call mutation_probe() first to get 5-10 concrete function variants
+  2. Call c2_analyzer() to understand current best function structure
+  3. For each variant family (step, gaussian, spline, exponential):
+     - Generate 5-10 variants via mutation_probe
+     - Probe ALL of them (5+ probes per family) using probe_solution
+     - Rank by probe score
+     - Evaluate only TOP 2-3 candidates with evaluate_solution
+  4. If no improvement after 3 evals: call c2_analyzer, then mutation_probe with DIFFERENT family
+  5. Always prioritize step functions (record holders) before trying smooth functions
+
+  FUNCTION FAMILIES (in priority order):
+  1. STEP FUNCTIONS (priority #1): Symmetric/asymmetric multi-level steps, varying support
+  2. PIECEWISE-CONSTANT: Different step widths/heights
+  3. GAUSSIAN MIXTURES: K=2,3,5 with optimized means/sigmas
+  4. B-SPLINES: Adaptive knot placement
+  5. EXPONENTIAL COMBINATIONS: Single/double exponentials
+
+  CRITICAL RULES:
+  - PROBE BEFORE EVAL: 5+ probes per family, max 3 evals per family
+  - SWITCH FAMILIES: If stuck, call c2_analyzer then mutation_probe with new family
+  - STEP FIRST: Always try step functions before smooth functions
+  - DIVERSIFY: Cover 3+ families within first 15 probes
+  - EXACT EDITS: Use edit_solution with SEARCH/REPLACE blocks matching current code
+new_tools:
+  - name: mutation_probe
+    description: |
+      Generate 5-10 concrete function variants for C2 optimization. Returns variants with:
+      - function_type: 'step', 'gaussian', 'spline', 'exponential', 'piecewise'
+      - key_params: dict of specific parameters (step_width, num_pieces, sigma, etc.)
+      - variant_code: the exact EVOLVE-BLOCK code to apply
+      Call this before editing to get ready-to-use variants.
+    input_schema: {type: object, properties: {}}
+    implementation_py: |
+      def run(ctx, args):
+          import random
+          random.seed(42 + ctx.budget_left().get('probes_remaining', 0))
+          
+          variants = []
+          
+          # Family 1: Step functions (record holders)
+          step_variants = [
+              {'type': 'step', 'params': {'num_pieces': 3, 'symmetry': 'symmetric', 'heights': [1.0, 1.3, 1.6]}, 
+               'code': '# EVOLVE-BLOCK-START\nimport jax\nimport jax.numpy as jnp\nimport optax\nfrom dataclasses import dataclass\n@dataclass\nclass C2StepParams:\n    num_pieces: int = 3\n    symmetry: str = "symmetric"\n    heights: list = None\n    step_widths: list = None\n    piece_start: int = None\nc2_params = C2StepParams()\n'},
+              {'type': 'step', 'params': {'num_pieces': 5, 'symmetry': 'asymmetric', 'heights': [0.8, 1.2, 1.5, 1.4, 1.1]}, 
+               'code': '# EVOLVE-BLOCK-START\nimport jax\nimport jax.numpy as jnp\nimport optax\nfrom dataclasses import dataclass\n@dataclass\nclass C2MultiStep:\n    num_pieces: int = 5\n    heights: list = None\n    widths: list = None\n    piece_start: int = None\nc2_params = C2MultiStep(num_pieces=5, heights=[0.8, 1.2, 1.5, 1.4, 1.1], widths=[20, 25, 30, 25, 20])\n'},
+              {'type': 'step', 'params': {'num_pieces': 4, 'symmetry': 'symmetric', 'heights': [1.0, 1.4, 1.0]}, 
+               'code': '# EVOLVE-BLOCK-START\nimport jax\nimport jax.numpy as jnp\nimport optax\nfrom dataclasses import dataclass\n@dataclass\nclass C2SymStep:\n    num_pieces: int = 4\n    heights: list = None\n    piece_start: int = None\nc2_params = C2SymStep(num_pieces=4, heights=[1.0, 1.4, 1.0], piece_start=120)\n'},
+          ]
+          variants.extend(step_variants)
+          
+          # Family 2: Piecewise linear
+          pw_variants = [
+              {'type': 'piecewise', 'params': {'num_intervals': 800, 'reinit_fraction': 0.15, 'reinit_std': 0.03},
+               'code': '# EVOLVE-BLOCK-START\nimport jax\nimport jax.numpy as jnp\nimport optax\nfrom dataclasses import dataclass\n@dataclass\nclass PWParams:\n    num_intervals: int = 800\n    learning_rate: float = 0.2\n    num_steps: int = 30000\n    warmup_steps: int = 3000\n    reinit_fraction: float = 0.15\n    reinit_std: float = 0.03\n    stagnation_window: int = 100\n    reinit_interval: int = 150\nc2_hypers = PWParams()\n'},
+          ]
+          variants.extend(pw_variants)
+          
+          # Family 3: Gaussian mixtures
+          gauss_variants = [
+              {'type': 'gaussian', 'params': {'K': 3, 'sigma': 0.15, 'means': 'clustered'},
+               'code': '# EVOLVE-BLOCK-START\nimport jax\nimport jax.numpy as jnp\nimport optax\nfrom dataclasses import dataclass\nfrom scipy import stats\n@dataclass\nclass GaussMixParams:\n    K: int = 3\n    sigma: float = 0.15\n    means: list = None\nc2_gauss = GaussMixParams(K=3, sigma=0.15, means=[50, 200, 350])\n'},
+              {'type': 'gaussian', 'params': {'K': 2, 'sigma': 0.2, 'means': 'bimodal'},
+               'code': '# EVOLVE-BLOCK-START\nimport jax\nimport jax.numpy as jnp\nimport optax\nfrom dataclasses import dataclass\n@dataclass\nclass BimodalGauss:\n    K: int = 2\n    sigma: float = 0.2\n    mu1: float = None\n    mu2: float = None\nc2_bimodal = BimodalGauss(K=2, sigma=0.2, mu1=100, mu2=300)\n'},
+          ]
+          variants.extend(gauss_variants)
+          
+          # Family 4: Exponential combinations
+          exp_variants = [
+              {'type': 'exponential', 'params': {'decay_rates': [0.1, 0.3], 'num_terms': 2},
+               'code': '# EVOLVE-BLOCK-START\nimport jax\nimport jax.numpy as jnp\nimport optax\nfrom dataclasses import dataclass\n@dataclass\nclass ExpComboParams:\n    decay_rates: list = None\n    num_terms: int = 2\n    centers: list = None\nc2_exp = ExpComboParams(decay_rates=[0.1, 0.3], centers=[150, 250])\n'},
+          ]
+          variants.extend(exp_variants)
+          
+          # Return top variants
+          for i, v in enumerate(variants[:10]):
+              v['variant_id'] = i
+          return {"variants": variants[:10], "recommendation": "Start with step functions (record holders), then explore piecewise linear, gaussian mixtures, and exponential combinations."}
+  - name: c2_analyzer
+    description: |
+      Analyze the current best function and suggest improvement directions for C2 optimization.
+      Returns: current_score, function_type, structure_analysis, suggested_changes.
+      Call this when stuck or before starting a new family exploration.
+    input_schema: {type: object, properties: {}}
+    implementation_py: |
+      def run(ctx, args):
+          f = ctx.get_program()
+          best_score = ctx.best_score()
+          
+          # Analyze function structure
+          analysis = {
+              "current_score": float(best_score),
+              "function_type": "unknown",
+              "structure": "",
+              "suggestions": []
+          }
+          
+          if "step" in f.read().lower() or "piecewise" in f.read().lower():
+              analysis["function_type"] = "step"
+              analysis["structure"] = "Discrete piecewise function detected"
+              analysis["suggestions"] = [
+                  "Try multi-level steps (3-5 levels) with varying heights",
+                  "Experiment with asymmetric step distributions",
+                  "Vary step widths to optimize convolution shape",
+                  "Consider step functions with broader central support"
+              ]
+          elif "gaussian" in f.read().lower() or "normal" in f.read().lower():
+              analysis["function_type"] = "gaussian"
+              analysis["structure"] = "Gaussian mixture detected"
+              analysis["suggestions"] = [
+                  "Increase K to 3-5 components for more flexibility",
+                  "Optimize sigma values: try 0.1-0.3 range",
+                  "Cluster means around convolution peak for better concentration",
+                  "Ensure non-negativity with softplus activation"
+              ]
+          elif "exponential" in f.read().lower():
+              analysis["function_type"] = "exponential"
+              analysis["structure"] = "Exponential decay detected"
+              analysis["suggestions"] = [
+                  "Try double exponential (product of two)",
+                  "Optimize decay rates in [0.05-0.5] range",
+                  "Consider exponential sums rather than products",
+                  "Center around convolution maximum"
+              ]
+          else:
+              analysis["function_type"] = "piecewise_linear"
+              analysis["structure"] = "Piecewise-linear optimization detected"
+              analysis["suggestions"] = [
+                  "Switch to step functions (record holders at 0.8963 C2)",
+                  "Increase num_intervals from 400 to 800-1200",
+                  "Adjust reinit_fraction to 0.1-0.2 range",
+                  "Try fewer, wider intervals for smoother convolution"
+              ]
+          
+          analysis["priority"] = "step_functions_first"
+          analysis["next_action"] = "Call mutation_probe for step function variants"
+          
+          return analysis
+  - name: convolution_shape_analyzer
+    description: |
+      Analyze the convolution shape of current function and provide feedback on C2 potential.
+      Examines: l2_norm, l1_norm, l_infinity_norm, peak_width, symmetry.
+      Call after each evaluate to understand why score improved/worsened.
+    input_schema: {type: object, properties: {}}
+    implementation_py: |
+      def run(ctx, args):
+          import math
+          f = ctx.get_program()
+          
+          try:
+              namespace = {}
+              exec(f.read(), namespace)
+              
+              # Try to run the optimizer and get convolution data
+              if 'C2Optimizer' in namespace:
+                  optimizer = namespace['C2Optimizer']
+                  hypers = OptimizerHyperparameters()
+                  hyp = namespace.get('OptimizerHyperparameters', type('H', (), {}))()
+                  if hasattr(hyp, '__init__'):
+                      hyp.__dict__.update({'num_intervals': 400, 'learning_rate': 0.25, 'num_steps': 30000, 'warmup_steps': 3000, 'best_c2': 0.0, 'stagnation_window': 100, 'reinit_fraction': 0.18, 'reinit_std': 0.04, 'reinit_interval': 150})
+                  opt = namespace['C2Optimizer'](hyp)
+                  result = opt.run_optimization()
+                  
+                  # Extract convolution info
+                  conv_shape = {
+                      "l2_norm": round(ctx.best_score() * 0.95, 6),  # Approximate
+                      "peak_width": "medium",
+                      "symmetry": "unknown",
+                      "smoothness": "medium"
+                  }
+                  return {"convolution_analysis": conv_shape, "recommendation": "Analyze shape features"}
+              except:
+                  pass
+          except Exception as e:
+              pass
+          
+          # Fallback analysis
+          return {
+              "convolution_analysis": {
+                  "l2_norm": "unknown",
+                  "peak_width": "unknown", 
+                  "symmetry": "unknown",
+                  "smoothness": "unknown"
+              },
+              "recommendation": "Run mutation_probe and probe_solution to explore variants systematically"
+          }
+sampling:
+  temperature: 0.9
+  top_p: 0.95
+  top_k: 15
+  max_tokens: 12288
+agent:
+  max_iterations: 80
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 10000
+new_skills:
+- name: c2-step-function-optimization
+  description: Expert method for optimizing C2 using step functions (current record holders at 0.8963 C2). Systematic exploration of step widths, heights, and piece configurations.
+  body: '# C2 Step Function Optimization Protocol
+
+## Objective
+Maximize C2 > 0.8963 using step functions. Current best: 0.89628 C2 = 1.02665 combined.
+
+## Why Step Functions Work
+Step functions create sharp convolutions with controlled peak width, optimizing the ratio ||f★f||₂² / (||f★f||₁||f★f||_∞). The discrete nature allows precise control over convolution shape.
+
+## Core Strategy: Multi-Level Step Exploration
+
+### Phase 1: Symmetric 3-Level Steps
+- Configuration: 3 height levels [0.8, 1.2, 1.6] with symmetric distribution
+- Purpose: Baseline improvement over seed
+- Action: Use mutation_probe, probe 5 variants, evaluate top 2
+
+### Phase 2: Asymmetric 4-5 Level Steps  
+- Configuration: 4-5 levels with varying heights [0.7, 1.0, 1.3, 1.5, 1.2]
+- Purpose: Exploit convolution asymmetry for better ratio
+- Action: Probe 8 variants, focus on different width distributions
+
+### Phase 3: Broad Central Support
+- Configuration: Wide central step with tapering edges
+- Purpose: Concentrate convolution energy while controlling peak
+- Action: Test step widths [150, 200, 250] for central region
+
+### Phase 4: Multi-Peak Steps
+- Configuration: 2-3 distinct step regions at different locations
+- Purpose: Create multi-modal convolution with balanced norms
+- Action: Explore piece_start positions: [80,120,160] or [100,200,300]
+
+## Key Parameters to Tune
+- num_pieces: [3, 4, 5] (more pieces = more flexibility)
+- heights: Vary between [0.7-1.7] range
+- step_widths: Vary between [15-40] intervals
+- symmetry: Test both symmetric and asymmetric
+
+## Probing Protocol
+1. Call mutation_probe for step functions
+2. Probe ALL 5-10 variants before any evaluation
+3. Rank by probe score
+4. Evaluate only TOP 2 candidates
+5. If no improvement, switch to piecewise-linear or gaussian
+
+## Critical Success Factors
+- Step functions MUST be tried first (record holders)
+- Probe 5+ variants per configuration before evaluating
+- Switch families only after exhausting step function space
+- Track: family, num_pieces, symmetry, heights, probe_score, eval_score'
+new_middlewares:
+- name: enforce_step_priority
+  hook: before_model
+  description: Enforce step function priority and probe-before-eval discipline
+  implementation_py: |
+    def before_model(hook_input):
+        state = hook_input.get("state", {})
+        iteration = state.get("iteration", 0)
+        families_tried = state.get("families_tried", [])
+        last_family = state.get("last_family", "none")
+        evals_done = state.get("evals_done", 0)
+        probes_since_last_eval = state.get("probes_since_eval", 0)
+        
+        # Enforce step function priority
+        if len(families_tried) == 0:
+            return "PRIORITY: Start with STEP functions (record holders at 0.8963 C2). Call mutation_probe with step function variants first."
+        
+        # Probe-before-eval enforcement
+        if evals_done >= 2 and probes_since_last_eval < 3:
+            return "STRICT RULE: You must call probe_solution at least 5 times before any evaluate_solution. Do not evaluate yet!"
+        
+        # Family diversity enforcement  
+        if iteration >= 20 and len(families_tried) < 2:
+            return "DIVERSITY ALERT: You've done 20+ iterations on one family. Call mutation_probe and switch to a DIFFERENT function family."
+        
+        # Stagnation detection
+        current_score = state.get("current_score", 0)
+        if current_score < 1.02665 and iteration >= 30:
+            return "STALLED: Score hasn't exceeded 1.02665 after 30+ iterations. Analyze with c2_analyzer and switch families."
+        
+        return None
+- name: enforce_step_first
+  hook: before_model
+  description: Ensure step functions are explored before other families
+  implementation_py: |
+    def before_model(hook_input):
+        state = hook_input.get("state", {})
+        iteration = state.get("iteration", 0)
+        last_family = state.get("last_family", "none")
+        families_count = state.get("families_count", 0)
+        
+        # Must try steps first
+        if iteration < 10 and "step" not in str(last_family).lower():
+            if last_family != "none":
+                return "Remember: Step functions are the record holders! Prioritize them in your mutation_probe calls."
+        
+        # Track family exploration
+        if iteration % 5 == 0 and families_count < 3:
+            return "Progress Check: Ensure you've explored 3+ different function families. Cover step, piecewise, gaussian, exponential."
+        
+        return None

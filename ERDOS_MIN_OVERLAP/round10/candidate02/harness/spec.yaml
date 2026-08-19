@@ -1,0 +1,192 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are solving the Erdős minimum overlap problem: find a step function h: [0,2] → [0,1] with integral(h)=1 that minimizes C5 = max_k ∫ h(x)(1-h(x+k)) dx.
+  
+  Current best bound: C5 ≤ 0.38092303510845016 (combined_score = 0.380923 / C5, need > 1.0)
+  
+  **CRITICAL STRATEGY: CONSTRUCTIVE SEARCH**
+  The seed optimizer uses gradient descent from 12 initialization patterns. This often gets stuck in local minima.
+  
+  YOUR APPROACH:
+  1. **DIRECT CONSTRUCTION**: Use construct_valid_step_function to generate valid step function candidates
+  2. **EXPLORE DIVERSE PATTERNS**: Try bimodal, triangular, periodic, multi-peak constructions
+  3. **RAPID EVALUATION**: Use probe_solution to screen constructions, then evaluate_solution on promising ones
+  4. **HYPERPARAMETER TUNING IS SECONDARY**: Only use if constructions alone fail
+  
+  Tool usage order:
+  - call construct_valid_step_function to get diverse candidate structures
+  - call edit_solution to implement a specific construction (can bypass optimizer for direct C5 computation)
+  - call probe_solution to quickly validate integral constraint and get approximate score
+  - call evaluate_solution on top 1-2 candidates
+  
+  Keep in mind: the EVOLVE-BLOCK contains an optimizer. Your goal is to replace it with direct construction + evaluation, as direct computation often beats gradient optimization for this problem.
+  
+  Focus on constructions that exploit the FFT-based correlation structure:
+  - Concentrate h(x) in specific regions to minimize overlap with 1-h(x+k)
+  - Try asymmetric placements, multi-peak distributions, Golomb ruler-inspired patterns
+skill_description: |
+  Constructive search for Erdős step functions. Generate mathematically principled candidates, use probe for rapid screening, evaluate top candidates. Emphasize direct construction over hyperparameter tuning.
+skill_body: |
+  # Erdős Minimum Overlap - Constructive Search Strategy
+  
+  ## Problem Understanding
+  
+  Minimize C5 = max_k ∫₀² h(x)(1-h(x+k)) dx
+  Subject to: h: [0,2] → [0,1], ∫h(x)dx = 1
+  
+  The C5 bound comes from the autocorrelation of h(x). To minimize the maximum overlap, we want h to avoid being correlated with shifted versions of itself.
+  
+  ## Why Constructive Search Works
+  
+  Gradient optimization from random initializations often finds suboptimal local minima.
+  The Erdős problem has a combinatorial nature: optimal solutions are often step-like with
+  specific structural patterns. Direct construction allows us to explore these patterns systematically.
+  
+  ## Search Strategy
+  
+  ### Step 1: Generate Multiple Constructions
+  Use construct_valid_step_function to create diverse candidates:
+  - bimodal: h concentrated in two narrow regions
+  - triangular/n-step: multi-level step patterns
+  - periodic: alternating on/off patterns
+  - Golomb-inspired: spacing to minimize overlaps
+  - asymmetric: break symmetry to reduce peak correlation
+  
+  ### Step 2: Rapid Screening with Probe
+  For each construction:
+  - Call probe_solution to check integral constraint and get approximate score
+  - Reject if integral is far from 1.0
+  - Note approximate C5 scores
+  
+  ### Step 3: Full Evaluation
+  Take top 1-3 constructions that pass screening:
+  - Implement as direct evaluation (no optimizer, just compute C5)
+  - Call evaluate_solution for exact scores
+  - Keep best results
+  
+  ### Step 4: Refine Promising Candidates
+  If a construction shows promise:
+  - Slight parameter adjustments (widths, positions, levels)
+  - Ensure integral constraint is satisfied
+  - Re-evaluate
+  
+  ## Key Constructions to Try
+  
+  1. **Bimodal tight**: Two narrow peaks at optimal positions to minimize self-overlap
+  2. **Triangular n-step**: Multi-level pattern (0→α→1-α→0)
+  3. **Asymmetric peak**: Single peak shifted from center
+  4. **Periodic fractional**: On for fraction p of interval, off for 1-p
+  5. **Golomb ruler**: Peak positions inspired by optimal spacing
+  
+  ## Success Criteria
+  
+  - combined_score > 1.0 (C5 < 0.380923)
+  - Document which construction achieved best result
+  - Use ~20 evals for evaluation, reserve probes for screening
+tool_descriptions:
+  edit_solution: Modify the EVOLVE-BLOCK to replace the optimizer with direct C5 computation, or change hyperparameters.
+  evaluate_solution: Run full evaluation, returns combined_score.
+  probe_solution: Quick approximate evaluation to screen constructions before full eval.
+  finish: Submit final solution when combined_score > 1.0.
+sampling:
+  temperature: 0.7
+  top_p: 0.85
+  top_k: 30
+  max_tokens: 14000
+agent:
+  max_iterations: 75
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 12000
+new_tools:
+  - name: construct_valid_step_function
+    description: |
+      Generate mathematically principled step function h: [0,2]→[0,1] candidates.
+      Returns dict with keys for different construction types (bimodal, triangular, periodic, Golomb).
+      Each value is pre-processed to satisfy integral(h)=1 constraint.
+      Use this to create diverse candidates without relying on gradient optimization.
+      Call this early to explore the solution space before any evaluations.
+    input_schema:
+      type: object
+      properties: {}
+    implementation_py: |
+      def run(ctx, args):
+          import numpy as np
+          N = 800
+          domain = 2.0
+          dx = domain / N
+          rng = np.random.default_rng(123)
+          
+          def normalize_to_integral_1(l, x):
+              """Adjust latent to get integral(h) = 1 using iterative threshold shift."""
+              h = 1 / (1 + np.exp(-l))
+              integral = np.sum(h) * dx
+              
+              # Iteratively adjust to get integral = 1
+              for _ in range(100):
+                  if abs(integral - 1.0) < 1e-6:
+                      break
+                  # Compute log-derivative of integral w.r.t. latent threshold
+                  shift = (integral - 1.0) / (np.sum(np.exp(-l))) * 2.0
+                  l = l - shift
+                  h = 1 / (1 + np.exp(-l))
+                  integral = np.sum(h) * dx
+              return l
+          
+          candidates = {}
+          
+          # Bimodal: two narrow peaks
+          x = np.linspace(0, domain, N)
+          bw1, bw2 = 0.15, 0.15
+          for pos1, pos2 in [(0.25, 0.75), (0.2, 0.8), (0.1, 0.9), (0.3, 0.7)]:
+              l = -((x-pos1)/bw1)**2 * 30 - ((x-pos2)/bw2)**2 * 30
+              l = l - np.mean(l)
+              l_norm = normalize_to_integral_1(l, x)
+              candidates[f'bimodal_{pos1}_{pos2}'] = l_norm
+          
+          # Triangular 3-level patterns
+          phases = [0.0, 0.33, 0.66]
+          for levels in [([-4, -1, 4]), ([-3, 0, 3]), ([-2, 1, 5])]:
+              l = np.zeros(N)
+              for p, lev in zip(phases, levels):
+                  in_range = (x >= p) & (x < p + 0.33)
+                  l = l + lev * in_range
+              l_norm = normalize_to_integral_1(l, x)
+              candidates[f'triangular_{levels}'] = l_norm
+          
+          # Periodic: on/off patterns with varying duty cycle
+          for p in [0.3, 0.25, 0.4, 0.35]:
+              l = np.where(x < p, 5.0, -5.0) + rng.normal(size=N) * 0.3
+              l_norm = normalize_to_integral_1(l, x)
+              candidates[f'periodic_{p}'] = l_norm
+          
+          # Golomb ruler inspired: 5 peaks at optimal spacing
+          marks = np.array([0.0, 0.5, 1.25, 1.625, 2.0])
+          widths = np.array([0.12, 0.10, 0.09, 0.09, 0.11])
+          l = np.zeros(N)
+          for m, w in zip(marks, widths):
+              l = l + 8.0 * np.exp(-((x-m)/w)**2 * 25)
+          l_norm = normalize_to_integral_1(l, x)
+          candidates['golomb_5'] = l_norm
+          
+          # Asymmetric single peak variants
+          for pos in [0.1, 0.2, 0.4, 0.6]:
+              l = -((x-pos)/0.2)**2 * 40
+              l = l - np.mean(l)
+              l_norm = normalize_to_integral_1(l, x)
+              candidates[f'asymmetric_{pos}'] = l_norm
+          
+          return {"candidates": candidates, "num_candidates": len(candidates)}
+remove_tools: []
+new_skills: []
+new_middlewares:
+  - name: construct_reminder
+    hook: before_model
+    description: |
+      Remind the solver to use construct_valid_step_function to generate diverse candidates
+      before spending full evaluations. Encourage exploring different construction types.
+    implementation_py: |
+      def before_model(hook_input):
+          if hook_input.get("iteration", 0) % 2 == 0:
+              return "Remember: Use construct_valid_step_function to generate diverse step function candidates (bimodal, triangular, periodic, Golomb patterns). Test multiple constructions with probe before full evaluation. Don't just tweak hyperparameters - constructive search often beats optimization!"
+          return None

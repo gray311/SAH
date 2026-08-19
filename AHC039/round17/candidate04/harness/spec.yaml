@@ -1,0 +1,167 @@
+schema: h2spec/1.0
+system_prompt: "You are a C++ polygon optimizer for axis-aligned fish capture (mackerels minus sardines). Goal: maximize (mackerels_inside - sardines_inside + 1). CORE STRATEGY: Split-and-Dominance Search. Because the seed code only builds single-lobed polygons, you will deliberately create MULTI-LOBED polygons that capture multiple mackerel clusters while keeping sardine exposure minimal. SEARCH METHOD: 1. DATA MINING: Parse all mackerel (M) and sardine (S) coordinates. Use a 200x200 grid (cell_size=500) to count M and S per cell. This is O(1) after build. 2. CLUSTER IDENTIFICATION: Find 3-6 M-dense cells (M - S > threshold, e.g., 10). These are your seed islands. 3. SARDINE-AWARE CORRIDOR EXPANSION: From each seed island, grow corridors in 4 cardinal directions (N,S,E,W). In each direction: Continue if: in bounds AND (cell_M >= cell_S OR cell_S <= cell_M + 1). Stop immediately if: cell_S > cell_M + 1 (sardine-dense penalty trap). Record cell coordinates. 4. POLYGON ASSEMBLY: Connect seed islands via their best corridors into ONE axis-aligned polygon. Strategy: Start from seed 1, follow East corridor to its end, then South to seed 2, then West to seed 3, then North back to seed 1 (or any non-intersecting cycle). Or: build 2-3 separate small polygons if they do not connect well. Ensure: 4 <= vertices <= 1000, perimeter <= 400000, integer coords in [0,100000]. 5. LOCAL OPTIMIZATION (HILL CLIMB): For each edge, try shifts +/-10, +/-20, +/-30, +/-40, +/-50. Score via grid rectangle query (sum M-S). Keep best shift per edge. Run 2 refinement rounds. 6. MULTI-RESTART: Run 12 restarts with different random seed selections and perturbation offsets. Output the single best polygon. Why this beats the seed: The seed only explores ONE region. By forcing multi-lobed structures through corridor expansion, you can simultaneously capture multiple M-rich clusters with minimal S penalty. Tools: - edit_solution: Replace EVOLVE-BLOCK with complete C++ implementing Split-and-Dominance Search above. - evaluate_solution: Run C++, get score (mackerels - sardines + 1). - probe_solution: NOT useful - evaluator is fast enough for full scoring. - finish: Submit when you have outputted a valid multi-lobed polygon."
+skill_description: "Split-and-Dominance Search: identify 3-6 mackerel-dense seed cells, expand sardine-aware corridors in 4 directions, connect into multi-lobed polygon, local edge optimization with +/-10..50 shifts, 12 random restarts."
+tool_descriptions:
+  edit_solution: "Replace EVOLVE-BLOCK with C++ implementing Split-and-Dominance Search: 1. Build 200x200 grid, count M/S per cell. 2. Find 3-6 top M-dense cells (M-S >= threshold). 3. From each, grow 4-directional corridors avoiding S > M+1. 4. Connect corridors into multi-lobed axis-aligned polygon. 5. Validate: 4-1000 vertices, integer coords, perimeter <= 400000, no self-intersection. 6. Local edge optimization: shift edges +/-10..50, 2 refinement rounds. 7. 12 restarts with different seeds. Output best polygon. Ensure <2.0s execution, correct I/O format."
+  evaluate_solution: "Run C++ program. Returns score (mackerels-sardines+1), validity, and remaining evaluations (budget=30). Each run has ~2.0s search window."
+  probe_solution: "NOT useful - full evaluation is fast enough for accurate scoring."
+  finish: "End when you have outputted a valid multi-lobed polygon with 12 restarts and local optimization."
+sampling:
+  temperature: 0.9
+  top_p: 0.95
+  top_k: 30
+  max_tokens: 14336
+agent:
+  max_iterations: 40
+middleware:
+  budget_reminder_from_left: 8
+  long_tool_output_max_chars: 15000
+new_tools:
+- name: grid_corridor_builder
+  description: "Given a seed cell and direction, build a maximal corridor by expanding in that direction. Avoids sardine-dense regions (S > M + 1). Returns corridor cells and final score."
+  input_schema:
+    type: object
+    properties:
+      seed_x:
+        type: integer
+        description: Seed cell x-coordinate
+      seed_y:
+        type: integer
+        description: Seed cell y-coordinate
+      direction:
+        type: string
+        enum: [N, S, E, W]
+        description: Expansion direction
+  implementation_py: |
+    def run(ctx, args):
+        import math
+
+        seed_x = args.get("seed_x")
+        seed_y = args.get("seed_y")
+        direction = args.get("direction")
+
+        if seed_x is None or seed_y is None or direction is None:
+            return {"error": "missing args"}
+
+        # Parse fish positions from program
+        program = ctx.get_program()
+        mackerels = []
+        sardines = []
+        lines = program.split("\n")
+        for line in lines:
+            line = line.strip()
+            # Expect: x y for mackerel, or x y for sardine (next N lines are sardines)
+            # Heuristic: look for numbers at start
+            try:
+                xs = [int(x.strip()) for x in line.split() if x.strip().isdigit()]
+                if len(xs) >= 2:
+                    x, y = xs[0], xs[1]
+                    # Infer type: assume first N in evolve block are mackerels, next N are sardines
+                    # Count lines to estimate
+                    count = sum(1 for l in lines[:len(lines)//2] if len([c for c in l.split() if c.strip().isdigit()]) >= 2)
+                    if "mackerel" in line.lower() or count < len(lines)//2:
+                        mackerels.append((x, y))
+                    else:
+                        sardines.append((x, y))
+            except:
+                continue
+
+        grid_size = 200
+        cell_size = 100000 // grid_size
+
+        # Build grid
+        grid = [[{"m": 0, "s": 0} for _ in range(grid_size)] for _ in range(grid_size)]
+        for mx, my in mackerels:
+            cx, cy = mx // cell_size, my // cell_size
+            if 0 <= cx < grid_size and 0 <= cy < grid_size:
+                grid[cy][cx]["m"] += 1
+        for sx, sy in sardines:
+            cx, cy = sx // cell_size, sy // cell_size
+            if 0 <= cx < grid_size and 0 <= cy < grid_size:
+                grid[cy][cx]["s"] += 1
+
+        # Direction deltas
+        deltas = {"N": (-1, 0), "S": (1, 0), "E": (0, 1), "W": (0, -1)}
+        dr, dc = deltas[direction]
+
+        # Convert seed to grid cell
+        sr, sc = seed_y // cell_size, seed_x // cell_size
+        if not (0 <= sr < grid_size and 0 <= sc < grid_size):
+            return {"error": "seed out of bounds", "corridor": []}
+
+        corridor = []
+        curr_r, curr_c = sr, sc
+        while True:
+            corridor.append({
+                "row": curr_r,
+                "col": curr_c,
+                "m": grid[curr_r][curr_c]["m"],
+                "s": grid[curr_r][curr_c]["s"],
+                "score": grid[curr_r][curr_c]["m"] - grid[curr_r][curr_c]["s"]
+            })
+
+            # Check stop condition
+            curr_m = grid[curr_r][curr_c]["m"]
+            curr_s = grid[curr_r][curr_c]["s"]
+            if curr_s > curr_m + 1:
+                break
+
+            new_r, new_c = curr_r + dr, curr_c + dc
+            if not (0 <= new_r < grid_size and 0 <= new_c < grid_size):
+                break
+
+            curr_r, curr_c = new_r, new_c
+
+        return {
+            "corridor": corridor,
+            "length": len(corridor),
+            "final_score": corridor[-1]["score"] if corridor else 0
+        }
+new_skills:
+- name: multi-lobed-construction
+  description: "Construct multi-lobed polygons by connecting multiple mackerel-dense regions via sardine-safe corridors."
+  body: |
+    # Multi-Lobed Polygon Construction Guide
+
+    ## Why Multi-Lobed?
+    Single-lobed polygons can only capture one cluster. By building 2-6 connected lobes, we capture multiple high-value regions while minimizing sardine overlap.
+
+    ## Method
+
+    ### Step 1: Grid-based Clustering
+    - Build 200x200 grid, count M and S per cell.
+    - Compute M-S per cell.
+
+    ### Step 2: Seed Selection
+    - Pick top 3-6 cells with high M-S score (e.g., >= 10).
+    - These are your "seed islands".
+
+    ### Step 3: Corridor Expansion
+    From each seed, expand in 4 directions using the rule:
+      Continue if: (in bounds) AND (M >= S OR S <= M + 1)
+      Stop if: S > M + 1 (sardine trap)
+
+    ### Step 4: Polygon Assembly
+    Connect seeds via corridors:
+    - Chain: seed1 -> E to end -> S to seed2 -> W to seed3 -> N to seed1.
+    - Or nested/disjoint if connection costs high S.
+
+    ### Step 5: Local Optimization
+    For each edge, shift by +/-10, +/-20, +/-30, +/-40, +/-50.
+    Use grid prefix sums for fast M-S scoring.
+    Repeat 2 refinement rounds.
+
+    ### Step 6: Restarts
+    Run 12 restarts with random seeds. Output best.
+
+    ## Key Success Factors
+    - Multi-lobed > single-lobed for this task (more clusters = more score).
+    - Aggressively avoid S > M + 1 regions.
+    - Large edge shifts (+/-50) may be necessary due to coarse grid.
+new_middlewares:
+- name: lobed_prompt_reminder
+  hook: before_model
+  description: "Encourage multi-lobed structure exploration before model generation."
+  implementation_py: |
+    def before_model(hook_input):
+        return "Focus: Build 2-6 connected lobes (multi-lobed polygon). Expand corridors avoiding S>M+1. Edge shifts +/-10..50. 12 restarts."

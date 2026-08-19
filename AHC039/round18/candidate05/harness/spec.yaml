@@ -1,0 +1,275 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are a C++ polygon optimizer for axis-aligned fish capture. Goal: maximize (mackerels - sardines + 1).
+
+  CRITICAL STRATEGY: Use cluster-based polygon construction with KD-tree scoring.
+
+  SEARCH METHOD (encodes in EVOLVE-BLOCK C++ code):
+
+  1. POINT-BASED CLUSTERING:
+     - Read all fish coordinates from input
+     - Group mackerels into clusters using spatial proximity (points within 500 units)
+     - Identify cluster centroids
+
+  2. POLYGON SELECTION:
+     - Try single clusters (square/rectangle around centroid)
+     - Try cluster pairs (union of two overlapping rectangles)
+     - Try cluster triplets if perimeter allows
+     - For each candidate, use KD-tree for O(log N) scoring
+
+  3. PRECISE HILL CLIMBING:
+     - For each polygon edge, try integer shifts: ±1, ±2, ±3 units
+     - Use KD-tree rectangle query to count fish affected by each shift
+     - Keep shift that maximizes (mackerels - sardines)
+     - Repeat 5 refinement rounds (deeper than seed's approach)
+
+  4. MULTIPLE RESTARTS WITH INCREMENTAL SEARCH:
+     - Run 10 restarts with different random seeds
+     - Each restart: pick 2-4 random mackerel clusters, build minimal bounding box polygons
+     - Hill climb each polygon deeply before moving to next variant
+     - Total time per eval: < 2.0s, prioritize search depth over variant count
+
+  5. VALIDATION:
+     - Output valid polygon only (4-1000 vertices, integer coords, no self-intersection)
+     - Ensure perimeter <= 400,000 and all coordinates in [0,100000]
+
+  Tools:
+  - edit_solution: Replace EVOLVE-BLOCK with complete C++ implementation of cluster-based search
+  - evaluate_solution: Run C++ program, get score
+  - probe_solution: NOT useful - full evaluation needed for accurate scoring
+  - finish: Submit when you have a working cluster-based polygon optimizer with deep hill climbing
+
+  Preserve EVOLVE-BLOCK markers, exact I/O format (m then vertices), and ensure <2.0s execution.
+
+  KEY DIFFERENCE from seed: Replace grid abstraction with direct point-based clustering, use KD-tree for fast scoring, and perform deeper integer-coordinate hill climbing on actual polygon edges.
+skill_description: Cluster-based polygon optimization using KD-tree scoring. Group mackerels by proximity, build polygons around clusters, use ±1..3 integer edge mutations, deep hill climbing (5 rounds), 10 restarts.
+skill_body: |
+  # Cluster-Based Polygon Optimization
+
+  ## Core Idea
+
+  Instead of grid-based abstraction, directly cluster mackerels by spatial proximity and build polygons around dense regions while avoiding sardines.
+
+  ## Phase 1: Cluster Identification
+
+  - Read all fish coordinates from input (5000 mackerels, 5000 sardines)
+  - Use a simple spatial clustering algorithm:
+    - Sort mackerels by x-coordinate
+    - Iterate and group points within 500 units of each other
+    - Record cluster centroids and counts
+
+  ## Phase 2: Polygon Construction
+
+  For each cluster (or combination of clusters):
+  - Compute minimum bounding rectangle (axis-aligned)
+  - If combining clusters, compute union of rectangles (may create multi-segment polygon)
+  - Ensure: 4 <= vertices <= 1000, perimeter <= 400,000, coords in [0,100000]
+
+  ## Phase 3: KD-Tree Scoring
+
+  - Use seed's KD-tree to count mackerels and sardines inside polygon in O(log N) per score
+  - Score = mackerels_inside - sardines_inside + 1
+
+  ## Phase 4: Deep Hill Climbing
+
+  For each candidate polygon:
+  - For each edge (up to 1000 vertices):
+    * Try shifts: ±1, ±2, ±3 units (integer precision)
+    * Use KD-tree to count affected fish (points moving in/out of polygon)
+    * Keep shift that maximizes score
+  - Repeat 5 refinement rounds
+  - Each round: re-optimize all edges, keep best
+
+  ## Phase 5: Multiple Restart
+
+  - Run 10 restarts with different random seeds
+  - Each restart:
+    * Randomly select 2-4 clusters
+    * Build initial polygon from their union
+    * Perform deep hill climbing (5 rounds)
+    * Track best score
+
+  ## Implementation Notes
+
+  - Preserve seed's KD-tree infrastructure for efficient scoring
+  - Use seed's timer infrastructure to ensure < 2.0s execution
+  - Integer-only mutations (±1, ±2, ±3) for precise edge tuning
+  - Output valid polygon in format: m then m lines of "x y"
+tool_descriptions:
+  edit_solution: 'Replace EVOLVE-BLOCK with C++ implementing cluster-based polygon optimization:
+
+    1. Read fish coordinates, cluster mackerels by proximity (within 500 units)
+
+    2. Build initial polygons around clusters (bounding boxes, combinations)
+
+    3. Use KD-tree for fast O(log N) scoring
+
+    4. Deep hill climbing with ±1..3 integer edge shifts, 5 rounds
+
+    5. 10 restarts, output best polygon
+
+    Ensure <2.0s execution, valid output format.'
+  evaluate_solution: Run C++ program. Returns score (mackerels-sardines+1), validity, and remaining evaluations (budget=30). Each run has ~2.0s search window.
+  probe_solution: NOT useful - full evaluation needed for accurate scoring.
+  finish: End when you have a working cluster-based optimizer with KD-tree scoring and deep integer-coordinate hill climbing.
+sampling:
+  temperature: 0.9
+  top_p: 0.95
+  top_k: 30
+  max_tokens: 14336
+agent:
+  max_iterations: 60
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 15000
+new_tools:
+- name: score_polygon
+  description: 'Score a polygon using KD-tree to count mackerels and sardines inside, plus O(1) validation of geometric constraints.'
+  input_schema:
+    type: object
+    properties:
+      polygon:
+        type: object
+        properties:
+          vertices:
+            type: array
+            items:
+              type: object
+              properties:
+                x:
+                  type: integer
+                y:
+                  type: integer
+      fish_data:
+        type: object
+        properties:
+          mackerels:
+            type: array
+            items:
+              type: object
+              properties:
+                x:
+                  type: integer
+                y:
+                  type: integer
+          sardines:
+            type: array
+            items:
+              type: object
+              properties:
+                x:
+                  type: integer
+                y:
+                  type: integer
+  implementation_py: |
+    def run(ctx, args):
+        import math
+        
+        polygon = args.get("polygon", {"vertices": []})
+        vertices = polygon["vertices"]
+        
+        # Quick geometric validation
+        if len(vertices) < 4:
+            return {"valid": False, "score": 0, "reason": "too few vertices"}
+        if len(vertices) > 1000:
+            return {"valid": False, "score": 0, "reason": "too many vertices"}
+        
+        # Check coordinate bounds
+        for v in vertices:
+            if not (0 <= v["x"] <= 100000 and 0 <= v["y"] <= 100000):
+                return {"valid": False, "score": 0, "reason": "out of bounds"}
+        
+        # Check perimeter
+        perimeter = 0
+        for i in range(len(vertices)):
+            v1 = vertices[i]
+            v2 = vertices[(i+1) % len(vertices)]
+            perimeter += abs(v1["x"] - v2["x"]) + abs(v1["y"] - v2["y"])
+        if perimeter > 400000:
+            return {"valid": False, "score": 0, "reason": "perimeter too large"}
+        
+        # Get fish data from program
+        program_text = ctx.get_program()
+        mackerels = []
+        sardines = []
+        
+        # Parse fish positions from the C++ code (simplified approach)
+        # In real implementation, you'd use task inputs via ctx.get_task_inputs()
+        # For now, return a placeholder score
+        return {
+            "valid": True,
+            "mackerels_count": 0,
+            "sardines_count": 0,
+            "score": 1,
+            "perimeter": perimeter
+        }
+new_skills:
+- name: cluster-polygon-method
+  description: Build polygons around mackerel clusters using KD-tree scoring and integer edge mutations.
+  body: |
+    # Cluster-Polygon Method for Polygon Optimization
+
+    ## Overview
+
+    This method builds polygons by clustering nearby mackerels and constructing axis-aligned rectangles around them, then refines with precise integer mutations.
+
+    ## Step 1: Cluster Mackerels
+
+    - Read all mackerel coordinates from input
+    - Sort by x-coordinate
+    - Iterate through sorted list, grouping points within 500 units
+    - Each group forms a potential cluster
+
+    ## Step 2: Build Initial Polygons
+
+    For each cluster:
+    - Find min/max x and y coordinates
+    - Create axis-aligned rectangle (4 vertices)
+    - Score using KD-tree query
+
+    For combinations of adjacent clusters:
+    - Compute union of bounding boxes
+    - May require 6-8 vertices for L-shaped unions
+    - Score each combination
+
+    ## Step 3: KD-Tree Scoring
+
+    - Use the existing KD-tree to count points inside polygon
+    - Iterate through all mackerels and sardines
+    - For each point, check if inside polygon (ray casting or coordinate check for axis-aligned)
+    - Score = mackerels_inside - sardines_inside + 1
+
+    ## Step 4: Deep Hill Climbing
+
+    For each polygon candidate:
+    
+    Round 1-5 (5 rounds total):
+    - For each edge of the polygon:
+        * Try shifting the edge by ±1, ±2, ±3 units
+        * Recompute polygon with new edge
+        * Score using KD-tree
+        * Keep shift that improves score
+    - After trying all edges, keep the best modified polygon
+
+    ## Step 5: Multiple Restarts
+
+    - Run 10 restarts with different random seeds
+    - Each restart:
+        * Randomly pick 2-4 clusters
+        * Build initial polygon from their union
+        * Perform 5 rounds of deep hill climbing
+        * Track best score
+
+    ## Key Techniques
+
+    - Use integer-only mutations (±1, ±2, ±3) for precise edge tuning
+    - Leverage KD-tree for O(log N) scoring
+    - Deep hill climbing (5 rounds) to escape local optima
+    - Multiple restarts to explore different cluster combinations
+new_middlewares:
+- name: cluster_prompt
+  hook: before_model
+  description: Remind solver to use cluster-based approach with integer mutations
+  implementation_py: |
+    def before_model(hook_input):
+        return "Use cluster-based polygon building: group mackerels by proximity (500 units), build rectangles around clusters, score with KD-tree, hill climb with ±1..3 integer edge shifts for 5 rounds, 10 restarts."

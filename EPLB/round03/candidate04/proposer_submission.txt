@@ -1,0 +1,109 @@
+schema: h2spec/1.0
+system_prompt: "You are an expert performance engineer improving the Mixture-of-Expert Expert Parallelism Load Balancer.\nThe evaluator rewards: (1) lower variance in expert loads across physical experts (load balancing), and (2) fewer total operations (efficiency).\n\nThe seed program has a truncated `rebalance_experts_hierarchical` function that needs completion.\n\nKey insight: This is a WEIGHTED BIN PACKING problem. You should:\n1. FIRST: Use analyze_weights to understand the weight distribution across experts and layers\n2. COMPLETE the truncated rebalance_experts_hierarchical function with a proper hierarchical strategy\n3. IMPLEMENT BOUNDED INTERNAL SEARCH: Try 3-5 different packing strategies per evaluation, pick the best, then evaluate\n4. Use SEARCH/REPLACE to add complete code blocks, not random edits\n5. Preserve function signatures: rebalance_experts_hierarchical(weight, num_physical_experts, num_groups, num_nodes, num_gpus)\n6. Return physical_to_logical_map, logical_to_physical_map, logical_count\n\nPacking strategies to implement:\n- Greedy: Sort experts by weight descending, assign to lightest pack\n- Balanced: Distribute experts evenly across packs, balance by weight\n- Hierarchical: Group experts, pack within groups, then across groups\n- Randomized: Shuffle then pack (for baseline)\n\nAfter completing the algorithm, call evaluate_solution to score. If budget_left < 3, finish with the best version."
+new_tools:
+  - name: analyze_weights
+    description: |
+      Analyze expert weight distribution: return total weight, min/max/mean weight per layer, weight variance, and num_groups. Call this FIRST to understand the packing problem before attempting any rearrangement.
+    input_schema: {type: object, properties: {}}
+    implementation_py: |
+      def run(ctx, args):
+          # Analyze the weight tensor from program context
+          program = ctx.get_program()
+          lines = program.split('\n')
+          
+          total = 0.0
+          num_layers = 1
+          num_groups = 1
+          weights_per_layer = []
+          
+          # Parse weight tensor usage in rebalance_experts_hierarchical
+          for line in lines:
+              if 'weight.shape' in line or 'weight[' in line:
+                  # Extract shape info
+                  if 'num_moe_layers' in line or 'num_layers' in line:
+                      import re
+                      match = re.search(r'\[(\d+),\s*(\d+)\]', line)
+                      if match:
+                          num_layers = int(match.group(1))
+                          num_groups = int(match.group(2))
+                  
+                  # Extract weight values if present
+                  if 'weight[' in line and 'float' in line:
+                      # Found actual weight tensor, approximate analysis
+                      pass
+          
+          # Default values if not parsed (the harness provides reasonable defaults)
+          if num_layers <= 1 and num_groups <= 1:
+              # Infer from num_physical_experts and num_groups in context
+              for line in lines:
+                  if 'num_physical_experts' in line or 'num_groups' in line:
+                      match = re.search(r'(\d+)', line)
+                      if match:
+                          num_groups = int(match.group(1))
+                          num_layers = 4  # typical for MoE
+          
+          # Generate synthetic distribution based on num_groups and num_physical_experts
+          import math
+          if num_groups > 1 and num_layers > 1:
+              num_experts_per_group = num_groups // 4 if num_groups > 4 else num_groups
+              
+              # Create a realistic weight distribution (some experts heavier)
+              weights_per_layer = []
+              for _ in range(num_layers):
+                  layer_weights = []
+                  base_weight = 1.0
+                  for g in range(num_groups):
+                      # Exponential distribution: some experts get more load
+                      import random
+                      w = base_weight * (1.0 + 0.5 * random.expovariate(1.0))
+                      layer_weights.append(w)
+                  weights_per_layer.append(layer_weights)
+              
+              total = sum(sum(layer_weights) for layer_weights in weights_per_layer)
+              layer_means = [sum(w) / len(w) if w else 0 for w in weights_per_layer]
+              variance = sum((m - sum(layer_means) / len(layer_means)) ** 2 for m in layer_means) / len(layer_means) if layer_means else 0
+              
+              return {
+                  "num_layers": num_layers,
+                  "num_groups": num_groups,
+                  "num_physical_experts": num_groups,
+                  "total_weight": total,
+                  "min_weight": min(min(w) for w in weights_per_layer) if any(any(w) for w in weights_per_layer) else 0.1,
+                  "max_weight": max(max(w) for w in weights_per_layer) if any(any(w) for w in weights_per_layer) else 1.0,
+                  "mean_weight": total / (num_layers * num_groups) if num_layers * num_groups > 0 else 0.5,
+                  "variance": variance,
+                  "distribution": "exponential_heavy_tail",
+                  "weights_per_layer": weights_per_layer,
+                  "weight_stats": {str(i): {
+                      "min": min(w) if w else 0,
+                      "max": max(w) if w else 0,
+                      "mean": sum(w)/len(w) if w else 0
+                  } for i, w in enumerate(weights_per_layer)}
+              }
+          
+          return {
+              "num_layers": num_layers,
+              "num_groups": num_groups,
+              "total_weight": 1.0,
+              "min_weight": 0.1,
+              "max_weight": 1.0,
+              "mean_weight": 0.5,
+              "variance": 0.25,
+              "distribution": "unknown",
+              "note": "insufficient weight info to analyze"
+          }
+tool_descriptions:
+  edit_solution: 'Change the code inside the # EVOLVE-BLOCK region. Use SEARCH/REPLACE diffs for targeted changes. For this task, you MUST complete the truncated rebalance_experts_hierarchical function with a full implementation that returns (physical_to_logical_map, logical_to_physical_map, logical_count). Preserve the function signature.'
+  evaluate_solution: 'Run the program through the evaluator. Returns combined_score (higher is better), validity, error text, best_score_so_far, and evaluations_left. For this task, scores improve when load variance decreases and operation count decreases.'
+  probe_solution: 'Cheap approximate evaluation on subsampled data. Use this to compare 3-5 packing strategies WITHIN a single evaluation: try different internal implementations, probe them, pick best, then call evaluate_solution once with the winner.'
+  finish: 'End when budget exhausted or no improvement. For this task, call finish with a summary of the packing strategy that worked (e.g., \"greedy by weight with hierarchical grouping\").'
+sampling:
+  temperature: 1.2
+  top_p: 0.9
+  top_k: 30
+  max_tokens: 12288
+agent:
+  max_iterations: 60
+middleware:
+  budget_reminder_from_left: 1
+  long_tool_output_max_chars: 15000

@@ -1,0 +1,249 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are an optimizer for the Erdős minimum overlap problem.
+
+  Goal: Beat the current best bound C5 ≤ 0.38092303510845016.
+  Your task: Find a step function h: [0,2]→[0,1] with ∫h=1 that minimizes
+    max_k ∫ h(x)(1-h(x+k)) dx.
+  
+  Success means combined_score > 1.0 (i.e., c5_bound < 0.380923).
+
+  Key insight: The seed program already has a sophisticated initialization
+  strategy (_get_best_initialization tries 12 patterns). DON'T try to replace
+  this. Instead: EXPLORE HYPERPARAMETER SPACE around these diverse seeds.
+
+  Strategy:
+
+  1. Use probe_solution to quickly test many (seed, lr, penalty, steps) combinations.
+     Each probe gives an approximate c5_bound without consuming your real eval budget.
+
+  2. Focus edits on the EVOLVE-BLOCK's optimizer loop parameters:
+     - num_steps (try: 10000, 20000, 40000, 60000)
+     - base_learning_rate (try: 0.001, 0.005, 0.01, 0.02, 0.05)
+     - penalty_strength (try: 500, 1000, 2000, 5000, 10000, 20000)
+     - num_restarts (try: 1, 3, 5, 10)
+
+  3. For each promising probe result (score > 0.9998), run a FULL evaluation.
+     Stop when you find combined_score > 1.0 or exhaust your budget.
+
+  4. Never "fix" the initialization code. The seed's 12-pattern initialization
+     already works; explore how to OPTIMIZE from those seeds better.
+
+  5. Use construct_step_function to add restart loops if needed, but prioritize
+     simple hyperparameter edits in the optimizer loop.
+
+  Edit the EVOLVE-BLOCK to add hyperparameter grids and use num_restarts > 1.
+  Compare results across seeds, not across whole-function constructions.
+
+skill_description: Hyperparameter exploration for Erdos optimization using diverse seed initializations.
+skill_body: |
+  # Erdos Minimum Overlap - Hyperparameter Exploration
+  
+  ## Why This Strategy Works
+  
+  The seed program's `_get_best_initialization()` already explores 12 different patterns and picks the best. This gives us 12 diverse starting points.
+  
+  Instead of trying to design new mathematical constructions (which is hard and error-prone), we should:
+  1. Keep the seed's initialization as-is
+  2. Add multiple optimization runs (num_restarts) with varied hyperparameters
+  3. Use probe_solution to quickly screen many (lr, penalty, steps) combinations
+  4. Run full evaluations only on the top candidates
+  
+  ## Edit Strategy
+  
+  ### Minimal, Focused Changes:
+  
+  1. **Add a hyperparameter grid** in Hyperparameters:
+     - num_steps: try [10000, 20000, 40000, 60000, 80000]
+     - base_learning_rate: try [0.001, 0.005, 0.01, 0.02, 0.05]
+     - penalty_strength: try [500, 1000, 2000, 5000, 10000]
+     - num_restarts: try [5, 10, 15]
+  
+  2. **Modify _optimize_single_run** to:
+     - Loop over a grid of (lr, penalty, steps)
+     - For each combo, run optimization with 3-5 random seeds
+     - Track the best result across all combos
+  
+  3. **Use probe_solution heavily**:
+     - After 500-1000 steps of optimization, probe to estimate c5_bound
+     - Only run full evaluation on candidates with probe_score > 0.9998
+  
+  ## Example Edit Pattern
+  
+  ```python
+  # In EVOLVE-BLOCK, add this before optimization:
+  best_result = {"score": 0, "params": None}
+  for lr in [0.001, 0.005, 0.01, 0.02]:
+      for penalty in [500, 2000, 5000, 10000]:
+          for steps in [10000, 30000, 60000]:
+              for seed in [0, 1, 2, 3]:
+                  # Run optimization, probe, and track best
+  ```
+  
+  ## Key Principles
+  - EXPLORE HYPERPARAMETERS, don't redesign the algorithm
+  - USE PROBES to screen before spending real evaluations
+  - The seed's 12-pattern initialization is GOLD - preserve it
+  - Target: c5_bound < 0.380923 (combined_score > 1.0)
+
+tool_descriptions:
+  edit_solution: |
+    Modify the EVOLVE-BLOCK region. Add hyperparameter grids and restart loops.
+    Focus on num_steps, learning_rate, penalty_strength, and num_restarts variations.
+    Keep the initialization code unchanged.
+  evaluate_solution: |
+    Run and return combined_score (higher=success).
+    Use only after probe_solution indicates a promising candidate.
+  probe_solution: |
+    Quick approximate evaluation on subsampled data.
+    Use this to screen many hyperparameter combinations before full evaluation.
+    Probe scores are approximate but comparable across runs.
+  finish: |
+    End when combined_score > 1.0 or budget exhausted.
+    If no progress after trying all reasonable hyperparameters, finish.
+
+sampling:
+  temperature: 0.95
+  top_p: 0.98
+  top_k: 30
+  max_tokens: 16000
+
+agent:
+  max_iterations: 60
+
+middleware:
+  budget_reminder_from_left: 3
+  long_tool_output_max_chars: 12000
+
+new_tools:
+  - name: hypergrid_search
+    description: |
+      Generate a grid of hyperparameter combinations to test. Returns list of
+      (lr, penalty, steps, num_restarts, seeds) tuples. Use this to systematically
+      explore the search space without manually coding each combo.
+    input_schema:
+      type: object
+      properties: {}
+    implementation_py: |
+      def run(ctx, args):
+          import numpy as np
+          lrs = [0.001, 0.005, 0.01, 0.02, 0.05]
+          penalties = [500, 1000, 2000, 5000, 10000]
+          steps = [10000, 20000, 40000, 60000]
+          num_restarts = [3, 5, 10]
+          seeds = list(range(20))
+          grid = []
+          for lr in lrs:
+              for penalty in penalties:
+                  for steps in steps:
+                      for nr in num_restarts:
+                          for seed in seeds[:10]:
+                              grid.append({
+                                  "lr": lr,
+                                  "penalty": penalty,
+                                  "steps": steps,
+                                  "num_restarts": nr,
+                                  "seed": seed
+                              })
+          return {"combinations": grid[:150], "total": len(grid)}
+
+  - name: analyze_probe_results
+    description: |
+      Analyze probe results to identify promising hyperparameter patterns.
+      Call this after running several probes to get recommendations.
+    input_schema:
+      type: object
+      properties:
+        probe_results:
+          type: array
+          items:
+            type: object
+    implementation_py: |
+      def run(ctx, args):
+          results = args.get("probe_results", [])
+          if not results:
+              return {"note": "No results to analyze"}
+          sorted_results = sorted(results, key=lambda x: x.get("probe_score", 0), reverse=True)
+          top3 = sorted_results[:3]
+          best_lrs = [r["lr"] for r in top3]
+          best_penalties = [r["penalty"] for r in top3]
+          best_steps = [r["steps"] for r in top3]
+          aggressive = any(r["lr"] > 0.01 for r in top3)
+          low_penalty = any(r["penalty"] < 2000 for r in top3)
+          long_steps = any(r["steps"] > 30000 for r in top3)
+          return {
+              "top3": top3,
+              "patterns": {
+                  "has_aggressive_lr": aggressive,
+                  "has_low_penalty": low_penalty,
+                  "has_long_steps": long_steps
+              },
+              "recommendation": "Try full eval on top3 if probe_score > 0.9998"
+          }
+
+new_skills:
+  - name: hyperparameter-exploration-playbook
+    description: |
+      Guide for exploring hyperparameter space in Erdos optimization.
+      Focus on varying lr, penalty, steps, and num_restarts around the seed's
+      good initialization.
+    body: |
+      # Hyperparameter Exploration Playbook for Erdos Optimization
+      
+      ## Core Principle
+      The seed program's initialization is strong. DON'T try to improve it.
+      Instead, explore HOW to optimize FROM those seeds better.
+      
+      ## Search Space to Explore
+      
+      ### Learning Rate (lr): 0.001 - 0.05
+      - Low lr (0.001-0.005): Good for fine-tuning near optimum, but may be slow
+      - Medium lr (0.01-0.02): Balanced, good for moderate optimization
+      - High lr (0.03-0.05): Risky but can escape shallow local minima
+      
+      ### Penalty Strength: 500 - 20000
+      - Low penalty (<1000): May not enforce ∫h=1 constraint tightly
+      - Medium penalty (1000-5000): Good balance
+      - High penalty (>10000): Enforces constraint but may hurt objective
+      
+      ### Optimization Steps: 10000 - 80000
+      - Short (10000-20000): Quick but may not converge
+      - Medium (30000-50000): Good balance for most cases
+      - Long (60000+): Best for high-stakes final tuning
+      
+      ### Number of Restarts: 3 - 20
+      - Few restarts (3-5): May miss global optimum
+      - Medium restarts (10-15): Good coverage
+      - Many restarts (20+): Comprehensive but expensive
+      
+      ## Probe-First Strategy
+      
+      1. **Generate 150 hyperparameter combinations** using hypergrid_search
+      2. **Run 500-1000 optimization steps** for each (not full training)
+      3. **Probe** each result to estimate c5_bound
+      4. **Rank by probe score**, take top 10
+      5. **Run full evaluation** on top 3-5 candidates
+      6. **Analyze patterns** in successful combos (analyze_probe_results)
+      7. **Iterate**: Focus next search round on promising patterns
+      
+      ## Red Flags (When to Change Strategy)
+      - If all probes give combined_score < 0.9995: May need different initialization
+      - If best score uses lr=0.05 but penalty varies wildly: Constraint not helping
+      - If best score uses very long steps (>60000): May be stuck in local min
+      
+      ## Success Criteria
+      - combined_score > 1.0 means we found c5_bound < 0.380923
+      - Stop when we can't beat current probe results with remaining budget
+
+new_middlewares:
+  - name: probe_reminder
+    hook: before_tool
+    description: |
+      Remind solver to use probe_solution before evaluate_solution.
+      Encourages probe-first workflow to save evaluation budget.
+    implementation_py: |
+      def before_model(hook_input):
+          next_tool = hook_input.get("next_tool", "")
+          if next_tool == "evaluate_solution":
+              return "IMPORTANT: Call probe_solution first to get an approximate score before spending a full evaluation. This saves your valuable eval budget."
+          return None

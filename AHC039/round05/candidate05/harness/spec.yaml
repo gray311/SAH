@@ -1,0 +1,130 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are an expert algorithm designer for geometric optimization problems.
+  MAXIMIZE the score: (mackerel_count - sardine_count + 1) for a valid orthogonal polygon.
+  
+  THIS TASK REQUIRES GEOMETRIC CONSTRUCTION, NOT GENERIC SEARCH:
+  - Build an axis-aligned polygon (edges parallel to x or y axes)
+  - Constraints: ≤1000 vertices, perimeter ≤400,000, integer coordinates 0-100,000
+  - Score is the polygon area with mackerels (+1) minus sardines (-1)
+  
+  KEY INSIGHT: For orthogonal polygons with axis-aligned edges, a simple rectangle
+  often achieves near-optimal results. Start with a 4-vertex rectangle and iterate.
+  
+  CONCRETE STRATEGY - Follow this approach:
+  1. Use `analyze_fish_distribution` ONCE at the start to understand fish layout
+  2. Construct a bounding rectangle around mackerels OR a centered rectangle
+  3. Validate geometry: 4+ vertices, axis-aligned, closed polygon
+  4. Use `probe_solution` to compare 2-3 rectangle variants cheaply
+  5. Use `evaluate_solution` ONCE per promising variant
+  6. If score is poor, try: L-shape, different center, different size
+  
+  Do NOT do:
+  - Internal search loops that exceed 0.9s
+  - Complex polygons with >20 vertices (overkill)
+  - Random edits without geometric reasoning
+  
+  Critical: Output must be in exact format:
+    Line 1: m (vertex count, 4≤m≤1000)
+    Lines 2..m+1: "x y" for each vertex
+new_tools:
+  - name: analyze_fish_distribution
+    description: |
+      Analyze fish positions from the first input file. Return statistics to guide
+      polygon construction. Call this once at start to determine best strategy.
+      Use the returned `mackerel_min_x`, `mackerel_min_y`, `mackerel_max_x`, `mackerel_max_y`
+      to construct a bounding rectangle:
+        Vertices: (min_x,min_y), (max_x,min_y), (max_x,max_y), (min_x,max_y)
+    input_schema: {type: object, properties: {}}
+    implementation_py: |
+      def run(ctx, args):
+          names = ctx.list_task_inputs()
+          if not names:
+              return {"note": "no inputs", "hint": "use default rectangle 0,0 to 100000,100000"}
+          try:
+              # Read mackerel positions (first input file)
+              data = ctx.read_input_df(names[0], nrows=1000)
+              if 'x' not in data or 'y' not in data:
+                  return {"error": "invalid input format", "hint": "check column names"}
+              
+              xs = data['x'].values
+              ys = data['y'].values
+              
+              min_x, max_x = int(xs.min()), int(xs.max())
+              min_y, max_y = int(ys.min()), int(ys.max())
+              
+              # Calculate spread for strategy hint
+              x_range = max_x - min_x
+              y_range = max_y - min_y
+              
+              # Recommend rectangle corners and strategy
+              hint = ""
+              if x_range > y_range:
+                  hint = f"X is wider. Consider L-shape or horizontal rectangle. Vertices: ({min_x},{min_y}) ({max_x},{min_y}) ({max_x},{max_y}) ({min_x},{max_y})"
+              else:
+                  hint = f"Y is wider. Consider vertical rectangle. Vertices: ({min_x},{min_y}) ({max_x},{min_y}) ({max_x},{max_y}) ({min_x},{max_y})"
+              
+              return {
+                  "mackerel_count": len(data),
+                  "mackerel_min_x": min_x,
+                  "mackerel_min_y": min_y,
+                  "mackerel_max_x": max_x,
+                  "mackerel_max_y": max_y,
+                  "x_range": x_range,
+                  "y_range": y_range,
+                  "hint": hint
+              }
+          except Exception as e:
+              return {"error": str(e), "hint": "use default rectangle 0,0 to 100000,100000"}
+new_skills:
+  - name: polygon-construction-checklist
+    description: |
+      A checklist for constructing high-scoring orthogonal polygons in mackerel-sardine problems.
+      Follow this method to ensure valid, effective constructions.
+    body: |
+      # Polygon Construction Checklist for Mackerel-Sardine Optimization
+  
+      ## Step 1: Validate Geometry
+      [ ] Exactly 4+ vertices output
+      [ ] All consecutive vertices form axis-aligned edges (same x or same y)
+      [ ] All coordinates are integers in [0, 100000]
+      [ ] Polygon is closed (last vertex connects to first)
+      [ ] Perimeter ≤ 400,000
+  
+      ## Step 2: Output Format
+      Line 1: m (vertex count, 4≤m≤1000)
+      Lines 2..m+1: "x y" coordinates
+  
+      ## Step 3: Common Strategies
+      [ ] Bounding rectangle: (min_x,min_y), (max_x,min_y), (max_x,max_y), (min_x,max_y)
+      [ ] Centered rectangle: use centroid, expand by k*std on each axis
+      [ ] L-shape: subset of rectangle, e.g., cut off top or right
+  
+      ## Step 4: Validation Before Eval
+      [ ] Check vertex count ≥ 4
+      [ ] Check consecutive vertices are axis-aligned
+      [ ] Estimate perimeter: (max_x-min_x)*2 + (max_y-min_y)*2 ≤ 400000
+      [ ] Verify all coordinates in [0, 100000]
+  
+      ## Step 5: Debugging Low Score
+      [ ] Is polygon too small? Expand it
+      [ ] Is polygon missing mackerels? Check bounds
+      [ ] Is polygon hitting many sardines? Shrink or reposition
+      [ ] Is perimeter too large? Reduce dimensions
+new_middlewares:
+  - name: remind_rect_construction
+    hook: before_model
+    description: |
+      Remind the solver to construct a simple axis-aligned rectangle around mackerel bounds
+      when stuck or at iteration start. Simple shapes often outperform complex ones.
+    implementation_py: |
+      def before_model(hook_input):
+          iteration = hook_input.get("iteration", 0)
+          best_score = hook_input.get("best_score", 0)
+          if iteration == 0:
+              return "START: Call analyze_fish_distribution first, then build a 4-vertex rectangle around mackerel bounds. Format: count then 'x y' pairs."
+          elif iteration % 5 == 0:
+              return "REMEMBER: Try a fresh 4-vertex rectangle. Output: 'm', then 'x1 y1', 'x2 y2', 'x3 y3', 'x4 y4' for axis-aligned rectangle vertices."
+          elif best_score < 300:
+              return "LOW SCORE: Simplify to a bounding rectangle. Don't overcomplicate."
+          return None

@@ -1,0 +1,252 @@
+schema: h2spec/1.0
+system_prompt: |
+  Erdos minimum overlap problem: FIND A STEP FUNCTION h: [0,2]->[0,1] minimizing max_k integral h(x)(1-h(x+k))dx.
+
+  Constraint: integral(h) = 1 exactly.
+
+  Current best: C5 <= 0.38092303510845016.
+
+  Goal: Beat seed score (c5_bound < 0.380923).
+
+  CRITICAL: The seed optimizer uses gradient descent on sigmoid-transformed vectors. This finds smooth curves, not optimal step functions.
+
+  NEW STRATEGY: REPLACE THE OPTIMIZER with direct combinatorial search over step-function parameters.
+
+  1. Build a NEW optimizer class that directly specifies step-function breakpoints and levels
+
+  2. Generate diverse candidates by varying:
+     - Number of intervals (4-16)
+     - Breakpoint locations (rational grids)
+     - Level assignments (binary or ternary: 0, 0.5, 1)
+
+  3. Use generate_step_candidates tool to get 8-12 pre-simulated candidates
+
+  4. Each candidate must satisfy: sum(h) * dx = 1 (scale levels to integrate to 1)
+
+  5. Evaluate ONLY candidates with analytical c5 < 0.36
+
+  6. If no improvement after 2 batches, try RATIONAL BREAKPOINT patterns (denominators 3,4,6,8,12)
+
+  7. EDIT the EVOLVE-BLOCK to completely replace ErdosOptimizer with StepFunctionSearcher
+  8. Keep num_restarts=3, but each restart generates independent step-function configs
+
+  Key insight: Optimal solutions are piecewise-constant, not smooth sigmoid curves.
+skill_description: |
+  Generate diverse step-function candidates for Erdos optimization.
+
+  Direct combinatorial search over breakpoints and levels, not gradient descent.
+  Precompute analytical c5 scores, scale to integral=1, filter c5 < 0.36 for full eval.
+skill_body: |
+  # Step Function Search Strategy
+
+  ## Problem
+  The seed optimizer trains smooth sigmoid curves. Optimal Erdős step functions are piecewise-constant.
+
+  ## Solution: Direct Combinatorial Construction
+
+  ### Step 1: Define Step Function Structure
+  A step function with N intervals has:
+  - N breakpoints in (0, 2)
+  - N levels in [0, 1]
+  - Scale: multiply all levels by constant to make integral = 1
+
+  ### Step 2: Generate Diverse Configurations
+  Vary:
+  - N (4, 6, 8, 10, 12, 16)
+  - Breakpoint grid (uniform, Fibonacci, golden-ratio spacing)
+  - Level patterns (binary: 0/1; ternary: 0/0.5/1; patterned)
+
+  ### Step 3: Precompute Scores
+  Use generate_step_candidates tool to get analytical c5_bound
+
+  ### Step 4: Evaluate Best
+  Only run full optimization on candidates with c5_bound < 0.36
+
+  ## Expected Behavior
+  1. CALL generate_step_candidates with 2-3 different N values
+  2. Filter for c5_bound < 0.36 (expect 2-4 candidates)
+  3. CALL evaluate_solution on each kept candidate
+  4. Iterate with new N, new breakpoint grids if no improvement
+  5. Total: 2-4 evals per batch, 2-3 batches max
+tool_descriptions:
+  edit_solution: 'Modify EVOLVE-BLOCK to completely REPLACE ErdosOptimizer with a step-function generator.
+
+  Keep the run() and _run_one_candidate() structure, but change the candidate generation to be combinatorial:
+  - Generate step functions with N=4,6,8,10,12,16
+  - Use rational breakpoints: e.g., [0, 2/5, 4/5, 1, 6/5, 8/5, 2]
+  - Assign binary/ternary levels, scale to integral=1
+
+  Do NOT change training loop hyperparameters - the seed optimizer is already well-tuned for smooth curves. We need different REPRESENTATION.'
+  evaluate_solution: 'Run full 59000-step optimization on a candidate. Returns combined_score = 0.38092303510845016 / c5_bound.
+
+  Higher is better. combined_score > 1.0 means a new record.'
+  probe_solution: Fast approximate evaluation (500 intervals, analytical c5). Uses probe budget.
+  finish: Submit when combined_score > 1.0 (c5_bound < 0.38092303510845016).
+sampling:
+  temperature: 1.0
+  top_p: 0.95
+  top_k: 50
+  max_tokens: 16384
+agent:
+  max_iterations: 40
+middleware:
+  budget_reminder_from_left: 3
+  long_tool_output_max_chars: 8000
+new_tools:
+- name: generate_step_candidates
+  description: |
+    Generate 12 step-function candidates with diverse breakpoint structures and level patterns.
+    Each candidate has precomputed analytical c5_bound and is scaled to integral=1.
+    Use for rapid screening before full evaluation.
+  input_schema:
+    type: object
+    properties:
+      target_c5:
+        type: number
+        default: 0.36
+  implementation_py: |
+    def run(ctx, args):
+        import numpy as np
+        N_intervals = 800
+        domain = 2.0
+        dx = domain / N_intervals
+        
+        def compute_c5(h):
+            h_padded = np.pad(h, (0, N_intervals))
+            j_padded = np.pad(1.0 - h, (0, N_intervals))
+            corr = np.fft.ifft(np.fft.fft(h_padded) * np.conj(np.fft.fft(j_padded))).real
+            return float(np.max(corr) * dx)
+        
+        def scale_to_integral_one(h):
+            integral = np.sum(h) * dx
+            if integral < 1e-6:
+                return h
+            return h / integral
+        
+        np.random.seed(42)
+        candidates = []
+        x = np.linspace(0, 2, N_intervals)
+        
+        # Grid 1: Binary step functions, N=4 to 12
+        for num_steps in [4, 6, 8, 10, 12]:
+            midpoints = np.linspace(0, 2, num_steps + 1)[1:-1]
+            levels = np.random.choice([0, 0.5, 1.0], size=num_steps)
+            h = np.zeros(N_intervals)
+            for i, mid in enumerate(midpoints):
+                mask = x < mid
+                h[mask] = levels[i]
+            h = scale_to_integral_one(h)
+            c5 = compute_c5(h)
+            candidates.append({"h": h.tolist(), "c5_bound": c5, "structure": f"binary_N{num_steps}", "c5_raw": c5})
+        
+        # Grid 2: Golden-ratio spacing
+        np.random.seed(43)
+        golden = 1.618034
+        phi_points = [0.0]
+        for i in range(8):
+            phi_points.append(2.0 * (golden**i) % 2.0)
+        phi_points.append(2.0)
+        phi_points = sorted(set([round(p, 4) for p in phi_points]))
+        h = np.zeros(N_intervals)
+        for i in range(len(phi_points)-1):
+            h[(x >= phi_points[i]) & (x < phi_points[i+1])] = 0.5 + np.random.rand() * 0.5
+        h = scale_to_integral_one(h)
+        c5 = compute_c5(h)
+        candidates.append({"h": h.tolist(), "c5_bound": c5, "structure": "golden_N8", "c5_raw": c5})
+        
+        # Grid 3: Fibonacci-like spacing
+        np.random.seed(44)
+        fib_pts = [0.0, 0.382, 0.618, 1.0, 1.382, 1.618, 2.0]
+        h = np.zeros(N_intervals)
+        for i in range(len(fib_pts)-1):
+            h[(x >= fib_pts[i]) & (x < fib_pts[i+1])] = np.random.choice([0, 0.5, 1.0])
+        h = scale_to_integral_one(h)
+        c5 = compute_c5(h)
+        candidates.append({"h": h.tolist(), "c5_bound": c5, "structure": "fibonacci_N6", "c5_raw": c5})
+        
+        # Grid 4: Uniform with perturbation
+        np.random.seed(45)
+        level_x = np.linspace(0, 2, 20)
+        levels = np.random.choice([0, 0.25, 0.5, 0.75, 1.0], size=20)
+        h = np.zeros(N_intervals)
+        for i in range(19):
+            left, right = level_x[i], level_x[i+1]
+            fraction = (right - left) / 2.0
+            h[(x >= left - fraction) & (x < left + fraction)] = levels[i]
+        h = scale_to_integral_one(h)
+        c5 = compute_c5(h)
+        candidates.append({"h": h.tolist(), "c5_bound": c5, "structure": "uniform_20_bands", "c5_raw": c5})
+        
+        return {"candidates": candidates, "num_candidates": len(candidates)}
+new_skills:
+- name: combinatorial-step-search
+  description: |
+    Search for optimal step functions by directly constructing piecewise-constant functions
+    with controlled breakpoints and levels. Avoid gradient-based smooth curve optimization.
+  body: |
+    # Combinatorial Step Function Search
+
+    ## Core Principle
+    Optimal Erdős step functions are piecewise-constant, NOT smooth sigmoid curves.
+    The seed optimizer's gradient descent on sigmoid-transformed vectors finds local minima
+    that are good but not optimal for this problem.
+
+    ## Search Strategy
+
+    ### Step 1: Choose Structural Parameters
+    - Number of steps: 4, 6, 8, 10, 12, 16
+    - Breakpoint spacing: uniform, golden-ratio, Fibonacci, rational grids
+    - Level assignments: binary (0,1), ternary (0,0.5,1), quaternary (0,0.25,0.75,1)
+
+    ### Step 2: Generate Candidate
+    1. Define breakpoints [b_0, b_1, ..., b_N] where 0 = b_0 < b_1 < ... < b_N = 2
+    2. Assign levels l_0, l_1, ..., l_{N-1} in [0, 1]
+    3. Scale: multiply all levels by c = 1 / (sum(l_i) * (b_{i+1}-b_i))
+    4. This guarantees integral(h) = 1
+
+    ### Step 3: Analytical Screening
+    Call generate_step_candidates for precomputed c5_bound
+    Filter: c5_bound < 0.36 (conservative) or < 0.37 (generous)
+
+    ### Step 4: Full Evaluation
+    Call evaluate_solution ONLY on candidates passing the filter
+    Typical budget: 2-4 evals per batch
+
+    ### Step 5: Iterate
+    If no improvement:
+    - Try different N values
+    - Try different breakpoint grids (rational with denom 3,4,6,8,12)
+    - Try different level assignments
+
+    ## Why This Works
+    - Direct combinatorial search explores a fundamentally different space
+    - Precomputed analytical scores enable rapid screening
+    - Piecewise-constant representation matches the problem structure
+new_middlewares:
+- name: enforce_step_function
+  hook: before_model
+  description: |
+    Middleware that reminds the executor to use step-function construction,
+    not gradient-based optimization on smooth curves.
+  implementation_py: |
+    def before_model(hook_input):
+        state = hook_input.get("state", {})
+        last_edit = state.get("last_tool_name", "")
+        
+        reminder = ""
+        
+        if last_edit == "edit_solution":
+            reminder = (
+                "After editing, verify the EVOLVE-BLOCK now contains a step-function generator,\
+                not gradient descent on sigmoid curves.\
+                \nCheck for: N_intervals loops, breakpoint definitions, level assignments.\
+                \nDo NOT keep training loops - they waste evals."
+            )
+        elif "evals_left" in state and state["evals_left"] >= 2:
+            reminder = (
+                f"{state['evals_left']} evals remaining.\
+                \nUse generate_step_candidates with NEW structural parameters (different N, new breakpoint grids).\
+                \nDon't repeat the same candidate structure."
+            )
+        
+        return reminder if reminder else None

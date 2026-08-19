@@ -1,0 +1,115 @@
+schema: h2spec/1.0
+system_prompt: You are an expert software developer. The task is to maximize C2 = ||f * f||_2^2 / ((integral(f))^2 ||f * f||_inf). Current best is 0.8963, achieved by step functions. YOUR CURRENT CODE USES PIECEWISE-LINEAR FUNCTIONS. YOU MUST SWITCH TO STEP FUNCTIONS.
+
+Template for step functions:
+f = jnp.zeros(num_intervals)
+f = f.at[0:int(width*num_intervals)].set(height)
+
+Try: width=0.5, height=1.0; widths=[0.3,0.4], heights=[1.2,0.8]; widths=[0.2,0.3,0.3,0.2], heights=[1.0,1.5,1.0,0.5]
+
+Strategy:
+1. Call representational_probe to confirm piecewise-linear
+2. IMMEDIATELY generate step-function variants using edit_solution
+3. Use probe_solution to rank 5-10 step variants before any full evaluation
+4. Evaluate top 3 step variants
+5. Do NOT tune piecewise-linear - switch to step functions
+
+Tools: edit_solution, evaluate_solution, probe_solution, representational_probe, finish
+skill_description: Systematically discover high-C2 functions by SWITCHING from piecewise-linear to step-function representation. Current record (0.8963) achieved by step functions. Generate step-function code, probe 10+ variants, evaluate top 3. NEVER tune piecewise-linear for 5+ iterations without trying step functions.
+skill_body: # C2 Optimization: Switch to Step Functions
+
+## Critical: Record (0.8963) is on STEP FUNCTIONS, not piecewise-linear
+
+## Step 1: Confirm current is piecewise-linear using representational_probe
+
+## Step 2: Replace _create_initializer with step-based code:
+if pattern_idx == 0:
+    start = int(0.2 * n)
+    end = int(0.5 * n)
+    f = f.at[start:end].set(1.0)
+elif pattern_idx == 1:
+    f = f.at[0:int(0.2*n)].set(1.2)
+    f = f.at[int(0.2*n):int(0.5*n)].set(1.5)
+    f = f.at[int(0.5*n):].set(0.8)
+elif pattern_idx == 2:
+    f = f.at[0:int(0.15*n)].set(1.0)
+    f = f.at[int(0.15*n):int(0.4*n)].set(1.8)
+    f = f.at[int(0.4*n):int(0.6*n)].set(1.0)
+    f = f.at[int(0.6*n):].set(0.5)
+else:
+    f = f.at[int(0.2*n):int(0.5*n)].set(1.0)
+
+## Step 3: Probe 10+ step variants using probe_solution before any full evaluation
+
+## Step 4: Evaluate top 3 candidates using evaluate_solution
+
+## Critical Rules:
+1. SWITCH to step functions IMMEDIATELY
+2. Probe 10+ variants before any full evaluation
+3. Evaluate only top 3
+4. If stuck, try different width/height combinations
+tool_descriptions:
+  edit_solution: Change code in EVOLVE-BLOCK. Replace _create_initializer with step-function code.
+  evaluate_solution: Run evaluator. Returns combined_score. Use only for top candidates.
+  probe_solution: Cheap scoring on subsampled data. Use to rank 10+ variants before evals.
+  finish: End session when done.
+  representational_probe: Analyze current function representation.
+sampling:
+  temperature: 1.5
+  top_p: 0.99
+  top_k: 50
+  max_tokens: 16384
+agent:
+  max_iterations: 80
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 12000
+new_tools: []
+new_skills:
+- name: step-function-discovery-playbook
+  description: Playbook for discovering high-C2 step functions. Probe 10+ variants, evaluate top 3.
+  body: |
+    # Step-Function Discovery
+
+    ## Core Principle: Record (0.8963) achieved by step functions
+
+    ## Phase 1: Confirm piecewise-linear using representational_probe
+
+    ## Phase 2: Generate step variants
+    - Two-level: widths=[0.3,0.4], heights=[1.2,0.8]
+    - Three-level: widths=[0.2,0.3,0.3,0.2], heights=[1.0,1.5,1.0,0.5]
+    - Four-level: widths=[0.15,0.2,0.2,0.15], heights=[0.8,1.4,1.0,0.6]
+
+    Test 10+ variants with probe_solution BEFORE any full evaluation.
+
+    ## Phase 3: Evaluate top 3 with evaluate_solution
+
+    ## Phase 4: Deep dive if step functions beat 0.8963
+
+    ## Critical: Do NOT tune piecewise-linear. Switch immediately.
+new_middlewares:
+- name: step_switch_reminder
+  hook: before_model
+  description: Remind executor to switch to step functions if stuck
+  implementation_py: |
+    def before_model(hook_input):
+        state = hook_input.get("state", {})
+        evals_used = state.get("evals_used", 0)
+        family_streak = state.get("family_streak", 0)
+        if evals_used > 0 and family_streak >= 3:
+            return "STEP_STALL: Switch to step functions. Record (0.8963) achieved by steps, not piecewise-linear."
+        return None
+- name: evaluate_budget_saver
+  hook: before_model
+  description: Enforce probe-before-eval discipline
+  implementation_py: |
+    def before_model(hook_input):
+        state = hook_input.get("state", {})
+        iteration = state.get("iteration", 0)
+        evals_used = state.get("evals_used", 0)
+        last_probed_iter = state.get("last_probed_iter", -1)
+        if iteration > last_probed_iter and evals_used > 0 and (iteration - last_probed_iter) > 3:
+            return "PROBE_REQUIRED: Test 10+ step variants with probe_solution before spending evals."
+        if iteration < 5 and evals_used == 0 and iteration > 0:
+            return "PROBE_FIRST: Generate step variants and probe before any full evaluation."
+        return None

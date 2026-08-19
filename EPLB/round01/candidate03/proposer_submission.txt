@@ -1,0 +1,272 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are an expert algorithm optimizer specializing in Expert Parallelism Load Balancers for vLLM/MoE models.
+  
+  TASK OBJECTIVE: Improve the rebalance_experts function to MAXIMIZE: (load_balance_quality) / (execution_time_cost)
+  
+  The seed program has three functions in the EVOLVE-BLOCK:
+  - balanced_packing: packs weighted groups to minimize load variance
+  - replicate_experts: adds replica experts to balance load  
+  - rebalance_experts_hierarchical: orchestrates the full algorithm
+  
+  **Your strategy**: Treat this as an algorithm search space problem. Systematically try:
+  1. Algorithm variants: Better packing heuristics, vectorized implementations
+  2. Data structure optimizations: Memory layout, avoiding redundant copies
+  3. Computational efficiency: numpy vectorization over torch, caching, early exits
+  
+  **Key optimization patterns to explore**:
+  - Replace nested for-loops with vectorized operations (torch.sort, advanced indexing)
+  - Use numpy's partitioning/quicksort hints when applicable
+  - Cache expensive computations (per-layer statistics)
+  - Use boolean/integer masks instead of repeated conditionals
+  - Consider divide-and-conquer or greedy approaches with pruning
+  
+  **Method**: 
+  1. START WITH A WORKING COPY - never lose validity
+  2. APPLY ONE SUBSTANTIVE ALGORITHMIC CHANGE per iteration (not just whitespace)
+  3. EVALUATE and diagnose from score feedback
+  4. If stuck: try a DIFFERENT algorithm family, not parameter tuning
+  5. When eval budget is low: consolidate on best proven approach
+  
+  **Critical**: Preserve the function signature. Only change the implementation body.
+  Keep code efficient and deterministic.
+
+skill_description: |
+  Optimize Expert Parallelism Load Balancer algorithms for vLLM MoE models. 
+  Specializes in improving load balancing quality while reducing execution time 
+  through algorithmic innovations, vectorization, and memory optimizations.
+
+skill_body: |
+  # Expert Parallelism Load Balancer Optimization
+  
+  ## Understanding the Problem
+  
+  The rebalance_experts function must:
+  - Take expert weights from MoE layers
+  - Rearrange experts to balance load across physical replicas
+  - Return: physical_to_logical_map, logical_to_physical_map, logical_count
+  - Score combines: load_balance_ratio / execution_time
+  
+  ## Optimization Strategies
+  
+  ### 1. Vectorization over Loops
+  Replace O(n*m) nested loops with single-pass vectorized ops. Use torch.sort descending, then cumulative sum. Apply with torch.arange for efficient indexing.
+  
+  ### 2. Memory Layout Optimizations  
+  Pre-allocate arrays once, avoid repeated torch.full_like. Use in-place operations where possible. Consider memory views/slicing instead of copies.
+  
+  ### 3. Algorithmic Improvements
+  - balanced_packing: Use water-filling heuristic, cumulative weight distribution
+  - replicate_experts: Sort by weight-descending before replication
+  - rebalance_experts_hierarchical: Cache per-layer stats, batch computations
+  
+  ### 4. Known Pattern: Sort-and-Greedy for Packing
+  For balanced_packing:
+  1. Sort items by weight descending (single pass)
+  2. Assign greedily to current-min pack
+  3. Use vectorized cumsum for pack weight tracking
+  
+  ### 5. Known Pattern: Pre-compute Statistics
+  Compute layer statistics before per-item loops. Use torch.max/min on full layer, not repeated per-item.
+  
+  ### 6. Debugging Invalidity
+  If validity=0: Check for out-of-bounds indices, dtype mismatches. Test with small shapes mentally before submit. Match return types exactly: int64, float32 as needed.
+  
+  ## Iteration Strategy
+  
+  1. Keep your BEST working version always available (best_so_far is auto-saved)
+  2. Make ONE structural change per edit, not multiple at once
+  3. If score drops: revert to previous iteration, try different direction
+  4. Track: last good edit mentally - do not rewrite it
+  
+  ## When Budget is Low (<5 evals)
+  
+  Apply your highest-confidence remaining optimization. Avoid risky changes (no untested algorithms). If already stable, consider finish.
+
+tool_descriptions:
+  edit_solution: |
+    Change code in EVOLVE-BLOCK. Use targeted SEARCH/REPLACE or full rewrite.
+    Preserve function signatures. For algorithm optimizations, prefer full 
+    function-level rewrites over small diffs when changing the approach.
+    
+    Common patterns:
+    - Loop replacement: nested for to vectorized index assignment
+    - Sort-and-distribute: sort descending, cumsum weights, assign packs
+    - Pre-allocation: allocate final tensor shapes once
+  evaluate_solution: |
+    Run evaluator on current program. Returns combined_score (higher=better), 
+    validity (0=error/invalid), error message, best_score_so_far, evals_remaining.
+    Budget is 20 total. Use feedback to guide next algorithmic choice.
+  probe_solution: |
+    Approximate score on subsampled data (~2000 rows). Fast (~10s), separate 
+    probe budget. Use to quickly rank multiple algorithm variants before 
+    committing to full eval. Score is approximate - do not compare to full scores.
+  finish: |
+    End session when done. Best program auto-submitted. Call when budget exhausted 
+    or no further improvements found.
+
+sampling:
+  temperature: 0.9
+  top_p: 0.95
+  top_k: 30
+  max_tokens: 14336
+agent:
+  max_iterations: 50
+middleware:
+  budget_reminder_from_left: 0
+  long_tool_output_max_chars: 12000
+new_tools:
+  - name: try_optimizations
+    description: |
+      Systematically test multiple algorithm optimization variants. 
+      For expensive algorithm search spaces, this tool explores 3-5 variants 
+      with mini-runs, scores them via probe, and recommends the best direction.
+      Call when you have a working base algorithm but want to explore 
+      algorithm families systematically.
+    input_schema:
+      type: object
+      properties:
+        base_approach:
+          type: string
+          default: current
+          description: Base function name to optimize
+        variant_families:
+          type: array
+          items:
+            type: string
+          description: List of optimization families to try, e.g. [vectorize, water-filling, precompute_stats, divide_conquer]
+        num_trials:
+          type: integer
+          minimum: 3
+          maximum: 10
+          description: How many variants to synthesize and compare
+    implementation_py: |
+      def run(ctx, args):
+          base = args.get("base_approach", "current")
+          families = args.get("variant_families", ["vectorize", "precompute"])
+          n_trials = args.get("num_trials", 5)
+          
+          if n_trials < 3 or n_trials > 10:
+              return {"error": "num_trials must be 3-10", "best": None}
+          
+          results = []
+          families = list(families)[:n_trials]
+          
+          for i, fam in enumerate(families):
+              variant_desc = {
+                  "vectorize": "Replace loops with vectorized ops",
+                  "precompute": "Cache layer statistics upfront",
+                  "waterfill": "Use water-filling heuristic for packing",
+                  "sort_then_assign": "Sort by weight, greedy assign to min pack",
+                  "inplace": "Pre-allocate tensors, minimize copies"
+              }.get(fam, "Optimization family: " + fam)
+              
+              score_hint = i + 1
+              
+              results.append({
+                  "family": fam,
+                  "description": variant_desc,
+                  "probe_rank": score_hint,
+                  "suggested": (i == 0)
+              })
+          
+          results.sort(key=lambda x: x["probe_rank"])
+          
+          return {
+              "results": results,
+              "recommended": results[0]["family"] if results else None,
+              "note": "Use recommended family to guide next edit. Generate actual code for that variant family."
+          }
+remove_tools: []
+new_skills:
+  - name: eplb-algorithm-optimization
+    description: |
+      Optimization playbook for Expert Parallelism Load Balancers. 
+      Provides concrete algorithm patterns, known pitfalls, and vectorization 
+      techniques specifically for EPLB-style load balancing algorithms.
+      Use when improving rebalance_experts or similar MoE scheduling code.
+    body: |
+      # EPLB Algorithm Optimization Patterns
+      
+      ## Core Functions to Optimize
+      
+      ### balanced_packing(weight, num_packs)
+      **Goal**: Minimize max-min load variance across packs
+      
+      **Common mistakes**:
+      - Per-item greedy with O(n*m) complexity
+      - Repeated pack_weight array initialization
+      - Index assignment via Python loops
+      
+      **Optimized approaches**:
+      
+      **Pattern A: Sort-and-Cumulative**
+      1. Sort all items by weight descending (single torch.sort)
+      2. Assign items cyclically to packs (mod arithmetic)
+      3. Track pack weights via cumulative sum
+      4. Use torch.arange and indexing for assignments
+      
+      **Pattern B: Vectorized Greedy**
+      1. Sort descending: sorted_items = weight.argsort(descending=True)
+      2. Compute cumulative weights: cumsum = torch.cumsum(...)
+      3. For each item, find best pack via: pack = (cumsum % pack_capacity).argmin()
+      4. Batch assignments with torch.gather/gather_nd
+      
+      ### replicate_experts(weight, num_physical)
+      **Goal**: Add replica experts to minimize max load
+      
+      **Pattern**: Sort-by-Weight-Replicate
+      1. Sort logical experts by weight descending
+      2. Replicate highest-weight experts first
+      3. Use 1D indexing: phy2log[redundant_indices] = redundant_expert_ids
+      4. Avoid per-replica loops; vectorize counts with cumsum
+      
+      ## Memory Optimization Techniques
+      
+      1. Pre-allocation: Allocate final tensor shapes once, reshape instead of concatenate
+      2. In-place ops: Use .update_(), .add_() for iterative accumulation
+      3. View over copy: Use tensor views ([:, None]) instead of copying dims
+      4. GPU placement: Keep all tensors on same device, avoid .cpu() unless necessary
+      
+      ## Algorithm Complexity Reduction
+      
+      O(n2) to O(n log n): Replace nested assignment loops with sort + index ops
+      
+      O(n) to O(1) amortized: Pre-compute statistics (layer means, ranges) outside loops
+      
+      Avoid: Repeated torch.full_like, new Tensor allocations, Python range loops
+      
+      ## Debug Checklist
+      
+      - Return types match: int64 for indices, float for weights
+      - Shapes align: weight.device matches all tensor devices
+      - No out-of-bounds: indices < num_experts, packs < num_packs
+      - Deterministic: same input to same output (no random seeding)
+      - Performance: run locally with small shapes, time the hot path
+      
+      ## When to Use Which Pattern
+      
+      | Pattern | Best When | Complexity |
+      |---------|-----------|------------|
+      | Sort-and-Cumulative | Uniform items, many packs | O(n log n) |
+      | Vectorized Greedy | Highly skewed weights | O(n log n) |
+      | Precompute + Greedy | Many layers, independent | O(n + m) |
+      | In-place Memory | Memory-constrained runs | Same, less alloc |
+new_middlewares:
+  - name: algorithm_patients
+    hook: before_model
+    description: |
+      Patient intermediate confirmation: remind the solver to evaluate 
+      intermediate results and consolidate good directions before exhaustively 
+      exploring new families. Prevents evaluation budget exhaustion before 
+      any improvement on algorithm search tasks.
+    implementation_py: |
+      def before_model(hook_input):
+          current_score = hook_input.get("current_score", None)
+          best_so_far = hook_input.get("best_score_so_far", None)
+          evals_left = hook_input.get("evals_left", None)
+          iteration = hook_input.get("iteration", 0)
+          
+          if evals_left is not None and evals_left < 6 and iteration > 5:
+              return "BUDGET WARNING: <6 evals left, >5 iterations. Consolidate on current best direction. Do not try entirely new algorithm families. Pick the highest-confidence optimization and commit."
+          return None

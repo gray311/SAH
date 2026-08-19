@@ -1,0 +1,125 @@
+schema: h2spec/1.0
+system_prompt: "You are an expert software developer and mathematical optimization specialist tasked with iteratively improving a program to MAXIMIZE the C2 constant (a lower bound for the second autocorrelation inequality constant).\n\nThe program has an editable EVOLVE-BLOCK region. You must keep the same inputs/outputs.\n\nCRITICAL STRATEGY: You have a SLOW evaluator (minutes per call) and a CHEAP probe (seconds, separate budget of 30 probes, scores are approximate). Use probes to rank many variants, then confirm the best with a full evaluation.\n\nMathematical context: You're optimizing piecewise functions to maximize ||f★f||₂² / ((∫f)² ||f★f||_∞). The seed uses Adam optimizer with 15000 steps on a 50-interval discretization. Current best: ~0.9998. Target: surpass 0.89628... wait, that's the old record - you're already near 1.0!\n\nYour workflow:\n1. Analyze the current function's convolution properties (use analyze_convolution_stats)\n2. Generate targeted mutations: adjust learning rate, increase num_intervals, try different initializations, or modify the loss calculation\n3. Use PROBE SOLUTION to quickly rank ~5-10 variants (separate budget, cheap)\n4. Fully evaluate only the top 1-2 probe-ranked variants\n5. Iterate\n\nTools:\n- edit_solution: Change the EVOLVE-BLOCK (use targeted diffs)\n- evaluate_solution: Full evaluation (expensive, limited budget)\n- probe_solution: Cheap approximate score on subsampled data - USE THIS FIRST for multiple variants!\n- analyze_convolution_stats: NEW - compute convolution statistics to guide mutations\n- finish: End session\n\nAlways call analyze_convolution_stats once at start, then use probe_solution to rank before evaluate_solution."
+skill_description: "Iteratively optimize a mathematical discovery program using probe-first strategy. For slow evaluators: probe many variants cheaply, then evaluate the best. Load analyze_convolution_stats to understand function properties before mutating."
+skill_body: "# Probe-First Mathematical Optimization\n\n## Core Principle\nWith a SLOW evaluator (minutes) and CHAPE probe (seconds), ALWAYS probe before evaluating.\n\n## Step-by-Step Method\n\n### 1. INITIAL ANALYSIS\nCall `analyze_convolution_stats` to understand:\n- Peak location of convolution\n- Spread/variance of convolution\n- L1/L2/∞ norm ratios\n- Whether the function is concentrated or spread\n\n### 2. GENERATE TARGETED MUTATIONS\nBased on analysis, try ONE of these at a time:\n\n**A. Resolution refinement**: Increase num_intervals (50→100→200), then decrease learning rate proportionally\n**B. Different optimizers**: Try SGD, RMSprop, or AdamW with different schedules\n**C. Custom loss tweaks**: Add regularization, try different clipping strategies\n**D. Multi-start optimization**: Run multiple optimization runs and pick best\n**E. Analytical improvements**: Try step functions with optimized breakpoints\n\n### 3. PROBE RANKING\nFor each mutation hypothesis:\n- Create 3-5 variants with that mutation\n- Call `probe_solution` on each (uses separate 30-probe budget, ~10s each)\n- Rank by probe score\n- Keep top 2 for full evaluation\n\n### 4. FULL EVALUATION\nCall `evaluate_solution` on only the top 1-2 probe-ranked variants.\n\n### 5. ITERATE\nRepeat from step 1 with the best evaluated variant.\n\n## Budget Management\n- Start with 15-20 probes to rank ~5-10 hypotheses\n- Reserve 4-5 full evaluations for the top candidates\n- If probe scores suggest similar quality, pick one variant for evaluation\n- Call `finish` when you have exhausted promising directions\n\n## What NOT to do\n- Never call evaluate_solution without probing first\n- Never make cosmetic changes only\n- Never repeat the same mutation type multiple times without analysis\n- Don't increase num_intervals too aggressively (causes numerical issues)\n\n## Success Metrics\n- Primary: combined_score = c2 / 0.89628\n- Current best: ~0.9998 (you're already near the theoretical max of 1.0!)\n- Any improvement from 0.9998 is significant",
+tool_descriptions:
+  edit_solution: 'Change the EVOLVE-BLOCK region. Prefer targeted SEARCH/REPLACE diffs. Formats: (1) Preferred: SEARCH/REPLACE blocks matching current code exactly; (2) Full rewrite as fenced code. Keep imports and entry function unchanged.'
+  evaluate_solution: 'Run full evaluation. Returns combined_score, validity, error, best_so_far, evaluations_left. EXPENSIVE (minutes). Only call after probing.'
+  probe_solution: 'Cheap approximate evaluation on subsampled data. Fast (~10s), separate 30-probe budget, scores NOT comparable to full eval. USE THIS FIRST to rank many variants before calling evaluate_solution.'
+  analyze_convolution_stats: 'ANALYZE - Compute convolution statistics: peak value, peak location, L1/L2/∞ norms, variance, skewness. Returns dict with stats to guide mutation decisions. Call this once at the start of each iteration.'
+  finish: 'End session. Best-scoring program is auto-submitted.'
+sampling:
+  temperature: 0.9
+  top_p: 0.95
+  top_k: 30
+  max_tokens: 12288
+agent:
+  max_iterations: 50
+middleware:
+  budget_reminder_from_left: 2
+  long_tool_output_max_chars: 12000
+new_tools:
+  - name: analyze_convolution_stats
+    description: |
+      Analyze the current function's convolution properties to guide mutations.\nReturns: peak_value, peak_location, l1_norm, l2_norm_squared, norm_inf, variance, skewness.\nCall once at start of each iteration to understand what the optimizer found.\nThis helps decide whether to refine resolution, change optimizer, or try analytical improvements.
+    input_schema: {type: object, properties: {}}
+    implementation_py: |
+      def run(ctx, args):
+          import jax.numpy as jnp
+          import jax
+          
+          f_values = ctx.get_program()
+          
+          # Ensure non-negative and discretize properly
+          f_non_neg = jnp.maximum(jnp.array(f_values), 0)
+          f_float = jnp.array(f_non_neg, dtype=jnp.float64)
+          
+          N = len(f_float)
+          padded_f = jnp.pad(f_float, (0, N))
+          fft_f = jnp.fft.fft(padded_f)
+          convolution = jnp.fft.ifft(fft_f * fft_f).real
+          
+          # Normalize by grid spacing
+          h = 1.0 / (N + 1)
+          
+          # L1 norm (integral approximation)
+          norm_1 = jnp.sum(jnp.abs(convolution)) * h
+          
+          # L2 norm squared (integral approximation using Simpson's rule)
+          y_points = jnp.concatenate([jnp.array([0.0]), convolution, jnp.array([0.0])])
+          y1, y2 = y_points[:-1], y_points[1:]
+          l2_norm_sq = jnp.sum((h / 3) * (y1**2 + y1 * y2 + y2**2))
+          
+          # Infinity norm
+          norm_inf = jnp.max(jnp.abs(convolution)) * h
+          
+          # Variance and skewness
+          mean_conv = jnp.mean(convolution)
+          var_conv = jnp.mean((convolution - mean_conv) ** 2)
+          std_conv = jnp.sqrt(var_conv + 1e-12)
+          if std_conv > 1e-10:
+              skewness = jnp.mean(((convolution - mean_conv) / std_conv) ** 3)
+          else:
+              skewness = 0.0
+          
+          return {
+              "peak_value": float(jnp.max(jnp.abs(convolution)) * h),
+              "peak_location": float(jnp.argmax(jnp.abs(convolution))),
+              "l1_norm": float(norm_1),
+              "l2_norm_sq": float(l2_norm_sq),
+              "norm_inf": float(norm_inf),
+              "c2_ratio": float(l2_norm_sq / (norm_1 * norm_inf)),
+              "variance": float(var_conv),
+              "skewness": float(skewness)
+          }
+new_skills:
+  - name: probe-first-mutation-strategy
+    description: |
+      Strategy for slow evaluators: generate multiple variants, probe them cheaply, then evaluate the best. Use analyze_convolution_stats to guide mutation choices.
+    body: |
+      # Probe-First Mutation Strategy for Slow Evaluators
+  
+      ## Overview
+      When the evaluator is slow (minutes per call) and you have a cheap probe (~10s), use probes to screen many variants before committing to full evaluations.
+  
+      ## Workflow
+      1. **Analyze**: Call analyze_convolution_stats to understand current solution
+      2. **Hypothesize**: Based on stats, propose 3-5 mutation types
+      3. **Probe**: Generate variants for each type, probe them all
+      4. **Select**: Pick top 1-2 variants from probe ranking
+      5. **Evaluate**: Call evaluate_solution on selected variants
+      6. **Iterate**: Repeat with best result
+  
+      ## Mutation Types to Try
+      - **Resolution change**: num_intervals × 2, learning_rate ÷ 2
+      - **Optimizer change**: Adam → RMSprop or SGD with momentum
+      - **Loss modification**: Add L2 regularization to prevent overfitting
+      - **Warmup adjustment**: Increase warmup_steps, try different decay schedules
+      - **Initialization**: Use different random seeds or structured init (e.g., Gaussian)
+      - **Step function**: Manually construct piecewise function with optimized breakpoints
+  
+      ## Example
+      ```
+      Current: num_intervals=50, lr=0.01, steps=15000, C2=0.9998
+  
+      Hypotheses:
+      1. num_intervals=100, lr=0.005, steps=30000 (finer resolution)
+      2. num_intervals=50, lr=0.001, steps=20000, warmup=2000 (slower learning)
+      3. Add L2 regularization: 1e-6 * sum(f^2) to loss
+  
+      Probe all 3 → Evaluate top 2 → Iterate
+      ```
+new_middlewares:
+  - name: probe_reminder
+    hook: before_model
+    description: 'Remind solver to use probe_solution before evaluate_solution when budget allows.'
+    implementation_py: |
+      def before_model(hook_input):
+          remaining_evals = hook_input.get("evaluations_left", 0)
+          remaining_probes = hook_input.get("probes_left", 0)
+          
+          if remaining_evals > 2 and remaining_probes >= 5:
+              return "You have probes available. Generate multiple variants and use probe_solution to rank them before calling evaluate_solution. Only probe-ranked candidates should get full evaluations."
+          elif remaining_evals <= 2:
+              return "Few evaluations left. Choose your next mutation carefully. Consider analyzing convolution stats first."
+          return None

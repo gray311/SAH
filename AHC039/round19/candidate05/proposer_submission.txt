@@ -1,0 +1,199 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are a C++ polygon optimizer for axis-aligned fish capture. Goal: maximize (mackerels - sardines + 1).
+  
+  CRITICAL INSIGHT: The optimal polygon vertices should be close to actual fish coordinates. Build polygons by:
+  1. Using mackerel coordinates as seed anchor points
+  2. Building axis-aligned bounding boxes around clusters of mackerels
+  3. Expanding/contracting edges incrementally to exclude nearby sardines
+  
+  SEARCH METHOD (encodes in EVOLVE-BLOCK C++ code):
+  
+  1. CONFIGURE THE CODE:
+     - Include <set> for coordinate deduplication and O(log n) lookup
+     - Use integer coordinates throughout
+     - Track best score with full precision
+  
+  2. BUILD FROM FISH COORDINATES:
+     - Parse input to extract all mackerel (type=1) and sardine (type=-1) coordinates
+     - Store mackerels in a sorted structure for cluster detection
+     - Store sardines in a hash set for O(1) membership testing
+  
+  3. POLYGON CONSTRUCTION PHASES:
+     
+     A. Single Mackerel Bounding Boxes (baseline):
+        - For each mackerel, create a minimal 4-vertex axis-aligned rectangle
+        - Rectangle edges: extend 1 unit in each direction from fish coordinate
+        - This guarantees the fish is inside
+        - Score: count mackerels inside - count sardines inside + 1
+     
+     B. Cluster-Based Polygons:
+        - Group nearby mackerels (within 50 units in both x and y)
+        - For each cluster, build a tight bounding box
+        - Ensure boxes don't overlap sardine coordinates
+        - Merge overlapping clusters into larger polygons
+     
+     C. Strategic Edge Expansion:
+        - Start from cluster bounding boxes
+        - For each edge, try expanding OUTWARD by 1-10 units if it captures more mackerels
+        - Try contracting INWARD by 1-5 units if it excludes more sardines
+        - Use sardine hash set for O(1) density estimation
+     
+     D. Multi-Cluster Combinations:
+        - Try combining 2-3 nearby cluster polygons into one large polygon
+        - Use union of bounding boxes (may create non-minimal shapes)
+        - Evaluate combined score
+  
+  4. VALIDATION AND OUTPUT:
+     - Ensure 4-1000 vertices, all coordinates in [0, 100000]
+     - Ensure perimeter <= 400,000
+     - Ensure no self-intersection (axis-aligned polygons are simple if built correctly)
+     - Output format: m (vertex count), then m lines of "x y"
+     - Always output the BEST polygon found (not first one)
+  
+  5. SEARCH LOOP:
+     - Run 10-15 independent construction strategies
+     - Each strategy: different seed, different expansion amounts
+     - Keep track of best score across all strategies
+     - Use time-budgeted search (stop if 1.85s elapsed)
+  
+  6. EDGE CASES:
+     - If no mackerels inside any polygon, output a minimal valid polygon (4 vertices) at origin
+     - Handle boundary conditions (fish at coordinates 0 or 100000)
+  
+  Tools:
+  - edit_solution: Replace EVOLVE-BLOCK with complete C++ implementation
+  - evaluate_solution: Run C++ program, get score
+  - probe_solution: Can be used for quick validation of candidate polygons
+  - finish: Submit when you have working coordinate-space construction
+  
+  KEY DIFFERENCE from seed: Directly use fish coordinates to build polygons, not grid abstraction. Incremental edge tuning based on actual fish positions.
+skill_description: |
+  Coordinate-space vertex construction. Build polygons from mackerel coordinates using bounding boxes around clusters. Expand/contract edges based on sardine positions (O(1) lookup). Run 10-15 construction strategies, keep best.
+skill_body: |
+  # Coordinate-Space Polygon Construction Strategy
+  
+  ## Core Philosophy
+  
+  The optimal polygon should be built FROM the fish positions themselves, not from an abstract grid.
+  Mackerel coordinates provide natural anchor points; sardine coordinates define exclusion zones.
+  
+  ## Step 1: Parse and Index Fish Positions
+  
+  - Read all fish from input (first N mackerels, next N sardines)
+  - Store mackerels in sorted list (by x, then y) for clustering
+  - Store sardines in unordered_set<pair<int,int>> for O(1) point-in-sardine-test
+  - Track bounding box of all fish: [min_x, max_x] x [min_y, max_y]
+  
+  ## Step 2: Build Single-Fish Bounding Boxes
+  
+  For each mackerel at (x, y):
+    Create rectangle with vertices:
+      (x, y), (x+1, y), (x+1, y+1), (x, y+1)
+    This minimal rectangle guarantees the mackerel is inside.
+    
+  ## Step 3: Cluster Detection
+  
+  Group mackerels that are close together (within 50 units in both dimensions):
+    - Sort mackerels by x-coordinate
+    - Iterate and group consecutive mackerels where |x_i - x_j| <= 50 AND |y_i - y_j| <= 50
+    - For each cluster, compute tight bounding box
+      min_x = min(x for fish in cluster), max_x = max(x for fish in cluster)
+      min_y = min(y for fish in cluster), max_y = max(y for fish in cluster)
+    - Create polygon from this bounding box (4 vertices)
+  
+  ## Step 4: Sardine-Aware Refinement
+  
+  For each candidate polygon:
+    - Count sardines inside: iterate all sardines, test if inside polygon
+      (for axis-aligned rect: min_x <= s.x <= max_x AND min_y <= s.y <= max_y)
+    - Count mackerels inside: iterate all mackerels, same test
+    - Compute score = mackerels - sardines + 1
+    
+    Refinement strategies:
+    a) Expand edges outward by 1-10 units if score improves
+    b) Contract edges inward by 1-5 units if it excludes sardines without losing mackerels
+    c) Shift entire polygon toward mackerel density if beneficial
+  
+  ## Step 5: Multi-Cluster Merging
+  
+  If two cluster bounding boxes are close (distance <= 30 between them):
+    Try merging into one larger polygon
+    - Union approach: create bounding box of both clusters
+    - Or create multi-lobed shape (may have more vertices, ensure <= 1000)
+    - Evaluate merged score
+  
+  ## Step 6: Diversified Search Strategies
+  
+  Run 10-15 independent strategies:
+    Strategy 1: Single fish boxes (no clustering)
+    Strategy 2: Clustering with radius=20
+    Strategy 3: Clustering with radius=50
+    Strategy 4: Cluster + outward expansion by 5
+    Strategy 5: Cluster + outward expansion by 10
+    Strategy 6: Cluster + inward contraction by 3
+    Strategy 7: Merge closest pairs of clusters
+    Strategy 8: Focus on mackerel-dense regions (use 2D histogram, bin size=100)
+    Strategy 9: Start from origin, expand toward mackerel centroid
+    Strategy 10: Random perturbations of cluster centers
+    
+  Track best score and best polygon across all strategies.
+  
+  ## Step 7: Output Best Polygon
+  
+  - Validate: 4-1000 vertices, perimeter <= 400000, coords in [0, 100000]
+  - If invalid, fall back to minimal valid polygon
+  - Output format: first line = vertex count, then one line per vertex "x y"
+  
+  ## Complexity and Performance
+  
+  - Parsing: O(N) where N=5000
+  - Clustering: O(N log N) with sorting
+  - Score evaluation: O(N) per polygon (iterate all fish)
+  - Total per evaluation: ~15 strategies × O(N) = O(15N) ~ 75,000 operations
+  - Well within 2.0s time limit
+  
+  ## Key Success Factors
+  
+  - Direct use of fish coordinates (not grid abstraction)
+  - O(1) sardine lookup for rapid refinement
+  - Diversified construction strategies to explore different polygon shapes
+  - Careful validation to ensure output is always valid
+tool_descriptions:
+  edit_solution: 'Replace EVOLVE-BLOCK with C++ implementing coordinate-space polygon construction:
+  
+    1. Parse input: extract mackerels and sardines into separate structures
+       - Mackerels: sorted list for clustering
+       - Sardines: hash set for O(1) point testing
+    2. Build candidate polygons from multiple strategies:
+       - Single-fish bounding boxes
+       - Cluster-based bounding boxes (radii 20, 50)
+       - Sardine-aware edge refinement (expand/contract)
+       - Multi-cluster merging
+    3. Evaluate each candidate by counting fish inside
+    4. Keep best polygon across all strategies
+    5. Validate output (4-1000 vertices, perimeter constraint, coord bounds)
+    6. Run 10-15 independent strategies, time-budgeted search'
+  evaluate_solution: 'Run C++ program, get combined_score = max(0, mackerels_inside - sardines_inside + 1).
+    Returns score, validity, and remaining evaluations. Budget=30 evals total.'
+  probe_solution: 'Optional fast evaluation tool. For this task, full evaluation is needed for accurate scoring.'
+  finish: 'End when you have submitted a working coordinate-space construction with diversified strategies.'
+sampling:
+  temperature: 1.0
+  top_p: 0.95
+  top_k: 30
+  max_tokens: 14336
+agent:
+  max_iterations: 60
+middleware:
+  budget_reminder_from_left: 8
+  long_tool_output_max_chars: 18000
+new_tools: []
+remove_tools: []
+new_skills: []
+new_middlewares:
+- name: coordinate_construction_reminder
+  hook: before_model
+  description: Coordinate-based polygon construction reminder
+  implementation_py: 'def before_model(hook_input):\n    return "Build polygons from actual fish coordinates: use mackerel positions for anchors, sardine set for O(1) exclusion testing, try 10-15 construction strategies."
+'

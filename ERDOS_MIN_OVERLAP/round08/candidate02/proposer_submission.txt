@@ -1,0 +1,320 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are an expert in mathematical optimization for the Erdős minimum overlap constant C5.
+  
+  THE OBJECTIVE: Maximize combined_score = 0.38092303510845016 / c5_bound
+  where c5_bound = max_k integral from 0 to 2 of h(x)(1-h(x+k)) dx
+  
+  CONSTRAINTS: h:[0,2]->[0,1], integral from 0 to 2 of h(x) dx = 1
+  
+  WHY WE'RE STUCK: The seed program uses 800 continuous parameters with Adam optimization,
+  which gets trapped in local optima. The optimal solution is likely a piecewise constant
+  function with FEW breakpoints, not 800 independent parameters.
+  
+  NEW STRATEGY: Use the construct_candidates tool to generate explicit piecewise constant
+  functions with explicit breakpoints. Optimize only the breakpoint positions and heights,
+  not 800 latent values.
+  
+  EXECUTION: 
+  1. Call construct_candidates to generate 5-10 diverse piecewise constant candidates
+  2. Evaluate each (use evaluate_solution - this evaluator is fast)
+  3. Combine the best patterns with refined discretization (500-1000 intervals)
+  4. Use the piecewise structure to guide the optimizer
+  5. Target combined_score > 1.0
+  
+  AGENCY: COMPLETELY REWRITE the EVOLVE-BLOCK to use piecewise construction. Do not try
+  to fix the seed's gradient descent on 800 parameters. Build a new approach from scratch.
+skill_description: |
+  C5 bound optimization using piecewise constant constructions.
+  Reduces search space from 800 continuous params to 10-20 breakpoint params.
+  Targets combined_score > 1.0 by finding structurally-simple optimal solutions.
+skill_body: |
+  # C5 Bound Optimization: Piecewise Constant Strategy
+  
+  THE CORE INSIGHT
+  
+  The optimal step function h is NOT 800 independent parameters. It is a piecewise
+  constant function with FEW breakpoints (e.g., 5-20 intervals). Optimize those
+  directly, not via gradient descent on latent continuous parameters.
+  
+  WHY THE SEED FAILS
+  
+  - 800 latent params with sigmoid: overparameterized, hard to converge
+  - Adam optimization struggles in high-dimensional, non-convex landscape
+  - Multi-restart with same param count keeps finding same local optima
+  
+  NEW STRATEGY: DIRECT PIECEWISE CONSTRUCTION
+  
+  STEP 1: GENERATE CANDIDATES
+  Use construct_candidates to create explicit piecewise functions:
+  - Single block: h=1 on [0,1], h=0 elsewhere (satisfies integral=1)
+  - Two blocks: h=0.5 on [0,0.5] and [1.5,2], h=0 elsewhere
+  - Symmetric patterns: blocks centered at x=1
+  - Asymmetric patterns: explore [0,a], [b,c], [d,2] configurations
+  
+  STEP 2: EVALUATE AND REFINE
+  - Evaluate each candidate directly (no gradient needed for initial scan)
+  - For promising candidates, refine breakpoint positions with local search
+  - Consider increasing discretization (500-1000 intervals) for final scoring
+  
+  STEP 3: HYBRID APPROACH
+  - Use piecewise structure to initialize the seed's latent optimization
+  - Fix h values at breakpoints, optimize breakpoint positions
+  - Use the constraint integral=1 to adjust heights automatically
+  
+  KEY CANDIDATES TO EXPLORE
+  
+  1. SINGLE PEAK: h=1 on [0,1] -> c5 bound from correlation of step function
+  2. DOUBLE PEAKS: h=0.5 on two intervals of total length 2 -> spread the mass
+  3. THREE PEAKS: h approx 1/3 on three intervals of total length 3 -> even more spread
+  4. OFFSET PATTERNS: Break symmetry by using asymmetric intervals
+  
+  EVALUATION BUDGET
+  
+  - 30 evaluations total
+  - Spend 10-15 on candidate generation and initial evaluation
+  - Spend 10-15 on refinement of top candidates
+  - Goal: Find ANY solution with c5_bound < 0.38092303510845016
+  
+  IMPORTANT
+  
+  - COMPLETE REWRITES ARE REQUIRED - do not patch the seed's gradient descent
+  - USE construct_candidates to generate structured candidates
+  - EXPLORE FIRST, OPTIMIZE LATER - find good patterns before refining
+  - CONSTRAINTS: h in [0,1], integral=1, domain=[0,2]
+tool_descriptions:
+  edit_solution: |
+    Rewrite the EVOLVE-BLOCK completely. Replace the latent-based optimization
+    with explicit piecewise construction. The new code should:
+    
+    1. Define piecewise constant functions with explicit intervals
+    2. Use construct_candidates to generate diverse candidates
+    3. Evaluate candidates directly (no need for gradient descent initially)
+    4. Optionally refine promising candidates with local search
+    
+    Example structure:
+    - Define breakpoints: e.g., [0, 0.5, 1.0, 1.5, 2.0]
+    - Define heights: e.g., [1.0, 0.0, 0.0, 0.0, 0.0] for single block
+    - Normalize to satisfy integral=1
+    - Compute c5_bound from the piecewise function
+  evaluate_solution: |
+    Run the piecewise construction code and get combined_score.
+    You have 30 evaluations. Use them to explore candidate structures
+    and refine promising ones.
+  probe_solution: |
+    NOT AVAILABLE for this fast JAX/NumPy evaluator. Use evaluate_solution directly.
+    This evaluator computes exact c5_bound quickly (less than 1 second per candidate).
+  finish: |
+    End when you have exhausted the budget or found combined_score > 1.0.
+sampling:
+  temperature: 0.8
+  top_p: 0.95
+  top_k: 15
+  max_tokens: 12288
+agent:
+  max_iterations: 50
+middleware:
+  budget_reminder_from_left: 3
+  long_tool_output_max_chars: 8000
+new_tools:
+  - name: construct_candidates
+    description: |
+      Generate explicit piecewise constant candidate functions for C5 optimization.
+      Creates diverse starting points with controlled integral constraint.
+      
+      Strategies available:
+      - single_block: h equals 1 on [0,1], 0 elsewhere
+      - double_block: h equals 0.5 on [0,0.5] and [1.5,2]
+      - three_block: h equals one-third on three intervals of length two-thirds
+      - symmetric_two: symmetric blocks around x equals 1
+      - asymmetric_three: three blocks with asymmetric placement
+      - random_piecewise: random piecewise with 5 to 10 intervals
+      
+      Returns a dictionary with candidates, each specifying intervals and heights.
+      
+      Call this at the start of each evaluation to generate diverse candidates.
+    input_schema:
+      type: object
+      properties:
+        num_candidates:
+          type: integer
+          description: Number of candidates to generate, default 10
+        strategies:
+          type: array
+          items:
+            type: string
+          description: Strategies to use
+          default:
+            - single_block
+            - double_block
+            - three_block
+            - symmetric_two
+            - asymmetric_three
+    implementation_py: |
+      def run(ctx, args):
+          import random
+          import jax
+          import jax.numpy as jnp
+          
+          num_intervals = ctx.hypers.num_intervals if hasattr(ctx, 'hypers') else 800
+          domain_width = ctx.hypers.domain_width if hasattr(ctx, 'hypers') else 2.0
+          dx = domain_width / num_intervals
+          
+          candidates = []
+          
+          # Single block: h=1 on [0,1]
+          def make_single_block():
+              h = jnp.zeros(num_intervals)
+              start = int(0 / dx)
+              end = int(1.0 / dx) + 1
+              h[start:end] = 1.0
+              return h, 1.0
+          
+          # Double block: h=0.5 on [0,0.5] and [1.5,2]
+          def make_double_block():
+              h = jnp.zeros(num_intervals)
+              h[:int(0.5/dx)+1] = 0.5
+              h[int(1.5/dx):int(2.0/dx)+1] = 0.5
+              return h, 1.0
+          
+          # Three block: h=1/3 on three intervals
+          def make_three_block():
+              h = jnp.zeros(num_intervals)
+              for start, end in [(0, 2/3), (2/3, 4/3), (4/3, 2.0)]:
+                  h[int(start/dx):int(end/dx)+1] = 1/3
+              return h, 1.0
+          
+          # Symmetric around x=1
+          def make_symmetric():
+              h = jnp.zeros(num_intervals)
+              h[int(0.5/dx):int(1.5/dx)+1] = 0.5
+              return h, 1.0
+          
+          # Asymmetric three blocks
+          def make_asymmetric():
+              h = jnp.zeros(num_intervals)
+              h[int(0/dx):int(0.33/dx)+1] = 1/3
+              h[int(0.66/dx):int(0.99/dx)+1] = 1/3
+              h[int(1.33/dx):int(2.0/dx)+1] = 1/3
+              return h, 1.0
+          
+          def make_random_piecewise():
+              n_blocks = random.randint(5, 10)
+              keys = jax.random.PRNGKey(random.randint(0, 2**31))
+              breakpoints = jax.random.uniform(keys, (n_blocks+1,), minval=0.0, maxval=domain_width)
+              breakpoints = jnp.sort(breakpoints)
+              heights = jax.random.uniform(keys, (n_blocks,)) * 2.0 - 1.0
+              heights = (heights + 1.0) / 2.0
+              
+              block_lengths = breakpoints[1:] - breakpoints[:-1]
+              block_lengths = block_lengths / jnp.sum(block_lengths)
+              heights = heights / jnp.sum(heights * block_lengths)
+              
+              h = jnp.zeros(num_intervals)
+              for i in range(n_blocks):
+                  start = int(breakpoints[i] / dx)
+                  end = int(breakpoints[i+1] / dx)
+                  h[start:end] = heights[i]
+              return h, float(jnp.sum(h) * dx)
+          
+          strategy_map = {
+              "single_block": make_single_block,
+              "double_block": make_double_block,
+              "three_block": make_three_block,
+              "symmetric_two": make_symmetric,
+              "asymmetric_three": make_asymmetric,
+              "random_piecewise": make_random_piecewise
+          }
+          
+          used_strategies = set(args.get("strategies", ["single_block", "double_block", 
+                     "three_block", "symmetric_two", "asymmetric_three"]))
+          for strategy in used_strategies:
+              if strategy in strategy_map:
+                  for _ in range(args.get("num_candidates", 5)):
+                      try:
+                          h, integral = strategy_map[strategy]()
+                          if abs(integral - 1.0) > 0.01:
+                              h = h * (1.0 / integral)
+                          h = jnp.clip(h, 0.0, 1.0)
+                          candidates.append({
+                              "strategy": strategy,
+                              "h": h,
+                              "integral": float(integral),
+                              "n_nonzero": int(jnp.sum(h > 0))
+                          })
+                      except Exception:
+                          pass
+          
+          return {
+              "num_candidates": len(candidates),
+              "candidates": candidates,
+              "num_intervals": num_intervals,
+              "dx": float(dx)
+          }
+new_skills:
+  - name: piecewise-strategy
+    description: |
+      Use piecewise constant constructions for C5 optimization.
+      Generate explicit candidates with few breakpoints, then evaluate.
+      Do not rely on gradient descent over 800 parameters.
+    body: |
+      # Piecewise Strategy for C5 Bound Optimization
+      
+      PROBLEM RECAP
+      
+      Minimize: max over k of integral from 0 to 2 of h(x)(1-h(x+k)) dx
+      Subject to: h maps [0,2] to [0,1], integral of h equals 1
+      
+      WHY PIECEWISE WORKS
+      
+      The optimal solution is structurally simple: a few rectangular blocks.
+      Parameterizing with 800 continuous values wastes the search budget.
+      
+      CONSTRUCTION RECIPES
+      
+      SINGLE BLOCK (baseline)
+      h(x) equals 1 if x is in [0,1], else 0
+      This satisfies integral=1 by construction.
+      
+      DOUBLE BLOCK (spread mass)
+      h(x) equals 0.5 if x is in [0,0.5] union [1.5,2], else 0
+      Spreads the mass to reduce overlap with shifted copies.
+      
+      THREE BLOCK (more spread)
+      h(x) approximately equals 1/3 on three intervals of length 2/3 each
+      Even more spreading, potentially better overlap.
+      
+      SYMMETRIC PATTERNS
+      Center blocks around x=1 to exploit symmetry in the overlap integral.
+      
+      ASYMMETRIC PATTERNS
+      Break symmetry to explore different regions of the solution space.
+      
+      EVALUATION WORKFLOW
+      
+      1. Generate 5-10 candidates using construct_candidates
+      2. Evaluate each to get c5_bound
+      3. Identify patterns that work
+      4. Refine by adjusting breakpoint positions
+      5. Consider hybrid: piecewise structure with gradient refinement
+      
+      KEY INSIGHT
+      
+      STRUCTURAL SIMPLICITY BEATS PARAMETRIC FLEXIBILITY.
+      The answer to how to minimize max overlap is likely to spread the mass
+      into few rectangular chunks, not to optimize 800 independent values.
+      
+      WHEN TO USE
+      
+      - Always at the start: generate diverse piecewise candidates
+      - When gradient descent stalls: try explicit construction
+      - When combining: use piecewise to initialize latent optimization
+new_middlewares:
+  - name: remind_piecewise
+    hook: before_model
+    description: |
+      Remind the solver to use piecewise construction before trying gradient-based refinement.
+      Encourages structural exploration over parametric optimization.
+    implementation_py: |
+      def before_model(hook_input):
+          return "Before optimizing, generate 5 to 10 piecewise constant candidates using construct_candidates. Focus on spreading mass into few blocks rather than optimizing 800 independent parameters. Evaluate each candidate directly. Refine promising patterns with adjusted breakpoints."

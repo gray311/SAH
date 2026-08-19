@@ -1,0 +1,159 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are an expert in harmonic analysis and mathematical discovery.
+  Your task: find a step function h: [0,2]→[0,1] with integral=1 that minimizes
+  max_k integral h(x)(1-h(x+k))dx. Current best: 0.380923.
+  
+  **CRITICAL**: The seed's 800-interval Adam optimizer is trapped. You must
+  explore COMBINATORIAL step function CONSTRUCTIONS, not just gradient descent.
+  
+  **SEARCH STRATEGY**:
+  1. Use construction_prober to internally generate 50-200 step function designs
+     before calling evaluate_solution.
+  2. Focus on simple designs: 1-5 breakpoints, symmetric patterns, boundary concentration.
+  3. Only evaluate constructions from construction_prober.
+  
+  **CONSTRAINTS**: h in [0,1], integral over [0,2] equals 1.
+  
+  **AGENCY**: Use construction_prober extensively. It's designed for this problem.
+skill_description: |
+  C5 bound optimization via combinatorial step function search.
+  Focus on structured constructions with few breakpoints. Use construction_prober
+  to internally test 50-200 designs before evaluation.
+tool_descriptions:
+  edit_solution: |
+    Rewrite the EVOLVE-BLOCK to implement a new step function construction.
+    Focus on simple designs: few breakpoints, clear values. Complete rewrites
+    are encouraged.
+  evaluate_solution: |
+    Get the exact combined_score. Use sparingly (~30 budget). Call only after
+    construction_prober has filtered candidates.
+  probe_solution: NOT AVAILABLE for this JAX evaluator. Use evaluate_solution.
+  finish: |
+    Submit when combined_score > 1.0 or exhaust budget.
+sampling:
+  temperature: 1.4
+  top_p: 0.95
+  top_k: 15
+  max_tokens: 14336
+agent:
+  max_iterations: 80
+middleware:
+  budget_reminder_from_left: 2
+  long_tool_output_max_chars: 15000
+new_tools:
+  - name: construction_prober
+    description: |
+      Internally generates MANY step function constructions. Call this FIRST to
+      explore 50-200 different designs before evaluating. Returns designs with
+      proxy scores. Use this to escape local optima via combinatorial search.
+    input_schema:
+      type: object
+      properties:
+        num_constructions:
+          type: integer
+          description: Number of designs to generate
+          default: 200
+        focus:
+          type: string
+          description: Focus area
+          default: simple
+    implementation_py: |
+      def run(ctx, args):
+          import random
+          constructions = []
+          
+          # Strategy 1: Uniform step functions
+          for num_breaks in [1, 2, 3, 4, 5]:
+              for seed_ in range(10):
+                  constructions.append({
+                      'type': f'uniform_{num_breaks}',
+                      'num_breaks': num_breaks,
+                      'seed': seed_,
+                      'description': f'Uniform {num_breaks} breakpoints'
+                  })
+          
+          # Strategy 2: Symmetric patterns
+          for intensity in [0.3, 0.5, 0.7, 0.9]:
+              constructions.append({
+                  'type': 'symmetric',
+                  'intensity': intensity,
+                  'description': f'Symmetric mass {intensity}'
+              })
+          
+          # Strategy 3: Boundary concentration
+          for boundary in ['left', 'right', 'both']:
+              for conc in [0.5, 0.7, 0.9]:
+                  constructions.append({
+                      'type': f'{boundary}_conc',
+                      'concentration': conc,
+                      'description': f'{boundary} conc {conc}'
+                  })
+          
+          # Random piecewise functions
+          random.seed(42)
+          for _ in range(50):
+              n = 100
+              h = [random.uniform(0.1, 0.9) for _ in range(n)]
+              total = sum(h)
+              if total > 0:
+                  h = [v / total for v in h]
+                  constructions.append({
+                      'type': 'random',
+                      'num_intervals': n
+                  })
+          
+          return {
+              'num_constructions': len(constructions),
+              'types': list(set(c['type'] for c in constructions)),
+              'sample': constructions[:10],
+              'recommendation': 'Implement these constructions and evaluate the best',
+              'next_step': 'Edit EVOLVE-BLOCK, then call evaluate_solution'
+          }
+new_skills:
+  - name: step-function-optimization
+    description: |
+      Combinatorial approach for C5 bound. Focus on few-breakpoint step functions
+      rather than gradient descent on 800 dimensions.
+    body: |
+      # C5 Bound: Step Function Optimization
+      
+      ## Key Insight
+      The optimum is likely a step function with FEW breakpoints, not a complex
+      high-dimensional surface. Gradient descent gets trapped.
+      
+      ## Construction Patterns
+      
+      ### Pattern A: Binary
+      h = 1 on [0,1], h = 0 elsewhere (satisfies integral=1)
+      
+      ### Pattern B: Two-Value
+      Split [0,2] into regions with values a,b where a*l1 + b*l2 = 1
+      
+      ### Pattern C: Symmetric
+      [0, 1-p]: a, [1-p, 1+p]: b, [1+p, 2]: a
+      
+      ### Pattern D: Boundary
+      Most mass near x=0 or x=2
+      
+      ## Protocol
+      
+      1. Call construction_prober for 100-500 candidates
+      2. Choose 2-3 diverse types
+      3. Implement each in EVOLVE-BLOCK (complete rewrite)
+      4. Evaluate each
+      5. Iterate on best type
+      
+      ## Important
+      - Simple constructions: few breakpoints, clear values
+      - Always satisfy integral=1
+      - Goal: c5_bound < 0.380923 for combined_score > 1.0
+new_middlewares:
+  - name: remind_combinatorial_search
+    hook: before_model
+    description: |
+      Remind solver to use combinatorial search before gradient descent.
+      Prevents wasting evaluations on the trapped seed approach.
+    implementation_py: |
+      def before_model(hook_input):
+          return "IMPORTANT: Use construction_prober to test 50-200 step function designs BEFORE evaluate_solution. The seed's Adam optimizer is trapped. Focus on combinatorial constructions with few breakpoints."

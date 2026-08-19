@@ -1,0 +1,291 @@
+schema: h2spec/1.0
+system_prompt: |
+  Erdos minimum overlap problem (C5): Find h: [0,2]->[0,1] minimizing max_k integral h(x)(1-h(x+k))dx.
+
+  CONSTRAINT: integral(h) = 1 exactly (critical!). h values in [0,1].
+
+  Current best: C5 <= 0.38092303510845016 (combined_score = 1.0).
+
+  GOAL: Find h achieving c5_bound < 0.38092303510845016 (combined_score > 1.0).
+
+  KEY INSIGHT: This is a PATTERN DISCOVERY problem, not hyperparameter tuning. The seed optimizer trains for 59000 steps - the bottleneck is finding the RIGHT initial pattern.
+
+  STRATEGY:
+
+  1. GENERATE INTEGRAL-CONSTRAINED PATTERNS: Call generate_ready_candidates(temperature=0.5) to get 3 integral-constrained initializations (Golomb, Bipartite, Tri-modal).
+
+  2. SCREEN WITH PROBE: For each candidate, call probe_solution to get approximate c5_bound. Only keep those with c5_bound < 0.375.
+
+  3. FULL EVALUATION: Call evaluate_solution on candidates with c5_bound < 0.370.
+
+  4. IF STUCK, VARY PATTERN PARAMETERS:
+     - Golomb: Try marks = [0.0, 0.33, 0.66, 1.33, 1.66] (denser) or [0.0, 0.5, 1.0, 1.5] (sparser)
+     - Tri-modal: Try peaks = [0.25, 1.0, 1.75] or add 4th peak at [0.2, 0.7, 1.0, 1.7]
+     - Bipartite: Try split at 0.4, 0.6, or 0.7
+
+  5. USE probe_solution AGGRESSIVELY: Budget 30 probes. Screen 10-20 pattern variants before any full eval. Only spend 1 eval on the BEST probe candidate.
+
+  6. STOP if combined_score > 1.0 or if you exhaust probes with no < 0.375 candidate.
+
+  REMEMBER: The optimizer is well-tuned (lr=0.006, steps=59000, penalty=60). DON'T waste time retuning hyperparameters. Focus on finding better PATTERNS.
+tool_descriptions:
+  edit_solution: |
+    Modify PATTERN PARAMETERS in the EVOLVE-BLOCK. DO NOT change num_intervals, learning_rate, num_steps, or penalty_strength.
+
+    MODIFY ONLY pattern parameters in _get_best_initialization:
+    - Golomb marks: try [0.0, 0.33, 0.66, 1.33, 1.66], [0.0, 0.5, 1.0, 1.5], etc.
+    - Tri-modal peaks: try [0.25, 1.0, 1.75], [0.2, 0.7, 1.0, 1.7], or [0.3, 1.0, 1.7]
+    - Bipartite split: change threshold 0.5 to 0.4, 0.6, or 0.7
+
+    Each edit should change ONE pattern parameter. Keep num_restarts=1, num_steps=30000 for quick testing. Use probe_solution to screen.
+  evaluate_solution: |
+    Full 59000-step optimization. Returns combined_score = 0.38092303510845016 / c5_bound.
+
+    ONLY call this when probe_solution indicates c5_bound < 0.370.
+    A score > 1.0 means you found a new record!
+
+    Budget: 60 total evaluations. Use sparingly - first use 30 probes to screen.
+  probe_solution: |
+    Fast approximate evaluation (500 intervals). Returns approximate c5_bound.
+
+    Uses separate probe budget (30 calls). Much cheaper than full eval.
+
+    CALL THIS AFTER EVERY pattern edit to quickly screen. Only call evaluate_solution on the best probe candidate.
+  finish: |
+    Submit when combined_score > 1.0 (c5_bound < 0.38092303510845016).
+sampling:
+  temperature: 1.2
+  top_p: 0.9
+  top_k: 30
+  max_tokens: 16000
+agent:
+  max_iterations: 50
+middleware:
+  budget_reminder_from_left: 3
+  long_tool_output_max_chars: 15000
+new_tools:
+  - name: generate_ready_candidates
+    description: |
+      Generate 3 integral-constrained initializations. Each candidate has integral=1 exactly.
+
+      Patterns: Golomb ruler (optimal spacing), Bipartite (step function), Tri-modal (3 narrow Gaussian peaks).
+      All use domain=2, N=800.
+
+      Usage: Call once. Filter: keep only if c5_bound < 0.375. Then evaluate those.
+    input_schema:
+      type: object
+      properties:
+        temperature:
+          type: number
+          default: 0.5
+    implementation_py: |
+      def run(ctx, args):
+          import numpy as np
+          N = 800
+          domain = 2.0
+          dx = domain / N
+
+          # Candidate 1: Golomb ruler pattern
+          golomb_marks = np.array([0.0, 0.4, 0.8, 1.2, 1.6])
+          golomb_h = np.zeros(N)
+          for mark in golomb_marks:
+              width = N * 0.08
+              golomb_h += 8.0 * np.exp(-((np.arange(N) - int(mark * N)) / width)**2)
+          golomb_h = np.clip(golomb_h, 0.01, 5.0)
+          golomb_h = np.exp(golomb_h)
+          golomb_h = golomb_h / (np.sum(golomb_h) * dx)
+          golomb_h = np.clip(golomb_h, 0.01, 1.0)
+          golomb_integral = np.sum(golomb_h) * dx
+          j_golomb = 1.0 - golomb_h
+          h_padded = np.pad(golomb_h, (0, N))
+          j_padded = np.pad(j_golomb, (0, N))
+          corr_fft = np.fft.fft(h_padded) * np.conj(np.fft.fft(j_padded))
+          correlation = np.fft.ifft(corr_fft).real
+          golomb_c5 = np.max(correlation * dx)
+
+          # Candidate 2: Bipartite pattern
+          a = 0.55
+          bipartite_h = np.zeros(N)
+          bipartite_h[:int(N*a)] = 4.0
+          bipartite_h[int(N*a):] = -1.0
+          bipartite_h = np.clip(bipartite_h, 0.01, 5.0)
+          bipartite_h = np.exp(bipartite_h)
+          bipartite_h = bipartite_h / (np.sum(bipartite_h) * dx)
+          bipartite_h = np.clip(bipartite_h, 0.01, 1.0)
+          bipartite_integral = np.sum(bipartite_h) * dx
+          j_bipartite = 1.0 - bipartite_h
+          h_padded = np.pad(bipartite_h, (0, N))
+          j_padded = np.pad(j_bipartite, (0, N))
+          corr_fft = np.fft.fft(h_padded) * np.conj(np.fft.fft(j_padded))
+          correlation = np.fft.ifft(corr_fft).real
+          bipartite_c5 = np.max(correlation * dx)
+
+          # Candidate 3: Tri-modal
+          tri_h = np.zeros(N)
+          peaks = [0.4, 1.0, 1.6]
+          bw = 0.06
+          for p in peaks:
+              tri_h += 6.0 * np.exp(-((np.arange(N) - int(p * N)) / (N * bw))**2)
+          tri_h = np.clip(tri_h, 0.01, 5.0)
+          tri_h = np.exp(tri_h)
+          tri_h = tri_h / (np.sum(tri_h) * dx)
+          tri_h = np.clip(tri_h, 0.01, 1.0)
+          tri_integral = np.sum(tri_h) * dx
+          j_tri = 1.0 - tri_h
+          h_padded = np.pad(tri_h, (0, N))
+          j_padded = np.pad(j_tri, (0, N))
+          corr_fft = np.fft.fft(h_padded) * np.conj(np.fft.fft(j_padded))
+          correlation = np.fft.ifft(corr_fft).real
+          tri_c5 = np.max(correlation * dx)
+
+          return {
+              "candidates": [
+                  {"h": golomb_h.tolist(), "integral": float(golomb_integral), "c5_bound": float(golomb_c5), "pattern_type": "golomb"},
+                  {"h": bipartite_h.tolist(), "integral": float(bipartite_integral), "c5_bound": float(bipartite_c5), "pattern_type": "bipartite"},
+                  {"h": tri_h.tolist(), "integral": float(tri_integral), "c5_bound": float(tri_c5), "pattern_type": "tri_modal"}
+              ],
+              "num_candidates": 3
+          }
+  - name: propose_golomb_variants
+    description: |
+      Propose 5 Golomb ruler pattern variants with different mark spacings and counts. All integral-constrained.
+    input_schema:
+      type: object
+      properties:
+        num_marks:
+          type: integer
+          default: 5
+          description: Number of marks (4-7 recommended)
+    implementation_py: |
+      def run(ctx, args):
+          import numpy as np
+          N = 800
+          domain = 2.0
+          dx = domain / N
+
+          candidates = []
+
+          # Variant 1: Standard Golomb (5 marks)
+          marks1 = np.array([0.0, 0.4, 0.8, 1.2, 1.6])
+          h1 = np.zeros(N)
+          for m in marks1:
+              h1 += 10.0 * np.exp(-((np.arange(N) - int(m * N)) / (N * 0.15))**2)
+          h1 = np.clip(h1, 0.01, 10.0)
+          h1 = np.exp(h1)
+          h1 = h1 / (np.sum(h1) * dx)
+          h1 = np.clip(h1, 0.01, 1.0)
+          j1 = 1.0 - h1
+          corr1 = np.fft.ifft(np.fft.fft(np.pad(h1,(0,N))) * np.conj(np.fft.fft(np.pad(j1,(0,N))))).real
+          c1 = np.max(corr1 * dx)
+          candidates.append({"type": "golomb_5_std", "marks": marks1.tolist(), "c5_bound": float(c1), "integral": float(np.sum(h1)*dx)})
+
+          # Variant 2: 4 marks (sparser)
+          marks2 = np.array([0.0, 0.5, 1.0, 1.5])
+          h2 = np.zeros(N)
+          for m in marks2:
+              h2 += 10.0 * np.exp(-((np.arange(N) - int(m * N)) / (N * 0.15))**2)
+          h2 = np.clip(h2, 0.01, 10.0)
+          h2 = np.exp(h2)
+          h2 = h2 / (np.sum(h2) * dx)
+          h2 = np.clip(h2, 0.01, 1.0)
+          j2 = 1.0 - h2
+          corr2 = np.fft.ifft(np.fft.fft(np.pad(h2,(0,N))) * np.conj(np.fft.fft(np.pad(j2,(0,N))))).real
+          c2 = np.max(corr2 * dx)
+          candidates.append({"type": "golomb_4_sparse", "marks": marks2.tolist(), "c5_bound": float(c2), "integral": float(np.sum(h2)*dx)})
+
+          # Variant 3: 5 marks denser
+          marks3 = np.array([0.0, 0.33, 0.66, 1.33, 1.66])
+          h3 = np.zeros(N)
+          for m in marks3:
+              h3 += 10.0 * np.exp(-((np.arange(N) - int(m * N)) / (N * 0.15))**2)
+          h3 = np.clip(h3, 0.01, 10.0)
+          h3 = np.exp(h3)
+          h3 = h3 / (np.sum(h3) * dx)
+          h3 = np.clip(h3, 0.01, 1.0)
+          j3 = 1.0 - h3
+          corr3 = np.fft.ifft(np.fft.fft(np.pad(h3,(0,N))) * np.conj(np.fft.fft(np.pad(j3,(0,N))))).real
+          c3 = np.max(corr3 * dx)
+          candidates.append({"type": "golomb_5_dense", "marks": marks3.tolist(), "c5_bound": float(c3), "integral": float(np.sum(h3)*dx)})
+
+          # Variant 4: Asymmetric spacing
+          marks4 = np.array([0.0, 0.25, 0.75, 1.25, 1.75])
+          h4 = np.zeros(N)
+          for m in marks4:
+              h4 += 10.0 * np.exp(-((np.arange(N) - int(m * N)) / (N * 0.15))**2)
+          h4 = np.clip(h4, 0.01, 10.0)
+          h4 = np.exp(h4)
+          h4 = h4 / (np.sum(h4) * dx)
+          h4 = np.clip(h4, 0.01, 1.0)
+          j4 = 1.0 - h4
+          corr4 = np.fft.ifft(np.fft.fft(np.pad(h4,(0,N))) * np.conj(np.fft.fft(np.pad(j4,(0,N))))).real
+          c4 = np.max(corr4 * dx)
+          candidates.append({"type": "golomb_5_asym", "marks": marks4.tolist(), "c5_bound": float(c4), "integral": float(np.sum(h4)*dx)})
+
+          # Variant 5: Wider spacing
+          marks5 = np.array([0.0, 0.3, 0.9, 1.5])
+          h5 = np.zeros(N)
+          for m in marks5:
+              h5 += 10.0 * np.exp(-((np.arange(N) - int(m * N)) / (N * 0.15))**2)
+          h5 = np.clip(h5, 0.01, 10.0)
+          h5 = np.exp(h5)
+          h5 = h5 / (np.sum(h5) * dx)
+          h5 = np.clip(h5, 0.01, 1.0)
+          j5 = 1.0 - h5
+          corr5 = np.fft.ifft(np.fft.fft(np.pad(h5,(0,N))) * np.conj(np.fft.fft(np.pad(j5,(0,N))))).real
+          c5 = np.max(corr5 * dx)
+          candidates.append({"type": "golomb_4_wide", "marks": marks5.tolist(), "c5_bound": float(c5), "integral": float(np.sum(h5)*dx)})
+
+          return {"candidates": candidates, "num_candidates": len(candidates)}
+new_skills:
+  - name: pattern-discovery-method
+    description: |
+      Systematic pattern search for Erdos C5 minimization. Focus on Golomb ruler and tri-modal patterns.
+    body: |
+      # Pattern Discovery for Erdos Problem
+
+      ## Core Principle
+
+      This is a PATTERN DISCOVERY problem. The seed optimizer is well-tuned (lr=0.006, steps=59000, penalty=60). Focus on finding BETTER INITIAL PATTERNS, not tuning hyperparameters.
+
+      ## Step 1: Generate Integral-Constrained Candidates
+
+      CALL generate_ready_candidates(temperature=0.5) once.
+
+      Returns 3 candidates (Golomb, Bipartite, Tri-modal) with integral(h)=1 exactly.
+
+      VERIFY integral ~ 1.0 for each. If not, discard.
+
+      ## Step 2: Screen with probe_solution
+
+      For each candidate, call probe_solution to get approximate c5_bound.
+
+      FILTER:
+      - c5_bound < 0.375: PROMISING, move to full eval
+      - c5_bound < 0.385: MARGINAL, may still be worth testing
+      - c5_bound >= 0.385: DISCARD
+
+      ## Step 3: Full Evaluation
+
+      Call evaluate_solution on candidates with c5_bound < 0.370.
+
+      Stop as soon as combined_score > 1.0.
+
+      ## Step 4: If Stuck, Vary Pattern Parameters
+
+      ### Golomb Ruler Variations:
+      - Try 4 marks: [0.0, 0.5, 1.0, 1.5] (coarser)
+      - Try 5 marks denser: [0.0, 0.33, 0.66, 1.33, 1.66]
+      - Try asymmetric: [0.0, 0.25, 0.75, 1.25, 1.75]
+
+      ### Tri-Modal Variations:
+      - Move peaks: [0.25, 1.0, 1.75] or [0.3, 1.0, 1.7]
+      - Add 4th peak: [0.2, 0.7, 1.0, 1.7]
+
+      ### Bipartite Variations:
+      - Change split: threshold at 0.4, 0.6, or 0.7
+
+      ## Budget Discipline
+
+      - 30 probe_budget: screen 10-20 pattern variants
+      - 60 eval_budget: spend max 5-10 full evaluations
+      - STOP when you find improvement OR exhaust probes with no < 0.375 candidate

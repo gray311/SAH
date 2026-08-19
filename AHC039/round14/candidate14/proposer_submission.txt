@@ -1,0 +1,144 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are a C++ polygon optimizer for axis-aligned fish capture. Goal: maximize (mackerels - sardines + 1).
+  
+  STRATEGY: Coordinate-space rectangle expansion with 2D prefix sums.
+  
+  SEARCH METHOD (encodes in EVOLVE-BLOCK C++ code):
+  
+  1. FISH GRID INDEXING:
+     - Create coordinate-to-fish mapping for O(1) lookup
+     - For any point (x,y), query count of mackerels/sardines in axis-aligned rectangle
+     - Use 2D prefix sums for fast rectangle queries after O(N) preprocessing
+  
+  2. DENSE CLUSTER DETECTION:
+     - Identify high-density mackerel regions by scanning x-coordinates
+     - For each unique x-coordinate range [x, x+500], count mackerels in [0,100000]x[0,100000]
+     - Also track sardine counts for penalty calculation
+  
+  3. RECTANGLE CONSTRUCTION (key innovation):
+     - Start from each dense mackerel cluster center
+     - Expand rectangle RIGHT (increase x) as long as: perimeter_growth < 200000 AND new cell has net gain or low penalty
+     - Expand rectangle DOWN (increase y) similarly
+     - Track best rectangle at each expansion step
+     - Try all 4 corner-starting expansion directions
+  
+  4. PERIMETER-AWARE GROWTH:
+     - For rectangle from (min_x, min_y) to (max_x, max_y): perimeter = 2*(max_x-min_x + max_y-min_y)
+     - Must stay <= 400,000
+     - Each expansion step: try expanding one side by 5, 10, 25, 50, 100 units
+     - Evaluate each candidate rectangle using prefix sum queries
+  
+  5. MULTI-RECTANGLE COMBINATION:
+     - Try combining 2-3 non-overlapping rectangles into single polygon
+     - Calculate combined perimeter and total score
+     - Ensure no self-intersection (rectangles must be axis-aligned and non-overlapping)
+  
+  6. DEEP LOCAL SEARCH:
+     - For each candidate rectangle, try vertex perturbations: ±5, ±10, ±25, ±50 on each corner
+     - Use prefix sum queries for fast scoring (no full fish iteration)
+     - Keep best perturbations
+  
+  7. MULTIPLE RESTARTS:
+     - Run 10-12 restarts with different starting points
+     - Each restart: pick random x-range, build rectangle, refine
+     - Total time per eval: < 1.8s to allow margin
+  
+  8. VALIDATION:
+     - Ensure 4 vertices, integer coordinates in [0,100000], perimeter <= 400000
+     - Output format: m\n x0 y0\n x1 y1\n ...
+  
+  Tools:
+  - edit_solution: Replace EVOLVE-BLOCK with complete C++ implementing this strategy
+  - evaluate_solution: Run C++ program, get score
+  - probe_solution: Not needed - use fast prefix sum queries internally
+  - finish: Submit when working
+skill_description: Coordinate-space rectangle expansion with 2D prefix sums. Detect mackerel-dense regions, expand rectangles with perimeter awareness, try multi-rectangle combinations, deep local vertex search, 10-12 restarts under 1.8s.
+skill_body: |
+  # Coordinate-Space Rectangle Optimization
+  
+  ## Core Strategy
+  Build axis-aligned rectangles directly from fish coordinates using 2D prefix sums for O(1) scoring.
+  
+  ## Phase 1: Preprocessing
+  - Build 2D prefix sum arrays for mackerels and sardines
+  - For coordinate (x,y) with cell size 500: prefix_sum[x][y] = count in [0,x]x[0,y]
+  - Query time: O(1), Build time: O(N + max_coord²/500)
+  
+  ## Phase 2: Dense Region Detection
+  - Scan x-coordinates in steps of 100 (range 0-100000)
+  - For each x-range [x, x+100], count total mackerels across all y
+  - Identify top 10 x-ranges with highest mackerel density
+  - For each, also compute sardine count for penalty
+  
+  ## Phase 3: Rectangle Expansion
+  For each dense region at (x0, y0):
+  
+  ### Expansion in 4 directions:
+  - RIGHT: Increase max_x by 5, 10, 25, 50, 100 units (while perimeter < 400000)
+  - DOWN: Increase max_y similarly
+  - LEFT: Decrease min_x (if > 0)
+  - UP: Decrease min_y (if < 100000)
+  
+  ### At each expansion step:
+  - Query rectangle score using prefix sums: mackerels - sardines
+  - Track best score at each perimeter level
+  - Stop if score becomes negative and stays negative for 3 consecutive sizes
+  
+  ## Phase 4: Multi-Rectangle Combinations
+  - Try pairing 2 non-overlapping rectangles
+  - Combined score = sum of individual scores
+  - Combined perimeter = sum of individual perimeters
+  - Must satisfy: combined_perimeter <= 400000
+  
+  ## Phase 5: Local Vertex Optimization
+  For each candidate rectangle (min_x, min_y, max_x, max_y):
+  - Try perturbing each corner by ±5, ±10, ±25, ±50
+  - Keep perturbation that maximizes score
+  - Repeat 2 refinement rounds (each round uses updated corners)
+  
+  ## Phase 6: Multiple Restarts
+  - Run 10-12 restarts
+  - Each restart: 
+    * Random seed selection of starting x-range
+    * Different expansion order (prioritize different directions)
+    * Different perturbation randomization
+  - Track best polygon across all restarts
+  
+  ## Phase 7: Output
+  - Ensure exactly 4 vertices for rectangles (or 6-12 for multi-rectangle)
+  - Integer coordinates in [0, 100000]
+  - Perimeter <= 400000
+  - Output: m\n x0 y0\n x1 y1\n ...
+  
+  ## C++ Implementation Notes
+  - Use int arrays for prefix sums (N=5000 fish, max_coord=100000, cell=500 → ~200x200 arrays)
+  - Rectangle query: sum_rect(x1,y1,x2,y2) = prefix[x2][y2] - prefix[x1][y2] - prefix[x2][y1] + prefix[x1][y1]
+  - Total time: < 1.8s with efficient prefix sum queries
+  - No KD-tree needed with O(1) prefix sum scoring
+tool_descriptions:
+  edit_solution: 'Replace EVOLVE-BLOCK with C++ implementing coordinate-space rectangle optimization:
+    
+    1. Build 2D prefix sum arrays for O(1) rectangle queries
+    2. Scan for mackerel-dense x-ranges
+    3. Expand rectangles in 4 directions with perimeter awareness
+    4. Try multi-rectangle combinations
+    5. Local vertex perturbation (±5, ±10, ±25, ±50)
+    6. 10-12 restarts, output best rectangle/polygon
+    7. Ensure < 1.8s execution'
+  evaluate_solution: Run C++ program. Returns score (mackerels-sardines+1), validity, and remaining evaluations (budget=30). Each run has ~1.8s search window.
+  probe_solution: Not needed - use fast prefix sum queries internally for all scoring.
+  finish: End when you have a working rectangle-based optimizer with prefix sums.
+sampling:
+  temperature: 0.9
+  top_p: 0.95
+  top_k: 15
+  max_tokens: 8192
+agent:
+  max_iterations: 40
+middleware:
+  budget_reminder_from_left: 3
+  long_tool_output_max_chars: 12000
+new_tools: []
+new_skills: []
+new_middlewares: []

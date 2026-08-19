@@ -1,0 +1,210 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are a C++ polygon optimizer for axis-aligned fish capture. Goal: maximize (mackerels - sardines + 1).
+  
+  CRITICAL INSIGHT: The current grid-based approach failed catastrophically. Use a DIRECT MINIMAL POLYGON approach instead:
+  
+  SEARCH METHOD:
+  
+  1. PARSE FISH DATA DIRECTLY from input (2N lines: first N mackerels, next N sardines)
+  
+  2. BUILD MINIMAL POLYGON around all mackerels:
+     - Create bounding box of all mackerel positions
+     - If all mackerels are collinear, use the next larger configuration
+     - This guarantees a valid polygon containing all mackerels
+  
+  3. REFINE WITH LOCAL SEARCH:
+     - For each edge of the bounding box, try expanding outward to capture more mackerels while avoiding sardines
+     - Try perturbations of edge coordinates: ±10, ±20, ±30 units
+     - Use edit_solution to generate candidates and evaluate_solution to score them
+     - Keep improvements for 3 rounds of hill climbing
+  
+  4. HANDLE EDGE CASES:
+     - If mackerels are in a single row or column, expand to 2D (±1 unit perpendicular)
+     - If mackerels form a single point, expand to a small square
+     - Always ensure 4 <= vertices <= 1000 and perimeter <= 400,000
+  
+  5. MULTIPLE RESTARTS:
+     - Run 5 restarts with different random perturbations
+     - Each restart: slightly perturb mackerel coordinates (±1 unit), rebuild bounding box, refine
+     - Track best polygon across all restarts
+  
+  Tools:
+  - edit_solution: Replace EVOLVE-BLOCK with C++ implementing minimal polygon approach
+  - evaluate_solution: Run C++ program, get score (budget=30)
+  - finish: Submit final solution
+  
+  preserve EVOLVE-BLOCK markers, exact I/O format (m then vertices), ensure <2.0s execution.
+  KEY DIFFERENCE: Use direct minimal bounding box approach instead of grid-based corridor expansion.
+skill_description: Minimal polygon around mackerels with local refinement. Build bounding box of all mackerels, refine edges via perturbation, 5 restarts with perturbations, evaluate with full scoring.
+skill_body: |
+  # Minimal Polygon Strategy for Fish Capture
+  
+  ## Core Idea
+  
+  Build a minimal axis-aligned polygon that contains all mackerels (maximizing guaranteed gain), then refine locally.
+  
+  ## Step 1: Parse Input
+  
+  - Read 2N fish positions from input
+  - First N lines: mackerels (type=1)
+  - Next N lines: sardines (type=-1)
+  
+  ## Step 2: Build Minimal Bounding Box
+  
+  - Find min_x, max_x, min_y, max_y among all mackerels
+  - If all have same x or same y (collinear), expand perpendicular by ±1 unit
+  - Create 4-vertex polygon from bounding box
+  
+  ## Step 3: Local Refinement
+  
+  For each of 5 restarts:
+  
+  - For each edge (4 edges for rectangle):
+    * Try perturbations: expand outward by ±10, ±20, ±30 units
+    * Generate new polygon with edit_solution
+    * Evaluate with evaluate_solution to score candidates
+    
+  - For interior points check: if a vertex position could be improved by shifting the edge
+    * Try 3 rounds of refinement
+  
+  ## Step 4: Handle Edge Cases
+  
+  - All mackerels collinear in X: expand ±1 in Y direction
+  - All mackerels collinear in Y: expand ±1 in X direction  
+  - Single mackerel: use 10x10 square centered on that point
+  
+  ## Step 5: Validation
+  
+  - Ensure: 4 <= vertices <= 1000
+  - Ensure: perimeter <= 400,000
+  - Ensure: all coords in [0, 100000]
+  - Ensure: no self-intersection (axis-aligned rectangles are inherently valid)
+  
+  ## C++ Implementation Notes
+  
+  - Use fast I/O with std::cin.tie(nullptr)
+  - Use direct coordinate comparison for fish counting (O(N*M) where M is polygon complexity)
+  - Total time per evaluation: < 2.0s
+tool_descriptions:
+  edit_solution: 'Replace EVOLVE-BLOCK with C++ implementing minimal bounding box approach:
+    1. Parse 2N fish positions from input
+    
+    2. Find bounding box of mackerels (min_x, max_x, min_y, max_y)
+    
+    3. Handle edge cases (collinear mackerels, single point)
+    
+    4. Build initial 4-vertex rectangle
+    
+    5. Local refinement: perturb each edge by ±10, ±20, ±30
+    
+    6. 5 restarts with coordinate perturbations
+    
+    7. Output best polygon'
+  evaluate_solution: Run C++ program. Returns score (mackerels-sardines+1), validity.
+  probe_solution: NOT useful - full evaluation needed for accurate scoring on this task.
+  finish: End when you have a working minimal bounding box approach with local refinement.
+sampling:
+  temperature: 0.9
+  top_p: 0.95
+  top_k: 30
+  max_tokens: 12288
+agent:
+  max_iterations: 60
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 15000
+new_tools:
+- name: check_polygon_score
+  description: |
+    Count fish inside a given polygon. Returns (mackerels_count - sardines_count + 1).
+    Given polygon vertices, check each fish point against the polygon (point-in-polygon test),
+    count mackerels (type=1) and sardines (type=-1), return max(0, mackerels - sardines + 1).
+    Input format: {"vertices": [{"x": int, "y": int}, ...]} with at least 4 vertices.
+    The polygon vertices should be in order (clockwise or counter-clockwise).
+    Uses Ray-Casting algorithm for point-in-polygon test.
+    Input schema: {"vertices": [{"x": int, "y": int}, ...]}
+    Implementation: Reads task input file to get fish coordinates and types, applies point-in-polygon test.
+  input_schema:
+    type: object
+    properties:
+      vertices:
+        type: array
+        items:
+          type: object
+          properties:
+            x:
+              type: integer
+            y:
+              type: integer
+  implementation_py: |
+    def run(ctx, args):
+        vertices = args.get("vertices", [])
+        if not isinstance(vertices, list) or len(vertices) < 4:
+            return {"score": 0, "error": "Invalid polygon: need at least 4 vertices"}
+        
+        poly = []
+        for v in vertices:
+            if isinstance(v, dict) and "x" in v and "y" in v:
+                poly.append((v["x"], v["y"]))
+            else:
+                return {"score": 0, "error": "Invalid vertex format"}
+        
+        if len(poly) < 4:
+            return {"score": 0, "error": "Need at least 4 vertices"}
+        
+        # Point-in-polygon using ray casting
+        def point_in_polygon(point, polygon):
+            x, y = point
+            inside = False
+            n = len(polygon)
+            j = n - 1
+            for i in range(n):
+                xi, yi = polygon[i]
+                xj, yj = polygon[j]
+                if ((yi > y) != (yj > y)) and (x < (xj - xi) * (y - yi) / (yj - yi + 1e-10) + xi):
+                    inside = not inside
+                j = i
+            return inside
+        
+        # Read fish from task inputs
+        fish_data = []  # (x, y)
+        names = ctx.list_task_inputs()
+        
+        for name in names:
+            try:
+                content = ctx.read_input_sample(name, nrows=10001)
+                if content:
+                    lines = content.strip().split('\n')
+                    if len(lines) > 1:
+                        for line in lines:
+                            parts = line.strip().split()
+                            if len(parts) >= 2:
+                                fx, fy = int(parts[0]), int(parts[1])
+                                fish_data.append((fx, fy))
+            except:
+                continue
+        
+        # Fish types: first N from input are mackerels (1), next N are sardines (-1)
+        # But we only have coordinates in the input file - we need N from context or estimate
+        # Use N=5000 (fixed per task description)
+        N = 5000
+        mackerels = 0
+        sardines = 0
+        
+        # Process fish in pairs (x_i, y_i) for i=0..2N-1
+        idx = 0
+        for i in range(2 * N):
+            if idx < len(fish_data):
+                fx, fy = fish_data[idx]
+                if point_in_polygon((fx, fy), poly):
+                    if i < N:  # First N are mackerels
+                        mackerels += 1
+                    else:  # Next N are sardines
+                        sardines += 1
+                idx += 1
+        
+        score = max(0, mackerels - sardines + 1)
+        return {"score": score, "mackerels": mackerels, "sardines": sardines}
+new_skills: []
+new_middlewares: []

@@ -1,0 +1,286 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are a C++ polygon optimizer for axis-aligned fish capture. Goal: maximize (mackerels - sardines + 1).
+  
+  CRITICAL STRATEGY: Use sardine-aware corridor expansion from mackerel-rich regions.
+  
+  SEARCH METHOD (encodes in EVOLVE-BLOCK C++ code):
+  
+  1. GRID-BASED ANALYSIS:
+     - Build 200x200 grid (cell_size=500) over [0,100000]x[0,100000]
+     - For each cell, count mackerels (M) and sardines (S), compute score = M - S
+     - Identify top 15 cells with highest positive score
+  
+  2. CORRIDOR EXPANSION (key innovation):
+     - From each top cell, expand in 4 cardinal directions (N,S,E,W)
+     - In each direction, extend a corridor as far as possible while:
+       * Keeping M-S ratio positive
+       * Avoiding cells with high sardine density (S > M + 2)
+       * Stopping at grid boundaries or negative-score regions
+     - Combine corridors into rectangular/multi-lobed polygons
+  
+  3. POLYGON CONSTRUCTION:
+     - Convert corridor sequences into valid axis-aligned polygons (4-1000 vertices)
+     - Ensure perimeter <= 400,000 and all coordinates in [0,100000]
+     - Support both single large polygons and multi-lobed structures
+  
+  4. DEEP HILL CLIMBING:
+     - For each candidate polygon, perform 3 rounds of refinement:
+       * For each edge, try shifts ±5, ±10, ±15, ±20, ±25 units
+       * Use grid queries for fast scoring (no full re-evaluation)
+       * Keep best shift per edge
+       * Repeat until no improvement
+  
+  5. MULTIPLE RESTARTS:
+     - Run 15-20 restarts with different random seeds
+     - Each restart: pick 3-5 top cells, build corridors, hill climb
+     - Total time per eval: < 2.0s, prioritize quantity of variants
+  
+  6. VALIDATION:
+     - Output valid polygon only (4-1000 vertices, integer coords, no self-intersection)
+     - Use KVH polygon validator to check self-intersection
+  
+  Tools:
+  - edit_solution: Replace EVOLVE-BLOCK with complete C++ implementation of above strategy
+  - evaluate_solution: Run C++ program, get score
+  - probe_solution: NOT useful - full evaluation needed
+  - finish: Submit when you have encoded a working sardine-aware corridor expansion
+  
+  Preserve EVOLVE-BLOCK markers, exact I/O format (m then vertices), and ensure <2.0s execution.
+  
+  KEY DIFFERENCE from seed: Use corridor expansion to connect mackerel clusters through sardine-free paths, enabling multi-lobed polygons that capture more fish while avoiding penalties.
+skill_description: |
+  Sardine-aware corridor expansion. Build grid, find mackerel-dense cells, expand through sardine-free corridors in 4 directions, combine into multi-lobed polygons, deep hill climb with ±5..25 shifts, 15-20 restarts.
+skill_body: |
+  # Sardine-Aware Corridor Expansion Strategy
+  
+  ## Phase 1: Grid Construction and Analysis
+  - Use 200x200 grid with cell_size=500 (covers 0-100000)
+  - For each cell, count mackerels and sardines from input
+  - Compute cell score = M - S
+  - Identify top 15 cells with positive score
+  
+  ## Phase 2: Corridor Expansion (Innovation)
+  For each top cell, expand in 4 cardinal directions:
+  - Start from the cell and move outward in one direction
+  - At each step, check if the new cell has good M-S ratio (M >= S or S < M + 2)
+  - Stop if: grid boundary, cell score < 0, or sardine density too high (S > M + 2)
+  - Record the corridor path (sequence of cells)
+  
+  ## Phase 3: Polygon Construction
+  - Convert corridor sequences into axis-aligned polygon vertices
+  - For a single direction corridor: create a long thin rectangle
+  - For multiple directions: combine into an L-shape or multi-lobed structure
+  - Ensure: 4 <= vertices <= 1000, perimeter <= 400,000, coords in [0,100000]
+  - Use KVH validator to ensure no self-intersection
+  
+  ## Phase 4: Deep Hill Climbing
+  For each candidate polygon:
+  - For each edge (up to 1000):
+    * Try shifts: ±5, ±10, ±15, ±20, ±25 units
+    * Use grid-based rectangle query for fast scoring
+    * Keep shift that maximizes M - S
+  - Repeat 3 refinement rounds
+  - Output refined polygon
+  
+  ## Phase 5: Multiple Random Restarts
+  - Run 15-20 restarts with different random seeds
+  - Each restart: 
+    * Randomly perturb top cell selection (add/subtract random offset to coordinates)
+    * Pick 3-5 perturbed top cells
+    * Build corridors from each
+    * Combine and hill climb
+  - Track best polygon across all restarts
+  - Output single best polygon
+  
+  ## C++ Implementation Notes
+  - Use fixed-size 200x200 grid array for O(1) access
+  - Pre-compute all cell scores in O(N) at startup
+  - Rectangle query = sum of grid cells covering the rectangle
+  - Total time per evaluation: < 2.0s with efficient operations
+  - Use std::random_device for seed generation
+  - Include KVH polygon self-intersection check
+tool_descriptions:
+  edit_solution: |
+    Replace EVOLVE-BLOCK with C++ implementing sardine-aware corridor expansion:
+    1. Build 200x200 grid, count M/S per cell, compute M-S score
+    2. Find top 15 cells with positive score
+    3. From each, expand 4-directional corridors avoiding high-sardine regions
+    4. Convert corridors to polygons, validate with KVH
+    5. Deep hill climb with ±5..25 shifts, 3 rounds
+    6. 15-20 random restarts, output best polygon
+    Ensure <2.0s execution, valid output format.
+  evaluate_solution: |
+    Run C++ program. Returns score (mackerels-sardines+1), validity, and remaining evaluations (budget=30). Each run has ~2.0s search window.
+  probe_solution: NOT useful - full evaluation needed for accurate scoring.
+  finish: |
+    End when you've submitted a working sardine-aware corridor expansion with 15-20 restarts and deep hill climbing.
+sampling:
+  temperature: 1.1
+  top_p: 0.9
+  top_k: 30
+  max_tokens: 12288
+agent:
+  max_iterations: 50
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 15000
+new_tools:
+- name: expand_corridor
+  description: |
+    Expand a corridor from a seed cell in a given direction, avoiding sardine-dense regions.
+    Returns the corridor path as a list of cell coordinates and final cell score.
+  input_schema:
+    type: object
+    properties:
+      seed_cell:
+        type: object
+        properties:
+          row:
+            type: integer
+          col:
+            type: integer
+      direction:
+        type: string
+        enum: ["N", "S", "E", "W"]
+      max_length:
+        type: integer
+        default: 100
+  implementation_py: |
+    def run(ctx, args):
+        import json
+        
+        seed_cell = args["seed_cell"]
+        direction = args["direction"]
+        max_length = args.get("max_length", 100)
+        
+        grid_size = 200
+        
+        # Parse program to extract fish positions
+        program_text = ctx.get_program()
+        fish_data = []
+        for line in program_text.split('\n'):
+            line = line.strip()
+            if line.startswith('fish['):
+                try:
+                    parts = line.replace('fish[', '').replace(']', '').split(',')
+                    if len(parts) >= 2:
+                        x, y = int(parts[0]), int(parts[1])
+                        fish_type = 1 if 'mackerel' in line.lower() else -1
+                        fish_data.append((x, y, fish_type))
+                except:
+                    continue
+        
+        # Build grid
+        grid = [[{'m': 0, 's': 0} for _ in range(grid_size)] for _ in range(grid_size)]
+        cell_size = 100000 // grid_size
+        
+        for x, y, ftype in fish_data:
+            cx, cy = x // cell_size, y // cell_size
+            if 0 <= cx < grid_size and 0 <= cy < grid_size:
+                if ftype == 1:
+                    grid[cy][cx]['m'] += 1
+                else:
+                    grid[cy][cx]['s'] += 1
+        
+        # Direction deltas
+        deltas = {
+            "N": (-1, 0),
+            "S": (1, 0),
+            "E": (0, 1),
+            "W": (0, -1)
+        }
+        dr, dc = deltas[direction]
+        
+        # Expand corridor
+        corridor = [seed_cell]
+        curr_r, curr_c = seed_cell["row"], seed_cell["col"]
+        max_score = grid[curr_r][curr_c]["m"] - grid[curr_r][curr_c]["s"]
+        
+        for _ in range(max_length):
+            new_r, new_c = curr_r + dr, curr_c + dc
+            if not (0 <= new_r < grid_size and 0 <= new_c < grid_size):
+                break
+            
+            m_count = grid[new_r][new_c]["m"]
+            s_count = grid[new_r][new_c]["s"]
+            score = m_count - s_count
+            
+            # Stop conditions
+            if score < 0 and s_count > m_count + 2:
+                break
+            
+            corridor.append({"row": new_r, "col": new_c, "m": m_count, "s": s_count, "score": score})
+            curr_r, curr_c = new_r, new_c
+        
+        return {
+            "corridor": corridor,
+            "length": len(corridor),
+            "final_score": corridor[-1]["score"] if corridor else 0
+        }
+new_skills:
+- name: corridor-expansion-guide
+  description: |
+    Use corridor expansion to grow from mackerel-dense cells through sardine-free paths.
+    Expand in 4 directions, avoid regions with S > M + 2, combine corridors into polygons.
+  body: |
+    # Corridor Expansion Guide for Polygon Optimization
+    
+    ## Core Idea
+    Instead of building polygons around isolated clusters, expand through sardine-free corridors
+    to connect mackerel-rich regions and create multi-lobed structures.
+    
+    ## Step-by-Step Method
+    
+    ### Step 1: Grid Analysis
+    - Build 200x200 grid over [0,100000]x[0,100000] (cell_size=500)
+    - Count mackerels (M) and sardines (S) in each cell
+    - Compute cell score = M - S
+    - Identify top 15 cells with positive score
+    
+    ### Step 2: Directional Expansion
+    For each top cell, try expanding in each cardinal direction:
+    - North: decrease row index
+    - South: increase row index
+    - East: increase column index
+    - West: decrease column index
+    
+    For each direction:
+    - Start from seed cell and move outward step by step
+    - At each step, check the new cell's M, S counts
+    - Continue if: cell is in bounds AND (M >= S OR S < M + 2)
+    - Stop if: out of bounds, M - S < 0, or S > M + 2
+    - Record all cells in the corridor
+    
+    ### Step 3: Polygon Formation
+    Convert corridor(s) into polygon:
+    - Single corridor: create rectangular boundary around corridor cells
+    - Multiple corridors from same seed: combine into L-shape or multi-lobed structure
+    - Ensure: 4 <= vertices <= 1000, integer coordinates, no self-intersection
+    
+    ### Step 4: Hill Climbing
+    For each polygon candidate:
+    - For each edge, try shifts ±5, ±10, ±15, ±20, ±25 units
+    - Use grid-based rectangle query for fast scoring
+    - Keep shift that improves M - S
+    - Repeat 3 refinement rounds
+    
+    ### Step 5: Multiple Restarts
+    - Run 15-20 restarts with different random seeds
+    - Each restart: perturb top cell selection, build 3-5 corridors, combine, hill climb
+    - Output best polygon across all restarts
+    
+    ## Key Success Factors
+    - Avoid sardine-dense regions (S > M + 2) to minimize penalties
+    - Use corridor expansion to create extended polygons that capture multiple clusters
+    - Deep hill climbing to fine-tune edge positions
+    - Many restarts to explore diverse polygon shapes
+new_middlewares:
+- name: restart_reminder
+  hook: before_model
+  description: |
+    Remind solver to use sardine-aware corridor expansion with 15-20 restarts.
+    Encourage deep hill climbing and avoiding sardine-dense regions.
+  implementation_py: |
+    def before_model(hook_input):
+        return "Use sardine-aware corridor expansion: from mackerel-dense cells, expand in 4 directions avoiding S>M+2, build multi-lobed polygons, deep hill climb with ±5..25 shifts, run 15-20 restarts."

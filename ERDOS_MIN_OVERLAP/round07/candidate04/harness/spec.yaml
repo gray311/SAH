@@ -1,0 +1,323 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are an expert in mathematical optimization for the Erdős minimum overlap problem.
+  
+  **OBJECTIVE**: Maximize combined_score = 0.38092303510845016 / c5_bound
+  You must find c5_bound < 0.38092303510845016 to achieve combined_score > 1.0.
+  
+  **CONSTRAINTS**: Step function h: [0,2]→[0,1] with ∫h(x)dx = 1 exactly.
+  
+  **NEW CAPABILITIES AVAILABLE**:
+  
+  **construct_step_function**: Create valid step functions with automatic constraint enforcement.
+  Usage: {num_intervals: N, heights: [h0, h1, ...], custom_breakpoints: [...]}.
+  Returns the step function array validated for h∈[0,1] and ∫h=1.
+  
+  **search_discrete_configurations**: Generate 10-50 candidate step functions automatically.
+  Tries single-interval, double-interval, uniform, and step-function patterns.
+  Call with {num_candidates: 20, num_intervals: 100}.
+  
+  **evaluate_c5_bound**: Compute the C5 bound directly using FFT.
+  Input: {h: [array], num_intervals: N}. Returns {c5_bound, integral_h, ...}.
+  
+  **Strategy**:
+  1. Call search_discrete_configurations to get 20-50 valid candidates
+  2. Call evaluate_c5_bound on each to rank them (cheap, no eval budget)
+  3. Pick the best 3-5 candidates and call edit_solution to incorporate them into EVOLVE-BLOCK
+  4. Evaluate each candidate separately to confirm
+  5. If c5_bound < 0.38092303510845016, you have combined_score > 1.0
+  
+  **DO NOT**: Rely on the seed program's gradient descent. It's too complex and stuck.
+  
+  **DO**: Build simple, directly-constructible solutions with few intervals first, then refine.
+
+new_tools:
+  - name: construct_step_function
+    description: |
+      Create a valid step function with specified breakpoints and heights.
+      Automatically enforces constraints: h∈[0,1] and ∫h=1 over [0,2].
+      Returns the step function array and its integral verification.
+      Use this to generate candidate solutions without gradient descent.
+      Call with: num_intervals (e.g., 3, 5, 10), and optionally heights or breakpoints.
+    input_schema: {type: object, properties: {num_intervals: {type: integer, minimum: 1, maximum: 1000}, heights: {type: array, items: {type: number}, minItems: 1, maxItems: 1000}, custom_breakpoints: {type: array, items: {type: number}, minItems: 0, maxItems: 1000}}, required: ["num_intervals"]}
+    implementation_py: |
+      def run(ctx, args):
+          import numpy as np
+          N = args.get("num_intervals", 100)
+          heights = args.get("heights", None)
+          custom_breakpoints = args.get("custom_breakpoints", None)
+          
+          dx = 2.0 / N
+          
+          # Generate breakpoints
+          if custom_breakpoints is None:
+              if heights is not None:
+                  # Use provided heights
+                  heights_arr = np.array(heights, dtype=np.float64)
+                  if len(heights_arr) != N:
+                      # Try to adjust to match N
+                      if len(heights_arr) > N:
+                          heights_arr = heights_arr[:N]
+                      else:
+                          # Repeat and truncate
+                          repeats = (N + len(heights_arr) - 1) // len(heights_arr)
+                          heights_arr = np.tile(heights_arr, repeats)[:N]
+                  h = np.zeros(N)
+                  for i, hi in enumerate(heights_arr):
+                      if 0 <= hi <= 1:
+                          h = np.where(h % N == i, hi, h)
+              else:
+                  # Default: start with 5-interval configuration
+                  N = 5
+                  # Pattern: [1, 0, 0, 0, 0] scaled to integrate to 1
+                  # With uniform intervals, h[i] * dx * N = 1, so h[i] = 1/N for all i
+                  # But we want concentration: try [1, 0, 0, 0, 0] style
+                  h = np.zeros(N)
+                  h[0] = 1.0
+                  # Scale to ensure integral = 1
+                  # integral = sum(h) * dx = 1 * 2/5 = 0.4, not 1
+                  # So we need h[0] = N/2 = 2.5, but that's > 1
+                  # Alternative: use [0.5, 0.5, 0, 0, 0] -> integral = 1 * 2/5 = 0.4
+                  # Need 2.5 total mass: [0.5, 0.5, 0.5, 0.5, 0]
+                  h = np.zeros(N)
+                  total_mass = N / 2.0
+                  h = np.ones(N) * total_mass / N
+          
+          # Ensure valid range
+          h = np.clip(h, 0, 1)
+          
+          # Verify and adjust for integral = 1
+          integral = np.sum(h) * dx
+          if abs(integral - 1.0) > 0.01 and np.sum(h) > 0:
+              scale = 1.0 / integral
+              h = h * scale
+              h = np.clip(h, 0, 1)
+          
+          return {
+              "h": h.tolist(),
+              "num_intervals": N,
+              "integral": float(np.sum(h) * dx),
+              "min_h": float(np.min(h)),
+              "max_h": float(np.max(h)),
+              "valid": 0.0 <= np.min(h) and np.max(h) <= 1.0 and abs(np.sum(h) * dx - 1.0) < 0.01
+          }
+  - name: search_discrete_configurations
+    description: |
+      Generate multiple candidate step functions by exploring different configurations.
+      Tries several patterns: single-interval concentration, double-interval split, uniform, etc.
+      Each candidate is validated for constraints and returned with its properties.
+      Use this to quickly generate 10-50 candidates to probe/evaluate.
+    input_schema: {type: object, properties: {num_candidates: {type: integer, minimum: 1, maximum: 100}, num_intervals: {type: integer, minimum: 2, maximum: 500}}, required: []}
+    implementation_py: |
+      def run(ctx, args):
+          import numpy as np
+          num_candidates = args.get("num_candidates", 20)
+          num_intervals = args.get("num_intervals", 100)
+          dx = 2.0 / num_intervals
+          
+          candidates = []
+          
+          # Pattern 1: Single interval concentrated at start
+          for i in range(min(5, num_candidates)):
+              h = np.zeros(num_intervals)
+              h[i] = 1.0 / (num_intervals - i) * (num_intervals // 2)
+              h = np.clip(h, 0, 1)
+              integral = np.sum(h) * dx
+              if abs(integral - 1.0) < 0.01:
+                  candidates.append({"pattern": f"single_{i}", "h": h.tolist(), "valid": True})
+                  if len(candidates) >= num_candidates:
+                      break
+              else:
+                  # Adjust to satisfy constraint
+                  h = np.ones(num_intervals) * (num_intervals / 2.0)
+                  h = np.clip(h, 0, 1)
+                  if len(candidates) < num_candidates:
+                      candidates.append({"pattern": f"single_{i}_adjusted", "h": h.tolist(), "valid": True})
+                      if len(candidates) >= num_candidates:
+                          break
+          
+          # Pattern 2: Double interval split
+          for i in range(3):
+              h = np.zeros(num_intervals)
+              left_mass = 1.0 / 2.0
+              right_mass = 1.0 - left_mass
+              left_h = left_mass / max(1, (i+1))
+              right_start = (i+1) % num_intervals
+              right_h = right_mass / max(1, num_intervals - right_start)
+              h[:i+1] = np.minimum(h[:i+1], left_h)
+              h[i+1:] = np.minimum(h[i+1:], right_h)
+              h = np.clip(h, 0, 1)
+              integral = np.sum(h) * dx
+              if abs(integral - 1.0) < 0.05:
+                  candidates.append({"pattern": f"double_{i}", "h": h.tolist(), "valid": True})
+          
+          # Pattern 3: Uniform
+          h = np.ones(num_intervals) * (num_intervals / 2.0)
+          h = np.clip(h, 0, 1)
+          integral = np.sum(h) * dx
+          if abs(integral - 1.0) < 0.05:
+              candidates.append({"pattern": "uniform", "h": h.tolist(), "valid": True})
+          
+          # Pattern 4: Step patterns
+          for k in range(min(5, num_candidates - len(candidates))):
+              h = np.zeros(num_intervals)
+              num_steps = min(k+3, num_intervals // 2)
+              step_height = (num_intervals / 2.0) / num_steps
+              for i in range(num_steps):
+                  h[i*num_steps//num_intervals:(i+1)*num_steps//num_intervals] = step_height
+              h = np.clip(h, 0, 1)
+              integral = np.sum(h) * dx
+              if abs(integral - 1.0) < 0.05:
+                  candidates.append({"pattern": f"steps_{k}", "h": h.tolist(), "valid": True})
+          
+          # If not enough candidates, generate random valid ones
+          while len(candidates) < num_candidates:
+              h = np.random.random(num_intervals)
+              h = np.clip(h, 0, 1)
+              integral = np.sum(h) * dx
+              if abs(integral - 1.0) < 0.05:
+                  candidates.append({"pattern": f"random_{len(candidates)}", "h": h.tolist(), "valid": True})
+          
+          return {
+              "num_candidates": len(candidates),
+              "candidates": candidates,
+              "dx": float(dx)
+          }
+  - name: evaluate_c5_bound
+    description: |
+      Directly compute the C5 bound for a given step function h without penalty.
+      Uses FFT-based correlation to compute max_k ∫h(x)(1-h(x+k))dx efficiently.
+      Call this to quickly score candidates before full evaluation.
+      Input should be {"h": [h_array_as_list], "num_intervals": N}.
+    input_schema: {type: object, properties: {h: {type: array, items: {type: number}}, num_intervals: {type: integer}}, required: ["h", "num_intervals"]}
+    implementation_py: |
+      def run(ctx, args):
+          import numpy as np
+          h = np.array(args["h"], dtype=np.float64)
+          N = args["num_intervals"]
+          dx = 2.0 / N
+          
+          j = 1.0 - h
+          h_padded = np.pad(h, (0, N))
+          j_padded = np.pad(j, (0, N))
+          
+          corr_fft = np.fft.fft(h_padded) * np.conj(np.fft.fft(j_padded))
+          correlation = np.fft.ifft(corr_fft).real
+          
+          c5_bound = np.max(correlation * dx)
+          
+          integral_h = np.sum(h) * dx
+          
+          return {
+              "c5_bound": float(c5_bound),
+              "integral_h": float(integral_h),
+              "max_correlation": float(np.max(correlation)),
+              "min_correlation": float(np.min(correlation)),
+              "valid": 0.0 <= np.min(h) and np.max(h) <= 1.0 and abs(integral_h - 1.0) < 0.01
+          }
+
+skill_description: |
+  Direct construction harness for C₅ bound optimization.
+  Uses constructive methods (step functions with enforced constraints) rather than gradient descent.
+  Targets combined_score > 1.0 by finding c5_bound < 0.38092303510845016.
+
+skill_body: |
+  # C₅ Bound Optimization via Direct Construction
+  
+  ## The Problem
+  
+  Minimize: max_k ∫₀² h(x)(1-h(x+k))dx
+  subject to: h:[0,2]→[0,1], ∫h=1
+  
+  ## Why Gradient Descent Fails
+  
+  The seed's Adam optimizer with 12 initialization patterns is stuck because:
+  - High-dimensional latent space has many local optima
+  - Penalty-based constraint handling is weak (penalty_strength=1370 is not enough)
+  - 800 intervals is too fine for global optimization
+  
+  ## Direct Construction Strategy
+  
+  ### Step 1: Generate Candidates
+  
+  Use `search_discrete_configurations` to automatically create 20-50 valid step functions.
+  This tool enforces all constraints and tries multiple patterns:
+  - Single-interval concentration
+  - Double-interval splits
+  - Uniform distributions
+  - Multi-step functions
+  
+  ### Step 2: Score with probe
+  
+  Use `evaluate_c5_bound` to compute the C5 bound for each candidate.
+  This is FAST (uses FFT) and does NOT consume your evaluation budget.
+  
+  ### Step 3: Select and Submit
+  
+  Pick the 3-5 best candidates (lowest c5_bound) and use `edit_solution` 
+  to replace the EVOLVE-BLOCK with code that returns these candidates directly.
+  
+  Example edit strategy:
+  ```python
+  def _get_initialization(self, seed):
+      # Return pre-validated step function
+      return jnp.array([0.5, 0.5, 0.0, ...])  # valid h with ∫h=1
+  ```
+  
+  ### Step 4: Refine if needed
+  
+  Once you find a promising candidate with c5_bound ≈ 0.37, try:
+  - More intervals (500-1000) for finer resolution
+  - Slightly different patterns
+  - But keep the direct construction approach
+  
+  ## Success Criteria
+  
+  - combined_score > 1.0 means c5_bound < 0.38092303510845016
+  - With direct construction, you can test 50+ candidates in one evaluation
+  - Focus on simple patterns first: [1,0,...], [0.5,0.5,0,...], etc.
+  
+  ## Common Patterns to Try
+  
+  1. Single step: h=1 on [0,0.5], h=0 elsewhere (integral=0.5×2=1) ✓
+  2. Two steps: h=0.5 on [0,1], h=0 elsewhere (integral=0.5×2=1) ✓
+  3. Triangle: linear from 0→1 at x=0.5, 1→0 at x=1.5
+  4. Uniform: h=0.5 everywhere (integral=0.5×2=1)
+  
+  Remember: h must be in [0,1] and integrate to exactly 1 over [0,2].
+
+tool_descriptions:
+  edit_solution: |
+    Replace the EVOLVE-BLOCK. **PREFERRED**: Write code that directly returns
+    pre-constructed step functions (see search_discrete_configurations).
+    
+    The seed's complex optimizer is unnecessary. Build simple solutions:
+    - A class method that returns h arrays for known valid configurations
+    - Use few intervals (5-50) initially, then refine
+    - Ensure ∫h=1 and h∈[0,1] explicitly
+    
+    Example pattern: 5 intervals with h=[1.0, 0.0, 0.0, 0.0, 0.0] needs scaling.
+    Better: h=[0.5, 0.5, 0.0, 0.0, 0.0] gives integral = 0.5×2/5 + 0.5×2/5 = 0.4 + 0.4 = 0.8 (not 1!)
+    Correct: h=[0.5, 0.5, 0.5, 0.5, 0.0] gives 1.0 exactly.
+  evaluate_solution: |
+    Run the program to get combined_score. You have ~30 evaluations.
+    Each candidate step function should be tested separately to confirm.
+    A combined_score > 1.0 means success!
+  probe_solution: |
+    The search_discrete_configurations and evaluate_c5_bound tools provide
+    cheap scoring. Use them extensively before spending evaluation budget.
+    You can score 50+ variants with probes, then pick the best 3-5 to evaluate fully.
+  finish: |
+    End when you achieve combined_score > 1.0 or have exhausted ~30 evaluations.
+    The solver should have found a valid step function with c5_bound < 0.38092303510845016.
+
+sampling:
+  temperature: 0.8
+  top_p: 0.95
+  top_k: 10
+  max_tokens: 16384
+agent:
+  max_iterations: 60
+middleware:
+  budget_reminder_from_left: 3
+  long_tool_output_max_chars: 15000

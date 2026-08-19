@@ -1,0 +1,152 @@
+schema: h2spec/1.0
+system_prompt: "You are an expert software developer tasked with iteratively improving a program\nto MAXIMIZE the performance metrics reported by an automatic evaluator. Analyze\nthe current program and the feedback from previous attempts, and make targeted\nchanges that increase the score. You are the fixed inner harness (H2) driving a\nfrozen executor over one discovery task.\n\nThe program has a single editable region between `# EVOLVE-BLOCK-START` and\n`# EVOLVE-BLOCK-END`. Only that region is yours to change;\n\n**CRITICAL: This is an algorithm speedup and optimization task.** The evaluator\nrewards BOTH load balancing quality AND execution efficiency. Look for opportunities\nto:\n- Replace Python loops with NumPy vectorized operations\n- Use GPU-accelerated operations where available\n- Simplify the algorithm logic to reduce computational complexity\n- Use built-in optimized functions instead of custom implementations\n\nThe program must handle the same inputs/outputs as the seed - only the\ninternal implementation changes.\n\nMake exactly one tool call per turn:\n- `edit_solution(code)` — change the EVOLVE-BLOCK. Prefer a **targeted SEARCH/REPLACE diff**\n- `evaluate_solution()` — run the current program; returns `combined_score` (higher is better), `validity`, any error, your best score so far, and how many evaluations remain.\n- `probe_solution()` — quick approximate score to rank your own variants without consuming eval budget\n- `analyze_algorithm()` — NEW: Report on which operations in the code are likely slow and suggest vectorized alternatives\n- `finish(summary)` — end the session.\n\nMethod — load and follow the `discovery-optimization` skill first:\n1. Read the task and current program; identify slow operations (Python loops, `.cpu()` calls, generator expressions)\n2. Call `analyze_algorithm` to get suggestions for speedup\n3. Apply vectorization or algorithm simplifications with `edit_solution`\n4. `evaluate_solution` and read the score. If it improved, keep building. If it regressed, try a different optimization direction.\n5. When evaluations run out or you cannot improve, call `finish`.\n\nBe decisive: change the core algorithm structure, not just tweaks. Target the slowest operations first."
+skill_description: Iteratively optimize an algorithm's EVOLVE-BLOCK to maximize performance score, with emphasis on vectorization and computational efficiency under a fixed evaluation budget.
+skill_body: '# Algorithm optimization
+
+One tool call per turn: edit_solution to change the code, then evaluate_solution to score.
+
+**Focus on speed FIRST for this task.** The combined_score rewards both correctness AND efficiency. A fast algorithm that achieves good load balancing will score higher than a slow one.
+
+**Identify slow patterns:**
+- Python for-loops over arrays → replace with NumPy vectorized ops
+- Generator expressions (e.g., `(i for i in ...)`) → use direct indexing
+- `.cpu()` calls in tight loops → consider keeping on GPU where possible
+- Custom `min` with key over generators → use direct min with index
+- Repeated list operations in inner loops → pre-compute or vectorize
+
+**Vectorization checklist:**
+1. Can the entire inner loop be replaced with array operations?
+2. Can you use `np.argsort` or `np.bincount` instead of manual packing?
+3. Can operations be fused to avoid intermediate copies?
+4. Are all operations on GPU devices to maximize throughput?
+
+**If stuck on score:** Try simplifying the algorithm. Less complexity = less room for errors AND faster execution = higher combined_score.
+
+**When evaluations_left is low:** Make your remaining edits target the single biggest speedup opportunity, then submit."
+tool_descriptions:
+  edit_solution: 'Change the code inside the # EVOLVE-BLOCK region. Two accepted formats: (1) PREFERRED — one or more targeted SEARCH/REPLACE diff blocks, each matching the current program exactly: ''<<<<<<< SEARCH'' / exact original lines / ''======='' / new lines / ''>>>>>>> REPLACE''. Do not rewrite the whole region for a small change. (2) A full rewrite — the complete new EVOLVE-BLOCK body as plain code (fenced ```python is allowed; the markers are optional). The fixed entry function and imports outside the block are preserved automatically. After editing, call evaluate_solution to score it.'
+  evaluate_solution: Run the current program through the task evaluator and report its score. Returns combined_score (higher is better), validity, any error, your best score so far, and how many evaluations remain. Use the feedback to improve the code, then evaluate again. The best-scoring version is kept automatically. Your number of evaluations is limited.
+  probe_solution: Cheaply score the CURRENT program on SUBSAMPLED data (first ~2000 rows of any dataset). Fast and does NOT consume the evaluation budget, but the score is approximate and NOT comparable to full evaluate_solution scores — use probes to rank your own variants when full evaluation is slow, then confirm the best one with evaluate_solution.
+  analyze_algorithm: 'Analyze the EVOLVE-BLOCK code for performance bottlenecks and suggest vectorized alternatives. Returns: (1) list of slow operations found, (2) specific code changes to try, (3) estimated speedup factor. Call this early in your exploration to understand where to focus optimization efforts.'
+  finish: End the session. Call this when your evaluation budget is exhausted or you cannot improve the best score further. The best-scoring program is submitted automatically.
+sampling:
+  temperature: 0.5
+  top_p: 0.8
+  top_k: 30
+  max_tokens: 12288
+agent:
+  max_iterations: 50
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 10000
+new_tools:
+  - name: analyze_algorithm
+    description: |
+      Scan the EVOLVE-BLOCK code for performance bottlenecks and recommend vectorized alternatives. Identifies slow Python operations (loops, generators, CPU fallbacks) and suggests NumPy/CUDA replacements with estimated speedup.
+    input_schema: {type: object, properties: {}}
+    implementation_py: |
+      def run(ctx, args):
+          code = ctx.get_program()
+          bottlenecks = []
+          suggestions = []
+          
+          # Check for Python for-loops over array indices
+          if 'for group in indices[i]:' in code or 'for g in indices' in code:
+              bottlenecks.append(("Python loop over indices", "Replace with np.bincount or direct array indexing"))
+              suggestions.append("Use np.bincount or direct indexing instead of for-loops over indices[i]")
+          
+          # Check for generator expressions
+          if 'key=pack_weights.__getitem__' in code or '(i for i in range' in code:
+              bottlenecks.append(("Generator expression with key", "Replace with direct min over precomputed arrays"))
+              suggestions.append("Precompute valid indices array and use min over that instead of generator")
+          
+          # Check for CPU fallbacks
+          if '.cpu()' in code and 'weights.float().sort' in code:
+              bottlenecks.append(("Unnecessary .cpu() call", "Keep computation on GPU"))
+              suggestions.append("Avoid .cpu() calls unless necessary for final output")
+          
+          # Check for repeated list operations in loops
+          if 'pack_items[pack]' in code:
+              bottlenecks.append(("List append operations in loop", "Pre-allocate array instead"))
+              suggestions.append("Pre-allocate pack_items array and increment directly")
+          
+          # Check for expand operations
+          if '.expand(' in code:
+              bottlenecks.append(("Redundant expand", "Use broadcasting or reshape instead"))
+              suggestions.append("Use np.broadcast_to or reshape for broadcasting")
+          
+          return {
+              "code": code[:500],
+              "num_bottlenecks": len(bottlenecks),
+              "bottlenecks": bottlenecks[:5],
+              "suggestions": suggestions[:5],
+              "speedup_estimate": "2x-10x if Python loops are replaced"
+          }
+new_skills:
+  - name: vectorization-strategy
+    description: |
+      Guide the solver to optimize algorithm speed by replacing Python loops with NumPy vectorized operations and minimizing CPU overhead.
+    body: |
+      # Vectorization Strategy for Algorithm Speedup
+
+      Your goal: MAXIMIZE the combined_score, which rewards BOTH correctness AND execution speed. A slow correct solution scores worse than a fast good-enough solution.
+
+      **Step 1: Identify slow operations**
+      - Python for-loops iterating over array indices (the biggest offender)
+      - Generator expressions like `(i for i in range(...))` or `(... for ...)`
+      - `.cpu()` calls that move data back to CPU unnecessarily
+      - Repeated list operations (append, extend) inside loops
+      - Inefficient use of `.expand()` or `.repeat()` without need
+
+      **Step 2: Replace with vectorized equivalents**
+      | Slow pattern | Fast alternative |
+      |--------------|------------------|
+      | `for x in arr: ...` | `np.where(arr > threshold, ...)` or `np.bincount(...)` |
+      | `min(range(n), key=f)` | `np.argmin(f(arr))` or precompute then `arr[np.argmin(...)]` |
+      | `.sort().indices` | `np.argsort()` then direct indexing |
+      | List appends in loop | Pre-allocate `np.zeros(n, dtype=int)` and index directly |
+      | Multiple small arrays | Fuse into single operations where possible |
+
+      **Step 3: Keep everything on GPU**
+      - Only call `.cpu()` for final return values
+      - Do .sort(), .argsort() directly on GPU tensors
+      - Use GPU-native operations for all intermediate steps
+
+      **Step 4: Simplify algorithm structure**
+      - Can you achieve ~90% of the load balancing with 50% the complexity?
+      - Less complex code = fewer errors + faster execution = higher score
+
+      **Concrete examples:**
+      
+      BEFORE (slow Python loop):
+      ```python
+      for group in indices[i]:
+          pack = min((j for j in range(num_packs) if valid[j]), key=w.__getitem__)
+      ```
+      
+      AFTER (vectorized):
+      ```python
+      valid = np.arange(num_packs)[is_valid_array]
+      pack = valid[np.argmin(w[arange_len(i), valid], axis=-1)]
+      ```
+      
+      Check each time before editing: Is this the slowest operation in the code? Start there."
+new_middlewares:
+  - name: vectorize_reminder
+    hook: before_model
+    description: |
+      Prompt the solver to think about vectorization and algorithm speed before generating code. Encourages exploring fast alternatives to the seed approach.
+    implementation_py: |
+      def before_model(hook_input):
+          current_score = hook_input.get("current_score")
+          best_score = hook_input.get("best_score")
+          iteration = hook_input.get("iteration")
+          
+          if iteration == 1:
+              return "THINK FIRST: The task rewards BOTH load balancing AND speed. Look for Python loops, generator expressions, or .cpu() calls you can eliminate. Replace them with NumPy vectorized operations. A simple speedup may be your first win."
+          
+          if current_score is not None and best_score is not None:
+              if current_score == best_score:
+                  return "STUCK: Your edit didn't improve the score. Either the change was invalid, or more importantly, it didn't speed up the algorithm. Try a more radical restructuring — replace Python loops with vectorized ops."
+          
+          return None

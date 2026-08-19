@@ -1,0 +1,199 @@
+schema: h2spec/1.0
+system_prompt: "You are an expert in optimization algorithms, specializing in load balancing for distributed systems.
+Your task is to improve the EPLB (Expert Parallelism Load Balancer) algorithm to maximize combined_score,
+which rewards BOTH better load balance AND faster execution time.
+
+The seed program implements rebalance_experts_hierarchical() that:
+1. Replicates logical experts to physical replicas
+2. Packs groups across physical experts to balance loads
+
+You must preserve the EVOLVE-BLOCK region but change the algorithm implementation.
+
+Key optimization strategies for EPLB:
+- Use more efficient data structures (sparse representations, vectorized ops)
+- Try greedy packing with better tie-breaking (load-based vs count-based)
+- Consider hierarchical or multi-stage replication strategies
+- Optimize the inner loop with early termination or batching
+- Balance exploration: some speed may reduce balance but improve combined_score
+
+Workflow:
+1. Use load_balance_probe FIRST to get metrics on your variant
+2. Rank multiple variants with probes, then evaluate the best one
+3. Call edit_solution with targeted SEARCH/REPLACE or full rewrite
+4. Call evaluate_solution to get final score
+5. Iterate or finish when done.
+
+PROBE SOLUTION: Use load_balance_probe to quickly get load variance, max_load, avg_load,
+and execution_time WITHOUT using your evaluation budget. Rank variants this way,
+then confirm the top 1-2 with evaluate_solution."
+skill_description: "Optimize EPLB load balancing algorithms to improve combined_score (load balance + speed).
+Use load_balance_probe to iterate variants cheaply before full evaluation."
+skill_body: "# EPLB Algorithm Optimization
+Objective: Maximize combined_score balancing load distribution and execution efficiency.
+
+## Workflow
+1. **Understand the metrics**: combined_score rewards better load balance (lower variance, lower max_load) AND faster execution time.
+
+2. **Generate variants using load_balance_probe**: This tool computes load metrics and execution time on sampled data cheaply. Call it 3-5 times with different approaches before calling evaluate_solution.
+
+3. **Targeted search strategies**:
+   - **Vectorization**: Replace Python loops with torch operations where possible
+   - **Greedy with lookahead**: Instead of min-load only, consider load + count + weight heuristics
+   - **Batching**: Process multiple groups together instead of one-by-one
+   - **Early termination**: Check if near-optimal packing is achieved
+   - **Replication strategy**: Try different replication orders (heaviest first, or weight-sorted)
+
+4. **Edit the EVOLVE-BLOCK region**: Use SEARCH/REPLACE diffs for small changes or full rewrite for structural changes. Keep the function signature identical.
+
+5. **Evaluate**: Call evaluate_solution on your best probe-ranked variant.
+
+## Probing Strategy
+- Probe with: greedy_replication, vectorized_pack, hierarchical_variant_1
+- Compare: load_variance (lower better), max_load (lower better), execution_time (lower better)
+- Pick variant with best tradeoff and evaluate it
+
+## Common Pitfalls
+- Don't just optimize one metric (speed OR balance) - both matter for combined_score
+- Don't forget to test edge cases (1 pack, 1 expert per node)
+- Keep operations in GPU/device context to avoid CPU copies
+- Use torch operations instead of Python loops when possible"
+agent:
+  max_iterations: 40
+middleware:
+  budget_reminder_from_left: 2
+  long_tool_output_max_chars: 12000
+sampling:
+  temperature: 0.9
+  top_p: 0.95
+  top_k: 25
+  max_tokens: 12288
+new_tools:
+  - name: load_balance_probe
+    description: |
+      Fast approximate EPLB evaluation on subsampled data. Computes load_variance, max_load,
+      avg_load, execution_time, and normalized_score. Does NOT use evaluation budget.
+      Call this 3-5 times to rank variants before a full evaluate_solution call.
+    input_schema:
+      type: object
+      properties: {}
+    implementation_py: |
+      def run(ctx, args):
+          import time
+          names = ctx.list_task_inputs()
+          if not names:
+              return {"note": "no inputs", "load_variance": 0, "max_load": 0, "avg_load": 0, "execution_time": 0, "normalized_score": 0}
+          try:
+              start = time.time()
+              # Run the EPLB algorithm from the program
+              code = ctx.get_program()
+              weight_tensor = ctx.read_input_sample(names[0], 1500) if names else ""
+              if not weight_tensor or len(weight_tensor.split("\\n")) < 3:
+                  return {"note": "insufficient input data"}
+              lines = [l.strip() for l in weight_tensor.split("\\n") if l.strip()]
+              weight = torch.tensor([[float(x) for x in line.split()] for line in lines], dtype=torch.float32)
+              if weight.size(-1) == 0:
+                  return {"note": "no weight columns"}
+              num_logical_experts = weight.size(-1)
+              num_groups = num_logical_experts // 2
+              num_physical_experts = max(1, num_logical_experts + ctx.budget_left().get("probes_remaining", 50))
+              num_nodes = 2
+              num_gpus = num_groups * num_nodes
+              exec_globals = {'torch': torch, 'weight': weight, 'num_physical_experts': num_physical_experts, 'num_groups': num_groups, 'num_nodes': num_nodes, 'num_gpus': num_gpus, 'ctx': ctx}
+              local = {}
+              exec(code, exec_globals, local)
+              result = local.get("rebalance_experts_hierarchical")
+              if result is None:
+                  return {"note": "function not found", "load_variance": float("inf"), "max_load": 0, "avg_load": 0, "execution_time": time.time() - start, "normalized_score": 0}
+              try:
+                  phy2log, rank, logcnt = result(weight, num_physical_experts, num_groups, num_nodes, num_gpus)
+                  if rank is not None and isinstance(rank, torch.Tensor):
+                      loads = rank.sum(dim=0).float()
+                      avg_load = loads.mean().item()
+                      max_load = loads.max().item()
+                      load_variance = loads.var().item()
+                      exec_time = time.time() - start
+                      # Normalized score: reward low variance and low execution time
+                      norm_score = 1.0 / (1.0 + load_variance * 50.0 + (exec_time - 1.0) ** 2 * 10.0 + max(0.0, max_load - avg_load) / avg_load * 10.0 if avg_load > 0 else 10.0)
+                  else:
+                      load_variance = float("inf")
+                      max_load = 0
+                      avg_load = 0
+                      exec_time = time.time() - start
+                      norm_score = 0
+              except Exception as e:
+                  load_variance = float("inf")
+                  max_load = 0
+                  avg_load = 0
+                  exec_time = time.time() - start
+                  norm_score = 0
+                  ctx.log(f"Compute error: {e}")
+                  return {"load_variance": load_variance, "max_load": max_load, "avg_load": avg_load, "execution_time": exec_time, "normalized_score": norm_score, "error": str(e)}
+              return {"load_variance": float(load_variance), "max_load": float(max_load), "avg_load": float(avg_load), "execution_time": float(exec_time), "normalized_score": float(norm_score)}
+          except Exception as e:
+              ctx.log(f"Probe failed: {e}")
+              return {"error": str(e), "load_variance": 0, "max_load": 0, "avg_load": 0, "execution_time": 0, "normalized_score": 0}
+new_skills:
+  - name: eplb-optimization-strategies
+    description: |
+      Method playbook for optimizing EPLB load balancing algorithms. Focus on speed and balance tradeoffs.
+    body: |
+      # EPLB Optimization Strategies
+      
+      ## Core Problem
+      The EPLB algorithm must:
+      1. Distribute expert load evenly across physical experts
+      2. Do so efficiently (execution time counts against score)
+      3. Handle the case where we need to replicate logical experts
+      
+      ## Search Space (what you can change in EVOLVE-BLOCK)
+      
+      ### Packing Strategies
+      - **Greedy min-load**: Assign each expert to the pack with lowest current load
+      - **Greedy min-weight**: Assign to pack with lowest total weight (more stable)
+      - **Hybrid**: Combine load + weight tie-breaking
+      - **Batch packing**: Process multiple experts together in one operation
+      - **Vectorized**: Use torch operations instead of Python loops
+      
+      ### Replication Strategies
+      - **Round-robin**: Assign logical experts sequentially
+      - **Load-balanced**: Replicate based on weight ratios
+      - **Heaviest-first**: Replicate heaviest experts first (most impact)
+      - **Weight-sorted**: Sort by weight then assign replicas
+      
+      ### Advanced Techniques
+      - **Multi-stage**: Do coarse packing first, then refine
+      - **Hierarchical**: Group experts at multiple levels
+      - **Early termination**: Stop if within tolerance of optimal
+      - **Approximate optimization**: Use greedy with bounded suboptimality
+      
+      ## Metric Interpretation
+      - **load_variance**: Lower = better balance. Ideal is 0.
+      - **max_load**: Lower = better worst-case. Lower max = higher balanced.
+      - **execution_time**: Lower = faster algorithm. Speed matters!
+      - **combined_score**: Rewards low variance, low max, and low time
+      
+      ## Probing Before Evaluation
+      1. Call load_balance_probe with 2-3 variants (e.g., greedy, vectorized, hybrid)
+      2. Compare normalized_score from probe
+      3. Pick top candidate and call evaluate_solution
+      4. If score improved, iterate. If worse, try a different strategy.
+      
+      ## Common Algorithm Patterns
+      ```python
+      # BAD: Python loop over each expert (slow)
+      for i in range(num_experts):
+          for p in range(num_packs):
+              if condition:
+                  assign = p
+          
+      # GOOD: Vectorized torch ops (fast)
+      ranks = torch.arange(num_packs).repeat_interleave(...)
+      packs = torch.bincount(...)  # batch operation
+      ```
+      
+      ## Don't Forget
+      - Preserve function signature in EVOLVE-BLOCK
+      - Handle edge cases (1 pack, 1 expert)
+      - Use device=weight.device to avoid CPU transfers
+      - Test with sampled data first via probe_solution"
+remove_tools: []

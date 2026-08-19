@@ -1,0 +1,218 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are solving the Erdos minimum overlap problem: minimize max_k integral h(x)(1-h(x+k)) dx
+  for a step function h: [0,2] -> [0,1] with integral(h)=1.
+  
+  Current best bound: C5 <= 0.38092303510845016
+  
+  STRATEGY: The seed program uses 12 initialization patterns but all follow similar Gaussian/sigmoid shapes.
+  To escape local minima, you need to try INITIALLY DIFFERENT STRUCTURES, not just tune hyperparameters.
+  
+  Steps:
+  1. CALL generate_diverse_init to create 4 structurally diverse initializations
+  2. For EACH initialization, EDIT the seed to use ONLY that pattern (num_restarts=1, seed_start=that pattern index)
+  3. Use probe_solution to quickly check constraint satisfaction and c5_bound (full training is wasteful for initial screening)
+  4. Call evaluate_solution ONLY on the top 2-3 initializations that pass probe with c5_bound < 0.37
+  5. If none work, EDIT to add a NEW initialization pattern that is structurally different from all 12 (e.g., piecewise constant with different breakpoints)
+  6. Focus on finding INITIALLY BETTER functions, not refining bad ones
+  
+  Key insight: The bottleneck is initialization diversity, not hyperparameter tuning. The FFT evaluator is fast, so use probe_budget to screen many candidates quickly.
+skill_description: |
+  Escape local minima by generating structurally diverse initial step functions and screening with probes before full evaluation.
+skill_body: |
+  # Erdos Minimum Overlap - Diverse Initialization Strategy
+  
+  ## Problem
+  The seed optimizer uses 12 similar initialization patterns (Gaussian, sinusoidal, threshold-based).
+  To find better solutions, we need initializations with DIFFERENT STRUCTURES.
+  
+  ## Strategy
+  
+  ### Phase 1: Generate Structurally Diverse Initializations
+  Use generate_diverse_init to create 4+ fundamentally different patterns:
+  - Golomb ruler-based (optimal spacing for 5-7 marks)
+  - Bipartite split (h=0 on [0,a), h=1 on [a,2-a], h=0 on [2-a,2])
+  - Multi-modal with 3-5 peaks at specific locations
+  - Truncated Gaussian with sharp cutoffs
+  
+  ### Phase 2: Screen with Probes (Use All 30 Probes Here!)
+  For each new initialization:
+  1. EDIT the seed to use ONLY that pattern (set num_restarts=1, use the pattern's latent as seed)
+  2. Call probe_solution to check: constraint satisfaction, c5_bound
+  3. Skip full evaluation if probe shows c5_bound >= 0.375 or constraint violation
+  4. Keep candidates with c5_bound < 0.37
+  
+  ### Phase 3: Evaluate Promising Candidates
+  Call evaluate_solution on top 2-3 candidates from Phase 2.
+  
+  ### Phase 4: If No Improvement, Add New Structure
+  Edit _get_best_initialization to add a completely new pattern:
+  - Piecewise constant with 3-4 breakpoints at "golden ratio" locations
+  - Asymmetric triangular wave
+  - Optimized 3-step function (high on [0,a], medium on [a,b], low on [b,2])
+  
+  ## Success Criteria
+  - combined_score > 1.0 (c5_bound < 0.380923)
+  - Found at least one initialization with c5_bound < 0.37
+tool_descriptions:
+  edit_solution: |
+    Modify the EVOLVE-BLOCK to change hyperparameters or replace the _get_best_initialization function.
+    To use a specific initialization, set num_restarts=1 and modify the seed logic to use that pattern's latent directly.
+  evaluate_solution: |
+    Run full evaluation, returns combined_score = 0.38092303510845016 / c5_bound.
+  probe_solution: |
+    Quick approximate evaluation using subsampled data (500 intervals instead of 800).
+    Check both constraint satisfaction (integral close to 1) and c5_bound estimate.
+    Use this to screen MANY candidates before spending full evaluations.
+  finish: |
+    Submit when combined_score > 1.0 or all strategies exhausted.
+  generate_diverse_init: |
+    Create 4 structurally diverse latent vectors for the Erdos optimizer.
+    Patterns: Golomb ruler (optimal mark spacing), bipartite (two high/low regions),
+    triple-peaked (three narrow peaks), and asymmetric wave.
+    Each latent vector, when passed through sigmoid, gives h(x) in [0,1].
+sampling:
+  temperature: 1.2
+  top_p: 0.95
+  top_k: 50
+  max_tokens: 15000
+agent:
+  max_iterations: 50
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 10000
+new_tools:
+  - name: generate_diverse_init
+    description: |
+      Generate 4 structurally diverse initializations for the Erdos optimizer.
+      Patterns: Golomb ruler (optimal mark spacing), bipartite (two regions),
+      triple-peaked (three narrow peaks), asymmetric triangular.
+      Each latent vector, when passed through sigmoid, gives h(x) in [0,1].
+    input_schema:
+      type: object
+      properties: {}
+    implementation_py: |
+      def run(ctx, args):
+          import numpy as np
+          N = 800
+          domain = 2.0
+          dx = domain / N
+          rng = np.random.default_rng(123)
+          constructions = {}
+          
+          # Golomb ruler for 5 marks: [0, 1, 4, 9, 11] -> scale to [0,2]
+          marks = np.array([0.0, 0.5, 1.6, 3.75, 4.4]) * 0.444  # scaled to [0,2]
+          marks = marks / marks.max() * 2.0
+          marks = marks[:5]
+          weights = np.array([1.5, 1.2, 1.0, 0.8, 0.6])
+          h_pattern = np.zeros(N)
+          for m, w in zip(marks, weights):
+              h_pattern += w * np.exp(-((np.arange(N) - m * N / 2) / (N * 0.15))**2)
+          h_pattern = h_pattern / (np.sum(h_pattern) * dx + 1e-10)
+          constructions['golomb_5'] = h_pattern
+          
+          # Bipartite: high on [0,a] U [a,2-a], low on [2-a,2]
+          a = 0.6
+          h_pattern = np.ones(N)
+          h_pattern[(N * a / 2):int(N * (2-a)/2)] = -2.0
+          h_pattern = np.clip(h_pattern, -5, 5)
+          constructions['bipartite'] = h_pattern
+          
+          # Triple-peaked: three narrow peaks
+          peaks = [0.4, 1.0, 1.6]
+          bw = 0.12
+          h_pattern = np.zeros(N)
+          for p in peaks:
+              h_pattern += 8.0 * np.exp(-((np.arange(N) - p * N / 2) / (N * bw / 2))**2)
+          h_pattern = np.clip(h_pattern, 0, 10)
+          constructions['triple_peaked'] = h_pattern
+          
+          # Asymmetric triangular: high on [0,0.5), medium on [0.5,1.5), low on [1.5,2]
+          h_pattern = np.zeros(N)
+          h_pattern[:int(N*0.5)] = 8.0
+          h_pattern[int(N*0.5):int(N*1.5)] = 3.0
+          h_pattern[int(N*1.5):] = -1.0
+          constructions['asymmetric_triangular'] = h_pattern
+          
+          return {"constructions": constructions, "num_constructions": 4}
+new_skills:
+  - name: diverse-init-strategy
+    description: |
+      Use structurally diverse initializations to escape local minima.
+      Screen with probes before full evaluation.
+    body: |
+      # Diverse Initialization Strategy for Erdos Optimizer
+      
+      ## Key Principle
+      The seed's 12 patterns are all Gaussian/sigmoid-based. To escape,
+      try INITIALLY DIFFERENT STRUCTURES.
+      
+      ## Workflow
+      1. Call generate_diverse_init to get 4 new patterns
+      2. For each pattern, EDIT the seed to use ONLY that pattern:
+         - Set num_restarts=1
+         - Set seed_start = pattern_index
+         - OR better: replace _get_best_initialization to use ONLY that latent
+      3. Call probe_solution to check:
+         - integral(h) ≈ 1 (constraint)
+         - c5_bound estimate < 0.37
+      4. Call evaluate_solution only on candidates with c5_bound < 0.37
+      5. If no success, ADD a new pattern type (piecewise constant with
+         non-Gaussian shape)
+      
+      ## Why This Works
+      - Golomb ruler patterns have optimal spacing properties
+      - Bipartite patterns can achieve low overlap by separating support
+      - Multi-peak patterns can distribute overlap evenly
+      - Probes let you screen 20+ candidates with the 30-probe budget
+  - name: efficient-probe-screening
+    description: |
+      Use the 30 probes to screen many candidates before spending evaluations.
+    body: |
+      # Efficient Probe Screening
+      
+      ## Budget Strategy
+      - 30 probes = plenty for initial screening
+      - Use ALL 30 to test diverse initializations
+      - Only spend 2-3 full evaluations on promising candidates
+      
+      ## Screening Criteria
+      Call probe_solution for each candidate and check:
+      - If probe fails integral constraint (sum != 1), SKIP
+      - If probe c5_bound >= 0.375, SKIP (too bad)
+      - If probe c5_bound < 0.37, KEEP for full evaluation
+      
+      ## Expected Outcome
+      - 15-20 probes will fail (constraint or high c5_bound)
+      - 5-10 probes will pass and be worth full evaluation
+      - 2-3 full evaluations will give the answer
+tool_descriptions:
+  edit_solution: |
+    Modify the EVOLVE-BLOCK to change hyperparameters or the initialization function.
+    To use a single initialization: set num_restarts=1, seed_start=pattern_index, and
+    optionally simplify _get_best_initialization to return only that pattern's latent.
+  evaluate_solution: |
+    Run full evaluation on a candidate program, returns combined_score.
+  probe_solution: |
+    Quick approximate evaluation (500 intervals, 10s runtime).
+    Returns estimate of c5_bound and constraint satisfaction.
+    Use this to screen MANY candidates before full evaluation.
+  finish: |
+    Submit when combined_score > 1.0.
+new_middlewares:
+  - name: probe_before_eval
+    hook: before_model
+    description: |
+      Remind solver to use probes to screen before full evaluation.
+    implementation_py: |
+      def before_model(hook_input):
+          state = hook_input.get("state", {})
+          evals_left = state.get("evals_left", 0)
+          probes_left = state.get("probes_left", 0)
+          if probes_left > 3 and evals_left > 2:
+              return (
+                  "Use probe_solution to screen new candidates before spending full evaluations.\n"
+                  "You have 30 probes - use them to find c5_bound < 0.37 before calling evaluate_solution.\n"
+                  "Only call evaluate_solution on the top 2-3 probe-passing candidates."
+              )
+          return None

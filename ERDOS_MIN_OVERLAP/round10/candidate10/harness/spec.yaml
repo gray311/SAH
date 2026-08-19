@@ -1,0 +1,138 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are solving the Erdos minimum overlap problem: minimize max_k integral h(x)(1-h(x+k)) dx
+  for a step function h: [0,2] -> [0,1] with integral(h)=1.
+  
+  Current best bound: C5 <= 0.38092303510845016
+  Goal: Find h giving combined_score > 1.0.
+  
+  CRITICAL INSIGHT: The seed program uses smooth sigmoid initializations. To break through,
+  you MUST try DISCRETE, BINARY, or MULTI-MODAL step functions. The optimizer can polish
+  these, but you need better starting points.
+  
+  STRATEGY:
+  1. FIRST, try structural innovations (not hyperparameter tweaks):
+     - Binary/step functions: h(x) = c for x in [a,b], else 0, scaled to integral=1
+     - Multi-peak constructions: multiple narrow peaks at strategic positions
+     - Shifted rectangular waves: periodic patterns with phase shifts
+     - Golomb-like ruler-based placements
+  2. For each structural variant:
+     - EDIT to implement the construction (use the new tool!)
+     - Call probe_solution to check constraint satisfaction and rough score
+     - If promising, EDIT to refine parameters (peak positions, widths, heights)
+     - Call evaluate_solution on refined variants
+  3. Keep the best program and iterate with more sophisticated structures.
+  
+  Focus: STRUCTURAL INNOVATION first, hyperparameter tuning only if stuck.
+new_tools:
+- name: construct_structured_init
+  description: |
+    Generate 4-6 mathematically principled step function initializations.
+    Returns constructions for bimodal, multipeak, periodic, and binary patterns.
+    Each latent vector is ready for sigmoid activation to give valid h(x) in [0,1].
+  input_schema:
+    type: object
+    properties: {}
+  implementation_py: |
+    def run(ctx, args):
+        import numpy as np
+        N = 800
+        domain = 2.0
+        dx = domain / N
+        rng = np.random.default_rng(123)
+        x = np.linspace(0, domain, N)
+        constructions = {}
+        
+        # Binary (0/1) single block: h=1 on [0.5, 1.5], 0 elsewhere (integral=1)
+        binary = np.zeros(N)
+        binary[(x >= 0.5) & (x < 1.5)] = 1.0
+        constructions['binary_1block'] = binary
+        
+        # Binary two blocks: [0,0.5] and [1,1.5]
+        binary2 = np.zeros(N)
+        binary2[(x >= 0.0) & (x < 0.5)] = 1.0
+        binary2[(x >= 1.0) & (x < 1.5)] = 1.0
+        constructions['binary_2blocks'] = binary2
+        
+        # Three-equal blocks
+        three = np.zeros(N)
+        widths = N // 3
+        three[(x >= 0) & (x < widths*dx)] = 1.0
+        three[(x >= 1) & (x < 1+widths*dx)] = 1.0
+        constructions['binary_3equal'] = three
+        
+        # Gaussian-bimodal (sharp peaks, not smooth)
+        g1 = np.exp(-((x - 0.25) ** 2) / (2 * 0.08**2))
+        g2 = np.exp(-((x - 0.75) ** 2) / (2 * 0.08**2))
+        bimodal = g1 + g2
+        norm = np.max(bimodal) * 0.5
+        bimodal = (bimodal / norm).clip(0, 1)
+        constructions['bimodal_sharp'] = bimodal
+        
+        # Five peaks (Golomb-inspired positions)
+        marks = np.array([0.0, 0.4, 0.65, 0.9, 1.4])
+        gauss5 = np.zeros(N)
+        for m in marks:
+            gauss5 += np.exp(-((x - m) ** 2) / (2 * 0.05**2))
+        norm5 = np.max(gauss5) * 0.6
+        gauss5 = (gauss5 / norm5).clip(0, 1)
+        constructions['pentapeak'] = gauss5
+        
+        # Periodic square wave
+        periodic = np.where((x >= 0.25) & (x < 0.75), 0.5, 0.0)
+        constructions['periodic_square'] = periodic
+        
+        return {"constructions": constructions, "num_constructions": len(constructions)}
+tool_descriptions:
+  edit_solution: Modify the EVOLVE-BLOCK region to implement step function constructions or refine parameters. Use binary patterns, multi-peak designs, or periodic structures.
+  evaluate_solution: Run full evaluation, returns combined_score (use sparingly, max 30 total).
+  probe_solution: Quick constraint check - verify integral(h)=1 approximately. Use before full eval.
+  finish: Submit when combined_score > 1.0 or all structural strategies exhausted.
+new_skills:
+- name: structural-search-playbook
+  description: |
+    For Erdos overlap minimization, try discrete/combinatorial step functions first.
+    Smooth sigmoids likely find local optima. Binary and multi-peak constructions
+    may escape these.
+  body: |
+    # Structural Search for Erdos Minimum Overlap
+    
+    ## Core Principle
+    The seed optimizer finds smooth solutions. To beat C5 ≤ 0.380923, try DISCRETE
+    step functions: 0/1 blocks, sharp peaks, combinatorial patterns.
+    
+    ## Search Strategy
+    
+    ### Phase 1: Structural Exploration
+    1. Call construct_structured_init to get diverse starting points
+    2. Try: binary blocks, multi-peak Gaussians, periodic patterns
+    3. For each, EDIT to implement in the optimizer, then probe
+    
+    ### Phase 2: Parameter Refinement
+    1. Pick top 2-3 structural variants by probe score
+    2. EDIT to fine-tune: adjust peak positions, block widths, amplitudes
+    3. Evaluate the best refinements
+    
+    ### Phase 3: Hybrid Approaches
+    1. Combine binary structures with smooth transitions
+    2. Use multi-start optimization from discrete initializations
+    3. Try different penalty strengths to enforce constraints
+    
+    ## When to Use This
+    - If hyperparameter tuning fails (no improvement after 5+ variants)
+    - If current best score is close to seed but not better
+    - When you suspect the search is stuck in smooth-function regime
+    
+    ## Key Insight
+    Overlap minimization benefits from sparse, separated support regions.
+    Binary/multipeak functions naturally create these. Smooth sigmoids dilute this.
+sampling:
+  temperature: 1.2
+  top_p: 0.95
+  top_k: 50
+  max_tokens: 14000
+agent:
+  max_iterations: 60
+middleware:
+  budget_reminder_from_left: 3
+  long_tool_output_max_chars: 8000

@@ -1,0 +1,175 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are a C++ polygon optimizer for axis-aligned fish capture. Goal: maximize (mackerels - sardines + 1).
+  
+  CRITICAL INSIGHT: The current grid-based approach is too coarse (500x500 cells). Fish are individual points;
+  build polygons around actual fish positions, not cell aggregates.
+  
+  SEARCH METHOD (encodes in EVOLVE-BLOCK C++ code):
+  
+  1. FISH-BASED CLUSTERING:
+     - Parse all fish positions (mackerels and sardines) from input
+     - Build a KD-tree or 2D grid with cell_size=50 (10x smaller than before)
+     - For each mackerel, find nearby sardines (distance < 100) - these are "conflict points"
+     - Group mackerels into clusters based on proximity (distance < 150)
+  
+  2. CLUSTER-BASED RECTANGLE CONSTRUCTION:
+     - For each mackerel cluster:
+       * Compute bounding box of cluster
+       * Expand bbox by ±20 units to capture edge fish
+       * Subtract "conflict" sardines (those inside the expanded bbox)
+       * Score = (mackerels in bbox) - (sardines in bbox)
+       * If score > 0, keep this rectangle
+  
+  3. MERRIERS' ALGORITHM (key innovation):
+     - Sort all candidate rectangles by score (descending)
+     - Greedily select non-overlapping rectangles with highest scores
+     - Try to merge adjacent rectangles if combined score improves
+     - Handle overlaps by splitting rectangles at overlap boundaries
+  
+  4. EDGE REFINEMENT (fine-grained):
+     - For each selected rectangle, try moving each edge by ±1, ±3, ±5, ±10, ±15 units
+     - Use fast O(1) point-in-rectangle queries (not grid-based)
+     - Evaluate new rectangle score exactly (count fish individually)
+     - Accept if score improves
+  
+  5. ITERATIVE IMPROVEMENT:
+     - After initial selection, try to add small rectangles in gaps between selected ones
+     - If adding a rectangle reduces overlap with existing ones, compute adjusted score
+  
+  6. MULTIPLE STRATEGIES:
+     - Strategy A: Largest mackerel clusters first
+     - Strategy B: Densest regions first (mackerel density > sardine density)
+     - Strategy C: Random seed with local search
+     - Run 8 strategies, output best
+  
+  7. VALIDATION:
+     - Ensure 4 <= vertices <= 1000, perimeter <= 400000, coords in [0,100000]
+     - No self-intersection (axis-aligned rectangles naturally satisfy this when non-overlapping)
+  
+  Tools:
+  - edit_solution: Replace EVOLVE-BLOCK with complete C++ implementing fish-based clustering
+  - evaluate_solution: Run C++ program, get exact score
+  - probe_solution: NOT useful - need exact counts
+  - finish: Submit when you have encoded working fish-based clustering
+
+  KEY DIFFERENCE from current harness: Work with individual fish positions, not coarse grid cells.
+  This enables precise rectangle placement around actual fish clusters.
+skill_description: |
+  Fish-based cluster packing. Parse individual fish positions, cluster mackerels by proximity,
+  build rectangles around clusters using KD-tree or fine grid, subtract conflicting sardines,
+  use greedy selection with overlap handling, fine-grained edge refinement (±1..15 units),
+  run 8 diverse strategies, output best polygon.
+skill_body: |
+  # Fish-Based Cluster Packing Strategy
+  
+  ## Phase 1: Fish Parsing and Preprocessing
+  - Parse mackerels (first N lines) and sardines (next N lines) from input
+  - Store as Point arrays: mackerels[N], sardines[N]
+  - Build KD-tree for O(log N) nearest neighbor queries
+  
+  ## Phase 2: Cluster Detection
+  For each mackerel:
+    - Find all other mackerels within distance 150 (squared distance <= 22500)
+    - Union these clusters using BFS/DFS on the proximity graph
+    - Each cluster gets a cluster_id
+  
+  ## Phase 3: Rectangle Generation
+  For each cluster:
+    - Compute bounding box: [min_x, max_x] x [min_y, max_y]
+    - Expand by delta=20: [min_x-20, max_x+20] x [min_y-20, max_y+20]
+    - Count mackerels in expanded bbox (using KD-tree range query)
+    - Count sardines in expanded bbox (using KD-tree range query)
+    - Score = M_count - S_count
+    - If score > 0, add to candidate list
+  
+  ## Phase 4: Greedy Selection with Overlap Handling
+  - Sort candidates by score descending
+  - Initialize selected_rects = []
+  - For each candidate (sorted):
+    - Check overlap with already selected rectangles
+    - If no overlap: select this rectangle
+    - If partial overlap: 
+      * Try splitting the candidate rectangle to remove overlap
+      * Or merge with overlapping rectangle if beneficial
+    - Track total score of selected set
+  
+  ## Phase 5: Merge Adjacent Rectangles
+  - After initial selection, check adjacent rectangles
+  - If two rectangles share an edge and combined score > sum of individual scores,
+    merge them into a larger rectangle
+  
+  ## Phase 6: Fine-Grained Edge Refinement
+  For each selected rectangle:
+    - For each edge (x_min, x_max, y_min, y_max):
+      * Try shifts: ±1, ±3, ±5, ±10, ±15 units (NOT coarse ±5..25)
+      * Compute new rectangle bounds
+      * Count mackerels and sardines using exact point queries
+      * If score improves, update the edge position
+    - Repeat 2 refinement rounds
+  
+  ## Phase 7: Gap Filling
+  - Find regions between selected rectangles with high mackerel density
+  - Try to add small rectangles in these gaps if score improves
+  
+  ## Phase 8: Multiple Strategies
+  Implement 8 different approaches:
+    1. Largest cluster first
+    2. Densest region first
+    3. Random seed + local search
+    4. Greedy by area
+    5. Greedy by density (M/S ratio)
+    6. Row-wise scanning (scan horizontal strips)
+    7. Column-wise scanning (scan vertical strips)
+    8. Multi-scale: try different expansion deltas (10, 20, 30)
+  
+  Output the rectangle configuration with highest score from all 8 strategies.
+  
+  ## C++ Implementation Notes
+  - Use std::set<Point> for O(log N) point lookup if needed
+  - Use KD-tree for O(log N) range queries
+  - Or use 2D grid with cell_size=50 for O(1) queries
+  - Total time per evaluation: < 2.0s with N=5000 fish
+  - Edge refinement: 4 edges * 5 shifts * 2 rounds = 40 evaluations max per rectangle
+  - Use fast bit manipulation or precomputed tables for speed
+tool_descriptions:
+  edit_solution: 'Replace EVOLVE-BLOCK with C++ implementing fish-based cluster packing:
+  
+    1. Parse all fish positions (mackerels and sardines)
+    
+    2. Build KD-tree or fine grid (cell_size=50) for range queries
+    
+    3. Cluster mackerels by proximity (distance < 150)
+    
+    4. Generate rectangles around clusters with expansion delta=20
+    
+    5. Subtract conflicting sardines (count exact, not approximate)
+    
+    6. Greedy selection of non-overlapping rectangles by score
+    
+    7. Fine-grained edge refinement (±1..15 shifts, 2 rounds)
+    
+    8. Run 8 diverse strategies, output best
+    
+    Ensure <2.0s execution, valid output format (m then vertices).'
+  evaluate_solution: Run C++ program. Returns exact score (mackerels-sardines+1), validity, and remaining evaluations (budget=30). Each run has ~2.0s search window.
+  probe_solution: NOT useful - need exact fish counts.
+  finish: End when you have submitted working fish-based cluster packing with fine-grained refinement.
+sampling:
+  temperature: 0.9
+  top_p: 0.95
+  top_k: 30
+  max_tokens: 14336
+agent:
+  max_iterations: 60
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 18000
+new_tools: []
+remove_tools: [probe_solution]
+new_skills: []
+new_middlewares:
+- name: cluster_focus_reminder
+  hook: before_model
+  description: generated middleware cluster_focus_reminder
+  implementation_py: "def before_model(hook_input):\n    return \"Work with individual fish positions: cluster mackerels by proximity (d<150), build rectangles around clusters, fine-grained edge refinement (±1..15), run 8 strategies.\""

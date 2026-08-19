@@ -1,0 +1,207 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are an expert mathematical optimizer for the Erdos minimum overlap problem. Your goal
+  is to find a step function h: [0, 2] -> [0, 1] that minimizes max_k integral h(x)(1 - h(x+k)) dx.
+
+
+  Key insight: The objective uses FFT-based correlation. The function h must satisfy integral h(x) dx
+  = 1. The optimal solution is likely a simple step function with sharp transitions, not a smooth
+  sigmoid output.
+
+
+  Strategy: DO NOT rely on gradient descent. Instead:
+  1. Generate step function candidates directly (binary patterns with integral=1)
+  2. Pre-compute FFT correlations for rapid ranking
+  3. Use design_step_configurations() to explore diverse step patterns
+  4. Evaluate top candidates with evaluate_solution
+  5. Combine successful patterns if beneficial
+
+
+  Tools:
+
+  - edit_solution: Modify the EVOLVE-BLOCK region only
+  - evaluate_solution: Run the program and get combined_score
+  - probe_solution: Quick approximate evaluation on subsampled data
+  - design_step_configurations: Generate and rank step function candidates with integral=1
+  - finish: End when you can''t improve further
+skill_description: |
+  Combinatorial search for step functions in Erdos minimum overlap problem. Avoids gradient descent,
+  directly tests discrete step function configurations with integral=1 constraint.
+skill_body: |
+  # Erdos Minimum Overlap - Step Function Search
+
+
+  ## Problem
+  Minimize max_k integral h(x)(1 - h(x+k)) dx for step function h: [0,2]->[0,1] with integral h = 1.
+  Current best: C5 <= 0.380923 (combined_score > 1.0 is success).
+
+
+  ## Why Gradient Descent Fails
+  The seed program uses sigmoid+gradient descent on latent vectors. This produces smooth functions,
+  not true step functions. The optimal solution likely has sharp binary transitions.
+
+
+  ## Solution: Direct Step Function Search
+
+
+  ### Use design_step_configurations()
+  Call this tool FIRST to generate 10-20 step function candidates:
+  - Two-step patterns: h=1 on [0,a], h=0 on [a,2] where a=0.5 (integral=1)
+  - Three-step patterns: two transitions with appropriate heights
+  - Alternating patterns: high-low-high with integral normalized to 1
+  - For each, compute C5 bound via FFT
+
+
+  ### Workflow
+  1. Call design_step_configurations() to get ranked candidates
+  2. For top 3-5 candidates, modify seed program to USE THOSE step patterns directly
+  3. Edit out the optimizer/Evolve-Block and replace with direct h values
+  4. Call evaluate_solution to get true score
+  5. If best score < 1.0, generate more diverse configurations
+
+
+  ### Key Patterns to Try
+  - Two-step: h(x)=1 for x in [0, 0.5], h(x)=0 elsewhere
+  - Three-step: three regions with heights summing to integral 1
+  - Alternating: high-low-high patterns
+
+
+  ### Implementation
+  When editing EVOLVE-BLOCK:
+  - Remove ErdosOptimizer class or disable it
+  - Hardcode h as a step pattern array
+  - Compute c5_bound directly via FFT
+  - Output combined_score
+
+
+  ## Tool Guide
+  - design_step_configurations: Returns dict with keys like 'two_step_simple', 'three_step_balanced', etc.
+  - edit_solution: Replace optimizer with direct step function
+  - probe_solution: Quick ranking before final eval
+  - evaluate_solution: True score; MAXIMIZE combined_score
+  - finish: End session when best score cannot be improved
+
+
+  ## Success Criteria
+  - combined_score > 1.0 (c5_bound < 0.38092303510845016)
+  - validity = 1.0 (integral exactly 1)
+  - Budget: 20 evaluations
+tool_descriptions:
+  edit_solution: |
+    Modify the EVOLVE-BLOCK region. Replace the optimizer with direct step function definition.
+    Keep imports unchanged. Hardcode h as numpy/jnp array representing step pattern.
+  evaluate_solution: |
+    Run the program and return combined_score (higher=success >1.0), validity, errors,
+    best score, and evals remaining.
+  probe_solution: |
+    Quick approximate evaluation on subsampled data. Use to rank step patterns before
+    full evaluation.
+  finish: |
+    End session when budget exhausted or no improvement possible. Best version auto-submitted.
+sampling:
+  temperature: 1.2
+  top_p: 0.95
+  top_k: 15
+  max_tokens: 14336
+agent:
+  max_iterations: 40
+middleware:
+  budget_reminder_from_left: 6
+  long_tool_output_max_chars: 12000
+new_tools:
+  - name: design_step_configurations
+    description: |
+      Generate and rank step function candidates for Erdos problem. Creates multiple
+      configurations with integral exactly 1: two-step patterns (mass split at different points),
+      three-step patterns (two transitions), and alternating patterns. For each, computes
+      C5 bound via FFT on full discretization. Returns dict with config names, h arrays,
+      c5_bounds, and validity checks. Enables combinatorial search instead of gradient descent.
+    input_schema:
+      type: object
+      properties: {}
+    implementation_py: |
+      def run(ctx, args):
+          import jax
+          import jax.numpy as jnp
+          N = 800
+          domain_width = 2.0
+          dx = domain_width / N
+
+
+          configs = []
+
+
+          # Two-step patterns: h=1 on [0,a], h=0 on [a,2], with integral=1 => a=0.5
+          a_values = [0.4, 0.45, 0.5, 0.55, 0.6, 1.0/3.0, 2.0/3.0]
+          for a in a_values:
+              h = jnp.ones(N)
+              x = jnp.linspace(0, 2, N)
+              h = h * (x < a)
+              configs.append(("two_step_a=" + str(round(a,3)), h))
+
+
+          # Two-step with amplitude scaling
+          for a in [0.4, 0.5, 0.6, 1/3, 2/3]:
+              for w in [0.2, 0.4, 0.6, 0.8, 1.0]:
+                  v = (1.0 - w * (2.0 - a)) / a if a > 0 else 0
+                  if v < 0 or v > 1:
+                      continue
+                  integral = v * a + w * (2.0 - a)
+                  if abs(integral - 1.0) < 1e-6:
+                      h = jnp.ones(N)
+                      x = jnp.linspace(0, 2, N)
+                      h = jnp.where(x < a, v, w)
+                      configs.append(("two_step_scale_a=" + str(round(a,1)) + "_v=" + str(round(v,2)) + "_w=" + str(w)), h)
+
+
+          # Three-step patterns
+          for a1 in [0.3, 0.4, 0.5, 0.6]:
+              for a2 in [0.7, 0.8, 0.9]:
+                  if a1 < a2 < 2.0:
+                      v1 = 1.0
+                      v2 = 1.0
+                      v3 = 0.0
+                      integral = v1 * a1 + v2 * (a2 - a1) + v3 * (2.0 - a2)
+                      if abs(integral - 1.0) < 1e-3:
+                          h = jnp.zeros(N)
+                          x = jnp.linspace(0, 2, N)
+                          h = jnp.where((x < a1) | (x > a2), v1, v2)
+                          configs.append(("three_step_a1=" + str(round(a1,1)) + "_a2=" + str(round(a2,1)), h))
+
+
+          # Alternating patterns: high-low-high
+          for period in [0.4, 0.5, 0.6, 1.0/3, 2.0/3]:
+              h = jnp.ones(N)
+              x = jnp.linspace(0, 2, N)
+              h = h * ((x // period) % 2 == 0)
+              integral = jnp.sum(h) * dx
+              if abs(integral - 1.0) < 0.1:
+                  h = h / integral
+                  configs.append(("alternating_period=" + str(round(period,2)), h))
+
+
+          # Evaluate all candidates
+          results = {}
+          for name, h_arr in configs:
+              h_padded = jnp.pad(h_arr, (0, N))
+              j_padded = 1.0 - h_padded
+              corr_fft = jnp.fft.fft(h_padded) * jnp.conj(jnp.fft.fft(j_padded))
+              correlation = jnp.fft.ifft(corr_fft).real
+              c5_bound = jnp.max(correlation * dx)
+              results[name] = {
+                  "c5_bound": float(c5_bound),
+                  "h": h_arr.tolist(),
+                  "valid": abs(float(jnp.sum(h_arr) * dx) - 1.0) < 1e-4
+              }
+
+
+          # Sort by c5_bound
+          sorted_names = sorted(results.keys(), key=lambda k: results[k]["c5_bound"])
+
+
+          return {
+              "top_configs": [sorted_names[i] for i in range(min(15, len(sorted_names)))]
+          }
+new_skills: []
+new_middlewares: []
+remove_tools: []

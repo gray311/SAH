@@ -1,0 +1,169 @@
+schema: h2spec/1.0
+system_prompt: |
+  Erdos minimum overlap problem (C5): Find h: [0,2]->[0,1] minimizing max_k integral h(x)(1-h(x+k))dx.
+  
+  CONSTRAINT: integral(h) = 1 exactly. h values in [0,1].
+  Current best: C5 <= 0.38092303510845016 (combined_score = 1.0).
+  GOAL: Find h achieving c5_bound < 0.38092303510845016 (combined_score > 1.0).
+  
+  CRITICAL STRATEGY (READ CAREFULLY):
+  
+  1. FIRST, CALL generate_ready_candidates() to get 3 pre-computed candidates with:
+     - h: latent vector (already sigmoided, values in [0,1])
+     - integral: sum(h)*dx (should be ~1.0)
+     - c5_bound: precomputed via FFT (no training needed!)
+     - pattern_type: label
+  
+  2. EXAMINE candidates: Keep ONLY those with c5_bound < 0.375. Discard rest.
+  
+  3. CALL evaluate_solution on kept candidates. If none beat current best, STOP and call finish.
+  
+  4. Only after exhausting candidates, if STILL stuck, THEN call analyze_fft_spectrum() on seed to diagnose:
+     - Where are the peaks in frequency domain?
+     - What's the energy distribution?
+     - Are there obvious conflicts (e.g., overlapping high-frequency components)?
+  
+  5. Based on FFT diagnosis, EDIT ONE parameter: Either num_intervals (400/800/1600) OR base_learning_rate (0.001/0.005/0.01)
+     to experiment with convergence behavior.
+  
+  6. Never edit multiple parameters at once. Never ignore generate_ready_candidates.
+  
+  Your ONLY goal: Spend all 30 evals getting combined_score > 1.0. Use generate_ready_candidates as your PRIMARY weapon.
+skill_description: |
+  Analytical screening via generate_ready_candidates, FFT diagnostics via analyze_fft_spectrum, then focused hyperparameter tuning only when stuck.
+skill_body: |
+  # Erdos C5 Solver - Analytical Screening Strategy
+  
+  ## PHASE 1: Analytical Screening (MUST DO FIRST)
+  
+  1. CALL generate_ready_candidates() with temperature=0.5
+  
+  2. EXAMINE the 3 returned candidates:
+     - Each has precomputed c5_bound via FFT
+     - Each has integral (should be ~1.0)
+  
+  3. FILTER:
+     - SKIP candidates with integral != 1.0 (constraint violation)
+     - SKIP candidates with c5_bound >= 0.375 (too bad)
+     - KEEP candidates with c5_bound < 0.37
+  
+  4. CALL evaluate_solution on ALL kept candidates.
+     - Full eval is expensive (59000 steps) but gives real score
+     - Record best combined_score
+  
+  5. If NO candidate gave combined_score > 1.0:
+     - Stop immediately
+     - Call finish() with summary
+  
+  ## PHASE 2: FFT Diagnosis (ONLY if Phase 1 failed)
+  
+  1. CALL analyze_fft_spectrum() to diagnose current seed:
+     - Report: peak_locations, energy_spectrum, max_overlap_index
+  
+  2. If FFT shows clear structure (e.g., peaks at 0.5, 1.5), edit ONE of:
+     - num_intervals: 800 -> 1600 (finer grid to capture peaks better)
+     - base_learning_rate: 0.006 -> 0.01 (faster convergence)
+  
+  3. CALL probe_solution on edited version (cheap check)
+  
+  4. If probe c5_bound < 0.38, CALL evaluate_solution
+  
+  5. If still stuck after 1 edit: STOP and call finish()
+  
+  ## WHY THIS WORKS
+  
+  - generate_ready_candidates: O(1) analytical scores, no training needed
+  - analyze_fft_spectrum: Diagnoses WHY current h is bad
+  - Focus: Only ~3-5 full evals, not 30
+  
+  ## FAILURE MODES TO AVOID
+  
+  - DON'T edit num_steps, penalty_strength, num_restarts (don't change optimizer behavior)
+  - DON'T try to "learn" better patterns (already have 15 in seed)
+  - DON'T call analyze_fft_spectrum before generating candidates
+sampling:
+  temperature: 0.3
+  top_p: 0.7
+  top_k: 5
+  max_tokens: 8192
+agent:
+  max_iterations: 20
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 5000
+new_tools:
+  - name: analyze_fft_spectrum
+    description: |
+      Analyze the FFT spectrum of the current h function to diagnose overlap issues.
+      Returns: peak_locations (where h has high energy), energy_spectrum (magnitude per frequency band), max_overlap_index (which k gives worst correlation), and overlap_pattern (qualitative description).
+      
+      Call this AFTER generating candidates fail, to understand WHY current h performs poorly.
+      
+      Usage: Call when Phase 1 (generate_ready_candidates) yields no improvement.
+    input_schema:
+      type: object
+      properties:
+        max_freq:
+          type: number
+          default: 10
+    implementation_py: |
+      def run(ctx, args):
+          import numpy as np
+          N = 800
+          domain = 2.0
+          dx = domain / N
+          
+          h = np.array(ctx.get_program().split('h_values = [')[1].split(']')[0], dtype=np.float64)
+          h = np.array([float(x.strip()) for x in h.strip().split(',')])
+          h = np.clip(h, 0.001, 0.999)
+          
+          j = 1.0 - h
+          h_padded = np.pad(h, (0, N))
+          j_padded = np.pad(j, (0, N))
+          
+          corr_fft = np.fft.fft(h_padded) * np.conj(np.fft.fft(j_padded))
+          correlation = np.fft.ifft(corr_fft).real
+          
+          c5_bound = np.max(correlation * dx)
+          
+          # Find peaks in h
+          h_smoother = np.convolve(h, np.ones(5)/5, mode='same')
+          peak_indices = np.where(h_smoother > h_smoother[0] * 2.0)[0]
+          peak_locations = [float(i * dx) for i in peak_indices[:5]] if len(peak_indices) > 0 else []
+          
+          # Energy spectrum
+          energy_spectrum = np.abs(np.fft.fft(h))[:N//4]
+          
+          # Find max overlap
+          max_k = np.argmax(correlation[1:-1])
+          max_overlap_index = float(max_k * dx)
+          
+          # Qualitative pattern
+          if len(peak_locations) >= 3:
+              overlap_pattern = "multi-peak with potential inter-peak overlap"
+          elif len(peak_locations) >= 2:
+              overlap_pattern = "bipartite-like with possible edge effects"
+          else:
+              overlap_pattern = "unimodal (high overlap likely)"
+          
+          return {
+              "c5_bound": float(c5_bound),
+              "peak_locations": peak_locations,
+              "energy_spectrum": energy_spectrum.tolist(),
+              "max_overlap_index": max_overlap_index,
+              "overlap_pattern": overlap_pattern,
+              "note": "Use peak_locations to guide edits; consider splitting peaks or adding intermediate peaks"
+          }
+new_skills:
+  - name: analytical-screening
+    description: Use generate_ready_candidates for cheap integral-constrained initialization screening.
+    body: '# Analytical Screening for Erdos Problem\n\n## Workflow\n\n1. CALL generate_ready_candidates(temperature=0.5)\n\
+      \n2. EXAMINE the 3 returned candidates:\n   - Each has precomputed integral and c5_bound\n   - Candidates\
+      \ are already sigmoid-scaled (h in [0,1])\n   - Candidates are integral-normalized (sum ~ 1)\n\n3.\
+      \ FILTER candidates:\n   - SKIP if integral != 1.0 (constraint violation)\n   - SKIP if c5_bound >=\
+      \ 0.375 (too bad for full eval)\n   - KEEP if c5_bound < 0.37\n\n4. CALL evaluate_solution on ALL\
+      \ kept candidates\n\n5. If no improvement, repeat with temperature=0.8\n\n## Why Analytical Screening\
+      \ Works\n\n- No training needed: c5_bound computed via FFT (analytical)\n- Integral check: exact,\
+      \ no approximation\n- Fast: generates all 3 in one tool call\n- Budget-efficient: 1 tool call, 2-3\
+      \ evals max\n\n## Expected Results\n\nWith this tool, you should find c5_bound < 0.37 candidates quickly,\n\
+      then spend only 2-3 evals to confirm improvements.'

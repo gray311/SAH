@@ -1,0 +1,182 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are an expert in harmonic analysis and the Erdős minimum overlap problem.
+
+  Your goal: beat the current best bound C5 <= 0.38092303510845016 by finding a step function h: [0,2]->[0,1]
+
+  with integral(h)=1 that minimizes max_k integral h(x)(1-h(x+k))dx.
+
+  Key insight: The constraint integral(h)=1 is CRITICAL. Start with INITIALLY VALID functions (integral=1) to avoid wasting optimization steps on constraint satisfaction.
+
+  The landscape is non-convex, but known constructions (periodic step functions, bimodal distributions) provide good starting points.
+
+  Strategy:
+
+  1. Use generate_constrained_init() to generate an h VALUE (not latent) with integral(h)=1 EXACTLY satisfied
+
+  2. Use penalty_annealing_workflow: start with low penalty strength, gradually increase
+
+  3. Call evaluate_solution on promising candidates to verify constraint satisfaction
+
+  4. Use probe_solution only after verifying the solution is valid (integral close to 1)
+
+  What to edit:
+
+  - Replace latent-based initialization with direct h values that satisfy integral=1
+
+  - Implement penalty annealing: start penalty=100, end penalty=5000 over the optimization run
+
+  - Add constraint checking before each evaluation
+
+  Target: combined_score > 1.0 (c5_bound < 0.380923)
+skill_description: |
+  Constraint-satisfying initialization and penalty annealing for Erdos minimum overlap optimization.
+skill_body: |
+  # Erdos Minimum Overlap - Constrained Initialization with Penalty Annealing
+
+  ## Problem
+  Minimize max_k integral h(x)(1 - h(x+k)) dx for h: [0,2]->[0,1] with integral(h)=1.
+
+  ## Why Constraints Matter
+  Starting with integral(h)=1 is CRITICAL. The seed program uses penalty strength 1370, which means if your initial h has integral != 1, the optimizer wastes steps on constraint satisfaction instead of improving the objective.
+
+  ## Method: Penalty Annealing with Valid Initialization
+
+  ### Phase 1: Generate Valid Initialization
+  Call generate_constrained_init() FIRST. This tool returns an h array (not latent) that:
+  - Has values in [0,1]
+  - Has integral(h over [0,2]) = 1.0 EXACTLY
+  - Is a mathematically principled construction
+
+  ### Phase 2: Penalty Annealing
+  Modify the optimizer to anneal the penalty strength:
+  - Start: penalty = 100 (let objective dominate, find good structure)
+  - End: penalty = 5000 (enforce constraint tightly)
+  - Schedule: linear increase over num_steps
+
+  ### Phase 3: Evaluation Workflow
+  1. Edit solution to use annealed penalty
+  2. Call evaluate_solution to verify constraint satisfaction AND get c5_bound
+  3. If combined_score > 1.0, you have a new record!
+
+  ## Mathematical Constructions to Use
+  1. Bimodal symmetric: h(x) with two narrow peaks at [0.2, 0.4] and [0.6, 0.8], normalized to integral=1
+  2. Triangular pulses: Two or three triangular peaks, heights normalized
+  3. Periodic staircase: Alternating levels on [0,0.5], [0.5,1], [1,2]
+
+  ## Key Principles
+  - INTEGRAL CONSTRAINT FIRST: Never start with arbitrary h
+  - ANNEAL PENALTY: Let the optimizer find structure, then tighten constraint
+  - VERIFY BEFORE PROBE: Check integral before using probe_solution
+  - SAVE VALID: Always keep best valid solution (combined_score > 1.0)
+tool_descriptions:
+  edit_solution: |
+    Modify the EVOLVE-BLOCK region. Replace latent-based init with generate_constrained_init(). Implement penalty annealing (start=100, end=5000).
+  evaluate_solution: |
+    Run and return combined_score (higher=success). Check integral close to 1.
+  probe_solution: |
+    Quick approximate evaluation on subsampled data.
+  finish: |
+    End when no improvement possible (combined_score <= 1.0 for 5 iterations).
+sampling:
+  temperature: 0.5
+  top_p: 0.9
+  top_k: 15
+  max_tokens: 12000
+agent:
+  max_iterations: 70
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 8000
+new_tools:
+- name: generate_constrained_init
+  description: |
+    Generate a VALID initial step function h with integral(h)=1 EXACTLY satisfied. Returns h as a numpy array of length 800, values in [0,1], where sum(h)*dx = 1.0. Uses mathematically principled constructions (bimodal, triangular, periodic).
+  input_schema:
+    type: object
+    properties: {}
+  implementation_py: |
+    def run(ctx, args):
+        import numpy as np
+        N = 800
+        domain = 2.0
+        dx = domain / N
+        
+        x = np.linspace(0, domain, N, endpoint=False)
+        h1 = np.zeros(N)
+        width = 0.2
+        h1[(x >= 0.2) & (x < 0.4)] = 1.0 / (2.0 * width)
+        h1[(x >= 0.6) & (x < 0.8)] = 1.0 / (2.0 * width)
+        integral1 = np.sum(h1) * dx
+        scale1 = 1.0 / integral1 if integral1 > 0 else 1.0
+        h1 = np.clip(h1 * scale1, 0, 1)
+        
+        h2 = np.zeros(N)
+        peaks = [(0.25, 0.2), (0.5, 0.25), (0.75, 0.2)]
+        for cx, cw in peaks:
+            mask = (x >= cx - cw/2) & (x < cx + cw/2)
+            h2[mask] = (x[mask] - (cx - cw/2)) / cw
+        integral2 = np.sum(h2) * dx
+        scale2 = 1.0 / integral2 if integral2 > 0 else 1.0
+        h2 = np.clip(h2 * scale2, 0, 1)
+        
+        h3 = np.zeros(N)
+        h3[(x >= 0.0) & (x < 0.4)] = 0.625
+        h3[(x >= 0.6) & (x < 1.0)] = 0.625
+        h3[(x >= 1.0) & (x < 2.0)] = 0.25
+        integral3 = np.sum(h3) * dx
+        scale3 = 1.0 / integral3 if integral3 > 0 else 1.0
+        h3 = np.clip(h3 * scale3, 0, 1)
+        
+        selected = h1
+        
+        return {
+            "h": selected.tolist(),
+            "type": "bimodal_symmetric",
+            "integral_check": float(np.sum(selected) * dx)
+        }
+new_skills:
+- name: penalty-annealing-strategy
+  description: |
+    Penalty annealing for Erdos optimization: start low penalty to find structure, then tighten constraint. Use with generate_constrained_init() for best results.
+  body: |
+    # Penalty Annealing Strategy for Erdos Minimum Overlap
+
+    ## Why Annealing Works
+    - High initial penalty forces integral=1 but constrains optimization too much
+    - Low initial penalty lets the optimizer find good structural patterns
+    - Gradual increase balances exploration and constraint satisfaction
+
+    ## Implementation
+    In the optimizer's train_step function, compute an annealing schedule:
+
+    step_fraction = current_step / total_steps
+    current_penalty = start_penalty + (end_penalty - start_penalty) * step_fraction
+
+    Recommended values:
+    - start_penalty = 100 (constraints nearly ignored, optimize objective)
+    - end_penalty = 5000 (strict constraint enforcement)
+    - total_steps = 50000 (allows smooth transition)
+
+    ## Workflow
+    1. Call generate_constrained_init() to get h with integral(h)=1
+    2. Pass h to optimizer with initial penalty=100
+    3. Anneal penalty linearly over 50000 steps
+    4. Extract final h and compute c5_bound
+    5. Verify combined_score > 1.0
+
+    ## Debugging
+    - If combined_score <= 1.0, check: did integral(h) stay close to 1?
+    - If optimizer diverges, reduce start_penalty to 50
+    - If final score improved but constraint violated, increase end_penalty to 10000
+remove_tools: []
+new_middlewares:
+- name: constraint_reminder
+  hook: before_tool
+  description: |
+    Remind the solver to verify integral constraint before full evaluation. Prevents wasting evals on invalid candidates.
+  implementation_py: |
+    def before_tool(hook_input):
+        if hook_input.get("tool_name") in ["edit_solution", "evaluate_solution"]:
+            return "IMPORTANT: Ensure the edited program uses generate_constrained_init() and implements penalty annealing. Verify integral(h)=1 before evaluate_solution."
+        return None

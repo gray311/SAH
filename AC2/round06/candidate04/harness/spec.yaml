@@ -1,0 +1,279 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are an expert in mathematical optimization for C2 maximization.
+  Target: surpass 1.02665 (seed baseline) to set a new record.
+  
+  CRITICAL INSIGHT: The seed program uses JAX-based gradient optimization with 9 diverse initializations.
+  DO NOT replace it with manual step function construction - that breaks the continuous optimization signal.
+  INSTEAD: Enhance the seed's optimizer with better initializations and structured mutations.
+  
+  Strategy:
+  1. Keep the seed's architecture but ADD new initializations that explore different function shapes
+  2. Use the step_config_generator tool to create INTERMEDIATE hybrid functions (smooth step transitions)
+  3. Try these new initialization families:
+     - Bimodal bumps: two Gaussian-like peaks
+     - Asymmetric triangles: rising/falling slopes of different steepness
+     - Plateau functions: flat top with sloped sides
+     - Multi-hump: 3-4 peaks of varying widths
+  
+  4. For each new initialization:
+     - Run the seed's optimizer (it will do the gradient descent)
+     - Use probe_solution to check early progress
+     - Only evaluate fully if probe shows promise
+  
+  5. After 3 failed attempts: try polynomial tail attachments to step-like functions
+  
+  TOOL USAGE:
+  - edit_solution: Create new initialization classes that the seed can optimize
+  - probe_solution: Test each variant early (call after 1000 steps, not at start)
+  - evaluate_solution: Only top 2 candidates
+  
+  Remember: You're improving the seed's optimizer, not replacing it with step functions!
+skill_description: |
+  Optimize C2 by enhancing the seed's JAX optimizer with diverse initialization families.
+  Use step_config_generator to create hybrid functions. Probe early, eval late. Max 4 evals.
+skill_body: |
+  # C2 Optimization: Enhanced Seed Strategy
+  
+  ## Core Principle
+  
+  The seed uses gradient descent with 9 initializations. DO NOT replace this with manual step functions.
+  Instead, augment it with better initialization strategies.
+  
+  ## Phase 1: Generate New Initializations
+  
+  Use step_config_generator to create hybrid functions:
+  
+  1. Bimodal bumps: two Gaussian-like peaks
+  
+  2. Asymmetric triangles: rising/falling slopes of different steepness
+  
+  3. Plateau functions: flat top with sloped sides
+  
+  4. Multi-hump: 3-4 peaks of varying widths
+  
+  ## Phase 2: Probe-Based Selection
+  
+  1. For each new initialization, run optimizer for 1000 steps (partial run)
+  2. Call probe_solution to check C2
+  3. If probe C2 > 1.026: proceed to full optimization
+  4. If probe C2 <= 1.026: discard and try next
+  
+  ## Phase 3: Full Optimization
+  
+  1. Take top 2 candidates from Phase 2
+  2. Run seed's optimizer for full 40000 steps
+  3. Evaluate with evaluate_solution
+  4. If no improvement after 2 evals: try polynomial tails
+  
+  ## Phase 4: Hybrid Functions
+  
+  If pure steps fail, try:
+  - Step function with smooth edges
+  - Step + exponential tail
+  
+  ## Critical Rules
+  
+  - MAX 4 full evaluations
+  - Always run seed's optimizer (don't manually construct final f)
+  - Probe after partial optimization, not on raw constructions
+  - Use step_config_generator for structured exploration
+tool_descriptions:
+  edit_solution: |
+    Change the code inside the EVOLVE-BLOCK region. Create new initialization functions:
+    
+    - Add new methods to C2Optimizer for different function families
+    - Use jax.numpy operations to create continuous functions
+    - Patch into the existing _create_multi_start method
+    
+    Examples:
+    - Smooth steps: f = jnp.piecewise with linear transitions
+    - Plateau: left_slope + flat + right_slope
+    - Multi-hump: concatenate multiple peaks
+  evaluate_solution: |
+    Run the full evaluator. Returns combined_score. Use sparingly (max ~20 total).
+    Only evaluate after probing and partial optimization.
+  probe_solution: |
+    Cheap score on subsampled data (~10s vs minutes). Separate budget (~30 available).
+    Use for ranking variants after partial optimization (1000 steps).
+  finish: |
+    End the session. Call when budget exhausted or score > 1.02665 achieved.
+sampling:
+  temperature: 0.9
+  top_p: 0.97
+  top_k: 30
+  max_tokens: 16384
+agent:
+  max_iterations: 60
+middleware:
+  budget_reminder_from_left: 2
+  long_tool_output_max_chars: 10000
+new_tools:
+- name: hybrid_function_creator
+  description: |
+    Creates hybrid functions that blend step-like and smooth characteristics.
+    Returns code snippets that can be patched into the seed's initialization.
+    Call when exploring beyond pure step functions to find function shapes the seed optimizer can improve.
+  input_schema:
+    type: object
+    properties:
+      hybrid_type:
+        type: string
+        description: Type of hybrid (smooth_steps, plateau_edges, multi_hump)
+      num_peaks:
+        type: integer
+        description: Number of peaks (2-5)
+      base_height:
+        type: number
+        description: Base height parameter
+  implementation_py: |
+    def run(ctx, args):
+        import random
+        config = args
+        hybrid_type = config.get("hybrid_type", "smooth_steps")
+        num_peaks = config.get("num_peaks", random.randint(2, 4))
+        base_height = config.get("base_height", 1.0)
+        
+        n = ctx.get_program().count("num_intervals") or 350
+        
+        if hybrid_type == "smooth_steps":
+            code = '''def _create_smooth_step(key):
+        n = %d
+        f = jnp.zeros(n)
+        step_levels = [%f, %f, %f]
+        positions = [%d, %d, %d]
+        for i, (h, p) in enumerate(zip(step_levels, positions)):
+            f = f.at[p-p*0.1:p+p*0.1].set(h)
+        return f''' % (n, base_height, base_height*1.2, base_height*0.8, int(0.1*n), int(0.4*n), int(0.7*n))
+            return {"type": hybrid_type, "code": code, "comment": "Smooth step transitions"}
+        
+        elif hybrid_type == "plateau_edges":
+            code = '''def _create_plateau_edges(key):
+        n = %d
+        plateau_width = int(%d)
+        left_slope = jnp.linspace(0, %f, int(%d))
+        plateau = jnp.full(plateau_width, %f)
+        right_slope = jnp.linspace(%f, 0, int(%d))
+        f = jnp.concatenate([left_slope, plateau, right_slope])
+        return f''' % (n, int(0.4*n), base_height, int(0.2*n), base_height, base_height, int(0.2*n))
+            return {"type": hybrid_type, "code": code, "comment": "Plateau with sloped edges"}
+        
+        elif hybrid_type == "multi_hump":
+            code = '''def _create_multi_hump(key):
+        n = %d
+        f = jnp.zeros(n)
+        peak_widths = [int(%d)] * %d
+        peak_centers = [%d, %d, %d]
+        peak_heights = [%f, %f, %f]
+        
+        for c, w, h in zip(peak_centers, peak_widths, peak_heights):
+            radius = int(w / 2)
+            left = jnp.linspace(0, h, radius)
+            right = jnp.linspace(h, 0, radius)
+            combined = left + right
+            f = f.at[c-radius:c+radius].set(combined)
+        return f''' % (n, int(0.1*n), num_peaks, int(0.2*n), int(0.4*n), int(0.6*n), base_height, base_height*1.2, base_height*1.0)
+            return {"type": hybrid_type, "code": code, "comment": "Multiple Gaussian-like peaks"}
+        
+        return {"type": "unknown", "error": "Invalid hybrid type"}
+new_skills:
+- name: enhanced-initialization-strategy
+  description: |
+    Method playbook for augmenting the seed's optimizer with better initialization strategies.
+    Focus on hybrid functions that blend step and smooth characteristics.
+  body: |
+    # Enhanced Initialization Strategy for C2 Maximization
+    
+    ## Objective
+    
+    Maximize C2 > 1.02665 by enhancing the seed's JAX optimizer, not replacing it.
+    
+    ## Why Enhance Rather Than Replace?
+    
+    - Seed's optimizer uses powerful gradient descent (40,000 steps)
+    - Seed already has 9 diverse initializations
+    - Manual step construction breaks the continuous optimization signal
+    - Our goal: better seeds, not new architecture
+    
+    ## Step 1: Analyze Current State
+    
+    1. Check seed's best C2 (baseline: 1.02665)
+    2. Note what initialization performed best
+    3. Identify what's missing (likely exploration diversity)
+    
+    ## Step 2: Generate Hybrid Initializations
+    
+    Use hybrid_function_creator tool:
+    
+    ### Option A: Smooth Steps
+    - 2-3 step levels with smooth (linear) transitions
+    - Better differentiability than pure steps
+    - Try: heights [1.0, 1.3, 0.9], positions [0.1, 0.4, 0.7]
+    
+    ### Option B: Plateau with Sloped Edges
+    - Flat top region (like step) but gradual slopes
+    - Combines step benefits with smooth optimization
+    - Try: plateau at 0.4, slopes over 0.2 on each side
+    
+    ### Option C: Multi-Hump
+    - 3-4 peaks of varying widths/heights
+    - Explores richer function space than single peak
+    - Try: centers at 0.2, 0.4, 0.6; heights [1.0, 1.3, 1.1]
+    
+    ## Step 3: Probe-Based Selection
+    
+    1. Create 3-5 hybrid initializations
+    2. For each:
+       - Patch into seed's _create_multi_start
+       - Run optimizer for 1000 steps (partial)
+       - Call probe_solution
+       - If probe C2 > 1.02665: proceed to full run
+       - If probe C2 <= 1.02665: discard
+    
+    ## Step 4: Full Optimization
+    
+    1. Take top 2 candidates from probing
+    2. Run seed's optimizer for full 40000 steps
+    3. Call evaluate_solution
+    4. Track which hybrid type performed best
+    
+    ## If No Progress
+    
+    - Try polynomial decay: f(x) = exp(-alpha*|x|^beta) with JAX optimization
+    - Try B-spline based representations
+    - Try the seed's existing reinitialization strategy more aggressively
+    
+    ## Critical Rules
+    
+    - MAX 4 full evaluations
+    - ALWAYS use seed's optimizer (gradient descent)
+    - Use hybrid_function_creator for structured exploration
+    - Probe after partial optimization, not on raw constructions
+    - Diversify across 3+ hybrid types before concluding
+new_middlewares:
+- name: enforce_seed_optimizer_usage
+  hook: before_model
+  description: |
+    Middleware that reminds the executor to use the seed's gradient optimizer instead of
+    manual step construction. Fires warnings when the executor attempts to replace the
+    optimizer architecture.
+  implementation_py: |
+    def before_model(hook_input):
+        state = hook_input.get("state", {})
+        iteration = state.get("iteration", 0)
+        last_action = state.get("last_action", "")
+        
+        # Warn against manual step construction
+        if "step_function" in last_action.lower() or "replace optimizer" in last_action.lower():
+            return "WARNING: DO NOT replace the seed's JAX optimizer! It uses powerful gradient descent over 40,000 steps. Instead, ADD new initialization functions that the optimizer can improve via gradient descent."
+        
+        # Encourage probing after partial optimization
+        if iteration > 5 and "evaluate" in last_action.lower():
+            return "REMINDER: You're evaluating without prior probing! Run the optimizer for 1000 steps first, then call probe_solution to rank variants before full evaluation."
+        
+        # Check for diversity
+        families_tried = state.get("families_tried", [])
+        if len(families_tried) == 1 and iteration > 10:
+            return "DIVERSIFICATION NEEDED: You've only tried one initialization family. Call hybrid_function_creator with different hybrid_type values to explore more function shapes."
+        
+        return None

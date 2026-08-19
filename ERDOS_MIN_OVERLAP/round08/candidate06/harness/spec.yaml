@@ -1,0 +1,203 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are optimizing for C5 bound. Goal: MAXIMIZE combined_score = 0.38092303510845016 / c5_bound.
+  Current best: 0.999641 (c5_bound ≈ 0.380975). Target: combined_score > 1.0 (c5_bound < 0.380923).
+
+  **CONSTRAINTS**: h:[0,2]→[0,1], integral(h)=1 exactly.
+
+  **WHY WE'RE STUCK**: The seed uses Adam optimization with 800 intervals. Gradient-based methods get trapped in local optima for this non-convex problem.
+
+  **YOUR TASK**: Rewrite the EVOLVE-BLOCK to try fundamentally different approaches:
+
+  1. **Discrete pattern search**: Instead of continuous optimization, try SPECIFIC step function patterns:
+     - Single block: h=1 on [0,1], h=0 elsewhere (integral=1)
+     - Two-block: h=a on [0,x], h=b on [y,2] with 2ax + (2-y)b = 1
+     - Uniform + perturbation: h=0.5 + small structured perturbations
+
+  2. **Fewer intervals first**: Start with num_intervals=200 (coarse), optimize, then increase to 800
+
+  3. **Alternative optimization**: Try coordinate descent on piecewise constant h (fix all but one interval, optimize that one)
+
+  4. **Pattern-based initialization**: Use the _get_best_initialization method but with CONCRETE mathematical patterns, not random noise.
+
+  5. **Evaluate multiple variants per edit**: Make edits that create 2-4 distinct candidate solutions, then eval each.
+
+  **EDITING RULES**:
+  - When changing initialization: rewrite the entire _get_best_initialization method
+  - When changing optimization: modify _objective_fn and how trains run
+  - Always ensure h values are sigmoid-transformed or clamped to [0,1]
+  - Always enforce integral=1 via penalty (seed uses penalty_strength=1370)
+
+  **BUDGET**: ~30 evaluations. Each eval is precious. Spend on promising directions.
+
+  **AGENCY**: Complete rewrites are expected. Don't make small edits.
+new_tools:
+  - name: generate_pattern_candidates
+    description: |
+      Generate diverse step function candidates by trying specific mathematical patterns:
+      single block, two blocks, uniform with shift, sine waves. Returns candidate h arrays
+      that satisfy integral=1 (approximately). Use this to create multiple variants to eval.
+    input_schema: {'type': 'object', 'properties': {'num_candidates': {'type': 'integer', 'default': 5}, 'num_intervals': {'type': 'integer', 'default': 200}}}
+    implementation_py: |
+      def run(ctx, args):
+          import numpy as np
+          num_intervals = args.get('num_intervals', 200)
+          num_candidates = args.get('num_candidates', 5)
+          domain = np.linspace(0, 2, num_intervals)
+          
+          candidates = []
+          
+          # Pattern 1: Single block h=1 on [0,1]
+          h1 = np.zeros(num_intervals)
+          mask = domain < 1.0
+          h1[mask] = 1.0
+          integral = np.sum(h1) * (2.0/num_intervals)
+          scale = 1.0 / (integral + 1e-9)
+          h1 = h1 * scale
+          candidates.append(h1)
+          
+          # Pattern 2: Two blocks [0,0.5] and [1.5,2] with h=0.5
+          h2 = np.zeros(num_intervals)
+          mask1 = (domain >= 0.0) & (domain < 0.5)
+          mask2 = (domain >= 1.5) & (domain <= 2.0)
+          h2[mask1] = 0.5
+          h2[mask2] = 0.5
+          integral = np.sum(h2) * (2.0/num_intervals)
+          scale = 1.0 / (integral + 1e-9)
+          h2 = h2 * scale
+          candidates.append(h2)
+          
+          # Pattern 3: Uniform h=0.5 with small perturbation
+          h3 = np.full(num_intervals, 0.5)
+          integral = np.sum(h3) * (2.0/num_intervals)
+          scale = 1.0 / (integral + 1e-9)
+          h3 = h3 * scale
+          candidates.append(h3)
+          
+          # Pattern 4: Sinusoidal
+          h4 = 0.5 + 0.5 * np.sin(np.pi * domain)
+          h4 = np.clip(h4, 0, 1)
+          integral = np.sum(h4) * (2.0/num_intervals)
+          scale = 1.0 / (integral + 1e-9)
+          h4 = h4 * scale
+          candidates.append(h4)
+          
+          # Pattern 5: Three blocks
+          h5 = np.zeros(num_intervals)
+          h5[domain < 1/3] = 0.75
+          h5[(domain >= 1/3) & (domain < 2/3)] = 0.25
+          h5[domain >= 2/3] = 0.75
+          integral = np.sum(h5) * (2.0/num_intervals)
+          scale = 1.0 / (integral + 1e-9)
+          h5 = np.clip(h5 * scale, 0, 1)
+          candidates.append(h5)
+          
+          return {"candidates": [c.tolist() for c in candidates],
+                  "num_intervals": num_intervals}
+skill_description: |
+  C5 optimization harness. Target: combined_score > 1.0 via discrete pattern search + coarse-to-fine refinement.
+  Use generate_pattern_candidates to create diverse step functions. Start coarse (200 intervals), refine to 800.
+skill_body: |
+  # C₅ Bound Optimization Strategy
+  
+  ## The Problem
+  Minimize max_k ∫_0^2 h(x)(1-h(x+k))dx subject to h∈[0,1], ∫h=1.
+  Current best: C₅ ≤ 0.38092303510845016.
+  
+  ## Why Standard Optimization Fails
+  The seed uses Adam on 800 continuous parameters. This non-convex problem has many local optima.
+  Gradient methods get stuck because small perturbations from good solutions increase the objective.
+  
+  ## Winning Strategy: Discrete Pattern Search
+  
+  ### Step 1: Generate Concrete Patterns (Use generate_pattern_candidates)
+  Instead of random initializations, try THESE specific constructions:
+  
+  1. **Single Block**: h=1 on [0,1], h=0 elsewhere
+  
+  2. **Two Equal Blocks**: h=0.5 on [0,0.5] and [1.5,2]
+  
+  3. **Uniform**: h=0.5 everywhere (with slight perturbations to vary)
+  
+  4. **Symmetric Wave**: h = 0.5 + 0.5*sin(πx)
+  
+  5. **Three-Block**: h=0.75 on [0,1/3]∪[2/3,2], h=0.25 on middle
+  
+  ### Step 2: Coarse-to-Fine Discretization
+  - Start with num_intervals=200 (coarse grid)
+  - Find promising patterns
+  - Refine to num_intervals=800 (finer grid)
+  - This escapes local optima by finding global structure first
+  
+  ### Step 3: Evaluate Patterns Directly
+  - Generate concrete patterns
+  - Compute their c5_bound directly before any optimization
+  - Pick best pattern, then optimize from there
+  
+  ### Step 4: Alternative Optimization
+  If Adam fails, try:
+  - Coordinate descent on interval parameters
+  - Derivative-free optimization
+  
+  ## Execution Plan
+  
+  1. **Baseline**: Eval seed (1 eval)
+  
+  2. **Pattern Generation**: Use generate_pattern_candidates with num_intervals=200
+  
+  3. **Pattern Selection**: Evaluate 5-10 patterns directly
+  
+  4. **Refinement**: For best patterns, increase to 800 intervals
+  
+  5. **Ablation**: Try different penalty strengths, learning rates
+  
+  ## Important
+  
+  - Each evaluation is precious (~30 total). Use them strategically.
+  - Concrete patterns beat random initialization.
+  - Coarse-to-fine is critical.
+  - Goal: combined_score > 1.0 (c5_bound < 0.380923).
+tool_descriptions:
+  edit_solution: |
+    Rewrite the EVOLVE-BLOCK. Strategic changes require COMPLETE rewrites, not diffs.
+    
+    **Common rewrites that help:**
+    - Replace entire _get_best_initialization method (use concrete patterns)
+    - Modify Hyperparameters: reduce num_intervals to 200 initially
+    - Add new candidate generation code before optimization
+    - Change optimizer: try coordinate descent or Nelder-Mead
+    
+    **DO NOT:** Make surgical edits. The seed is stuck because its approach is fundamentally wrong.
+  evaluate_solution: |
+    Run and get combined_score. You have ~30 evaluations.
+    
+    **Use evals strategically:**
+    - 1 eval: baseline (seed)
+    - 1 eval: test concrete patterns (coarse 200 intervals)
+    - 2-3 evals: refine best patterns (800 intervals)
+    
+    **If score ≤ 0.999641, try a completely different approach.**
+  probe_solution: |
+    Approximate evaluation on subsampled data. Separate budget of 30 probes.
+    
+    **Use probe_solution to:**
+    - Rank multiple pattern candidates cheaply
+    - Iterate on coarse discretization
+    - Only confirm top candidates with evaluate_solution
+    
+    **Pattern:** Generate 10 patterns → probe all → eval top 3 → refine top 1.
+  finish: |
+    End when: budget exhausted OR combined_score > 1.0 (record found!)
+sampling:
+  temperature: 0.4
+  top_p: 0.9
+  top_k: 10
+  max_tokens: 8192
+agent:
+  max_iterations: 40
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 10000
+new_skills: []
+remove_tools: []
+new_middlewares: []

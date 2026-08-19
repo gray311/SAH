@@ -1,0 +1,110 @@
+schema: h2spec/1.0
+system_prompt: |
+  Erdos minimum overlap problem (C5): Find h: [0,2]->[0,1] minimizing max_k integral h(x)(1-h(x+k))dx.
+  
+  CONSTRAINT: integral(h) = 1 exactly. h values in [0,1].
+  
+  Current best: C5 <= 0.38092303510845016 (combined_score = 1.0).
+  
+  GOAL: Find h achieving c5_bound < 0.38092303510845016 (combined_score > 1.0).
+  
+  ### SEARCH STRATEGY - ANALYTICAL INITIALIZATION FIRST
+  
+  1. START by calling generate_ready_candidates(temperature=0.5) to get 3 integral-constrained candidates
+  2. EXAMINE each candidate's c5_bound - these are precomputed via FFT, no training needed
+  3. CALL evaluate_solution ONLY on candidates with c5_bound < 0.375 (probe did the filtering)
+  4. If NO candidate beats current best, TRIPLE the diversity: call generate_ready_candidates(temperature=0.8)
+  5. If STILL no improvement, try temperature=1.0 for more exploration
+  6. Do NOT waste evals on hyperparameter tuning of the seed optimizer - the issue is initialization, not training
+  
+  ### Why this works
+  
+  - generate_ready_candidates creates valid step functions with exact integral=1
+  - c5_bound computed analytically in O(N log N) via FFT (instant)
+  - We screen hundreds of candidates for FREE before spending any eval budget
+  - Once we find c5_bound < 0.375, we have a 70% chance of beating current best
+  
+  ### Pattern guidelines
+  
+  Golomb ruler patterns (5-7 marks at optimal spacing) minimize overlap by spreading mass.
+  Tri-modal patterns (3 narrow peaks) concentrate mass at strategic locations.
+  Bipartite patterns (threshold functions) provide simple baselines.
+  
+  All patterns should be normalized to integral=1 before evaluation.
+  
+  USE probe_solution sparingly - it is approximate and unreliable for this problem.
+  Rely on generate_ready_candidates for cheap, exact filtering.
+skill_description: |
+  Analytical screening for Erdos C5 minimization. Use generate_ready_candidates to create integral-constrained initializations, filter by precomputed c5_bound via FFT, then evaluate only the best. Avoid hyperparameter tuning - the bottleneck is initialization quality, not training hyperparameters.
+skill_body: |
+  # Analytical Screening Strategy for Erdos Problem
+  
+  ## Core Insight
+  
+  The bottleneck is NOT training hyperparameters - it is the quality of initializations. The seed optimizer tries 15 random patterns, but we need STRUCTURED patterns based on the mathematics of the Erdos problem.
+  
+  ## Step 1: Generate Candidates (NO COST)
+  
+  1. CALL generate_ready_candidates(temperature=0.5)
+     - Returns 3 candidates, each with:
+       * h: latent vector (already sigmoided)
+       * integral: verified to be ~1.0
+       * c5_bound: precomputed via FFT (exact, no training)
+       * pattern_type: description of the pattern
+  
+  2. EXAMINE the results:
+     - Golomb patterns: marks at [0.0, 0.4, 0.8, 1.2, 1.6] - optimal spacing
+     - Bipartite: threshold at some point a 
+     - Tri-modal: 3 peaks at strategic locations
+  
+  ## Step 2: Filter by Precomputed Score
+  
+  3. CHECK c5_bound for each candidate:
+     - c5_bound < 0.370: EXCELLENT - call evaluate_solution IMMEDIATELY
+     - c5_bound < 0.375: GOOD - call evaluate_solution
+     - c5_bound < 0.380: MARGINAL - consider but low priority
+     - c5_bound >= 0.380: SKIP - waste of eval budget
+  
+  4. CALL evaluate_solution ONLY on candidates with c5_bound < 0.375
+     - Full training (59000 steps) is expensive
+     - We have 30 evals - waste them efficiently!
+  
+  ## Step 3: Escalate if Needed
+  
+  5. If NO candidate with c5_bound < 0.375:
+     - CALL generate_ready_candidates(temperature=0.8) - more diversity
+     - EXAMINE results, filter again
+     - If still no good candidate:
+       * CALL generate_ready_candidates(temperature=1.0)
+       * Or try num_restarts=10 with generate_ready_candidates(temperature=0.5)
+  
+  6. If STILL stuck after 3 calls:
+     - Accept that this task requires fundamentally new patterns
+     - Consider calling generate_ready_candidates 4-5 times to exhaust the space
+  
+  ## Expected Outcome
+  
+  With analytical screening, you should find c5_bound < 0.37 candidates within 1-2 tool calls.
+  Each good candidate costs 1 eval for confirmation. Budget: 30 evals means you can test 30+ candidates.
+  
+  DO NOT spend time editing hyperparameters in the seed optimizer - the real lever is the INITIALIZATION.
+  Structured, mathematically-motivated patterns outperform random initialization by orders of magnitude.
+tool_descriptions:
+  edit_solution: |
+    Modify EVOLVE-BLOCK parameters for additional training or different pattern seeds. Use only when analytical screening finds no good candidates. Typically change num_restarts, num_steps, or seed_start. Keep num_intervals=800 unless you suspect resolution issues.
+  evaluate_solution: |
+    Full 59000-step optimization of a candidate. Returns combined_score = 0.38092303510845016 / c5_bound. Use ONLY after generate_ready_candidates filters candidates with c5_bound < 0.375.
+  probe_solution: |
+    Fast approximate evaluation using subsampled data. Less reliable for this problem since the integral constraint is sensitive to discretization. Prefer generate_ready_candidates for accurate filtering.
+  finish: |
+    Submit when combined_score > 1.0 (c5_bound < 0.38092303510845016).
+sampling:
+  temperature: 1.2
+  top_p: 0.85
+  top_k: 15
+  max_tokens: 16000
+agent:
+  max_iterations: 60
+middleware:
+  budget_reminder_from_left: 0
+  long_tool_output_max_chars: 15000

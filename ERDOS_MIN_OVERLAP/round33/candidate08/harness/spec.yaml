@@ -1,0 +1,355 @@
+schema: h2spec/1.0
+system_prompt: |
+  Erdos C5 problem: Find a step function h: [0,2]->[0,1] minimizing max_k integral h(x)(1-h(x+k))dx.
+  
+  CONSTRAINT: integral(h)=1 exactly, h values in [0,1].
+  
+  Current best: C5 <= 0.38092303510845016 (combined_score = 1.0).
+  GOAL: Find h achieving combined_score > 1.0.
+  
+  STRATEGY - STRUCTURED STEP FUNCTION GENERATION:
+  
+  1. GENERATE diverse step function candidates using mathematical patterns:
+     - Bipartite functions (single threshold at various positions)
+     - Multi-modal functions (2-4 peaks with controlled widths)
+     - Symmetric functions (mirror around x=1.0)
+     - Golomb-ruler inspired (spaced peaks to minimize overlap)
+  
+  2. Use step_function_generator to create 5-10 diverse candidates
+  3. Call probe_solution on each to screen for c5_bound < 0.382
+  4. Evaluate the best 1-3 candidates that pass screening
+  5. If no improvement, try different pattern families
+  
+  KEY INSIGHT: Random continuous functions (sigmoid of random latent) rarely produce good step functions.
+  Instead, directly generate step functions with known-good mathematical structures.
+  
+  ALWAYS generate structural step functions, not random continuous curves.
+skill_description: |
+  Generate diverse step function candidates using mathematical patterns (bipartite, multi-modal, symmetric).
+  Use probe_solution to screen, evaluate the best candidates. Focus on structural step functions, not random curves.
+skill_body: |
+  # Structured Step Function Generation for Erdos C5
+  
+  ## Core Principle
+  The Erdős C5 problem rewards step functions with specific geometric structures.
+  Random sigmoid curves rarely achieve good bounds. Instead, directly generate step functions.
+  
+  ## Step 1: Generate Diverse Candidates
+  
+  Use step_function_generator to create candidates from different pattern families:
+  - **Bipartite**: Single threshold function h(x) = 1 if x < t, else 0
+  - **Multi-modal**: Multiple narrow peaks separated by valleys
+  - **Symmetric**: Functions symmetric around x=1.0
+  - **Golomb-like**: Peaks at carefully spaced positions
+  
+  Target: 5-10 diverse candidates covering different families.
+  
+  ## Step 2: Screen with probe
+  
+  For each candidate:
+  - Call probe_solution to get approximate c5_bound
+  - Keep only candidates with c5_bound < 0.382 (promising)
+  
+  ## Step 3: Evaluate Best Candidates
+  
+  For promising candidates:
+  - Call evaluate_solution for full score
+  - If combined_score > 1.0, finish!
+  
+  ## Step 4: Iterate
+  
+  If no improvement after 3-5 cycles:
+  - Try different pattern families
+  - Adjust peak positions, widths, and heights
+  - Try asymmetric patterns
+  
+  ## Never Do
+  - Generate random sigmoid curves
+  - Rely on hyperparameter tuning without structural changes
+  - Expect random mutations to improve the score
+  
+  ## Always Do
+  - Generate structural step functions
+  - Use probe_solution for screening
+  - Focus on patterns known to work for similar optimization problems
+tool_descriptions:
+  edit_solution: |
+    Generate a step function from a specific pattern family.
+    
+    Options:
+    - "bipartite": h(x) = 1 if x < t, else 0 (normalize to integral=1)
+    - "bipolar": Two peaks at positions p1, p2 with heights h1, h2
+    - "tripolar": Three peaks (often symmetric)
+    - "four-modal": Four peaks with controlled spacing
+    - "golomb": Peaks at positions from a Golomb ruler sequence
+    
+    Constraints: integral(h)=1, h in [0,1]. Choose widths and heights accordingly.
+  evaluate_solution: |
+    Full evaluation returning combined_score = 0.38092303510845016 / c5_bound.
+    Use probe_solution first to screen candidates with c5_bound < 0.382.
+    Combined_score > 1.0 means c5_bound < 0.38092303510845016 (new record).
+  probe_solution: |
+    Fast approximate evaluation (500 intervals, analytical c5).
+    Use this to screen many step function candidates cheaply.
+    Target: find candidates with c5_bound < 0.382 before full evaluation.
+  finish: |
+    Submit when combined_score > 1.0 (c5_bound < 0.38092303510845016).
+sampling:
+  temperature: 0.8
+  top_p: 0.9
+  top_k: 15
+  max_tokens: 12000
+agent:
+  max_iterations: 60
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 8000
+new_tools:
+  - name: step_function_generator
+    description: |
+      Generate diverse step function candidates using mathematical patterns.
+      
+      Pattern families:
+      1. Bipartite: Single threshold function
+      2. Bipolar: Two peaks with specified positions
+      3. Tripolar: Three peaks (often symmetric)
+      4. Four-modal: Four peaks with controlled spacing
+      5. Golomb-inspired: Peaks from Golomb ruler sequences
+      
+      Each pattern is normalized to have integral=1 over [0,2].
+      This tool generates COMPLETE step functions ready for evaluation.
+    input_schema:
+      type: object
+      properties:
+        pattern_type:
+          type: string
+          enum:
+            - bipartite
+            - bipolar
+            - tripolar
+            - four-modal
+            - golomb
+        seed:
+          type: integer
+          default: 42
+    implementation_py: |
+      def run(ctx, args):
+          import random
+          import numpy as np
+          
+          pattern_type = args.get("pattern_type", "bipolar")
+          seed = args.get("seed", 42)
+          random.seed(seed)
+          
+          N = 800  # Number of intervals
+          domain = 2.0
+          dx = domain / N
+          
+          h = np.zeros(N)
+          
+          if pattern_type == "bipartite":
+              # Single threshold at t in (0,2), h=1 for x<t, h=0 for x>=t
+              t = random.uniform(0.3, 1.7)
+              h[:int(t*N/dx)] = 1.0
+              # Normalize to integral = 1
+              integral = h.sum() * dx
+              if integral > 0:
+                  h = h / integral
+              
+          elif pattern_type == "bipolar":
+              # Two peaks at p1, p2
+              p1 = random.uniform(0.2, 0.8)
+              p2 = random.uniform(1.2, 1.8)
+              width1 = random.uniform(0.15, 0.25)
+              width2 = random.uniform(0.15, 0.25)
+              height1 = random.uniform(0.8, 1.0)
+              height2 = random.uniform(0.8, 1.0)
+              
+              # Create peaks with Gaussian-like shapes, then threshold to [0,1]
+              x = np.linspace(0, 2, N)
+              peak1 = np.exp(-((x - p1) ** 2) / (2 * width1**2))
+              peak2 = np.exp(-((x - p2) ** 2) / (2 * width2**2))
+              h = (peak1 * height1 + peak2 * height2)
+              h = np.clip(h, 0, 1)
+              
+          elif pattern_type == "tripolar":
+              # Three peaks, often symmetric around x=1
+              centers = [0.4, 1.0, 1.6]
+              widths = [0.12, 0.12, 0.12]
+              heights = [0.8, 1.0, 0.8]
+              
+              x = np.linspace(0, 2, N)
+              h = np.zeros(N)
+              for c, w, ht in zip(centers, widths, heights):
+                  peak = np.exp(-((x - c) ** 2) / (2 * w**2))
+                  h += peak * ht
+              h = np.clip(h, 0, 1)
+              
+          elif pattern_type == "four-modal":
+              # Four peaks with spacing to minimize overlap
+              centers = [0.25, 0.75, 1.25, 1.75]
+              widths = [0.1, 0.1, 0.1, 0.1]
+              heights = [0.7, 0.9, 0.9, 0.7]
+              
+              x = np.linspace(0, 2, N)
+              h = np.zeros(N)
+              for c, w, ht in zip(centers, widths, heights):
+                  peak = np.exp(-((x - c) ** 2) / (2 * w**2))
+                  h += peak * ht
+              h = np.clip(h, 0, 1)
+              
+          elif pattern_type == "golomb":
+              # Golomb ruler inspired: peaks at 0.0, 0.4, 0.8, 1.2, 1.6
+              centers = [0.0, 0.4, 0.8, 1.2, 1.6]
+              widths = [0.12, 0.12, 0.12, 0.12, 0.12]
+              heights = [0.8, 0.9, 0.85, 0.9, 0.8]
+              
+              x = np.linspace(0, 2, N)
+              h = np.zeros(N)
+              for c, w, ht in zip(centers, widths, heights):
+                  peak = np.exp(-((x - c) ** 2) / (2 * w**2))
+                  h += peak * ht
+              h = np.clip(h, 0, 1)
+          
+          # Ensure h is in [0,1] and integral is approximately 1
+          h = np.clip(h, 0, 1)
+          integral = h.sum() * dx
+          
+          if integral > 0 and integral < 1e-6:
+              h = h / integral
+          
+          # Return the h array as a string representation
+          h_str = ",".join([f"{x:.6f}" for x in h])
+          return {
+              "pattern": pattern_type,
+              "integral": float(integral),
+              "h_array": h_str
+          }
+new_skills:
+  - name: structured-step-functions
+    description: Generate step functions with mathematical patterns (bipartite, multi-modal, Golomb-inspired).
+    body: |
+      # Structured Step Functions for Erdos C5
+      
+      ## Why Structural Patterns Work
+      
+      The Erdős C5 problem rewards functions with specific geometric properties.
+      Random sigmoid curves rarely achieve good bounds because:
+      - They don't naturally create the separation needed to minimize overlap
+      - They waste "mass" in regions that don't contribute to the objective
+      
+      Instead, directly generate step functions with known-good structures.
+      
+      ## Pattern Families
+      
+      ### 1. Bipartite Functions
+      A single threshold: h(x) = 1 if x < t, else 0.
+      Simple but often yields decent bounds.
+      
+      ### 2. Multi-Modal Functions
+      Multiple narrow peaks separated by valleys.
+      - **Bipolar**: Two peaks (often symmetric or asymmetric)
+      - **Tripolar**: Three peaks (often symmetric around x=1.0)
+      - **Four-modal**: Four peaks with controlled spacing
+      
+      Key insight: Peaks should be separated by at least their own width
+      to minimize overlap at various shifts k.
+      
+      ### 3. Golomb-Ruler Inspired
+      Place peaks at positions from a Golomb ruler (no two pairs have the same distance).
+      This minimizes overlap at many shift values simultaneously.
+      
+      ## Workflow
+      
+      1. Call step_function_generator with different pattern types
+      2. Use probe_solution to screen (target c5_bound < 0.382)
+      3. Evaluate promising candidates
+      4. Iterate: adjust peak positions, widths, heights
+      
+      ## Never Generate
+      - Random sigmoid curves (latents passed through sigmoid)
+      - Hyperparameter-tuned random functions without structural changes
+      - Functions with overlapping peaks (wastes mass)
+      
+      ## Always Generate
+      - Step functions with clear peak/valley structure
+      - Peeks separated by at least 1-2x their width
+      - Patterns from the families above
+tool_descriptions:
+  edit_solution: |
+    Edit the EVOLVE-BLOCK to use structured step function patterns.
+    
+    To generate a new candidate:
+    - Call step_function_generator with pattern_type="bipolar" or "tripolar"
+    - Use the returned h_array to replace the current h generation code
+    
+    Structure your mutations as:
+    1. Generate h from step_function_generator
+    2. Normalize to integral=1
+    3. Ensure h is in [0,1]
+    
+    Example mutation pattern:
+    h = np.array([float(x) for x in step_function_generator(pattern_type="tripolar", seed=42)["h_array"].split(",")])
+    h = h / (h.sum() * 2.0 / 800)  # Normalize to integral=1
+  evaluate_solution: |
+    Full evaluation. Use probe_solution first to screen with c5_bound < 0.382.
+    combined_score > 1.0 means c5_bound < 0.38092303510845016.
+  probe_solution: |
+    Fast approximate evaluation. Target c5_bound < 0.382 for promising candidates.
+  finish: |
+    Submit when combined_score > 1.0.
+sampling:
+  temperature: 0.7
+  top_p: 0.9
+  top_k: 12
+  max_tokens: 10000
+agent:
+  max_iterations: 60
+middleware:
+  budget_reminder_from_left: 4
+  long_tool_output_max_chars: 6000
+new_middlewares:
+  - name: step_function_reminder
+    hook: before_model
+    description: |
+      Middleware reminder to use step function patterns instead of random sigmoids.
+      Prevents the solver from wasting time on random continuous functions.
+    implementation_py: |
+      def before_model(hook_input):
+          history = hook_input.get("history", [])
+          
+          # Track if step_function_generator has been called
+          has_step_gen = any(
+              "step_function_generator" in str(turn.get("tools_used", []))
+              for turn in history
+          )
+          
+          # Track if we've tried multiple patterns
+          patterns_tried = []
+          for turn in history:
+              used_tools = str(turn.get("tools_used", []))
+              if "bipolar" in used_tools or "tripolar" in used_tools or "golomb" in used_tools:
+                  patterns_tried.append(used_tools)
+          
+          # If we haven't tried step function generator, remind
+          if not has_step_gen and len(history) < 3:
+              return (
+                  "FIRST TRY: Call step_function_generator with pattern_type=\"tripolar\"\n"
+                  "Generate 3-5 diverse step functions (bipolar, tripolar, golomb).\n"
+                  "Use probe_solution to screen for c5_bound < 0.382.\n"
+                  "Random sigmoids rarely work - use structural step functions!"
+              )
+          
+          # If we've tried patterns but no evaluation yet, remind to evaluate
+          elif len(patterns_tried) > 0 and has_step_gen:
+              eval_count = sum(
+                  1 for turn in history
+                  if "evaluate_solution" in str(turn.get("tools_used", []))
+              )
+              if eval_count == 0:
+                  return (
+                      "You've generated step functions. NOW CALL evaluate_solution\n"
+                      "on the best candidate with c5_bound < 0.382."
+                  )
+          
+          return None

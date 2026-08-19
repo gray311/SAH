@@ -1,0 +1,124 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are an expert in functional analysis for C2 maximization.
+  
+  Current best: 0.8962799441554086 (step functions).
+  
+  KEY INSIGHT: The seed contains 12+ pre-defined step patterns. DO NOT just mutate the current best.
+  Instead: SAMPLE diverse step patterns from the seed library, probe them cheaply, then deep-refine winners.
+  
+  METHOD - DIVERSE ARCHITECTURE SEARCH:
+  
+  PHASE A (iterations 1-10): ARCHITECTURE DISCOVERY
+  
+  1. Call sample_step_patterns to extract ALL step patterns from the seed code
+  
+  2. Sample 5 DISTINCT patterns (not just 5 tiny mutations of the same)
+  
+  3. Call probe_solution on ALL 5 patterns
+  
+  4. Pick TOP 2 by probe score
+  
+  5. Call evaluate_solution on both (budget allows, but prioritize probing first)
+  
+  PHASE B (iterations 11-20): DEEP REFINEMENT
+  
+  1. For each of the top 2 patterns:
+     - Use JAX gradients to refine interval boundaries and heights
+     - Try both ascent and descent directions
+     - Probe 2 variants, evaluate best
+  
+  2. Merge promising features: if pattern A has better peak heights and pattern B has better widths,
+     create a hybrid pattern
+  
+  3. Re-probe hybrids before full eval
+  
+  PHASE C (iterations 21-30): AGGRESSIVE INNOVATION
+  
+  1. If stuck, SAMPLE 3 brand new patterns from the library
+  2. Probe all, evaluate top 1
+  3. If no progress after iteration 25: restart from scratch with different sampling
+  
+  TOOL USAGE:
+  - sample_step_patterns: Call ONCE per iteration to get fresh step pattern candidates
+  - probe_solution: Use heavily (you have 30 probes) - rank many architectures cheaply
+  - evaluate_solution: Only on top 2-3 by probe score
+  - edit_solution: When refining, make SUBSTANTIVE changes (change 2-3 heights, shift peak by 10%+), not tiny tweaks
+  
+  RULES:
+  - Always sample from the STEP PATTERN LIBRARY first
+  - Never call reinitialize_parameters without a new pattern base
+  - Use probes to explore 8-10 architectures before any full eval
+  - Gradient refinement is for POLISHING, not discovering
+sampling:
+  temperature: 1.2
+  top_p: 0.95
+  top_k: 30
+  max_tokens: 16384
+agent:
+  max_iterations: 30
+middleware:
+  budget_reminder_from_left: 3
+  long_tool_output_max_chars: 15000
+new_tools:
+- name: sample_step_patterns
+  description: |
+    Extract all 12+ step patterns from the seed code. Returns a list of patterns with their
+    key characteristics (peak positions, height profiles, number of levels). Use this to
+    sample diverse starting architectures instead of mutating a single pattern.
+    Call once per iteration to get fresh candidates.
+  input_schema:
+    type: object
+    properties: {}
+  implementation_py: |
+    def run(ctx, args):
+        import re
+        best_f = ctx.get_best_program()
+        lines = best_f.split('\n')
+        patterns = []
+        lines_lower = [l.lower() for l in lines]
+        pattern_start = None
+        for i, line in enumerate(lines):
+            if 'def _create_step_initializer' in line:
+                pattern_start = i
+            if 'return f' in line and pattern_start is not None:
+                # Found end of function, this is one pattern definition
+                pattern_lines = lines[pattern_start:i+1]
+                params = {'heights': [], 'intervals': [], 'description': ''}
+                for j, pl in enumerate(pattern_lines):
+                    if 'f = f.at[' in pl:
+                        # Extract interval and height
+                        interval_match = re.search(r'\.at\[(\d+\*n):\s*(\d+\*n)\]', pl)
+                        if interval_match:
+                            params['intervals'].append(interval_match.group(0))
+                    if 'height' in pl.lower():
+                        h_match = re.search(r'\.set\(([\d.]+)\)', pl)
+                        if h_match:
+                            params['heights'].append(float(h_match.group(1)))
+                if params['heights']:
+                    patterns.append(params)
+        return {'patterns': patterns, 'count': len(patterns)}
+new_skills:
+- name: diverse-architecture-search
+  description: Search diverse step function architectures from the seed library, probe many, refine winners.
+  body: "# Diverse Architecture Search Protocol\n\n## Phase A: Architecture Discovery (iterations 1-10)\n\n1. Call sample_step_patterns to extract ALL patterns from the seed\n\n2. Sample 5 DISTINCT patterns (different peak configurations, different number of levels)\n\n3. Probe ALL 5 with probe_solution\n\n4. Rank by probe score, pick TOP 2\n\n5. Evaluate both if budget allows, otherwise refine top 1\n\n## Phase B: Deep Refinement (iterations 11-20)\n\n1. For each top pattern:\n   - Make SUBSTANTIVE edits: change 2-3 heights, shift peaks by 10%+ of domain\n   - Use JAX gradients to refine interval boundaries\n   - Try both ascent and descent directions\n\n2. Create hybrid patterns: combine best features (peak heights from A, widths from B)\n\n3. Probe hybrids before full eval\n\n## Phase C: Aggressive Innovation (iterations 21-30)\n\n1. If no improvement, sample 3 new patterns from library\n\n2. Probe all, evaluate top 1\n\n3. Restart from scratch if stuck for >5 iterations\n\n## Key Rules\n- Always sample from STEP PATTERN LIBRARY first\n- Never make tiny tweaks (<5%) - make substantive changes\n- Use probes to explore 8-10 architectures before any full eval\n- Gradient is for polishing, not discovery"
+new_middlewares:
+- name: enforce_diversity
+  hook: before_tool
+  description: Middleware that enforces diverse pattern sampling and warns about repeated mutations
+  implementation_py: |
+    def before_tool(hook_input):
+        iteration = hook_input.get('iteration', 0)
+        tool = hook_input.get('tool_name', '')
+        last_pattern = hook_input.get('last_sampled_pattern', '')
+        
+        if tool == 'edit_solution' and last_pattern:
+            # Warn if editing same pattern repeatedly
+            if 'Mutation' not in hook_input.get('edit_description', ''):
+                return 'Warning: Editing same pattern? Sample a new pattern from sample_step_patterns instead of tiny tweaks.'
+        
+        if iteration >= 10 and last_pattern:
+            # After 10 iterations, encourage new pattern sampling
+            return 'Iteration 10+: Consider sampling a fresh step pattern to avoid local optima.'
+        
+        return None

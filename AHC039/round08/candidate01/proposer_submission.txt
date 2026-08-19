@@ -1,0 +1,172 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are a C++ polygon optimizer for axis-aligned fish capture. Goal: maximize (mackerels - sardines + 1).
+  
+  CRITICAL STRATEGY: Use boundary-based exclusion, not just density clustering.
+  
+  PHASE 1: Analyze fish distribution with exclusion_map tool to find regions where sardines can be excluded without losing mackerels.
+  
+  PHASE 2: For each mackerel-dense region:
+    - Compute the tight bounding box
+    - Identify sardines on/near each edge of the bounding box
+    - For each edge, calculate the "exclusion gain": how many sardines can be excluded vs mackerels lost when cutting a notch
+    - Generate polygons with optimal notches (cut inward 50-150 units from edges where sardines exist)
+  
+  PHASE 3: Stepped corner optimization:
+    - For each corner of the bounding box, try L-shaped cuts that keep dense mackerel corners while excluding sardines at opposite corners
+    - Evaluate each L-shape with the exclusion map
+  
+  PHASE 4: Multi-scale refinement:
+    - Start with coarse grid (500x500), then refine promising regions with finer grid (100x100)
+    - Use exclusion map to guide refinement (focus on edges with sardines)
+  
+  PHASE 5: 10 random restarts with 700ms time budget each
+  
+  Tools:
+  - edit_solution: Complete C++ code with boundary-exclusion strategy
+  - evaluate_solution: Get score
+  - exclusion_map: NEW TOOL - analyze edge exclusion opportunities
+  - finish: Submit when best polygon found
+
+  Run full search within 2.0s. Stop only on timeout.
+skill_description: |
+  Optimize polygon using boundary-based exclusion analysis. Identify edges where sardines can be excluded with minimal mackerel loss. Use exclusion map to guide notch placement and L-shape cuts. Multi-scale refinement. 10 restarts.
+skill_body: |
+  # Boundary-Based Exclusion Polygon Optimization
+  
+  ## Core Insight: Sardines on polygon edges hurt score more than mackerels inside help
+  The optimal polygon often excludes sardines by cutting notches at edges rather than making large boundary cuts.
+  
+  ### Phase 1: Build Exclusion Map
+  - Create a spatial grid (cell_size=200)
+  - For each cell on grid boundaries, compute:
+    - mackerels_on_edge: mackerels whose bounding box edge passes through this cell
+    - sardines_on_edge: sardines whose bounding box edge passes through this cell
+    - exclusion_ratio = sardines_on_edge / (sardines_on_edge + mackerels_on_edge)
+  - Mark high-exclusion cells (ratio > 0.5) as "cut zones"
+  
+  ### Phase 2: Edge Notch Generation
+  For each edge of the mackerel bounding box:
+  1. Find all sardines within 200 units of this edge
+  2. Sort sardines by distance from edge (closest first)
+  3. For each sardine, compute notch depth that excludes it but minimizes mackerel loss:
+     - Notch depth = sardine_distance + 50 to 150
+     - Estimate mackerel loss by counting mackerels in the notch rectangle
+     - Score = (sardines_excluded) - (mackerels_lost)
+  4. Select top 3 notches per edge
+  5. Generate polygon with these notches applied
+  
+  ### Phase 3: Corner L-Shape Optimization
+  For each of 4 corners:
+  1. Check if opposite corner has high sardine density
+  2. If yes, generate L-shape that keeps current corner, cuts off opposite
+  3. Score each L-shape using grid query
+  4. Keep best L-shapes (up to 2 per corner)
+  
+  ### Phase 4: Multi-Scale Refinement
+  1. Start with coarse 500x500 grid
+  2. For polygons scoring > baseline, refine with 100x100 grid in the polygon region
+  3. Apply edge shifts of ±5, ±10, ±20 units guided by exclusion map
+  4. Keep improvements
+  
+  ### Phase 5: Multiple Restarts
+  - Run 10 restarts with different random perturbations
+  - Each restart: 700ms time budget
+  - Track best polygon across all runs
+  
+  ### C++ Implementation Notes
+  - Use fixed-size arrays for grids (fast O(1) access)
+  - Pre-compute exclusion map in O(N)
+  - Edge notch scoring: O(num_edges * num_sardines_near_edge)
+  - Total time per evaluation: < 0.8s
+tool_descriptions:
+  edit_solution: |
+    Modify C++ EVOLVE-BLOCK with boundary-exclusion strategy. Must include: exclusion map construction, edge notch generation with scoring, corner L-shape optimization, multi-scale refinement, and 10 restarts. Preserve EVOLVE-BLOCK markers and I/O format.
+  evaluate_solution: |
+    Run C++ program, return score (mackerels-sardines+1), validity, and budget remaining.
+  probe_solution: |
+    Approximate evaluation on subsampled data. Use for quick ranking before full evaluation.
+  finish: |
+    End when best boundary-exclusion polygon found.
+sampling:
+  temperature: 0.9
+  top_p: 0.9
+  top_k: 15
+  max_tokens: 12288
+agent:
+  max_iterations: 40
+middleware:
+  budget_reminder_from_left: 3
+  long_tool_output_max_chars: 15000
+new_tools:
+  - name: exclusion_map
+    description: |
+      Analyze grid boundaries to find where sardines can be excluded with minimal mackerel loss.
+      Returns top exclusion zones with sardine_count, mackerel_count, and exclusion_ratio.
+      Use this to guide notch placement on polygon edges.
+    input_schema:
+      type: object
+      properties: {}
+    implementation_py: |
+      def run(ctx, args):
+          # Build 200x200 exclusion grid
+          grid_size = 200
+          cell_size = 100000 // grid_size
+          
+          # Initialize grid with boundary info
+          # Each cell tracks: mackerels_on_edge, sardines_on_edge
+          mackerels_on_edge = [[0 for _ in range(grid_size)] for _ in range(grid_size)]
+          sardines_on_edge = [[0 for _ in range(grid_size)] for _ in range(grid_size)]
+          
+          # Read fish from program
+          lines = ctx.get_program().split('\n')
+          fish_positions = []
+          for line in lines:
+              line = line.strip()
+              if not line or 'fish[' not in line:
+                  continue
+              try:
+                  # Parse fish position from line
+                  parts = line.split(',')
+                  if len(parts) >= 2:
+                      x, y = int(parts[0].strip().replace('fish[', '').strip()), int(parts[1].strip().replace(']', '').strip())
+                      fish_type = 'mackerel' if 'mackerel' in line.lower() else 'sardine'
+                      fish_positions.append((x, y, fish_type))
+              except:
+                  continue
+          
+          # Populate grid with edge info
+          # Cell (cx, cy) represents region [cx*cell_size, (cx+1)*cell_size) x [cy*cell_size, (cy+1)*cell_size)
+          for x, y, ftype in fish_positions:
+              cx, cy = x // cell_size, y // cell_size
+              if 0 <= cx < grid_size and 0 <= cy < grid_size:
+                  if ftype == 'mackerel':
+                      mackerels_on_edge[cy][cx] += 1
+                  else:
+                      sardines_on_edge[cy][cx] += 1
+          
+          # Compute exclusion ratio and find top zones
+          cells = []
+          for cy in range(grid_size):
+              for cx in range(grid_size):
+                  m = mackerels_on_edge[cy][cx]
+                  s = sardines_on_edge[cy][cx]
+                  if m + s > 0:
+                      ratio = s / (s + m)
+                      cells.append((cx, cy, m, s, ratio))
+          
+          # Sort by exclusion ratio descending
+          cells.sort(key=lambda t: t[4], reverse=True)
+          
+          # Return top 50 exclusion zones
+          top_50 = cells[:50]
+          
+          return {
+              "exclusion_zones": [
+                  {"x_cell": c[0], "y_cell": c[1], "mackerels": c[2], 
+                   "sardines": c[3], "exclusion_ratio": round(c[4], 4)}
+                  for c in top_50
+              ],
+              "total_zones": len(cells)
+          }
+remove_tools: []

@@ -1,0 +1,147 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are solving the Erdos minimum overlap problem: minimize max_k integral h(x)(1-h(x+k)) dx
+  for a step function h: [0,2] -> [0,1] with integral(h)=1.
+
+  Current best bound: C5 <= 0.38092303510845016
+
+  CRITICAL INSIGHT: The seed program already has 12 diverse initialization patterns built-in.
+  Don't replace them with new initializations - that loses diversity!
+
+  STRATEGY: Modify the seed's EXISTING hyperparameters to explore a wider solution space.
+
+  Steps:
+  1. Call generate_hyper_diversity to get 5-7 DIFFERENT hyperparameter configurations
+  2. For EACH configuration, EDIT the seed to USE ONLY that hyperparameter set (keep num_restarts=3)
+  3. Call probe_solution to check constraint satisfaction and c5_bound estimate
+  4. Call evaluate_solution ONLY on the top 2-3 configurations with c5_bound < 0.375
+  5. If none work, edit to change num_intervals (try 400 or 1600) or penalty_strength
+
+  Key insight: The bottleneck is hyperparameter exploration, not initialization diversity.
+  The FFT evaluator is fast, so use probe_budget to screen many hyperparameter configs.
+
+
+skill_description: Escape local minima by exploring diverse hyperparameter configurations while preserving the seed's multi-restart diversity.
+skill_body: |
+  # Erdos Minimum Overlap - Hyperparameter Diversity Strategy
+
+  ## Problem
+  The seed optimizer has good initialization diversity but limited hyperparameter exploration.
+
+  ## Strategy
+
+  ### Phase 1: Generate Hyperparameter Variations
+  Use generate_hyper_diversity to get 5-7 fundamentally different hyperparameter sets:
+  - Vary num_intervals (400, 800, 1200, 1600)
+  - Vary learning_rate (0.001, 0.01, 0.05, 0.1)
+  - Vary penalty_strength (10, 50, 100, 200)
+  - Vary num_restarts (1, 5, 10)
+  - Vary num_steps (20000, 100000, 200000)
+
+  ### Phase 2: Screen with Probes (Use All 30 Probes Here!)
+  For each hyperparameter config:
+  1. EDIT the seed to use ONLY that config (edit the Hyperparameters dataclass)
+  2. Keep num_restarts=3 to maintain diversity
+  3. Call probe_solution to check: constraint satisfaction, c5_bound
+  4. Skip full evaluation if probe shows c5_bound >= 0.375 or constraint violation
+  5. Keep candidates with c5_bound < 0.37
+
+  ### Phase 3: Evaluate Promising Candidates
+  Call evaluate_solution on top 2-3 candidates from Phase 2.
+
+  ### Phase 4: If No Improvement, Change Problem Scale
+  Edit to change num_intervals dramatically (e.g., from 800 to 400 or 1600)
+
+  ## Success Criteria
+  - combined_score > 1.0 (c5_bound < 0.380923)
+  - Found at least one config with c5_bound < 0.37
+
+tool_descriptions:
+  edit_solution: |
+    Modify the EVOLVE-BLOCK to change hyperparameters.
+    To change Hyperparameters: find the @dataclass Hyperparameters block and edit the field values.
+    Example: change num_intervals from 800 to 400, or learning_rate from 0.007 to 0.01.
+    Keep all other seed code intact - especially keep num_restarts=3 for diversity.
+
+  evaluate_solution: Run full evaluation on a candidate program, returns combined_score.
+  probe_solution: |
+    Quick approximate evaluation (500 intervals, 10s runtime).
+    Returns estimate of c5_bound and constraint satisfaction.
+    Use this to screen MANY hyperparameter configs before full evaluation.
+
+  finish: Submit when combined_score > 1.0.
+
+sampling:
+  temperature: 0.8
+  top_p: 0.9
+  top_k: 15
+  max_tokens: 12000
+agent:
+  max_iterations: 60
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 10000
+new_tools:
+  - name: generate_hyper_diversity
+    description: |
+      Generate 6 different hyperparameter configurations for the Erdos optimizer.
+      Vary: num_intervals (400,800,1200,1600), learning_rate (0.001,0.01,0.05,0.1),
+      penalty_strength (10,50,100,200), num_restarts (1,3,5,10), num_steps (20000,59000,100000).
+      Each config is a complete Hyperparameters dataclass.
+    input_schema:
+      type: object
+      properties: {}
+    implementation_py: |
+      def run(ctx, args):
+          import numpy as np
+          configs = [
+              {"num_intervals": 400, "base_learning_rate": 0.01, "num_steps": 59000, "penalty_strength": 50, "num_restarts": 3, "seed_start": 0},
+              {"num_intervals": 800, "base_learning_rate": 0.01, "num_steps": 100000, "penalty_strength": 30, "num_restarts": 5, "seed_start": 0},
+              {"num_intervals": 1200, "base_learning_rate": 0.003, "num_steps": 200000, "penalty_strength": 100, "num_restarts": 3, "seed_start": 0},
+              {"num_intervals": 1600, "base_learning_rate": 0.05, "num_steps": 59000, "penalty_strength": 61, "num_restarts": 3, "seed_start": 0},
+              {"num_intervals": 400, "base_learning_rate": 0.1, "num_steps": 20000, "penalty_strength": 200, "num_restarts": 10, "seed_start": 0},
+              {"num_intervals": 800, "base_learning_rate": 0.05, "num_steps": 200000, "penalty_strength": 10, "num_restarts": 5, "seed_start": 0}
+          ]
+          return {"configs": configs, "num_configs": 6}
+
+new_skills:
+  - name: hyper-parameter-exploration
+    description: Explore diverse hyperparameter configurations while preserving multi-restart diversity. Screen with probes.
+    body: |
+      # Hyperparameter Exploration Strategy
+
+      ## Key Principle
+      The seed's 12 initialization patterns are excellent. Don't replace them.
+      Instead, explore different hyperparameter settings.
+
+      ## Workflow
+      1. Call generate_hyper_diversity to get 6 hyperparameter configs
+      2. For each config, EDIT ONLY the Hyperparameters dataclass
+      3. CRITICAL: Keep num_restarts=3 (or at least 1) to maintain diversity
+      4. Call probe_solution to check c5_bound < 0.37
+      5. Call evaluate_solution only on top 2-3 probe-passing configs
+      6. If no success, change num_intervals dramatically
+
+      ## Why This Works
+      - Different discretization scales (400 vs 1600 intervals) capture different function shapes
+      - Different learning rates help escape shallow local minima
+      - Different penalty strengths balance constraint satisfaction vs objective
+      - Probes let you screen 20+ configs with the 30-probe budget
+
+new_middlewares:
+  - name: use_hyper_explore
+    hook: before_model
+    description: Remind executor to explore hyperparameters, not replace initializations
+    implementation_py: |
+      def before_model(hook_input):
+          state = hook_input.get("state", {})
+          probes_left = state.get("probes_left", 0)
+          if probes_left > 2 and state.get("evals_left", 10) > 2:
+              return (
+                  "Remember: Don't replace the seed's 12 initialization patterns!\n"
+                  "They already provide good diversity.\n"
+                  "Instead, use generate_hyper_diversity to vary num_intervals, learning_rate,\n"
+                  "penalty_strength while keeping num_restarts >= 1.\n"
+                  "Use probes to screen configs before full evaluation."
+              )
+          return None

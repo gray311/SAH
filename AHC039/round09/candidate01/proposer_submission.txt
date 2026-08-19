@@ -1,0 +1,345 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are a C++ polygon optimizer for axis-aligned fish capture. Goal: maximize (mackerels - sardines + 1).
+  
+  CRITICAL STRATEGY: Coarse regional analysis with rectangle mutation.
+  
+  SEARCH METHOD (encodes in EVOLVE-BLOCK C++ code):
+  
+  1. COARSE REGIONAL ANALYSIS:
+     - Divide 100,000x100,000 area into 50x50 grid (cell_size=2000)
+     - Count mackerels (M) and sardines (S) per cell
+     - Compute cell score = M - S
+     - Identify top 20 cells with highest positive score
+  
+  2. RECTANGLE CONSTRUCTION (new approach):
+     - From each top cell, try to build a large axis-aligned rectangle
+     - Expand in 4 directions until: perimeter > 400,000 OR score drops significantly
+     - Each rectangle: ensure 4 <= vertices <= 1000, all coords in [0,100000]
+  
+  3. MULTI-RECTANGLE COMBINATION:
+     - Combine 2-5 top rectangles into a single polygon
+     - Use union of rectangles (ensure no self-intersection)
+     - Can create L-shapes, multi-lobed structures
+  
+  4. EDGE POSITION HILL CLIMBING:
+     - For each candidate polygon, refine each edge by ±100, ±200, ±300 units
+     - Use rectangular score estimation for fast iteration
+     - Repeat 2 refinement rounds
+  
+  5. REGIONAL DIVERSITY:
+     - Run 25-30 restarts with different random seeds
+     - Each restart: pick different random subset of top cells
+     - Track best polygon across all restarts
+  
+  6. VALIDATION:
+     - Ensure valid axis-aligned polygon (no self-intersection)
+     - Use simple edge-pair collision check
+  
+  Tools:
+  - edit_solution: Replace EVOLVE-BLOCK with complete C++ implementing above strategy
+  - evaluate_solution: Run C++ program, get score
+  - probe_solution: Not useful - full evaluation needed
+  - finish: Submit when you have a working regional rectangle strategy with 25-30 restarts
+
+  KEY DIFFERENCE from previous attempts: Use coarse 50x50 grid (cell_size=2000) for regional analysis, focus on building large rectangles that capture multiple fish clusters, use larger edge shifts (±100..300) for hill climbing.
+skill_description: |
+  Coarse regional analysis with rectangle mutation. Use 50x50 grid (cell_size=2000) to find mackerel-dense regions, build large axis-aligned rectangles, combine into multi-lobed polygons, edge refinement with ±100..300 shifts, 25-30 restarts.
+skill_body: |
+  # Regional Rectangle Strategy for Polygon Optimization
+  
+  ## Overview
+  Instead of fine-grained cell corridors, use coarse regional analysis to identify broad mackerel-dense areas and build large axis-aligned rectangles that capture multiple clusters while avoiding sardine penalties.
+  
+  ## Phase 1: Coarse Grid Construction
+  - Use 50x50 grid over [0,100000]x[0,100000] (cell_size=2000)
+  - For each cell, count mackerels (M) and sardines (S)
+  - Compute cell score = M - S
+  - Identify top 20 cells with highest positive score
+  
+  ## Phase 2: Rectangle Building
+  For each top cell, attempt to build a rectangle:
+  - Start from seed cell center
+  - Expand each direction (N,S,E,W) by trying larger distances
+  - Track cumulative score as rectangle grows
+  - Stop when: perimeter > 400,000, score drops > 50%, or boundary reached
+  - Ensure: 4 <= vertices <= 1000, coords in [0,100000]
+  
+  ## Phase 3: Multi-Rectangle Combination
+  - Select 2-5 best rectangles from Phase 2
+  - Compute their union (handle overlaps by merging)
+  - Convert to single polygon with no self-intersection
+  - Can form L-shapes, multi-lobed structures
+  
+  ## Phase 4: Edge Position Refinement
+  For each candidate polygon:
+  - For each edge, try shifts: ±100, ±200, ±300 units
+  - Use rectangular score estimation for fast evaluation
+  - Keep shift that maximizes M - S
+  - Repeat 2 refinement rounds
+  
+  ## Phase 5: Regional Diversity Search
+  - Run 25-30 restarts with different random seeds
+  - Each restart: 
+    * Randomly perturb top cell selection
+    * Pick random subset of 3-5 top cells
+    * Build rectangles, combine, refine
+  - Output single best polygon across all restarts
+  
+  ## Implementation Notes
+  - Use fixed-size 50x50 grid array for O(1) access
+  - Pre-compute all cell scores at startup
+  - Rectangle score = sum of grid cells covered
+  - Use efficient O(1) rectangle queries
+  - Total time per evaluation: < 2.0s
+  - Include simple self-intersection check (edge-pair collision)
+tool_descriptions:
+  edit_solution: 'Replace EVOLVE-BLOCK with C++ implementing regional rectangle strategy:
+  
+  1. Build 50x50 grid (cell_size=2000), count M/S per cell
+  
+  2. Find top 20 cells with highest positive score
+  
+  3. From each, build large axis-aligned rectangles
+  
+  4. Combine 2-5 rectangles into single polygon
+  
+  5. Refine edge positions with ±100..300 shifts
+  
+  6. Run 25-30 restarts, output best polygon
+  
+  Ensure <2.0s execution, valid output format.'
+  evaluate_solution: Run C++ program. Returns score (mackerels-sardines+1), validity, and remaining evaluations (budget=30). Each run has ~2.0s search window.
+  probe_solution: Not useful - full evaluation needed for accurate scoring.
+  finish: End when you have a working regional rectangle strategy with 25-30 restarts and edge refinement.
+sampling:
+  temperature: 0.9
+  top_p: 0.95
+  top_k: 15
+agent:
+  max_iterations: 40
+middleware:
+  budget_reminder_from_left: 3
+  long_tool_output_max_chars: 12000
+new_tools:
+  - name: build_rectangle
+    description: 'Build a large axis-aligned rectangle from a seed cell by expanding in 4 cardinal directions. Avoid regions with high sardine density. Returns rectangle vertices and score.'
+    input_schema:
+      type: object
+      properties:
+        seed_cell:
+          type: object
+          properties:
+            row:
+              type: integer
+            col:
+              type: integer
+        max_perimeter:
+          type: integer
+          default: 400000
+        expansion_factor:
+          type: integer
+          default: 200
+    implementation_py: |
+      def run(ctx, args):
+          import json
+          
+          seed_cell = args.get("seed_cell")
+          max_perimeter = args.get("max_perimeter", 400000)
+          expansion_factor = args.get("expansion_factor", 200)
+          
+          if seed_cell is None:
+              return {"error": "seed_cell not provided"}
+          
+          # Parse program to extract fish positions
+          program_text = ctx.get_program()
+          fish_data = []
+          for line in program_text.split('\n'):
+              line = line.strip()
+              if 'mackerel' in line.lower() or 'sardine' in line.lower():
+                  try:
+                      if '[' in line and ']' in line:
+                          parts = line.split('[')
+                          if len(parts) > 1:
+                              coords = parts[1].split(']')[0]
+                              if ',' in coords:
+                                  x_str, y_str = coords.split(',')
+                                  x, y = int(x_str.strip()), int(y_str.strip())
+                                  fish_type = 1 if 'mackerel' in line.lower() else -1
+                                  fish_data.append((x, y, fish_type))
+                  except:
+                      continue
+          
+          # Build 50x50 grid (cell_size=2000)
+          grid_size = 50
+          cell_size = 100000 // grid_size
+          grid = [[{"m": 0, "s": 0} for _ in range(grid_size)] for _ in range(grid_size)]
+          
+          for x, y, ftype in fish_data:
+              cx, cy = x // cell_size, y // cell_size
+              if 0 <= cx < grid_size and 0 <= cy < grid_size:
+                  if ftype == 1:
+                      grid[cy][cx]["m"] += 1
+                  else:
+                      grid[cy][cx]["s"] += 1
+          
+          # Start from seed cell and expand
+          sr, sc = seed_cell["row"], seed_cell["col"]
+          
+          # Expand in 4 directions
+          directions = [
+              ("N", -1, 0),
+              ("S", 1, 0),
+              ("E", 0, 1),
+              ("W", 0, -1)
+          ]
+          
+          # Try each direction to find optimal expansion
+          best_rect = None
+          best_score = -float("inf")
+          
+          for dir_name, dr, dc in directions:
+              # Expand in this direction
+              row_start, col_start = sr, sc
+              row_end, col_end = sr, sc
+              
+              curr_r, curr_c = sr, sc
+              curr_score = grid[sr][sc]["m"] - grid[sr][sc]["s"]
+              
+              # Expand up to expansion_factor cells in this direction
+              for _ in range(expansion_factor):
+                  new_r, new_c = curr_r + dr, curr_c + dc
+                  if not (0 <= new_r < grid_size and 0 <= new_c < grid_size):
+                      break
+                  
+                  m_count = grid[new_r][new_c]["m"]
+                  s_count = grid[new_r][new_c]["s"]
+                  cell_score = m_count - s_count
+                  
+                  # Stop if too many sardines
+                  if s_count > m_count * 3:
+                      break
+                  
+                  if cell_score > 0:
+                      curr_r, curr_c = new_r, new_c
+                  else:
+                      break
+              
+              # Compute rectangle from (row_start, col_start) to (curr_r, curr_c)
+              r_min, r_max = min(row_start, curr_r), max(row_start, curr_r)
+              c_min, c_max = min(col_start, curr_c), max(col_start, curr_c)
+              
+              # Check perimeter constraint
+              perimeter = 2 * ((r_max - r_min + 1) * cell_size + (c_max - c_min + 1) * cell_size)
+              if perimeter > max_perimeter * 0.8:  # Leave room for refinement
+                  continue
+              
+              # Compute rectangle score
+              rect_score = 0
+              for r in range(r_min, r_max + 1):
+                  for c in range(c_min, c_max + 1):
+                      rect_score += grid[r][c]["m"] - grid[r][c]["s"]
+              
+              if rect_score > best_score:
+                  best_score = rect_score
+                  best_rect = {
+                      "r_min": r_min,
+                      "r_max": r_max,
+                      "c_min": c_min,
+                      "c_max": c_max,
+                      "score": rect_score,
+                      "perimeter": perimeter
+                  }
+          
+          if best_rect is None:
+              # Fallback to single cell
+              best_rect = {
+                  "r_min": sr,
+                  "r_max": sr,
+                  "c_min": sc,
+                  "c_max": sc,
+                  "score": grid[sr][sc]["m"] - grid[sr][sc]["s"],
+                  "perimeter": 4 * cell_size
+              }
+          
+          # Convert to vertices
+          cell_size = 100000 // 50
+          vertices = [
+              (best_rect["c_min"] * cell_size, best_rect["r_min"] * cell_size),
+              (best_rect["c_max"] * cell_size, best_rect["r_min"] * cell_size),
+              (best_rect["c_max"] * cell_size, best_rect["r_max"] * cell_size),
+              (best_rect["c_min"] * cell_size, best_rect["r_max"] * cell_size)
+          ]
+          
+          return {
+              "vertices": vertices,
+              "score": best_rect["score"],
+              "perimeter": best_rect["perimeter"],
+              "grid_cells": {
+                  "r_min": best_rect["r_min"],
+                  "r_max": best_rect["r_max"],
+                  "c_min": best_rect["c_min"],
+                  "c_max": best_rect["c_max"]
+              }
+          }
+new_skills:
+  - name: regional-rectangle-guide
+    description: 'Use coarse regional analysis to identify mackerel-dense areas and build large rectangles. Expand in 4 directions, avoid sardine-dense regions, combine rectangles, refine with large shifts.'
+    body: |
+      # Regional Rectangle Strategy for Polygon Optimization
+      
+      ## Core Idea
+      
+      Use coarse 50x50 grid (cell_size=2000) to identify broad mackerel-dense regions and build large axis-aligned rectangles that capture multiple clusters while minimizing sardine penalties.
+      
+      ## Step-by-Step Method
+      
+      ### Step 1: Coarse Grid Analysis
+      
+      - Build 50x50 grid over [0,100000]x[0,100000] (cell_size=2000)
+      - Count mackerels (M) and sardines (S) in each cell
+      - Compute cell score = M - S
+      - Identify top 20 cells with highest positive score
+      
+      ### Step 2: Rectangle Construction
+      
+      For each top cell:
+      - Start from cell center
+      - Expand in each cardinal direction (N, S, E, W)
+      - Continue expanding as long as:
+        * Cell score >= 0
+        * Perimeter < 400,000
+        * Sardine density is not too high (S < M * 3)
+      - Track the best rectangle (highest M - S score)
+      
+      ### Step 3: Multi-Rectangle Combination
+      
+      - Select 2-5 best rectangles
+      - Compute their union (merge overlapping regions)
+      - Convert to single polygon with no self-intersection
+      - Can form L-shapes, multi-lobed structures
+      
+      ### Step 4: Edge Position Refinement
+      
+      For each candidate polygon:
+      - For each edge, try shifts: ±100, ±200, ±300 units
+      - Use rectangular score estimation for fast evaluation
+      - Keep shift that maximizes M - S
+      - Repeat 2 refinement rounds
+      
+      ### Step 5: Regional Diversity Search
+      
+      - Run 25-30 restarts with different random seeds
+      - Each restart:
+        * Randomly perturb top cell selection
+        * Pick random subset of 3-5 top cells
+        * Build rectangles, combine, refine
+      - Output single best polygon
+      
+      ## Key Success Factors
+      
+      - Use coarse grid to capture broad patterns
+      - Build large rectangles to maximize coverage
+      - Use large edge shifts (±100..300) for effective refinement
+      - Many restarts to explore diverse configurations
+remove_tools: []

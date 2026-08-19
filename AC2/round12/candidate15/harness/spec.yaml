@@ -1,0 +1,276 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are an expert in functional analysis and mathematical optimization, specializing in discovering functions that maximize C₂ = ||f★f||₂² / ((∫f)²||f★f||∞).
+
+  Current best: 1.03841 (achieved by a 5-level asymmetric pattern with heights 0.60, 1.20, 2.20, 1.20, 0.60).
+
+  CRITICAL INSIGHT: The seed program's 13 patterns represent LOCAL OPTIMA. The harness has repeatedly failed to improve because it tries RANDOM mutations that barely change the function, or it exhausts a pattern class without systematic exploration.
+
+  YOUR MISSION: BEAT 1.03841 by discovering a NEW pattern class or substantially improving existing ones through DIVERSIFIED, LARGE-MAGNITUDE mutations.
+
+  STRATEGY - TWO-PHASE APPROACH:
+
+  PHASE 1: EXHAUSTIVE PATTERN REFINEMENT (first 15 evals)
+  1. Analyze the current best pattern (likely the 5-level asymmetric one at heights [0.60, 1.20, 2.20, 1.20, 0.60])
+  2. Generate mutations that CHANGE THE PATTERN STRUCTURE, not just tweak parameters:
+     - HEIGHT SCALING: Scale all heights by 1.05-1.15 (not just ±0.05)
+     - WIDTH SCALING: Expand/contract intervals by 15-25% (not just 5-10%)
+     - LEVEL COUNT: Add/remove a level (e.g., 5-level → 6-level or 4-level)
+     - SYMMETRY BREAKING: Take a symmetric pattern and make it asymmetric in a different way
+  3. After 3 failed mutation types, move to PHASE 2
+
+  PHASE 2: ARCHITECTURE EXPLORATION (remaining evals)
+  Explore entirely new pattern classes:
+  - Multi-peaked functions (2-4 separate peaks)
+  - Smoothed transitions between levels (use soft steps)
+  - Non-monotonic patterns (peak at edges, dip in center)
+  - Very narrow high peaks with wide low bases
+  - Staircase patterns with 6+ levels
+
+  KEY PRINCIPLES:
+  - MUTATION MAGNITUDE MATTERS: ±0.05 height changes are too small. Try ±0.15-0.30.
+  - STRUCTURE OVER PARAMETERS: Changing a 5-level to a 6-level pattern is more promising than tweaking heights.
+  - DIVERSITY IS CRITICAL: After 2 mutations of the same type fail, IMMEDIATELY switch to a completely different mutation type.
+  - TRACK SUCCESS: Remember which mutation type worked last. Once you find a working type, generate 3-5 variants of IT before moving on.
+
+  FAILURE MODES TO AVOID:
+  - X: Making tiny parameter tweaks that don't change the function meaningfully
+  - X: Staying with one mutation type after 2 failures
+  - X: Ignoring the global structure and only tweaking numbers
+  - X: Wasting evals on variations that are too similar
+
+  EVALUATION STRATEGY:
+  - Call pattern_mutator ONCE at start to get initial high-magnitude proposals
+  - Each iteration: ask for 2-3 MUTUALLY DISTINCT mutations (different types), test with evaluate_solution
+  - Track which MUTATION TYPE improves (e.g., "height_scaling", "width_scaling", "level_count_change")
+  - When a mutation type works: generate 5+ variants of that type
+  - When a mutation type fails 2x: switch to a completely different type immediately
+  - Only after trying 4-5 mutation types without success, try entirely new architectures
+tool_descriptions:
+  edit_solution: |
+    Modify the EVOLVE-BLOCK to implement a pattern mutation. Target LARGE changes:
+
+    - HEIGHT SCALING: Multiply all heights by a factor of 1.08-1.20 (e.g., 2.20 → 2.55, 1.20 → 1.32)
+
+    - WIDTH SCALING: Change interval boundaries by 15-25% (e.g., 0.25n → 0.30n for expansion)
+
+    - LEVEL COUNT: Add or remove a level. Example: convert 5-level [0.60, 1.20, 2.20, 1.20, 0.60] to 6-level by splitting one interval and adding a new height level.
+
+    - STRUCTURAL CHANGES: Take a symmetric pattern and create a new asymmetric variant, OR take a 5-level pattern and create a 6-level or 4-level version.
+
+    - CRITICAL: Changes must be SUBSTANTIAL. ±0.05 on heights and ±5% on widths are too small to escape local optima.
+  evaluate_solution: |
+    Full evaluation. Returns combined_score. Call ONCE per mutation variant.
+    Budget: 30 evals total. Each eval tests one concrete mutation.
+  probe_solution: |
+    SKIP. This task's evaluator is numerically sensitive and probe is unreliable.
+  finish: |
+    Report the best C₂ achieved and the pattern class/mutation type that produced it.
+sampling:
+  temperature: 0.7
+  top_p: 0.9
+  top_k: 50
+  max_tokens: 16384
+agent:
+  max_iterations: 80
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 20000
+new_tools:
+- name: diversity_generator
+  description: |
+    Generate 3-5 MUTUALLY DISTINCT, HIGH-MAGNITUDE pattern mutation proposals.
+    Focus on STRUCTURAL changes (level count, symmetry breaking, interval reorganization) rather than small parameter tweaks.
+    Each proposal should be from a DIFFERENT mutation category: (1) height_scaling, (2) width_scaling, (3) level_addition/removal, (4) symmetry_breaking_type2, (5) multi_peaked_variant.
+  input_schema:
+    type: object
+    properties: {}
+  implementation_py: |
+    def run(ctx, args):
+        import re
+        prog = ctx.get_program()
+        if "# EVOLVE-BLOCK" not in prog:
+            return {"note": "no evolve block", "proposals": []}
+        
+        # Extract height values
+        height_matches = re.findall(r'\.set\((\d+\.\d+)\)', prog)
+        height_matches += re.findall(r'set\((\d+\.\d+)\)', prog)
+        heights = [float(h) for h in height_matches if h]
+        
+        if not heights:
+            return {"note": "could not parse heights", "proposals": []}
+        
+        # Categorize current pattern
+        num_levels = len(heights)
+        avg_h = sum(heights) / len(heights)
+        max_h = max(heights)
+        min_h = min(heights)
+        
+        proposals = []
+        
+        # Proposal 1: Height scaling (multiply all by factor)
+        scale_factor = 1.12 if num_levels < 6 else 1.08
+        proposals.append({
+            "mutation_type": "height_scaling",
+            "description": f"Scale all heights by {scale_factor:.2f}x",
+            "changes": {
+                "operation": "multiply_all_heights",
+                "factor": scale_factor,
+                "affected_levels": "all"
+            },
+            "rationale": "Scaling all heights proportionally can improve the L2/∞ ratio by changing the relative weighting"
+        })
+        
+        # Proposal 2: Width scaling on core interval
+        core_indices = [1, 2] if num_levels >= 3 else [0, 1]
+        expansion = 0.22
+        proposals.append({
+            "mutation_type": "width_scaling",
+            "description": f"Expand core interval(s) by {expansion*100:.0f}%",
+            "changes": {
+                "operation": "expand_intervals",
+                "expansion_fraction": expansion,
+                "target": "core_intervals"
+            },
+            "rationale": "Wider intervals increase convolution overlap, boosting L2 norm"
+        })
+        
+        # Proposal 3: Level count change (add/remove a level)
+        if num_levels <= 7:
+            level_change = 1
+            proposals.append({
+                "mutation_type": "level_addition",
+                "description": f"Add {level_change} level(s) to create {num_levels + level_change}-level pattern",
+                "changes": {
+                    "operation": "add_level",
+                    "new_level_count": num_levels + level_change,
+                    "strategy": "split_middle_interval"
+                },
+                "rationale": "More levels allow finer control over the convolution shape"
+            })
+        else:
+            proposals.append({
+                "mutation_type": "level_reduction",
+                "description": f"Reduce to {num_levels - 1} level(s) by merging adjacent levels",
+                "changes": {
+                    "operation": "merge_adjacent_levels",
+                    "new_level_count": num_levels - 1,
+                    "strategy": "merge_middle"
+                },
+                "rationale": "Fewer levels with higher amplitudes may improve the ratio"
+            })
+        
+        # Proposal 4: Symmetry breaking type 2 (different from just making asymmetric)
+        # Shift heights in a non-uniform way
+        proposals.append({
+            "mutation_type": "symmetry_breaking_gradient",
+            "description": "Create gradient-like height asymmetry: left side higher, right side lower",
+            "changes": {
+                "operation": "gradient_asymmetry",
+                "strategy": "left_high_right_low",
+                "scale": 0.12
+            },
+            "rationale": "Gradient asymmetry breaks perfect symmetry differently than random asymmetry"
+        })
+        
+        # Proposal 5: Multi-peaked variant (if not already multi-peaked)
+        if num_levels <= 3:
+            proposals.append({
+                "mutation_type": "multi_peaked_creation",
+                "description": "Convert to 4-level multi-peaked pattern with two distinct peaks",
+                "changes": {
+                    "operation": "create_two_peaks",
+                    "new_level_count": 4,
+                    "strategy": "add_wings"
+                },
+                "rationale": "Two distinct peaks can create a different convolution profile"
+            })
+        else:
+            proposals.append({
+                "mutation_type": "narrow_peak_creation",
+                "description": "Add a very narrow, high peak in the center",
+                "changes": {
+                    "operation": "add_narrow_peak",
+                    "peak_height": max_h * 1.15,
+                    "peak_width_fraction": 0.05
+                },
+                "rationale": "A narrow high peak increases ||f★f||₂² significantly without increasing ||f★f||∞ proportionally"
+            })
+        
+        return {
+            "analysis": {
+                "current_levels": num_levels,
+                "avg_height": avg_h,
+                "height_range": max_h - min_h
+            },
+            "proposals": proposals
+        }
+new_skills:
+- name: structural-mutation-strategy
+  description: |
+    Focus on STRUCTURAL changes to escape local optima. Small parameter tweaks won't work.
+    Prioritize: level count changes, symmetry breaking, width scaling, height scaling.
+  body: |
+    # Structural Mutation Strategy for C₂ Maximization
+
+    ## Why Structural Changes Are Needed
+
+    The seed program's patterns are locally optimized. Small tweaks (±0.05 on heights, 5% on widths) cannot escape these local optima. You need STRUCTURAL changes that alter the fundamental pattern class.
+
+    ## Structural Mutation Categories (in order of priority)
+
+    ### 1. Height Scaling (High Priority)
+    - Multiply ALL heights by a factor of 1.08-1.20
+    - This changes the relative weighting of all levels uniformly
+    - Can improve the L2/∞ ratio by balancing the convolution profile
+
+    ### 2. Width Scaling (High Priority)
+    - Expand or contract intervals by 15-25% (not 5-10%)
+    - Focus on expanding the "core" interval(s) where the function is highest
+    - Wider intervals increase convolution overlap, boosting ||f★f||₂²
+
+    ### 3. Level Count Changes (Very High Priority)
+    - Add a level: split an existing interval and introduce a new height
+    - Remove a level: merge two adjacent levels
+    - This fundamentally changes the pattern class!
+    - A 5-level → 6-level or 4-level change is much more promising than tweaking heights
+
+    ### 4. Symmetry Breaking Type 2 (Medium Priority)
+    - Instead of random asymmetry, create a gradient: left side higher, right side lower
+    - Or: make the asymmetry position-dependent (more asymmetric at one end)
+    - This breaks symmetry in a more systematic way
+
+    ### 5. Multi-Peaked Creation (Medium Priority)
+    - If current pattern has ≤3 levels, create a 4-level pattern with two distinct peaks
+    - If already multi-peaked, add a narrow high peak in the center
+    - More peaks = more degrees of freedom in the convolution profile
+
+    ## Execution Protocol
+
+    1. Call diversity_generator ONCE at start to get 5 distinct proposals
+    2. For EACH proposal type (try to keep them distinct):
+       - Implement with edit_solution (make LARGE changes)
+       - Evaluate with evaluate_solution
+       - If improvement: generate 3-5 more variants of THIS mutation type
+       - If 2 failures: switch to a DIFFERENT mutation type immediately
+    3. After exhausting 4-5 mutation types without success, try entirely new architectures
+    4. NEVER stick with one mutation type after 2 failures
+
+    ## Key Principle
+
+    STRUCTURE > PARAMETERS. A 5-level → 6-level change is more powerful than tweaking heights by 0.05.
+new_middlewares:
+- name: large_mutation_enforcement
+  hook: before_model
+  description: |
+    Enforce large-magnitude mutations. Reject small tweaks.
+  implementation_py: |
+    def before_model(hook_input):
+        return "WARNING: Small parameter tweaks won't escape local optima. Make LARGE changes: height scaling by 15-30%, width scaling by 20-25%, add/remove a level, or create a completely new pattern structure. ±0.05 on heights is too small!"
+- name: diversity_switch_enforcement
+  hook: before_model
+  description: |
+    Enforce mutation type diversity. Switch after 2 failures.
+  implementation_py: |
+    def before_model(hook_input):
+        return "If you've tried 2+ variants of the same mutation type without improvement, IMMEDIATELY switch to a DIFFERENT mutation type. Don't exhaust one type!"

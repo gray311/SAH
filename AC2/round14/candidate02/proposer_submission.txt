@@ -1,0 +1,221 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are an expert in functional analysis and mathematical optimization for the C2 constant:
+  C2 = ||f★f||₂² / ((∫f)² ||f★f||_∞), where f: ℝ→ℝ is non-negative.
+
+  Current best: 0.8962799441554086 (step function by AlphaEvolve).
+  Target: Beat this to establish a new world record.
+
+  CRITICAL STRATEGY: The step-function record is a LOCAL optimum. To break through, you must:
+  1. FIRST: Analyze the current step pattern's structure using step_pattern_analyzer
+  2. SECOND: Systematically refine heights, widths, and positions within the step architecture
+  3. THIRD: Only explore new function families (Gaussian, spline, etc.) if step refinements exhaust after 3+ iterations
+
+  Key insight: Step functions work because their convolution has favorable L2/∞ ratios. Small, mathematically-informed perturbations to heights and widths can push C2 above the record.
+
+  Exploration Protocol:
+  - At iteration 1: call step_pattern_analyzer to extract current pattern parameters
+  - For each mutation: perturb ONE parameter (height ±0.03, width ±5%, position ±2%)
+  - Use probe_solution to rank mutations (30 probes available), then evaluate top 2-3
+  - If no improvement after 3 mutation types on current pattern: try new families
+
+  Function constraints: f(x)≥0, ∫f>0, numerically stable convolution.
+
+  Tools:
+  - edit_solution: implement mutations (change ONE parameter at a time)
+  - evaluate_solution: full score, budget-limited (30 evals total)
+  - probe_solution: approximate score on subsample, FAST and RELIABLE for ranking step functions
+  - step_pattern_analyzer: analyze current step pattern and suggest mutations (NEW TOOL)
+  - generate_candidates: get diverse function proposals across multiple families
+skill_description: |
+  Step-function refinement for C₂ maximization. Use step_pattern_analyzer to extract pattern structure, then systematically perturb heights, widths, and positions. Only explore new architectures after exhausting step refinements.
+skill_body: |
+  # C₂ Maximizer: Step-Function Refinement Protocol
+
+  ## Core Principle
+
+  Step functions achieve the current record through carefully tuned heights and widths. To beat it, make SMALL, TARGETED perturbations to ONE parameter at a time, then evaluate.
+
+  ## Phase 1: Pattern Analysis (Iteration 1)
+
+  1. Call step_pattern_analyzer ONCE to extract:
+     - Number of levels/steps
+     - Heights at each interval
+     - Width ratios between intervals
+     - Overall asymmetry
+
+  2. Understand the pattern class before mutating
+
+  ## Phase 2: Single-Parameter Mutation
+
+  For each mutation, change ONLY ONE parameter:
+
+  **Mutation Type 1: Height Perturbation**
+  - Adjust ONE level height by ±0.03-0.08
+  - Try: increase the tallest level slightly, decrease the shortest
+  - Rationale: Alters ||f★f||₂² vs ||f★f||_∞ ratio
+
+  **Mutation Type 2: Width Expansion/Contraction**
+  - Change ONE interval width by ±3-8%
+  - Expand the "core" interval (highest step) to increase L2 norm
+  - Contract "wing" intervals to reduce infinity norm
+
+  **Mutation Type 3: Position Shift**
+  - Shift ONE boundary by ±1-2% of domain
+  - Can break symmetry and reduce constructive interference
+
+  ## Phase 3: Mutation Cycle
+
+  1. Generate 3-5 mutations (each perturbing different parameters)
+  2. Call probe_solution for each (use all 30 probes to rank)
+  3. Call evaluate_solution for top 2-3 by probe score
+  4. If improvement: continue refining that parameter direction
+  5. If no improvement after 3 parameter types: try next mutation cycle
+
+  ## Phase 4: Architecture Exploration (last resort)
+
+  Only after exhausting 3+ mutation cycles without improvement:
+  - Call generate_candidates for new families
+  - But expect: smooth functions likely UNDERPERFORM step functions
+  - Return to step refinement if new families fail
+
+  Key: ONE parameter at a time. Systematic refinement beats random exploration.
+tool_descriptions:
+  edit_solution: |
+    Modify the EVOLVE-BLOCK to implement a SINGLE parameter mutation:
+    - Height mutation: change one step height by ±0.03-0.08 (e.g., 1.40 → 1.44)
+    - Width mutation: change one interval boundary by ±3-8% (e.g., 0.25n → 0.26n)
+    - Position mutation: shift one boundary by ±1-2% of domain
+    - ONLY change ONE parameter per edit. Multiple changes confound analysis.
+    - Use SEARCH/REPLACE for precise modifications
+  evaluate_solution: |
+    Full evaluation. Returns combined_score. Budget: 30 evals total.
+    Call ONCE per mutation variant that passes probe screening.
+    Each eval tests one concrete mutation - ensure it's ready.
+  probe_solution: |
+    Approximate score on 10% subsampled data. FAST and RELIABLE for step functions.
+    You have 30 probes - USE THEM TO RANK mutations BEFORE full evaluation.
+    Step-function C2 scores are stable on subsamples. Call this for every mutation.
+  finish: |
+    Report best C₂ achieved and which parameter mutations led there.
+sampling:
+  temperature: 0.4
+  top_p: 0.85
+  top_k: 15
+  max_tokens: 16384
+agent:
+  max_iterations: 60
+middleware:
+  budget_reminder_from_left: 3
+  long_tool_output_max_chars: 15000
+new_tools:
+- name: step_pattern_analyzer
+  description: |
+    Analyze the current step function pattern by extracting heights, widths, and positions from the EVOLVE-BLOCK.
+    Returns structured analysis: number of levels, height values, width ratios, asymmetry score.
+    Suggests 3-5 concrete mutation directions (e.g., "increase level 2 height by 0.05", "expand interval 1 by 5%").
+    Call this at iteration 1 and after each failed mutation cycle to guide systematic refinement.
+  input_schema:
+    type: object
+    properties: {}
+  implementation_py: |
+    def run(ctx, args):
+        import re
+        program = ctx.get_program()
+        heights = re.findall(r'base_height\s*=\s*([\d.]+)', program)
+        heights = [float(h) for h in heights] if heights else []
+        width_patterns = re.findall(r'int\(([0-9.]+)\s*\*\s*n\)', program)
+        widths = [float(w) for w in width_patterns] if width_patterns else []
+        bump_heights = re.findall(r'bump(\d*)_height\s*=\s*([\d.]+)', program)
+        for _, bh in bump_heights:
+            heights.append(float(bh))
+        width_ratios = []
+        if len(widths) >= 2:
+            for i in range(len(widths)-1):
+                width_ratios.append(widths[i+1]/max(widths[i], 1e-6))
+        asymmetry = 0.0
+        if len(widths) >= 4:
+            left_width = sum(widths[:len(widths)//2])
+            right_width = sum(widths[len(widths)//2:])
+            asymmetry = abs(left_width - right_width) / max(left_width + right_width, 1e-6)
+        suggestions = []
+        if heights:
+            max_h_idx = heights.index(max(heights))
+            min_h_idx = heights.index(min(heights))
+            suggestions.append({"type": "height_increase", "target": f"height_{max_h_idx}", "direction": "increase", "magnitude": 0.05, "rationale": "Increase tallest level to boost L2 norm more than infinity norm"})
+            suggestions.append({"type": "height_decrease", "target": f"height_{min_h_idx}", "direction": "decrease", "magnitude": 0.05, "rationale": "Decrease shortest level to reduce infinity norm"})
+        if width_ratios:
+            avg_ratio = sum(width_ratios) / len(width_ratios)
+            for i, ratio in enumerate(width_ratios):
+                if ratio > avg_ratio * 1.1:
+                    suggestions.append({"type": "width_contract", "target": f"width_{i}", "direction": "contract", "magnitude": 0.05, "rationale": "Contract wide interval to reduce ||f★f||_∞"})
+                elif ratio < avg_ratio * 0.9:
+                    suggestions.append({"type": "width_expand", "target": f"width_{i}", "direction": "expand", "magnitude": 0.05, "rationale": "Expand narrow interval to boost ||f★f||₂²"})
+        while len(suggestions) < 3:
+            suggestions.append({"type": "height_perturb", "target": "random_level", "direction": "random_pm_0.03", "magnitude": 0.03, "rationale": "Small random perturbation to explore local neighborhood"})
+        return {"num_levels": len(heights), "heights": heights[:10], "width_ratios": width_ratios[:5], "asymmetry": asymmetry, "suggestions": suggestions[:5]}
+new_skills:
+- name: systematic-step-refinement
+  description: |
+    Systematic single-parameter mutation protocol for step-function C₂ optimization.
+    Focus on ONE parameter change per iteration to understand causality.
+  body: |
+    # Systematic Step-Function Refinement Protocol
+
+    ## Core Principle
+    Step functions work through careful parameter tuning. To beat the record, make SMALL, TARGETED changes to ONE parameter at a time.
+
+    ## Mutation Protocol
+    ### Cycle 1: Height Exploration
+    1. Use step_pattern_analyzer to identify current heights
+    2. Pick ONE height level
+    3. Perturb by ±0.03 to ±0.08
+    4. Call probe_solution to check score
+    5. If improvement: continue in same direction; else try ±0.05
+
+    ### Cycle 2: Width Exploration
+    1. Use step_pattern_analyzer to identify current widths
+    2. Pick ONE interval
+    3. Change boundary by ±3% to ±8%
+    4. Call probe_solution
+    5. Prefer expanding the "core" (tallest) interval
+
+    ### Cycle 3: Position Exploration
+    1. Pick ONE boundary
+    2. Shift by ±1-2% of domain
+    3. Call probe_solution
+    4. Test both left and right shifts
+
+    ## Ranking & Evaluation
+    1. Generate 3-5 mutations (different parameters)
+    2. Probe ALL of them (use your 30 probes!)
+    3. Evaluate top 2 by probe score
+    4. If BOTH fail: reset and try next cycle
+    5. If ONE succeeds: refine that parameter further
+
+    ## When to Explore New Families
+    Only after exhausting 3+ mutation cycles without improvement:
+    - Try Gaussian mixtures, splines, etc.
+    - But expect them to UNDERPERFORM step functions
+    - Return to step refinement if they fail
+
+    Key: Systematic, single-parameter mutations beat random exploration.
+new_middlewares:
+- name: force_single_param_change
+  hook: before_tool
+  description: |
+    Warn against multi-parameter edits. Remind solver to change ONE parameter at a time for clear causality.
+  implementation_py: |
+    def before_tool(hook_input):
+        if "edit_solution" in hook_input.get("tool_name", ""):
+            return "CRITICAL: Change ONLY ONE parameter (height, width, or position) per edit. Multiple changes confound analysis and waste evaluations."
+        return None
+- name: probe_before_any_eval
+  hook: before_tool
+  description: |
+    Enforce probe-first strategy. Remind solver to always probe before full evaluation to maximize the 30-eval budget.
+  implementation_py: |
+    def before_tool(hook_input):
+        if "evaluate_solution" in hook_input.get("tool_name", ""):
+            return "Remember: You have 30 probes! Always call probe_solution first to rank mutations. Only evaluate top 2-3."
+        return None

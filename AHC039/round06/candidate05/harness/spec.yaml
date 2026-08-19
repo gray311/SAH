@@ -1,0 +1,145 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are a C++ optimization expert tasked with improving a polygon-constructing program.
+  The program must find an axis-aligned orthogonal polygon that maximizes:
+    (mackerels inside) - (sardines inside) + 1
+  
+  Key constraints:
+    - Polygon edges must be parallel to x or y axes
+    - Max 1000 vertices, max perimeter 400,000
+    - Integer coordinates 0 to 100,000
+    - No self-intersections
+    - Must include a bounded internal search loop to fit 2.0s time limit
+  
+  Method:
+  1. CALL analyze_fish_grid ONCE to understand fish distribution patterns
+  2. Design a C++ algorithm that uses this insight to construct polygons
+  3. Implement a time-bounded search inside the program (e.g., hill climbing, grid-based exploration)
+  4. Ensure all constraints are checked efficiently
+  
+  Critical: The solver must output VALID C++ code that compiles and runs within time limits.
+  Focus on algorithmic improvements to the search strategy, not cosmetic changes.
+new_tools:
+  - name: analyze_fish_grid
+    description: |
+      Analyze the fish distribution from input to identify high-value regions.
+      Returns counts of mackerels and sardines per cell in a coarse grid,
+      helping guide polygon construction toward dense mackerel regions.
+    input_schema: {type: object, properties: {}}
+    implementation_py: |
+      def run(ctx, args):
+          names = ctx.list_task_inputs()
+          if not names:
+              return {"note": "no task inputs"}
+          # Read all fish positions from the input
+          try:
+              df_mack = ctx.read_input_df(names[0], nrows=10000)  # First half
+              df_sard = ctx.read_input_df(names[1], nrows=10000)  # Second half
+          except:
+              return {"note": "input read failed"}
+          
+          mackerels = set()
+          sardines = set()
+          for _, row in df_mack.iterrows():
+              mackerels.add((int(row[0]), int(row[1])))
+          for _, row in df_sard.iterrows():
+              sardines.add((int(row[0]), int(row[1])))
+          
+          # Create a coarse grid (e.g., 100x100 cells)
+          cell_size = 1000
+          grid = {}
+          
+          for (x, y) in mackerels:
+              cx, cy = x // cell_size, y // cell_size
+              grid[(cx, cy)] = grid.get((cx, cy), 0) + 1
+          
+          for (x, y) in sardines:
+              cx, cy = x // cell_size, y // cell_size
+              grid[(cx, cy)] = grid.get((cx, cy), 0) - 1
+          
+          # Find best regions
+          best_cells = sorted(grid.items(), key=lambda x: -x[1])[:20]
+          
+          return {
+              "mackerel_count": len(mackerels),
+              "sardine_count": len(sardines),
+              "grid_resolution": cell_size,
+              "best_regions": [(c, mc, sc) for c, (mc, sc) in best_cells]
+          }
+remove_tools: []
+new_skills:
+  - name: cpp-polygon-search
+    description: |
+      For orthogonal polygon optimization in C++, implement an internal bounded search.
+      Use grid analysis to seed promising regions, then perform hill climbing or
+      iterative refinement while checking validity constraints.
+    body: |
+      # C++ Polygon Search Strategy for Orthogonal Polygons
+      
+      ## Phase 1: Grid Analysis
+      - Use analyze_fish_grid to get high-level fish distribution
+      - Identify dense mackerel regions and avoid sardine-heavy areas
+      - Create a coarse grid map for rapid lookups
+      
+      ## Phase 2: Seed Polygon Construction
+      - Start with a simple rectangle or L-shaped polygon
+      - Place vertices at grid boundaries where mackerels are dense
+      - Ensure all edges are axis-aligned
+      
+      ## Phase 3: Internal Optimization Loop
+      - Use a time budget (e.g., 1.5s for 150 test cases)
+      - Implement iterative improvements:
+        * Try expanding polygon edges outward
+        * Split or merge polygon regions
+        * Adjust vertices to capture more mackerels
+        * Always validate: perimeter <= 400000, vertices <= 1000
+      
+      ## Phase 4: Validation
+      - Check all constraints before final output
+      - Ensure no self-intersections (for orthogonal polygons, check edge crossings)
+      - Verify output format matches expected format
+      
+      ## Tips:
+      - Use KD-trees or spatial hashing for fast point-in-polygon queries
+      - Pre-sort fish by coordinate for efficient grid population
+      - Cache intermediate results to avoid redundant computation
+      - The search must complete within the time limit - don't optimize too much!
+tool_descriptions:
+  edit_solution: |
+    Edit the EVOLVE-BLOCK region. Prefer targeted SEARCH/REPLACE diffs over full rewrites.
+    The program must implement a complete C++ solution with an internal bounded search loop.
+    Focus on algorithmic improvements: change the search strategy, add grid analysis, or
+    optimize the validity checks. Each edit should be a concrete hypothesis about better polygon construction.
+  evaluate_solution: |
+    Run the C++ program against the evaluator. Returns combined_score (higher is better),
+    validity (0 if invalid), errors, best score so far, and evaluations remaining.
+    Each evaluation costs 1 from your budget. Use feedback to guide the next edit.
+  probe_solution: |
+    Run the current program on a subsampled dataset (first 2000 fish rows) for quick scoring.
+    Does NOT consume the evaluation budget but scores are approximate and not comparable to full scores.
+    Use probes to rank multiple variants quickly, then confirm the best with evaluate_solution.
+  finish: |
+    End the session when you've exhausted your budget or can't improve the best score.
+    The best-scoring valid program is automatically submitted.
+sampling:
+  temperature: 0.8
+  top_p: 0.9
+  top_k: 30
+  max_tokens: 12000
+agent:
+  max_iterations: 45
+middleware:
+  budget_reminder_from_left: 4
+  long_tool_output_max_chars: 10000
+new_middlewares:
+  - name: validate_before_submit
+    hook: before_model
+    description: |
+      Remind the solver to check polygon validity and time constraints before submitting.
+      Ensures the solver doesn't waste evaluations on invalid programs.
+    implementation_py: |
+      def before_model(hook_input):
+          code = hook_input.get("code", "")
+          if "EVOLVE-BLOCK" in code:
+              return "Remember: Check that your polygon has valid constraints (perimeter <= 400000, vertices <= 1000, no self-intersections) before calling evaluate_solution."
+          return None

@@ -1,0 +1,285 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are a C++ polygon optimizer for axis-aligned fish capture. Goal: maximize (mackerels - sardines + 1).
+
+  This is a combinatorial optimization problem requiring vertex-level refinement.
+
+  SEARCH METHOD (encodes in EVOLVE-BLOCK C++ code):
+
+  1. PARSE FISH DATA:
+     - Read all fish coordinates from input (first 2500 are mackerels, next 2500 are sardines)
+     - Store in array for O(1) access
+
+  2. POLYGON STRUCTURE:
+     - Start with 4-1000 axis-aligned vertices with integer coordinates in [0,100000]
+     - Ensure perimeter <= 400,000
+     - Each edge parallel to x or y axis (axis-aligned)
+     - No self-intersection
+
+  3. SCORING APPROACH:
+     - Use ray-casting point-in-polygon test for exact scoring
+     - For each fish, check if inside: ray-casting algorithm (even intersections = inside)
+     - Handle boundary cases: fish on edge counts as inside
+
+  4. SEARCH STRATEGY (within 2s time limit):
+     - Begin with 3-5 diverse initial polygons:
+       * Large bounding box covering entire coordinate range
+       * Rectangle around center region
+       * Multiple smaller rectangles at different quadrants
+     - For each polygon, generate 3-5 child variants:
+       * Edge expansion: shift each edge outward by ±10, ±20, ±50 units (where beneficial)
+       * Edge contraction: shift edge inward to exclude nearby sardines
+       * Vertex addition: add new vertices at fish locations to create finer control
+       * Vertex removal: merge vertices where edges form 180° angles
+     - Score all variants using ray-casting exact method
+     - Keep top 5 variants for next iteration (beam search, 3-4 iterations)
+     - Output single best valid polygon
+
+  5. VALIDATION CRITICAL:
+     - 4 <= m <= 1000 vertices
+     - Integer coordinates in [0,100000]
+     - Perimeter <= 400,000
+     - No self-intersection (check all non-adjacent edge pairs)
+     - All vertices distinct
+
+  Tools:
+  - edit_solution: Replace EVOLVE-BLOCK with complete C++ implementation using beam search
+  - evaluate_solution: Run C++ program, get exact score
+  - probe_solution: NOT useful - full evaluation needed for exact polygon scoring
+  - finish: Submit when you have working beam search over polygon vertices
+
+  KEY STRATEGY: Implement beam search (3-5 branches, 3-4 iterations) with vertex-level mutations. Each branch explores: expand edges to capture more mackerels, contract edges to exclude sardines, add vertices at fish locations. Use ray-casting for exact scoring.
+skill_description: Beam search over polygon vertices. Start with 3-5 diverse polygons, explore vertex-level mutations (±10, ±20, ±50 shifts, add/remove vertices at fish locations), use ray-casting for exact scoring, beam search (3-5 branches × 3-4 iterations), output best valid polygon.
+skill_body: |
+  # Beam Search for Axis-Aligned Polygon Optimization
+
+  ## Overview
+  This strategy uses beam search (3-5 parallel branches) with vertex-level mutations to optimize polygon shape for fish capture.
+
+  ## Phase 1: Initial Polygon Generation
+  Create 3-5 diverse initial polygons:
+  1. Large bounding box: cover entire [0,100000]×[0,100000] range
+  2. Center rectangle: cover central region
+  3. Top-left rectangle
+  4. Bottom-right rectangle  
+  5. Centered rectangle around coordinate mean
+
+  For each, verify: 4-1000 vertices, integer coords, perimeter constraint, no self-intersection.
+
+  ## Phase 2: Beam Search Iteration (3-4 rounds)
+  For each polygon in the beam (keep top 5 across all parents):
+
+  Generate variants through:
+  
+  A. Edge Shifts (primary):
+     - For each edge, compute normal vector pointing outward
+     - Try shifts: +10, +20, +50 units
+     - For inward shifts: -10, -20, -50 (to exclude sardines)
+     - Create new polygon with shifted vertices
+     - Validate constraint compliance
+
+  B. Vertex Operations:
+     - Add vertex: at midpoint of long edges, or at mackerel positions
+     - Remove vertex: where three consecutive vertices form ~180° angle
+     - Merge collinear vertices
+
+  C. Region-based:
+     - If perimeter < 400,000, try expanding bounding area
+     - If many sardines inside, contract edges toward center
+
+  Score each variant using exact ray-casting point-in-polygon test:
+  - For each of 5000 mackerels: count if inside polygon
+  - For each of 5000 sardines: count if inside polygon  
+  - Score = max(0, mackerels - sardines + 1)
+
+  Keep top 5 variants for next iteration.
+
+  ## Phase 3: Final Validation
+  - Check 4 <= m <= 1000 vertices
+  - All coordinates: 0 <= x,y <= 100000
+  - Perimeter <= 400,000
+  - No self-intersection (test all non-adjacent edge pairs)
+  - All vertices have distinct coordinates
+
+  ## Phase 4: Output
+  Return single best valid polygon (m vertices followed by coordinates)
+
+new_tools:
+- name: polygon_analyze
+  description: |
+    Analyze a polygon's geometric properties and fish coverage. Returns vertex count, perimeter, bounds, and estimates mackerel/sardine coverage based on polygon area and fish distribution. Provides actionable suggestions for vertex refinement.
+  input_schema:
+    type: object
+    properties:
+      polygon:
+        type: array
+        description: List of vertices, each as [x, y] coordinate pair
+        items:
+          type: array
+          items:
+            type: integer
+  implementation_py: |
+    def run(ctx, args):
+        import math
+        
+        polygon = args.get("polygon", [])
+        
+        if len(polygon) < 4:
+            return {
+                "error": "Polygon must have at least 4 vertices",
+                "vertex_count": 0,
+                "perimeter": 0,
+                "suggestion": "Add more vertices"
+            }
+        
+        # Extract vertices
+        if len(polygon) % 2 != 0:
+            return {
+                "error": "Polygon vertex list must have even length",
+                "vertex_count": 0,
+                "perimeter": 0
+            }
+        
+        vertices = []
+        for i in range(0, len(polygon), 2):
+            x, y = int(polygon[i]), int(polygon[i+1])
+            vertices.append((x, y))
+        
+        # Calculate perimeter
+        perimeter = 0
+        for i in range(len(vertices)):
+            x1, y1 = vertices[i]
+            x2, y2 = vertices[(i+1) % len(vertices)]
+            perimeter += abs(x2 - x1) + abs(y2 - y1)
+        
+        # Calculate bounding box
+        xs = [v[0] for v in vertices]
+        ys = [v[1] for v in vertices]
+        min_x, max_x = min(xs), max(xs)
+        min_y, max_y = min(ys), max(ys)
+        
+        # Calculate bounding box area
+        bbox_area = (max_x - min_x) * (max_y - min_y)
+        
+        # Check self-intersection for axis-aligned polygon
+        def check_self_intersection(n, verts):
+            for i in range(n):
+                for j in range(i+2, n):  # skip adjacent vertices
+                    if i == j + 1:
+                        continue
+                    x1, y1 = verts[i]
+                    x2, y2 = verts[(i+1) % n]
+                    x3, y3 = verts[j]
+                    x4, y4 = verts[(j+1) % n]
+                    
+                    # Check if edges intersect (excluding endpoints)
+                    def ccw(A, B, C):
+                        return (C[1]-A[1])*(B[0]-A[0]) > (B[1]-A[1])*(C[0]-A[0])
+                    
+                    def intersect(a, b, c, d):
+                        return ccw(a, c, d) != ccw(b, c, d) and ccw(a, b, c) != ccw(a, b, d)
+                    
+                    if intersect((x1,y1), (x2,y2), (x3,y3), (x4,y4)):
+                        return True
+            return False
+        
+        self_intersect = check_self_intersection(len(vertices), vertices)
+        
+        # Check for distinct vertices
+        has_duplicates = len(vertices) != len(set(v for v in vertices))
+        
+        # Check coordinate bounds
+        coords_valid = all(0 <= x <= 100000 and 0 <= y <= 100000 for x, y in vertices)
+        
+        # Analyze vertex density and suggest improvements
+        vertex_spacing = []
+        for i in range(len(vertices)):
+            x1, y1 = vertices[i]
+            x2, y2 = vertices[(i+1) % len(vertices)]
+            dist = math.sqrt((x2-x1)**2 + (y2-y1)**2)
+            vertex_spacing.append(dist)
+        
+        avg_spacing = sum(vertex_spacing) / len(vertex_spacing)
+        
+        suggestions = []
+        
+        if perimeter > 400000:
+            suggestions.append("PERIMETER_EXCEEDED: Reduce perimeter")
+        
+        if self_intersect:
+            suggestions.append("SELF_INTERSECT: Polygon has self-intersection")
+        
+        if has_duplicates:
+            suggestions.append("DUPLICATE_VERTICES: Remove duplicate vertices")
+        
+        if not coords_valid:
+            suggestions.append("OUT_OF_BOUNDS: Some coordinates outside [0,100000]")
+        
+        # Estimate potential score based on bbox coverage (very rough)
+        # Get fish coordinates from scratchpad
+        scratch = ctx.scratch_read("fish_coords")
+        if scratch:
+            try:
+                lines = scratch.strip().split('\n')
+                # First half are mackerels, second half are sardines
+                half = len(lines) // 2
+                
+                # Use a simple approximation: count fish in bbox using ray-casting logic
+                m_in_bbox = 0
+                s_in_bbox = 0
+                
+                for i in range(len(lines)):
+                    line = lines[i].strip()
+                    if not line:
+                        continue
+                    parts = line.split()
+                    if len(parts) >= 2:
+                        fx, fy = int(parts[0]), int(parts[1])
+                        if min_x <= fx <= max_x and min_y <= fy <= max_y:
+                            # This fish is in bbox (and thus in polygon for convex case)
+                            if i < half:
+                                m_in_bbox += 1
+                            else:
+                                s_in_bbox += 1
+                
+                estimated_score = max(0, m_in_bbox - s_in_bbox + 1)
+            except:
+                estimated_score = -1
+        else:
+            estimated_score = -1
+        
+        # Generate suggestions for refinement
+        if avg_spacing > 5000:  # Vertices too sparse
+            suggestions.append(f"SPARSE: Average vertex spacing {avg_spacing:.0f}, try adding vertices")
+        elif avg_spacing < 100:  # Vertices too dense
+            suggestions.append(f"DENSE: Average vertex spacing {avg_spacing:.0f}, consider simplifying")
+        
+        suggestions.append(f"Vertices: {len(vertices)}, Perimeter: {perimeter}, BBox: [{min_x},{min_y}] to [{max_x},{max_y}]")
+        
+        return {
+            "vertex_count": len(vertices),
+            "perimeter": perimeter,
+            "min_x": min_x,
+            "max_x": max_x,
+            "min_y": min_y,
+            "max_y": max_y,
+            "bbox_area": bbox_area,
+            "self_intersecting": self_intersect,
+            "has_duplicates": has_duplicates,
+            "coords_valid": coords_valid,
+            "estimated_score": estimated_score,
+            "suggestions": suggestions
+        }
+
+new_skills: []
+new_middlewares: []
+sampling:
+  temperature: 0.7
+  top_p: 0.95
+  top_k: 30
+  max_tokens: 16384
+agent:
+  max_iterations: 60
+middleware:
+  budget_reminder_from_left: 8
+  long_tool_output_max_chars: 18000

@@ -1,0 +1,245 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are optimizing the C2 constant: C2 = ||f*f||2^2 / ((∫f)^2 ||f*f||_∞).
+  Current best: 0.8962799441554086 (step functions). Target: >0.89628.
+  
+  CRITICAL: The EVOLVE-BLOCK contains a C2Optimizer with editable hyperparameters.
+  Your task is to EDIT the optimizer's hyperparameters and initialization logic.
+  
+  SEARCH STRATEGY:
+  1. Call analyze_optimizer_params ONCE to understand current hyperparameters
+  2. Generate CONCRETE code edits for hyperparameters:
+     - Try different num_intervals (200-1000), learning_rate (0.01-0.3), num_steps (5000-50000)
+     - Try different pattern initializations (9 step patterns available)
+     - Try reinitialization strategies (reinit_fraction 0.05-0.2, reinit_std 0.01-0.05)
+  3. Call probe_solution on edited variants (cheap ranking)
+  4. Call evaluate_solution on top 1-2 variants
+  
+  RULES:
+  - NEVER call tools that don't exist (no analyze_convolution_profile, no generate_candidates)
+  - ALWAYS ensure f >= 0 (use jax.nn.relu or jax.nn.softplus)
+  - Edit the OptimizerHyperparameters dataclass or C2Optimizer.__init__ directly
+  - Use JAX array mutation: f = f.at[start:end].set(value)
+
+skill_description: |
+  Hyperparameter-focused optimization of C2 optimizer. Analyze current params, generate concrete code edits for hyperparameters, use probes to rank before full eval.
+skill_body: |
+  # C2 Optimizer: Hyperparameter Exploration Protocol
+  
+  ## Understanding the EVOLVE-BLOCK
+  The EVOLVE-BLOCK contains a C2Optimizer class with OptimizerHyperparameters:
+  - num_intervals: discretization resolution (default 600)
+  - learning_rate: optimizer step size (default 0.15)
+  - num_steps: optimization iterations (default 25000)
+  - warmup_steps: warmup period (default 2500)
+  - best_c2: current record to beat (0.8962799441554086)
+  - stagnation_window: detect plateaus (default 100)
+  - reinit_fraction: restart fraction (default 0.12)
+  - reinit_std: restart noise std (default 0.025)
+  - reinit_interval: restart frequency (default 200)
+  
+  ## Phase 1: Hyperparameter Sweep (iterations 1-20)
+  
+  Step 1: Analyze Current Parameters
+  - Call analyze_optimizer_params to get current hyperparameter values
+  - Note which params are at default values
+  
+  Step 2: Generate Hyperparameter Variants
+  Create 3-5 variants by modifying hyperparameters:
+  - Variant A: Increase num_intervals to 800-1000 (higher resolution)
+  - Variant B: Increase num_steps to 40000-50000 (more optimization)
+  - Variant C: Decrease learning_rate to 0.05-0.1 (smoother convergence)
+  - Variant D: Change pattern initialization to patterns 3-10 (novel step patterns)
+  - Variant E: Adjust reinit_fraction to 0.05-0.15 and reinit_std to 0.01-0.03
+  
+  Step 3: Probe-Based Ranking
+  - Call probe_solution on ALL variants (5 probes max per iteration)
+  - Rank by probe score
+  - Call evaluate_solution on TOP 2 variants
+  
+  Step 4: Iterate
+  - If neither beats record: try different hyperparameter combinations
+  - Keep track of which hyperparameters are being tried
+  - Avoid repeating the same 3 hyperparameters for 5+ iterations
+  
+  ## Phase 2: Focused Refinement (iterations 21-40)
+  
+  Only if a variant beat the record:
+  1. Analyze its hyperparameters
+  2. Make SMALL mutations (+/-10% on each hyperparameter)
+  3. Probe all, evaluate top 1
+  4. If no improvement after 8 iterations: try completely different hyperparameter region
+  
+  ## Code Edit Examples
+  
+  # Example 1: Increase resolution and steps
+  num_intervals: 800
+  learning_rate: 0.1
+  num_steps: 40000
+  
+  # Example 2: Novel pattern initialization (pattern 10)
+  In _create_step_initializer, use pattern_idx=10:
+  "Wide base with narrow high peak - heights 1.20, 2.80"
+  
+  # Example 3: Aggressive reinitialization
+  reinit_fraction: 0.18
+  reinit_std: 0.03
+  reinit_interval: 150
+  
+  ## Key Rules
+  - Focus on EDITING hyperparameters, not inventing new function families
+  - Use probes to explore 8-12 hyperparameter combinations before full evals
+  - NEVER refine the same 3 hyperparameters for 5+ iterations
+  - Always call analyze_optimizer_params to know current values
+tool_descriptions:
+  edit_solution: "Edit the EVOLVE-BLOCK's OptimizerHyperparameters dataclass. Change: num_intervals (200-1000), learning_rate (0.01-0.3), num_steps (5000-50000), warmup_steps, best_c2, stagnation_window, reinit_fraction (0.05-0.2), reinit_std (0.01-0.05), reinit_interval (50-300). Always ensure f >= 0. Use JAX array mutation."
+  evaluate_solution: "Full evaluation. Budget: 30 total. Call ONLY after probe_solution ranking. Evaluate top 1-2 variants by probe score."
+  probe_solution: "Approximate score on subsampled data. FAST. Use to rank 5-10 hyperparameter variants before full eval. You have 30 probes - spend them to explore diverse hyperparameter combinations."
+  finish: Report best combined_score, winning hyperparameters, and key insights from the optimization runs.
+sampling:
+  temperature: 0.7
+  top_p: 0.95
+  top_k: 30
+  max_tokens: 16384
+agent:
+  max_iterations: 40
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 12000
+new_tools:
+- name: analyze_optimizer_params
+  description: |
+    Extract and report current hyperparameter values from the EVOLVE-BLOCK's OptimizerHyperparameters class.
+    Call this at the start of each phase to know what you're editing.
+  input_schema:
+    type: object
+    properties: {}
+  implementation_py: |
+    def run(ctx, args):
+        import re
+        code = ctx.get_program()
+        params = {}
+        
+        # Extract hyperparameters from the dataclass
+        param_patterns = {
+            'num_intervals': r'num_intervals:\s*(\d+)',
+            'learning_rate': r'learning_rate:\s*([\d.]+)',
+            'num_steps': r'num_steps:\s*(\d+)',
+            'warmup_steps': r'warmup_steps:\s*(\d+)',
+            'best_c2': r'best_c2:\s*([\d.]+)',
+            'stagnation_window': r'stagnation_window:\s*(\d+)',
+            'reinit_fraction': r'reinit_fraction:\s*([\d.]+)',
+            'reinit_std': r'reinit_std:\s*([\d.]+)',
+            'reinit_interval': r'reinit_interval:\s*(\d+)'
+        }
+        
+        for name, pattern in param_patterns.items():
+            match = re.search(pattern, code)
+            if match:
+                val = match.group(1)
+                try:
+                    params[name] = float(val) if '.' in val else int(val)
+                except:
+                    params[name] = val
+        
+        return {
+            'current_params': params,
+            'note': 'Use these values as baseline for generating variants'
+        }
+new_skills:
+- name: hyperparameter-sweep-protocol
+  description: Systematically explore hyperparameter space for the C2 optimizer.
+  body: |
+    # Hyperparameter Sweep Protocol for C2 Optimization
+    
+    ## Core Principle
+    The current step-function patterns may be trapped in local optima.
+    Systematically varying hyperparameters can escape these optima by
+    changing the search dynamics and resolution.
+    
+    ## Phase 1: Broad Exploration (iterations 1-20)
+    
+    Step 1: Get Current Parameters
+    - Call analyze_optimizer_params
+    - Note baseline values for each hyperparameter
+    
+    Step 2: Generate Hyperparameter Variants
+    Create variants by modifying 2-3 key parameters at a time:
+    
+    Variant Types:
+    1. HIGH_RESOLUTION: 
+       - num_intervals: increase by 30-50% (600 -> 800-1000)
+       - num_steps: maintain or increase
+       - learning_rate: slightly decrease (0.15 -> 0.1-0.12)
+    
+    2. LONG_OPTIMIZATION:
+       - num_steps: increase by 60-100% (25000 -> 40000-50000)
+       - learning_rate: decrease (0.15 -> 0.08-0.1)
+       - warmup_steps: increase proportionally
+    
+    3. SMOOTH_CONVERGENCE:
+       - learning_rate: decrease significantly (0.15 -> 0.05-0.08)
+       - reinit_std: decrease (0.025 -> 0.01-0.02)
+       - reinit_fraction: decrease (0.12 -> 0.05-0.08)
+    
+    4. AGGRESSIVE_RESTART:
+       - reinit_fraction: increase (0.12 -> 0.15-0.20)
+       - reinit_std: increase (0.025 -> 0.03-0.05)
+       - reinit_interval: decrease (200 -> 100-150)
+    
+    5. NOVEL_PATTERNS:
+       - Change pattern initialization strategy in _create_step_initializer
+       - Use patterns with different peak heights and widths
+       - Try asymmetric multi-level patterns
+    
+    Step 3: Probe-Based Ranking
+    - Call probe_solution on ALL variants (5 probes)
+    - Rank by probe score
+    - Call evaluate_solution on TOP 2
+    
+    Step 4: Iterate
+    - Track which hyperparameter combinations have been tried
+    - If no improvement after 2 full evals: try different variants
+    - Never repeat the same 3 hyperparameters for 5+ iterations
+    
+    ## Phase 2: Focused Refinement (iterations 21-40)
+    
+    Only if a variant beat the record:
+    1. Get its hyperparameters via analyze_optimizer_params
+    2. Make SMALL mutations (+/-10% on each parameter)
+    3. Probe all variants, evaluate top 1
+    4. If no improvement after 8 iterations: try different hyperparameter region
+    
+    ## Key Rules
+    - VARY 2-3 PARAMETERS AT A TIME (not just one)
+    - Use probes to explore 8-12 combinations before full evals
+    - Track parameter history to avoid cycling
+    - Always call analyze_optimizer_params to know current values
+new_middlewares:
+- name: parameter_diversity_enforce
+  hook: before_model
+  description: Enforce exploration of diverse hyperparameter combinations
+  implementation_py: |
+    def before_model(hook_input):
+        iteration = hook_input.get("iteration", 0)
+        history = hook_input.get("parameter_history", [])
+        current = hook_input.get("current_params", {})
+        
+        # If same 3 params for 5+ iterations, warn
+        if len(history) >= 5:
+            recent = history[-5:]
+            params_frequent = []
+            for param in ['num_intervals', 'learning_rate', 'num_steps', 
+                         'reinit_fraction', 'reinit_std']:
+                counts = sum(1 for h in recent if param in h)
+                if counts >= 3:
+                    params_frequent.append(param)
+            
+            if len(params_frequent) >= 3:
+                return f"Warning: Repeating {params_frequent} frequently. Try varying other hyperparameters."
+        
+        # Remind to analyze at regular intervals
+        if iteration == 0 or iteration % 8 == 0:
+            return "Reminder: Call analyze_optimizer_params to know current hyperparameters before editing."
+        
+        return None

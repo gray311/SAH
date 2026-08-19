@@ -1,0 +1,174 @@
+schema: h2spec/1.0
+system_prompt: |
+  Task: Find step function h: [0,2]->[0,1] minimizing max_k ∫ h(x)(1-h(x+k)) dx.
+  
+  Current best upper bound: C5 <= 0.38092303510845016 (combined_score = 1.00001).
+  Goal: Beat this bound with combined_score > 1.0.
+  
+  Constraints:
+  - h(x) must be in [0,1]
+  - integral(h) = 1.0 exactly
+  
+  Strategy:
+  
+  1. The seed optimizer uses num_intervals=800, penalty_strength=61.0, num_steps=120000.
+     Keep these settings - they're optimized for accuracy. Do NOT reduce intervals.
+  
+  2. Use the tool generate_candidates to produce valid initializations
+     with precomputed integral=1.0 and analytical c5_bound scores.
+  
+  3. CALL generate_candidates(num_candidates=12) to get 12 diverse patterns.
+  
+  4. EXAMINE the 12 candidates:
+     - Skip any with integral != 1.0 (constraint violation)
+     - Skip any with c5_bound >= 0.370 (too bad to waste evals)
+     - Call evaluate_solution on candidates with c5_bound < 0.370
+  
+  5. If no improvement after 3 evals, CALL generate_candidates again with different temperature.
+  
+  6. Use probe_solution to quickly rank new candidates before full evaluation.
+  
+  7. EDIT the EVOLVE-BLOCK to set num_candidates=12 in generate_candidates call.
+  
+  8. The optimizer trains for 120k steps - each full evaluation is expensive (~5 mins).
+     Use probe (cheap) to screen, then evaluate (expensive) only on best candidates.
+skill_description: |
+  Generate many diverse pattern-based initializations for Erdos optimization with
+  precomputed analytical scores (integral=1.0, c5_bound). Screen candidates before full eval.
+skill_body: |
+  # Candidate Generation and Screening Strategy
+  
+  ## Understanding the Problem
+  We need to find a step function h: [0,2] -> [0,1] that minimizes the maximum correlation
+  with its shifted versions. The seed optimizer trains for 120,000 steps per candidate - very expensive.
+  
+  ## Strategy: Generate Many, Screen Cheaply
+  
+  1. CALL generate_candidates(num_candidates=12) to get 12 structurally diverse initializations.
+     Patterns include: Golomb ruler, bipartite, tri-modal, various threshold patterns, random seeds.
+  
+  2. ANALYZE each candidate:
+     - Check integral: MUST be 1.0 (constraint). Skip if not.
+     - Check c5_bound (precomputed analytical score). This tells us the objective value WITHOUT training.
+     - Only proceed with evaluation if c5_bound < 0.370 (promising start)
+  
+  3. For candidates with c5_bound < 0.370:
+     - CALL evaluate_solution to get the true optimized score after 120k training steps.
+     - Track the best combined_score seen.
+  
+  4. If you've evaluated 3-5 candidates and none beat the seed score:
+     - CALL generate_candidates again with different temperature (0.7 or 0.9).
+     - Try to get different patterns.
+  
+  5. Budget management:
+     - You have ~30 evaluation budget total.
+     - Each full evaluation costs 1 eval.
+     - Use probe_solution to get approximate scores quickly for new candidates.
+  
+  ## Why This Works
+  
+  - 12 diverse patterns give multiple chances to find a good starting point.
+  - Precomputed analytical scores let us screen without expensive training.
+  - Only promising candidates (c5_bound < 0.370) get full evaluation.
+  - Typical workflow: 12 candidates -> 2-5 pass screen -> 2-4 full evals -> 1-2 improvers.
+  
+  ## Example
+  
+  Candidate 0 (Golomb): integral=1.000, c5=0.362 -> EVALUATE
+  Candidate 1 (Bipartite): integral=1.000, c5=0.371 -> SKIP (>=0.370)
+  Candidate 2 (Tri-modal): integral=1.000, c5=0.358 -> EVALUATE
+  Candidate 3 (Random1): integral=1.000, c5=0.385 -> SKIP
+  Candidate 4 (Random2): integral=1.000, c5=0.365 -> EVALUATE
+  
+  Result: 3 evaluations used, best c5=0.362 -> combined_score = 0.3809/0.362 = 1.052
+new_tools:
+- name: analyze_patterns
+  description: |
+    Analyze the structure of task inputs and current best to guide pattern generation.
+    Call this once at start to understand the problem landscape.
+  input_schema:
+    type: object
+    properties: {}
+  implementation_py: |
+    def run(ctx, args):
+        """Analyze current best program and provide guidance."""
+        best = ctx.get_best_program()
+        if best is None:
+            return {"note": "no best program yet"}
+        
+        # Look for pattern indicators
+        lines = best.split('\n')
+        integral_ok = 'integral=1.0' in best or 'sum(h)*dx' in best
+        
+        # Count pattern types mentioned
+        pattern_keywords = ['golomb', 'bipartite', 'tri-modal', 'threshold', 'random']
+        patterns_found = [p for p in pattern_keywords if p in best.lower()]
+        
+        return {
+            "has_best_program": best is not None,
+            "best_lines": len(lines),
+            "patterns_in_seed": patterns_found,
+            "recommendation": f"Use diverse patterns including: {patterns_found}"
+        }
+new_skills:
+- name: pattern-diversity-search
+  description: |
+    Generate many diverse initializations with precomputed scores. Screen candidates with c5_bound < 0.37 before evaluation.
+  body: |
+    # Pattern Diversity Search Strategy
+    
+    ## The Challenge
+    
+    Training for 120,000 steps is very expensive (~5 minutes). We need to find good starting
+    points without wasting evaluations on poor candidates.
+    
+    ## The Solution
+    
+    1. Generate MANY candidates at once using generate_candidates(num_candidates=12).
+       This gives 12 structurally different starting points.
+    
+    2. EXAMINE all 12 candidates carefully:
+       - integral: MUST equal 1.0 (skip if not)
+       - c5_bound: analytical precomputed score (skip if >= 0.370)
+    
+    3. Evaluate ONLY promising candidates (c5_bound < 0.370).
+       Typically 2-5 out of 12 will pass.
+    
+    4. If no improvement after 3-4 evaluations, generate a new batch with different temperature.
+    
+    ## Why 12 Candidates?
+    
+    - With seed stuck at c5 ~ 0.381, we need variety
+    - 12 patterns cover: Golomb (optimal spacing), Bipartite (separated support), Tri-modal (3 peaks),
+      various threshold patterns, and random seeds
+    - Each has different structural properties that might generalize better
+    
+    ## Success Metric
+    
+    - Seed: c5 = 0.381, score = 1.000
+    - Target: c5 < 0.380, score > 1.0
+    - With 12 candidates, probability of finding c5 < 0.370 is high
+    - Only evaluate those with c5 < 0.370
+new_middlewares:
+- name: encourage_probe_then_eval
+  hook: before_model
+  description: |
+    Encourage use of probe_solution before evaluate_solution to save budget.
+  implementation_py: |
+    def before_model(hook_input):
+        state = hook_input.get("state", {})
+        evals_left = state.get("evals_left", 0)
+        has_been_evaluating = state.get("has_evaluate_called", False)
+        
+        if evals_left >= 5 and has_been_evaluating:
+            return (
+                "You have 5+ evals left and have used evaluate_solution.\n"
+                "Before each new evaluate, consider calling probe_solution\n"
+                "to quickly screen candidates with approximate scores.\n"
+            )
+        elif evals_left >= 8:
+            return (
+                f"Good: {evals_left} evals remaining.\n"
+                "Plan to use probe_solution to rank 3-5 candidates before full evaluation.\n"
+            )
+        return None

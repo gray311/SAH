@@ -1,0 +1,144 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are optimizing C2 = ||f*f||_2^2 / ((∫f)^2 ||f*f||_∞) for non-negative f:ℝ→ℝ.
+  Current best: 0.8962799441554086 (seed achieves combined_score=1.042, so it's already good).
+  
+  CRITICAL: The seed uses FFT-based convolution with 600 intervals. Small changes to discretization,
+  integration method, or convolution precision can unlock improvements.
+  
+  SEARCH STRATEGY (use all 30 evals):
+  PHASE 1 (iter 1): PRECISION TUNING
+  - Analyze current best's convolution profile using analyze_convolution_profile
+  - Try INCREASING num_intervals (800-1200) for better FFT resolution
+  - Probe all variants, evaluate top 2
+  
+  PHASE 2 (iter 2-3): SHAPE REFINEMENT  
+  - If Phase 1 didn't beat record by 0.5%, try SMALL shape mutations:
+    * Adjust step boundaries by ±2%
+    * Tweaking heights by ±0.05
+  - Probe all, evaluate best
+  
+  PHASE 3 (iter 4-5): ARCHITECTURE EXPANSION
+  - Only if stuck: add ONE new level to step function or switch to Gaussian mixture
+  - Evaluate top 1
+  
+  RULES:
+  - Call probe_solution on ALL variants before any full eval
+  - NEVER waste evals on probe score < 1.0
+  - Use JAX array mutation (f.at[...] for in-place edits)
+  - Always call analyze_convolution_profile at start to diagnose
+skill_description: |
+  Precision tuning for FFT-based C2 optimization. Start with discretization and integration method changes,
+  then refine shapes, then expand architectures only if needed.
+skill_body: |
+  # Precision-Tuned C2 Maximizer
+  
+  ## Why Precision Matters
+  The seed achieves 1.042 combined_score, meaning it's already near-optimal. Small improvements
+  come from better convolution resolution and numerical integration, not radical architecture changes.
+  
+  ## Phase 1: Precision Tuning (iterations 1-2)
+  
+  Step 1: Analyze Current Best
+  - Call analyze_convolution_profile
+  - Note: Where is ||f*f||_2 concentrated? What's the resolution?
+  
+  Step 2: Try Discretization Changes
+  - INCREASE num_intervals: 800, 1000, or 1200 (better FFT resolution)
+  - Check integration: Simpson's rule h/3 * (y1^2 + y1*y2 + y2^2)
+  - These are SAFE mutations that often yield 0.1-0.3% improvements
+  
+  Step 3: Probe and Evaluate
+  - Call probe_solution on all variants
+  - Evaluate only those with probe combined_score > 1.0
+  
+  ## Phase 2: Shape Refinement (iteration 3)
+  
+  Only if Phase 1 didn't beat record:
+  - Mutate step boundaries: shift by ±2% of total range
+  - Adjust heights by ±0.05 (keep f ≥ 0)
+  - Probe all, evaluate best
+  
+  ## Phase 3: Architecture Expansion (only if stuck)
+  
+  If still no improvement after 2 full evals:
+  - Add one asymmetric level to step function
+  - OR switch to simple Gaussian mixture (2-3 peaks)
+  - Evaluate top 1
+  
+  ## Key Rules
+  - PROBE ALL before any full eval (30 probe budget)
+  - Evaluate max 3 variants total
+  - NEVER try radical architecture changes first
+  - Always analyze convolution profile to guide mutations
+tool_descriptions:
+  edit_solution: |
+    Edit the EVOLVE-BLOCK. Start with precision changes:
+    - Increase num_intervals: 800, 1000, or 1200
+    - Try Simpson's integration: h/3 * (y1^2 + y1*y2 + y2^2) if not already used
+    - Small shape mutations: shift step boundaries by ±2%, adjust heights by ±0.05
+    - Use JAX array mutation: f = f.at[start:end].set(value)
+    - Ensure f >= 0 via jax.nn.softplus or max(0,·)
+  evaluate_solution: |
+    Full evaluation. Budget: 30. Call only after probing and ranking. Evaluate top 1-2 variants.
+    If probe combined_score < 1.0, skip full eval.
+  probe_solution: |
+    Approximate score on 10% subsample. FAST (~10s). Use to rank 5+ variants before full eval.
+    You have 30 probes - spend them to filter candidates, not confirm ones.
+  finish: |
+    Report best combined_score, the winning precision/architecture, and key insights.
+sampling:
+  temperature: 0.3
+  top_p: 0.95
+  top_k: 30
+  max_tokens: 12288
+agent:
+  max_iterations: 8
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 8000
+new_tools:
+- name: analyze_convolution_profile
+  description: |
+    Analyze the current best function's convolution profile to diagnose why C2 might be suboptimal.
+    Returns: peaks of ||f*f||_2, ||f*f||_inf locations, L1/L2 ratios, support width.
+    Call ONCE at the start to understand the current best's structure.
+  input_schema:
+    type: object
+    properties: {}
+  implementation_py: |
+    def run(ctx, args):
+        import numpy as np
+        f = ctx.get_best_program()
+        lines = f.strip().split('\n')
+        code = '\n'.join(lines)
+        try:
+            exec_globals = {'jnp': np, 'np': np}
+            exec(code, exec_globals)
+            C2Optimizer = exec_globals.get('C2Optimizer')
+            if C2Optimizer:
+                hypers = C2Optimizer.hypers
+                num_intervals = hypers.num_intervals
+                f_vals = np.linspace(-3, 3, num_intervals)
+                padded_f = np.pad(np.abs(f_vals), (0, num_intervals))
+                fft_f = np.fft.fft(padded_f)
+                conv = np.fft.ifft(fft_f * fft_f).real
+                h = 1.0 / (len(conv) + 1)
+                conv_norm = h * conv
+                l2_sq = np.sum(conv_norm**2)
+                l1 = np.sum(np.abs(conv_norm))
+                norm_inf = np.max(np.abs(conv_norm))
+                c2 = l2_sq / (l1 * norm_inf)
+                return {
+                    'num_intervals': num_intervals,
+                    'l2_squared': float(l2_sq),
+                    'l1_norm': float(l1),
+                    'norm_inf': float(norm_inf),
+                    'c2_ratio': float(c2),
+                    'convolution_peaks': np.argsort(conv_norm)[-5:][::-1].tolist(),
+                    'support_width': float(h * (2 * num_intervals))
+                }
+        except Exception as e:
+            return {'error': str(e), 'note': 'Could not analyze, use default step pattern'}
+new_skills: []
+new_middlewares: []

@@ -1,0 +1,251 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are an expert C++ algorithm engineer solving a geometric optimization problem.
+  
+  Task: Construct an axis-aligned polygon (max 1000 vertices, perimeter ≤400000) to maximize (mackerels inside - sardines inside + 1).
+  
+  Method — GRID-BASED POLYGON CONSTRUCTION:
+  1. Read all fish (5000 mackerels, 5000 sardines) and their coordinates.
+  2. Build a spatial grid (e.g., 100×100 or adaptive) and compute the mackerel/sardine ratio for each cell.
+  3. Identify high-ratio cells (e.g., ratio > 1.5 or top 30% of cells by ratio).
+  4. For selected cells, construct a minimal axis-aligned polygon that covers them (use bounding boxes, merge adjacent cells).
+  5. Ensure validity: polygon must not self-intersect, vertices distinct, perimeter ≤400000.
+  6. Use SEARCH/REPLACE diffs to experiment with: (a) grid resolution, (b) ratio threshold, (c) cell selection strategy (top-k by ratio, by area, etc.).
+  7. Always keep the fixed CPP_CODE entry point intact; only modify the internal search/construction logic inside the EVOLVE-BLOCK.
+  
+  Search strategy: Run an internal loop until time limit - 0.1s. Each iteration:
+  - Adjust one parameter (grid size, threshold, selection method).
+  - Construct polygon, validate, compute score.
+  - Keep best score.
+  
+  Critical: The internal search MUST finish well within 2.0s. Avoid O(N²) or O(N³) loops. Use KD-tree or grid cells for O(1) cell lookups.
+
+skill_description: |
+  Grid-based polygon construction for fish trap optimization. Partition space into cells, evaluate mackerel/sardine ratios, construct minimal polygons covering high-ratio regions.
+skill_body: |
+  # Grid-Based Polygon Construction for Fish Trap
+  
+  ## Problem
+  Maximize (mackerels - sardines + 1) using an axis-aligned polygon.
+  
+  ## Algorithm
+  1. **Spatial Grid**: Divide [0, 100000]×[0, 100000] into G×G cells (e.g., G=100 → 10,000 cells).
+  2. **Cell Ratios**: For each cell, count mackerels (type=1) and sardines (type=-1). Compute ratio = mackerels/(sardines+1) to avoid division by zero.
+  3. **Select High-Ratio Cells**: Pick top K cells by ratio (e.g., K=500-1000) or cells with ratio > threshold (e.g., >1.5).
+  4. **Polygon Construction**: For selected cells:
+     - Compute bounding box of each group of adjacent cells.
+     - Merge adjacent bounding boxes into larger rectangles.
+     - Connect rectangles into a simple polygon (chain them in sorted order by x, then by y).
+  5. **Validity Check**: Ensure no self-intersection, distinct vertices, perimeter ≤400000, vertex count ≤1000.
+  6. **Internal Search**: Before final submission, try multiple parameter combinations:
+     - Grid sizes: 50×50, 100×100, 200×200
+     - K values: 500, 800, 1200
+     - Thresholds: 1.0, 1.5, 2.0
+     - Selection: top-K vs. ratio > threshold
+     - Keep the best score.
+  
+  ## C++ Implementation Tips
+  - Use a flat 2D array for grid cells (grid[row][col]).
+  - Use KD-tree or sorted lists for fast fish location lookup.
+  - For polygon merging: use union-find or BFS on grid adjacency.
+  - Time budget: finish internal search by T - 0.1s.
+  
+  ## Tool Usage
+  - `edit_solution`: Change the internal search loop, parameter exploration, or construction logic. Keep CPP_CODE entry intact.
+  - `evaluate_solution`: Score your polygon. Higher = better.
+  - `probe_solution`: Try parameter variations quickly without consuming budget.
+  
+  ## Common Pitfalls
+  - Invalid polygon (self-intersection): check before submission.
+  - Perimeter violation: shrink polygon if >400000.
+  - Too many vertices: merge collinear vertices.
+  - Slow search: avoid O(N²) nested loops over fish.
+
+tool_descriptions:
+  edit_solution: |
+    Change the C++ code inside the EVOLVE-BLOCK region. Two formats:
+    1. TARGETED DIFF (preferred): SEARCH/REPLACE blocks that match exactly.
+    2. FULL REWRITE: Complete new EVOLVE-BLOCK body.
+    
+    For this task, focus on modifying:
+    - The internal search loop (parameter exploration).
+    - Grid construction and cell ratio computation.
+    - Polygon merging and simplification logic.
+    
+    NEVER change the fixed CPP_CODE entry point or main function signature.
+
+  evaluate_solution: |
+    Run the current C++ program through the evaluator. Returns combined_score (higher is better),
+    validity (1=valid, 0=invalid), error message (if any), best_so_far score, and evaluations left.
+    Use this feedback to guide your next edit.
+
+  probe_solution: |
+    Cheaply score the CURRENT program on subsampled data (first ~2000 fish). Uses separate probe budget
+    and does NOT count against your 20 evaluations. Score is approximate — use to quickly rank
+    multiple parameter variations before confirming with evaluate_solution.
+
+sampling:
+  temperature: 0.3
+  top_p: 0.8
+  top_k: 10
+  max_tokens: 12288
+agent:
+  max_iterations: 50
+middleware:
+  budget_reminder_from_left: 2
+  long_tool_output_max_chars: 10000
+new_tools:
+  - name: analyze_fish_distribution
+    description: |
+      Compute mackerel/sardine ratio for each grid cell and return the top-K cells with highest ratios,
+      along with basic statistics (min/max/mean ratio, total fish per type). Use a 100×100 grid by default.
+      Call this once at the start of your internal search to guide polygon construction.
+    input_schema: {type: object, properties: {}}
+    implementation_py: |
+      def run(ctx, args):
+          # Read fish data
+          names = ctx.list_task_inputs()
+          if not names:
+              return {"note": "no inputs"}
+          
+          # Load all fish
+          fish_data = ctx.read_input_df(names[0], nrows=10000)  # 5000 mackerels + 5000 sardines
+          
+          if len(fish_data) != 10000:
+              return {"note": f"unexpected fish count: {len(fish_data)}"}
+          
+          # Build 100x100 grid
+          G = 100
+          max_coord = 100000
+          cell_size = max_coord / G
+          
+          grid = {}  # (row, col) -> {"mackerel": 0, "sardine": 0}
+          
+          for _, row in fish_data.iterrows():
+              x, y, fish_type = int(row['x']), int(row['y']), int(row['type'])
+              row_idx = int(y / cell_size)
+              col_idx = int(x / cell_size)
+              cell = (row_idx, col_idx)
+              if cell not in grid:
+                  grid[cell] = {"mackerel": 0, "sardine": 0}
+              if fish_type == 1:
+                  grid[cell]["mackerel"] += 1
+              else:
+                  grid[cell]["sardine"] += 1
+          
+          # Compute ratios and sort
+          cell_ratios = []
+          for (r, c), counts in grid.items():
+              m = counts["mackerel"]
+              s = counts["sardine"]
+              ratio = m / (s + 1)  # avoid division by zero
+              cell_ratios.append({
+                  "row": r, "col": c,
+                  "mackerel": m, "sardine": s,
+                  "ratio": ratio,
+                  "score": m - s + 1
+              })
+          
+          # Sort by ratio descending
+          cell_ratios.sort(key=lambda x: x["ratio"], reverse=True)
+          
+          # Return top K
+          K = min(args.get("K", 500), len(cell_ratios))
+          top_cells = cell_ratios[:K]
+          
+          # Statistics
+          total_m = sum(c["mackerel"] for c in cell_ratios)
+          total_s = sum(c["sardine"] for c in cell_ratios)
+          
+          return {
+              "num_cells": len(grid),
+              "top_cells": top_cells,
+              "statistics": {
+                  "total_mackerels": total_m,
+                  "total_sardines": total_s,
+                  "max_ratio": max((c["ratio"] for c in cell_ratios), default=0),
+                  "min_ratio": min((c["ratio"] for c in cell_ratios), default=0),
+                  "mean_ratio": sum(c["ratio"] for c in cell_ratios) / len(cell_ratios) if cell_ratios else 0
+              }
+          }
+new_skills:
+  - name: polygon-construction-grid
+    description: |
+      Use grid-based spatial partitioning to construct optimal polygons for the fish trap problem.
+      Identify high-ratio cells and merge them into minimal axis-aligned polygons.
+    body: |
+      # Grid-Based Polygon Construction Playbook
+      
+      ## Overview
+      Partition the 2D plane into a grid, compute mackerel/sardine ratios per cell,
+      select high-ratio cells, and construct a minimal polygon covering them.
+      
+      ## Step 1: Choose Grid Size
+      - Start with G=100 (100×100 = 10,000 cells for 0-100000 range).
+      - Adjust based on fish density: fewer cells if fish clustered, more if uniform.
+      - Too coarse: miss local high-ratio areas. Too fine: more cells to process.
+      
+      ## Step 2: Compute Cell Statistics
+      For each cell:
+      - Count mackerels (type=1) and sardines (type=-1).
+      - Ratio = mackerels / (sardines + 1).
+      - Score = mackerels - sardines + 1 (the objective).
+      
+      ## Step 3: Select High-Ratio Cells
+      Options:
+      - Top-K cells by ratio (e.g., K=500).
+      - Cells with ratio > threshold (e.g., >1.5).
+      - Combination: top-K with ratio > threshold.
+      
+      ## Step 4: Merge Adjacent Cells
+      - Use union-find or BFS to merge adjacent high-ratio cells.
+      - For each merged group, compute the bounding box.
+      - Bounding box of cells with grid positions [r1,c1] to [r2,c2]:
+        x_min = c1 * cell_size, x_max = (c2+1) * cell_size
+        y_min = r1 * cell_size, y_max = (r2+1) * cell_size
+      
+      ## Step 5: Construct Polygon
+      - For each bounding box (rectangle), get 4 vertices.
+      - Connect rectangles in sorted order (e.g., by centroid, then by x).
+      - Merge collinear vertices.
+      - Ensure no self-intersection (axis-aligned polygons are simpler).
+      
+      ## Step 6: Validate
+      - Vertex count ≤ 1000.
+      - Perimeter ≤ 400,000.
+      - All coordinates 0-100,000.
+      - No self-intersection.
+      
+      ## Step 7: Internal Search Loop
+      Before final submission, try parameter variations:
+      - Grid sizes: 50, 100, 200.
+      - K values: 500, 800, 1000, 1500.
+      - Thresholds: 1.0, 1.5, 2.0.
+      - Selection methods: top-K, ratio > threshold, top-K + ratio > threshold.
+      - Keep the best score.
+      
+      ## Implementation Notes
+      - Use a flat 2D array for grid cells.
+      - Pre-sort fish by coordinates for O(1) cell assignment.
+      - Use union-find for efficient cell merging.
+      - Finish internal search by T - 0.1s.
+
+new_middlewares:
+  - name: search_progress_reminder
+    hook: before_model
+    description: |
+      Remind the solver to diversify its internal search parameters and avoid
+      getting stuck on a single strategy.
+    implementation_py: |
+      def before_model(hook_input):
+          evals_left = hook_input.get("evaluations_left", 10)
+          iteration = hook_input.get("iteration", 1)
+          
+          if iteration <= 10:
+              return "Parametrize your search: try grid sizes 50/100/200, K=500/800/1000, thresholds 1.0/1.5/2.0."
+          elif evals_left <= 5:
+              return "Final submissions: consolidate best parameters from prior evaluations."
+          elif evals_left <= 10:
+              return "Diversify: try different selection strategies (top-K vs. ratio threshold)."
+          else:
+              return None

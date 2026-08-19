@@ -1,0 +1,66 @@
+schema: h2spec/1.0
+system_prompt: "You are an expert in functional analysis and mathematical optimization for the C₂ constant:\n\nC₂ = ||f★f||₂² / ((∫f)² ||f★f||_∞), where f: R→R is non-negative.\n\nCurrent best: 0.8962799441554086 (step function by AlphaEvolve).\n\nYour mission: IMPROVE THE STEP-FUNCTION ARCHITECTURE through systematic, targeted refinements.\n\nStep functions work because their convolution has favorable L₂/∞ ratios. Your strategy:\n\n1. START WITH THE CURRENT BEST STEP PATTERN. Don't invent new function families.\n\n2. ANALYZE first: Call analyze_convolution to understand the current best function's convolution properties.\n\n3. MUTATE systematically: Adjust heights, widths, or add small bumps based on the analysis.\n\n4. PROBE to rank variants cheaply (30 probe budget total).\n\n5. EVALUATE only the top 2-3 probe-ranked variants.\n\n6. ITERATE: Use the new best as your starting point and repeat.\n\n7. If no improvement after 15 iterations, try a DIFFERENT step-function pattern.\n\nCritical: Focus on PRECISE, SMALL mutations (heights ±0.01-0.05, widths ±2-5%). Large changes destroy the delicate balance.\n\nTool usage:\n- analyze_convolution: Call ONCE at iteration start to understand current best\n- edit_solution: Make SMALL, targeted edits based on analysis\n- probe_solution: RANK variants before evaluation (30 budget)\n- evaluate_solution: Test top 2-3 probe-ranked variants"
+skill_description: "Systematic step-function refinement for C₂ maximization. Analyze convolution properties, apply targeted mutations, probe to rank, evaluate top variants, iterate."
+skill_body: "# C₂ Maximizer: Systematic Step-Function Refinement Protocol\n\n## Core Principle\n\nThe step-function record is HIGH but achievable. Break it through PRECISE, mathematically-informed refinements, not wild exploration.\n\n## Phase 1: Initial Analysis (First Iteration)\n\n1. Call analyze_convolution ONCE on the current best function\n2. Study the convolution profile:\n   - Where is ||f★f||_∞ achieved (peak location, width)?\n   - How is energy distributed (L₂ vs L₁)?\n   - Are there symmetries or asymmetries?\n\n## Phase 2: Targeted Mutation\n\nGenerate ONE concrete implementation per mutation type:\n\n**Mutation Type 1: Peak Height Optimization**\n- Increase the central peak by 0.01-0.03\n- Decrease side peaks by 0.01-0.02\n- Rationale: Adjust L₂/∞ balance\n\n**Mutation Type 2: Width Refinement**\n- Expand the high plateau by 2-5% (e.g., 0.22n → 0.23n)\n- Contract the side regions by 2-5%\n- Rationale: Spread convolution energy more evenly\n\n**Mutation Type 3: Asymmetric Enhancement**\n- Make left and right steps slightly different (e.g., 1.45 vs 1.40)\n- Rationale: Break symmetry to reduce interference peaks\n\n**Mutation Type 4: Small Bump Addition**\n- Add a tiny bump (height 0.05-0.10, width 0.02n) in a low region\n- Rationale: Fill \"valleys\" in convolution, improve L₂\n\n## Phase 3: Probe → Evaluate Loop\n\n1. For each mutation, call probe_solution to rank\n2. Select top 2-3 by probe score\n3. Call evaluate_solution on top 2-3\n4. If none improve: pick a different mutation type\n5. If improvement: use new best as starting point and repeat\n\n## Phase 4: Pattern Switching\n\nIf 15+ iterations with no improvement:\n- Try a completely different step pattern (e.g., 4 levels instead of 2, or asymmetric multi-step)\n- Then restart the refine→probe→evaluate loop"
+tool_descriptions:
+  edit_solution: 'Modify the EVOLVE-BLOCK with SMALL, targeted mutations:\n\n  - Height: change by ±0.01-0.05 (e.g., 1.45 → 1.47)\n  - Width: change boundaries by ±2-5% (e.g., 0.22n → 0.23n)\n  - Add bump: insert a small range of indices with height 0.05-0.10\n  - Make asymmetric: change one side to 1.40, other to 1.45\n\n  Use SEARCH/REPLACE, keep the rest identical.'
+  evaluate_solution: 'Full evaluation. Returns combined_score. Call ONCE per variant after probing.\n\n  Budget: 30 evals total. Use only for top 2-3 probe-ranked variants.'
+  probe_solution: 'Approximate score on subsampled data (30 budget, separate from evals).\n\n  CRITICAL: Call this for EACH mutation variant BEFORE evaluating. Use probe scores to RANK and select top 2-3 for full evaluation. Skip probe for obvious losers.'
+sampling:
+  temperature: 0.3
+  top_p: 0.85
+  top_k: 10
+  max_tokens: 16384
+agent:
+  max_iterations: 80
+new_tools:
+  - name: analyze_convolution
+    description: |
+      Analyze the current best function's convolution properties to guide mutations.
+      Returns peak location, width, energy distribution, symmetry analysis, and mutation recommendations.
+      Call this ONCE at the start of each iteration cycle.
+    input_schema:
+      type: object
+      properties: {}
+    implementation_py: |
+      def run(ctx, args):
+          import jax.numpy as jnp
+          best_f = ctx.get_best_program()
+          try:
+              # Extract f_values from the program
+              f_line = [l for l in best_f.split('\\n') if 'f_values = ' in l][0]
+              f_values_str = f_line.split('f_values = ')[1].strip().rstrip(',')
+              # Execute to get array
+              f_arr = eval(f_values_str, {"jnp": jnp})
+          except Exception as e:
+              return {"error": f"Failed to parse f_values: {e}"}
+          
+          N = len(f_arr)
+          padded = jnp.pad(f_arr, (0, N))
+          fft_p = jnp.fft.fft(padded)
+          conv = jnp.fft.ifft(fft_p * fft_p).real
+          
+          h = 1.0 / (len(conv) + 1)
+          conv_pts = jnp.concatenate([jnp.array([0.0]), conv, jnp.array([0.0])])
+          y1, y2 = conv_pts[:-1], conv_pts[1:]
+          l2_sq = jnp.sum((h/3) * (y1**2 + y1*y2 + y2**2))
+          l1 = jnp.sum(jnp.abs(conv)) / (len(conv) + 1)
+          linf = jnp.max(jnp.abs(conv))
+          
+          peak_idx = int(jnp.argmax(jnp.abs(conv)))
+          above_half_peak = jnp.sum(jnp.abs(conv) > jnp.max(jnp.abs(conv)) * 0.5)
+          
+          return {
+              "peak_location": int(peak_idx),
+              "peak_width": int(above_half_peak),
+              "peak_value": float(jnp.max(jnp.abs(conv))),
+              "l2_squared": float(l2_sq),
+              "l1_norm": float(l1),
+              "linf_norm": float(linf),
+              "c2_estimate": float(l2_sq / (l1 * linf)),
+              "recommendation": "Focus mutations near the peak location to reduce L∞ while preserving L₂ energy. Try: (1) expanding central plateau by 3-5%, (2) adding small bumps in valley regions, (3) slight asymmetry between left/right steps."
+          }
+new_skills:
+  - name: step-refinement-protocol
+    description: "Focused refinement of step-function architectures through systematic mutation, probing, and evaluation."
+    body: "# Step-Function Refinement Protocol for C₂ Maximization\n\n## Core Strategy\n\nThe current step-function designs are close to optimal. Break the record through PRECISE, mathematically-informed mutations, not wild exploration.\n\n## The Loop (Repeat until improvement or exhaustion)\n\n1. **Analyze**: Call analyze_convolution on the current best\n2. **Mutate**: Generate ONE variant per mutation type (peak adjustment, width refinement, asymmetry, bump addition)\n3. **Probe**: Call probe_solution for each variant to rank them\n4. **Evaluate**: Call evaluate_solution on top 2-3 probe-ranked variants\n5. **Iterate**: Use the best result as your new starting point\n\n## Mutation Types (in order of priority)\n\n### 1. Peak Height Optimization\n- Increase central peak by 0.01-0.03, decrease sides by 0.01-0.02\n- Expected effect: Adjusts L₂/∞ balance\n\n### 2. Width Refinement  \n- Expand high plateau by 2-5%, contract side regions by 2-5%\n- Expected effect: Spreads convolution energy more evenly\n\n### 3. Asymmetric Enhancement\n- Make left and right steps slightly different (1.45 vs 1.40)\n- Expected effect: Breaks symmetry, reduces interference peaks\n\n### 4. Small Bump Addition\n- Add bump (height 0.05-0.10, width 0.02n) in a low region\n- Expected effect: Fills valleys in convolution, improves L₂\n\n## Key Rules\n\n- **SMALL mutations only**: heights ±0.01-0.05, widths ±2-5%\n- **Probe before evaluate**: Use all 30 probes before spending evals\n- **One variant per type**: Don't generate 10 variants of the same mutation\n- **Stick with step functions**: Don't switch to smooth functions mid-process\n- **Document mutations**: Note what you changed in the finish summary"

@@ -1,0 +1,216 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are an expert in constructing step functions for the Erdős minimum overlap problem.
+
+  **OBJECTIVE**: Maximize combined_score = 0.38092303510845016 / c5_bound by finding c5_bound < 0.38092303510845016.
+
+  **KEY INSIGHT**: Gradient-based optimization from random initializations gets trapped in local optima. You must **construct** candidate step functions with specific mathematical properties, then refine them.
+
+  **STRATEGY**:
+
+  1. Use the `construct_step_function` tool to generate diverse candidate patterns:
+     - Symmetric constructions (even/odd around x=1)
+     - Concentrated mass patterns (h concentrated in specific regions)
+     - Multi-scale patterns (different interval distributions)
+     - Boundary-focused constructions (mass near x=0 or x=2)
+
+  2. For each constructed candidate:
+     - Evaluate to get c5_bound
+     - If promising, refine with gradient descent (tune hyperparameters)
+     - Try coarser discretizations (100-200 intervals) to find global structure, then refine to 800+
+
+  3. Mathematical properties to exploit:
+     - Symmetric functions often achieve lower overlaps
+     - Concentrating mass away from self-overlap regions helps
+     - Step functions with few breakpoints are easier to optimize than smooth transitions
+
+  4. Budget: ~30 evaluations. Use each wisely. Construct multiple candidates per evaluation batch.
+
+  **CONSTRAINTS**: h:[0,2]→[0,1], ∫h=1. Use sigmoid(latent) with constraint penalties if optimizing continuously.
+
+  **ACTIONS**: Construct diverse candidates first, then refine. Don't rely solely on the seed's multi-restart from random initializations.
+tool_descriptions:
+  edit_solution: |
+    Edit the EVOLVE-BLOCK to change optimizer hyperparameters, initialization strategies, or construction logic.
+    For major strategy changes, prefer complete rewrites of the EVOLVE-BLOCK.
+  evaluate_solution: |
+    Run the program and get combined_score. You have ~30 evaluations total.
+  probe_solution: |
+    NOT AVAILABLE for this fast JAX/NumPy evaluator.
+  finish: |
+    End when budget exhausted or no improvements after exploring multiple strategies.
+new_tools:
+  - name: construct_step_function
+    description: |
+      Generate a step function h with specified structural properties for Erdős overlap minimization.
+      Constructs candidate solutions with mathematical insights rather than random initialization.
+      
+      Parameters:
+        - pattern_type: 'symmetric' | 'concentrated' | 'multi_scale' | 'boundary' | 'random'
+        - num_intervals: int (default 800)
+        - concentration_center: float (for concentrated patterns, where to center mass in [0,2])
+        - symmetry_axis: float (for symmetric patterns, axis of symmetry in [0,2])
+        
+      Returns a latent vector that when passed through sigmoid gives a valid h in [0,1].
+    input_schema:
+      type: object
+      properties:
+        pattern_type:
+          type: string
+          enum: [symmetric, concentrated, multi_scale, boundary, random]
+        num_intervals:
+          type: integer
+          default: 800
+        concentration_center:
+          type: number
+          default: 1.0
+        symmetry_axis:
+          type: number
+          default: 1.0
+    implementation_py: |
+      def run(ctx, args):
+          import jax
+          import jax.numpy as jnp
+          from dataclasses import dataclass
+          
+          num_intervals = args.get('num_intervals', 800)
+          pattern_type = args.get('pattern_type', 'symmetric')
+          concentration_center = args.get('concentration_center', 1.0)
+          symmetry_axis = args.get('symmetry_axis', 1.0)
+          
+          N = num_intervals
+          x = jnp.linspace(0, 2, N)
+          domain_width = 2.0
+          
+          if pattern_type == 'symmetric':
+              # Construct symmetric step function around symmetry_axis
+              # Start with a basic symmetric pattern and add noise
+              key = jax.random.PRNGKey(42)
+              base = jnp.zeros(N)
+              
+              # Create multiple symmetric step patterns and blend
+              for _ in range(5):
+                  step_width = jnp.random.uniform(0.2, 0.8, (1, N))
+                  symmetry_val = jnp.sin(2 * jnp.pi * jnp.abs(x - symmetry_axis) / 1.0)
+                  base = base + symmetry_val * step_width[0]
+              
+              latent = jnp.tanh(base * 1.5)
+              
+          elif pattern_type == 'concentrated':
+              # Concentrate mass around concentration_center
+              key = jax.random.PRNGKey(43)
+              latent = jnp.zeros(N)
+              
+              # Create Gaussian-like concentration
+              width = jnp.random.uniform(0.15, 0.3, (1,))
+              dist = jnp.abs(x - concentration_center) / 1.0
+              latent = jnp.exp(-dist / width) * jnp.tanh(3.0)
+              
+              # Add small symmetric perturbation
+              perturbation = jnp.sin(4 * jnp.pi * (x - 1.0)) * 0.5
+              latent = latent + perturbation * 0.3
+              
+          elif pattern_type == 'multi_scale':
+              # Combine multiple scale patterns
+              key = jax.random.PRNGKey(44)
+              latent = jnp.zeros(N)
+              
+              # Fine scale: high-frequency oscillations
+              latent += jnp.sin(10 * jnp.pi * x) * 0.5
+              latent += jnp.sin(20 * jnp.pi * x) * 0.3
+              
+              # Coarse scale: broad shape
+              latent += jnp.sin(2 * jnp.pi * x) * 1.5
+              latent += jnp.cos(2 * jnp.pi * x) * 0.5
+              
+              # Add asymmetric bias
+              latent += 2.0 * (x - 1.0)
+              
+          elif pattern_type == 'boundary':
+              # Concentrate near boundaries (x=0 or x=2)
+              key = jax.random.PRNGKey(45)
+              latent = jnp.zeros(N)
+              
+              # Dual boundary concentration
+              boundary_dist = jnp.minimum(x, 2.0 - x) / 1.0
+              latent = jnp.exp(-boundary_dist / 0.3) * jnp.tanh(3.0)
+              
+              # Subtract middle to ensure integral constraint
+              middle_penalty = jnp.exp(-jnp.abs(x - 1.0) / 0.5) * 0.5
+              latent = latent - middle_penalty * 0.3
+              
+          else:  # random
+              key = jax.random.PRNGKey(46)
+              latent = jax.random.normal(key, (N,)) * 1.0
+              
+          # Apply sigmoid to get h in (0, 1)
+          h = jax.nn.sigmoid(latent)
+          
+          # Add constraint to ensure integral ≈ 1
+          current_integral = jnp.sum(h) * (2.0 / N)
+          if current_integral < 0.95 or current_integral > 1.05:
+              scale = 1.0 / jnp.clip(current_integral, 0.01, 10.0)
+              latent = latent + jnp.log(scale)  # Adjust sigmoid scale
+              h = jax.nn.sigmoid(latent)
+          
+          # Return latent (h can be recomputed if needed)
+          return {"latent": latent.tolist(), "h_mean": float(jnp.mean(h)),
+                  "h_integral": float(current_integral), "pattern": pattern_type}
+new_skills:
+  - name: constructive-erdos-strategy
+    description: |
+      Construct mathematical step functions for Erdős overlap minimization.
+      Use structured constructions before gradient refinement. Exploit symmetry, concentration, and multi-scale patterns.
+    body: |
+      # Constructive Strategy for Erdős C5 Bound Optimization
+      
+      ## Core Principle
+      Don't rely solely on gradient descent from random starts. **Construct** candidate step functions with mathematically-informed structures.
+      
+      ## Construction Patterns
+      
+      ### 1. Symmetric Constructions
+      - Functions symmetric around x=1 often achieve lower max overlap
+      - Try: h(x) = h(2-x) for symmetry
+      - Use sin/cos basis functions centered at x=1
+      
+      ### 2. Concentrated Mass Patterns
+      - Concentrate h(x) in regions where it doesn't self-overlap much
+      - Try: Gaussian-like concentration, then perturb
+      - Test different concentration centers (0.5, 1.0, 1.5)
+      
+      ### 3. Multi-Scale Patterns
+      - Combine coarse and fine scale structures
+      - Coarse: broad shape (sin/cos at low frequency)
+      - Fine: high-frequency modulations
+      - This escapes simple local optima
+      
+      ### 4. Boundary Focused
+      - Concentrate mass near x=0 and x=2
+      - Reduces overlap with shifted versions
+      - Use: h concentrated near boundaries, low in middle
+      
+      ## Refinement Strategy
+      
+      1. **Construct** 3-5 diverse candidates using `construct_step_function`
+      2. **Evaluate** each to identify promising ones (combined_score > 0.99)
+      3. **Refine** promising candidates:
+         - Increase num_intervals if discretization is coarse
+         - Tune hyperparameters (learning_rate, penalty_strength)
+         - Run multi-restart optimization from the constructed candidate
+      4. **Iterate**: If no improvement, construct with different pattern types
+      
+      ## Key Mathematical Insights
+      
+      - The constraint ∫h=1 is critical: violated constraints destroy solutions
+      - Symmetric constructions often beat asymmetric random starts
+      - Multi-scale beats single-scale: captures both global structure and local detail
+      - Gradient refinement needs good starting points; construction provides those
+new_middlewares:
+  - name: construct_reminder
+    hook: before_model
+    description: |
+      Remind the solver to use constructive patterns before gradient refinement.
+    implementation_py: |
+      def before_model(hook_input):
+          return "Construct diverse step function candidates (symmetric, concentrated, multi_scale) before refining with gradient descent. Each construction attempt may be worth more than 10 optimization runs from bad starts."

@@ -1,0 +1,182 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are an expert in harmonic analysis and mathematical discovery. Your task is to find a step function h: [0,2]→[0,1] that minimizes the maximum overlap integral max_k ∫ h(x)(1-h(x+k)) dx.
+  
+  **OBJECTIVE**: Maximize combined_score = 0.38092303510845016 / c5_bound (target: > 1.0)
+  
+  **CONSTRAINTS**: h∈[0,1], ∫_0^2 h(x) dx = 1
+  
+  **KEY INSIGHT**: This is a discrete optimization problem over piecewise constant functions. Gradient descent often fails to escape local optima. Instead, use **direct construction** of candidate step functions with specific structural patterns, then evaluate them.
+  
+  **STRATEGY**:
+  1. Use the construct_candidate tool to build candidate solutions with known-good structures
+  2. Try: single-step, double-step, symmetric multi-step, concentrated mass patterns
+  3. For promising candidates, refine with local search (adjust breakpoints/values)
+  4. Coarse discretization (100-200 intervals) first to find global structure, then refine
+  
+  **TOOLS**:
+  - construct_candidate: Build a candidate h function directly (bypasses gradient descent)
+  - evaluate_solution: Get the official combined_score
+  - edit_solution: Make surgical edits to the seed program if needed
+  
+  **BUDGET**: ~30 evaluations. Each direct construction + eval pair is one evaluation.
+  
+  **WORKFLOW**: Call construct_candidate with a pattern → evaluate the result → try new patterns → iterate.
+new_tools:
+  - name: construct_candidate
+    description: |
+      Construct a candidate step function h directly without gradient descent.
+      Specify the pattern type and parameters. Returns a JSON with the constructed h
+      and its c5_bound (approximate). Call this to explore solution space systematically.
+    input_schema:
+      type: object
+      properties:
+        pattern:
+          type: string
+          description: |
+            Pattern type: "single_step", "double_step", "symmetric_3step", "concentrated_mass",
+            "triangular", "sine_wave", "piecewise_constant"
+        num_intervals:
+          type: integer
+          description: Number of intervals (100-1000). Use 100-200 for coarse search, 500+ for refinement.
+        params:
+          type: object
+          description: Pattern-specific parameters (see examples below)
+    implementation_py: |
+      def run(ctx, args):
+          import math
+          import jax.numpy as jnp
+          num_intervals = args.get("num_intervals", 200)
+          N = num_intervals
+          params = args.get("params", {})
+          pattern = args.get("pattern", "single_step")
+          
+          dx = 2.0 / N
+          h = jnp.zeros(N)
+          
+          # Single step: h=1 on [0,1], need to normalize for integral=1
+          if pattern == "single_step":
+              h = jnp.ones(N // 2)
+          
+          elif pattern == "double_step":
+              half_N = N // 4
+              h = jnp.ones(half_N)
+              h = h.at[3*half_N:].set(1.0)
+          
+          elif pattern == "symmetric_3step":
+              third_N = N // 3
+              h = jnp.zeros(N)
+              h = h.at[:third_N].set(1.0/3.0)
+              h = h.at[2*third_N:3*third_N].set(1.0/3.0)
+          
+          elif pattern == "concentrated_mass":
+              start_idx = int(0.5 / 2.0 * N)
+              end_idx = int(1.5 / 2.0 * N)
+              h = h.at[start_idx:end_idx].set(1.0)
+          
+          elif pattern == "triangular":
+              x = jnp.linspace(0, 2, N)
+              h = jnp.maximum(0.0, 1.0 - jnp.abs(x - 1.0))
+          
+          elif pattern == "sine_wave":
+              x = jnp.linspace(0, 2, N)
+              h = 0.5 + 0.5 * jnp.sin(math.pi * x)
+          
+          elif pattern == "piecewise_constant":
+              h = jnp.full(N, 0.5)
+          
+          # Normalize h to ensure integral = 1
+          integral_h = jnp.sum(h) * dx
+          if integral_h > 0 and integral_h != 1.0:
+              h = h / integral_h
+              h = jnp.clip(h, 0.0, 1.0)
+              integral_h = jnp.sum(h) * dx
+              if integral_h > 0:
+                  h = h / integral_h
+          
+          # Compute c5_bound
+          j_arr = 1.0 - h
+          h_padded = jnp.pad(h, (0, N))
+          j_padded = jnp.pad(j_arr, (0, N))
+          corr_fft = jnp.fft.fft(h_padded) * jnp.conj(jnp.fft.fft(j_padded))
+          correlation = jnp.fft.ifft(corr_fft).real
+          c5_bound = jnp.max(correlation) * dx
+          
+          return {
+              "h": h.tolist(),
+              "c5_bound": float(c5_bound),
+              "pattern": pattern,
+              "num_intervals": N,
+              "integral": float(jnp.sum(h) * dx)
+          }
+new_skills:
+  - name: direct-construction-strategy
+    description: |
+      Systematic construction of candidate step functions for the Erdős C₅ problem.
+      Bypasses gradient descent by directly building solutions with known structures.
+    body: |
+      # Direct Construction Strategy for Erdős C₅ Problem
+      
+      ## Why Direct Construction Works
+      
+      The gradient-based optimizer gets stuck in local optima. Instead, construct
+      candidate solutions with specific mathematical properties that are known to
+      perform well for overlap minimization.
+      
+      ## Pattern Library
+      
+      ### 1. Single Step
+      - h(x) = 1 for x ∈ [0,1], 0 elsewhere
+      - Integral = 1 ✓
+      - Simple baseline, often good starting point
+      
+      ### 2. Double Step
+      - h(x) = 1 for x ∈ [0,0.5] ∪ [1.5,2], 0 elsewhere
+      - Integral = 1 ✓
+      - Spreads mass to reduce overlap
+      
+      ### 3. Symmetric Multi-Step
+      - Divide [0,2] into k equal intervals, put h=1/k on each
+      - Exploits symmetry to minimize correlation
+      
+      ### 4. Concentrated Mass
+      - h(x) = 1 for x ∈ [0.5,1.5], 0 elsewhere
+      - Integral = 1 ✓
+      
+      ### 5. Triangular Wave
+      - h(x) = 1 - |x-1| for x ∈ [0,2]
+      - Smooth, symmetric, integral = 1 ✓
+      
+      ### 6. Sine Wave
+      - h(x) = 0.5 + 0.5*sin(π*x) for x ∈ [0,2]
+      - Smooth oscillation, integral = 1 ✓
+      
+      ## Search Procedure
+      
+      1. Start with coarse discretization (N=100-200)
+      2. Try each pattern in the library
+      3. Record the best c5_bound for each pattern
+      4. Refine promising patterns with finer discretization (N=500-1000)
+      5. For very promising candidates, use local search to tweak parameters
+      6. Evaluate final candidates with full evaluation
+      
+      ## Key Insight
+      
+      The optimal h likely has a **piecewise constant** structure with few breakpoints.
+      Gradient descent from random starts struggles to find this. Direct construction
+      systematically explores this structured space.
+tool_descriptions:
+  edit_solution: 'Surgical edits to the seed program. For strategic changes (new patterns, different optimizer), prefer constructing entirely new candidate solutions using construct_candidate instead.'
+  evaluate_solution: 'Run the candidate and get combined_score. You have ~30 evaluations. Use construct_candidate to generate candidates, then evaluate the best ones.'
+  probe_solution: 'Approximate evaluation on subsampled data. Useful for ranking many construct_candidate outputs before full evaluation.'
+  finish: 'End when budget exhausted or no improvements found. Best program auto-submitted.'
+sampling:
+  temperature: 1.5
+  top_p: 0.95
+  top_k: 30
+  max_tokens: 16000
+agent:
+  max_iterations: 80
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 15000

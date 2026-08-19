@@ -1,0 +1,205 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are an expert algorithm engineer improving a C++ program to solve a polygon optimization problem.
+  Goal: MAXIMIZE score = max(0, mackerels_inside - sardines_inside + 1)
+  Constraints: axis-aligned polygon, ≤1000 vertices, perimeter ≤400,000, integer coordinates [0,10^5]
+  
+  STRATEGY: Use a two-phase approach:
+  1. ANALYZE: First, analyze the fish distribution to identify mackerel-rich regions and sardine-dense areas
+  2. CONSTRUCT: Build an initial polygon using greedy clustering around mackerels, then iteratively refine
+  3. VALIDATE: Always call analyze_fish_distribution once at the start to understand the layout
+  4. PROBE FIRST: Before full evaluation, probe your candidates on the cheapest score to quickly rank options
+  5. CONSIDER: Try expanding the polygon in directions with high mackerel density and low sardine presence
+  
+  Key insight: The optimal polygon often forms a bounding box or union of several boxes around mackerel clusters.
+  Avoid regions with high sardine density unless they also contain many mackerels.
+  
+  Make targeted changes: use SEARCH/REPLACE diffs for small edits, full rewrites only for major strategy changes.
+  Never evaluate the same code twice. Keep your internal search loop within the 1.95s time limit.
+skill_description: |
+  Optimize a C++ polygon program for a fish-capture game. Use analyze_fish_distribution to understand
+  the layout, then build smart initial constructions and probe before full evaluation. Maximize mackerels minus sardines.
+skill_body: |
+  # Polygon Optimization Strategy
+  
+  ## Phase 1: Analyze the Fish Distribution
+  - Call `analyze_fish_distribution` immediately to get the spatial layout
+  - Identify: mackerel clusters, sardine-dense regions, empty spaces
+  
+  ## Phase 2: Construct Initial Polygon
+  - Greedy approach: start with a bounding box around all mackerels
+  - Refine by cutting out sardine-dense areas using recursive subdivision
+  - Or: build multiple small boxes around mackerel clusters
+  
+  ## Phase 3: Iterative Refinement
+  - For each vertex, try small perturbations that expand into mackerel-rich areas
+  - Contract edges that pass through sardine-dense regions
+  - Use the `probe_solution` to quickly rank multiple variants before full evaluation
+  
+  ## Phase 4: Validate and Finalize
+  - Ensure all constraints: axis-aligned, perimeter ≤400,000, vertices ≤1000
+  - Output the last refined polygon
+  
+  ## Key Techniques
+  - Use KD-tree or sweep-line for fast point counting
+  - Pre-sort fish by coordinates for efficient quadrant queries
+  - Consider the bounding box of just mackerels as a strong baseline
+  - If sardines are sparse, a simple convex hull of mackerels may suffice
+  
+  ## Common Pitfalls
+  - Don't let the internal search exceed ~1.8s (leave 0.1s margin)
+  - Don't forget axis-alignment constraint
+  - Remember: points ON edges count as inside the polygon
+  
+  ## Tool Usage Order
+  1. Call analyze_fish_distribution once
+  2. Call edit_solution to create initial construction
+  3. Call probe_solution to quickly rank multiple variants
+  4. Call evaluate_solution only on your best candidates
+  5. Repeat refinement until time or budget exhausted
+tool_descriptions:
+  edit_solution: |
+    Change the EVOLVE-BLOCK region with SEARCH/REPLACE diffs or full rewrites.
+    Preserve the fixed entry function structure. Make targeted edits for small changes.
+  evaluate_solution: |
+    Run the program and get combined_score (higher is better), validity, errors, best_so_far, and evaluations_left.
+    Limited budget—use wisely.
+  probe_solution: |
+    FAST approximate score on subsampled fish data (~2000 fish). Does NOT consume evaluation budget.
+    Use to quickly rank multiple polygon variants before committing to full evaluation.
+    Scores are approximate and NOT comparable to evaluate_solution scores.
+  analyze_fish_distribution: |
+    NEW TASK-SPECIFIC TOOL: Analyze the spatial distribution of all fish. Returns: total mackerels/sardines,
+    global bounding box, density heatmap (50x50 grid cell counts), and per-region
+    mackerel/sardine ratios. Call this ONCE at the start of your program to
+    inform your construction strategy. This is a precomputation step—O(N) time.
+    This helps identify promising construction strategies and avoid sardine-dense areas.
+  finish: |
+    End the session when you can't improve or budget is exhausted. Best solution auto-submitted.
+sampling:
+  temperature: 0.9
+  top_p: 0.95
+  top_k: 30
+  max_tokens: 10240
+agent:
+  max_iterations: 50
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 12000
+new_tools:
+  - name: analyze_fish_distribution
+    description: |
+      Analyze the spatial distribution of all fish. Returns: total mackerels/sardines,
+      global bounding box, density heatmap (50x50 grid cell counts), and per-region
+      mackerel/sardine ratios. Call this ONCE at the start of your program to
+      inform your construction strategy. This is a precomputation step—O(N) time.
+    input_schema: {type: object, properties: {}}
+    implementation_py: |
+      def run(ctx, args):
+          # Read all fish coordinates
+          all_fish = []
+          names = ctx.list_task_inputs()
+          if names:
+              df = ctx.read_input_df(names[0], nrows=5000)
+              if len(df) >= 5000:
+                  mackerels = df.iloc[:5000]
+                  sardines = df.iloc[5000:]
+                  for _, row in mackerels.iterrows():
+                      all_fish.append({"type": 1, "x": int(row[0]), "y": int(row[1])})
+                  for _, row in sardines.iterrows():
+                      all_fish.append({"type": -1, "x": int(row[0]), "y": int(row[1])})
+          
+          if not all_fish:
+              return {"error": "No fish found", "mackerels": 0, "sardines": 0,
+                      "bbox_xmin": 0, "bbox_ymin": 0, "bbox_xmax": 100000, "bbox_ymax": 100000}
+          
+          # Compute bounding box
+          xs = [f["x"] for f in all_fish]
+          ys = [f["y"] for f in all_fish]
+          xmin, xmax = min(xs), max(xs)
+          ymin, ymax = min(ys), max(ys)
+          
+          # Build 50x50 grid density heatmap
+          grid_size = 50
+          cell_width = (xmax - xmin) / grid_size if xmax > xmin else 1
+          cell_height = (ymax - ymin) / grid_size if ymax > ymin else 1
+          
+          grid = [[{"mackerel": 0, "sardine": 0} for _ in range(grid_size)] for _ in range(grid_size)]
+          for f in all_fish:
+              cx = int((f["x"] - xmin) / cell_width) if cell_width > 0 else 0
+              cy = int((f["y"] - ymin) / cell_height) if cell_height > 0 else 0
+              if 0 <= cx < grid_size and 0 <= cy < grid_size:
+                  if f["type"] == 1:
+                      grid[cy][cx]["mackerel"] += 1
+                  else:
+                      grid[cy][cx]["sardine"] += 1
+          
+          mackerels = sum(f["type"] == 1 for f in all_fish)
+          sardines = sum(f["type"] == -1 for f in all_fish)
+          
+          return {
+              "mackerels": mackerels, "sardines": sardines,
+              "bbox_xmin": xmin, "bbox_ymin": ymin, "bbox_xmax": xmax, "bbox_ymax": ymax,
+              "grid": grid,
+              "recommendation": "Use greedy clustering around mackerel cells with high mackerel/sardine ratio"
+          }
+new_skills:
+  - name: polygon-construction-strategy
+    description: |
+      Task-specific skill for constructing axis-aligned polygons. Guides the solver to:
+      1. Analyze fish distribution first
+      2. Build initial polygon around mackerel clusters
+      3. Iteratively refine by probing and full evaluation
+    body: |
+      # Axis-Aligned Polygon Construction for Fish Capture
+      
+      ## Understanding the Problem
+      You need to construct a polygon that maximizes (mackerels_inside - sardines_inside + 1).
+      Key constraints: axis-aligned edges, ≤1000 vertices, perimeter ≤400,000, integer coordinates.
+      
+      ## Strategy: Greedy Clustering with Refinement
+      
+      ### Step 1: Initial Construction
+      - Call analyze_fish_distribution to get the spatial layout
+      - Identify mackerel-rich regions: cells where mackerel_count >> sardine_count
+      - Build a bounding box around the mackerel cluster with highest density
+      - Alternative: create multiple small boxes around separate mackerel clusters
+      
+      ### Step 2: Shape Optimization
+      - The polygon edges must be axis-aligned (horizontal or vertical)
+      - Use a bounding box of a subset of mackerels as your baseline
+      - Consider: if sardines are sparse outside mackerel regions, a large bounding box works
+      - If sardines are dense in some areas, cut those out using L-shaped or U-shaped polygons
+      
+      ### Step 3: Iterative Refinement
+      - For each vertex, try 4 perturbations: expand/shrink in ±x or ±y direction
+      - Keep perturbations that increase score (check with probe_solution first)
+      - Stop when no improvement or time limit reached
+      
+      ### Step 4: Edge Cases
+      - If all mackerels are in a cluster: simple bounding box is strong baseline
+      - If mackerels are spread: multiple small boxes or a complex polygon
+      - If many sardines near mackerels: carefully navigate around sardine-rich regions
+      
+      ## Implementation Tips
+      - Use KD-tree or bucket sort for O(log N) or O(1) point-in-polygon queries
+      - Pre-compute which points are inside before scoring
+      - Keep your internal search loop under 1.8 seconds
+      - Always validate: perimeter ≤400,000, vertices ≤1000, axis-aligned
+      
+      ## Tool Usage
+      - analyze_fish_distribution: CALL ONCE at start
+      - probe_solution: For quick ranking of multiple variants (cheaper than full eval)
+      - evaluate_solution: Only on your best candidates
+      - finish: When done or budget exhausted
+new_middlewares:
+  - name: reminder_probe_before_eval
+    hook: before_model
+    description: |
+      Remind the solver to probe before spending a full evaluation, and to call
+      analyze_fish_distribution once at the beginning.
+    implementation_py: |
+      def before_model(hook_input):
+          if "edit_solution" in hook_input.get("last_action", ""):
+              return "After editing, call probe_solution to quickly rank variants before calling evaluate_solution. Also ensure you called analyze_fish_distribution ONCE at the start to understand the fish layout."
+          return None

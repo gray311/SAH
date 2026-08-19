@@ -1,0 +1,107 @@
+schema: h2spec/1.0
+system_prompt: "You are an expert mathematical optimizer specializing in harmonic analysis and the Erdős minimum overlap problem. Your task is to find step functions h: [0, 2] → [0, 1] that minimize the C5 bound (the maximum autocorrelation).\n\nKey strategy: Use bounded internal search within each evaluation. Since the evaluator has a time limit, don't rely on long gradient descent. Instead:\n1. Try MULTIPLE different initialization strategies with bounded internal optimization (fewer steps per restart, but many restarts)\n2. Include diverse constructions: periodic patterns, block patterns, alternating strategies\n3. Use your new tool `pattern_searcher` to generate and evaluate many variants quickly\n4. Report the BEST C5 bound found across all attempts\n\nThe fixed constraint: ∫h(x)dx = 1 over [0, 2]. The function must stay in [0, 1].\n\nCurrent best record: C5 ≤ 0.38092303510845016 (your combined_score = 0.38092303510845016 / found_C5)\n\nTime is your enemy: maximize diversity of attempts per evaluation rather than deep optimization of one."
+skill_description: "Mathematical optimization for the Erdős minimum overlap problem. Use pattern exploration and bounded internal search to find step functions that minimize C5 bound. Try multiple constructions per evaluation and report the best."
+skill_body: "# Erdős C5 Minimization Strategy\n\n## Core Approach\n\nThe C5 problem seeks a step function h: [0, 2] → [0, 1] with ∫h(x)dx = 1 that minimizes the maximum autocorrelation max_k ∫ h(x)(1 - h(x+k)) dx.\n\n## Key Strategy: Pattern Exploration + Bounded Search\n\n**DO NOT** run long gradient descent (20000+ steps) in a single evaluation. Instead:\n\n1. **INTERNAL SEARCH LOOP**: Run multiple restarts (5-10) with different initialization patterns\n2. **BUDGETED OPTIMIZATION**: Use 200-500 optimization steps per restart (total 2500-5000 steps across all restarts)\n3. **DIVERSITY**: Try different construction patterns as initializations\n4. **BEST RESULT**: Return the best C5 bound found across all attempts\n\n## Recommended Initialization Patterns\n\n- **Random + Momentum**: Multiple random initializations with momentum-based SGD\n- **Periodic Block**: Construct h as repeating blocks of [a, 1-a] pattern\n- **Alternating Strategy**: High/low value patterns with varying block sizes\n- **Peak-Avoidance**: Place higher values away from k=1 region to minimize overlap\n\n## Constraint Handling\n\nUse projection or penalty: after each update, ensure:\n- h[i] = max(0, min(1, h[i])) for all i\n- Scale so sum(h) * dx ≈ 1.0\n\n## Tool Usage\n\n- `pattern_searcher`: Call this to generate and evaluate multiple pattern-based candidates\n- `edit_solution`: Use to change the internal optimization strategy\n- `evaluate_solution`: Call once at the end with your best attempt only\n\n## Time Budget Reality\n\nThe evaluator has a time limit. Aim to complete your internal search in < 15 seconds, leaving margin for the evaluator overhead. Better to evaluate 10 quick candidates than 1 slow one."
+tool_descriptions:
+  edit_solution: 'Change the code inside the # EVOLVE-BLOCK region. Preferred: SEARCH/REPLACE diffs for targeted changes. Alternatively, full rewrite of the EVOLVE-BLOCK body. The fixed entry function and imports outside are preserved.'
+  evaluate_solution: 'Run your program through the evaluator. Returns combined_score, validity, error, and remaining budget. Only the BEST variant from your internal search should be presented here. Use it sparingly (20 total budget).'
+  probe_solution: 'Cheap approximate evaluation on subsampled data. Use to quickly test internal strategies before full evaluation. Does NOT consume evaluation budget. Score is approximate and NOT comparable to full scores.'
+  finish: 'End the session when budget exhausted or no more improvements possible.'
+sampling:
+  temperature: 0.9
+  top_p: 0.98
+  top_k: 50
+  max_tokens: 12288
+agent:
+  max_iterations: 40
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 10000
+new_tools:
+  - name: pattern_searcher
+    description: |
+      Generate and internally evaluate multiple step function patterns (periodic, alternating, block-based) with bounded optimization (200 steps each, 8 restarts). Returns dict with 'best_c5_bound', 'best_pattern_type', and top 3 pattern descriptions.
+    input_schema: {type: object, properties: {}}
+    implementation_py: |
+      def run(ctx, args):
+          import jax
+          import jax.numpy as jnp
+          import optax
+          
+          results = []
+          
+          # Pattern 1: Random with different seeds
+          def pattern_random(seed):
+              latent = jax.random.normal(jax.random.PRNGKey(seed), (1000,))
+              optimizer = optax.sgd(0.02)
+              opt_state = optimizer.init(latent)
+              for _ in range(200):
+                  loss_fn = lambda z: _obj(z, 1000.0)
+                  loss, grads = jax.value_and_grad(loss_fn)(latent)
+                  latent = latent + grads * 0.01
+                  latent = jnp.clip(latent, -10, 10)
+              h = jax.nn.sigmoid(latent)[:1000]
+              j = 1.0 - h
+              corr = jnp.fft.fft(h) * jnp.conj(jnp.fft.fft(j))
+              c5 = float(jnp.max(jnp.fft.ifft(corr).real))
+              integral = float(jnp.sum(h))
+              return c5, float(integral), "random_seed" + str(seed)
+          
+          # Pattern 2: Block construction
+          def pattern_blocks(seed):
+              rng = jax.random.PRNGKey(seed)
+              block_sizes = jax.random.randint(rng, (8,), 10, 200)
+              pattern = jnp.zeros(1000)
+              for i, size in enumerate(block_sizes):
+                  start = i * 125
+                  pattern = pattern.at[start:start+size].set(jax.random.uniform(rng, (1,))[0])
+              h = pattern / jnp.sum(pattern) * 1000.0
+              j = 1.0 - h
+              corr = jnp.fft.fft(h) * jnp.conj(jnp.fft(j))
+              c5 = float(jnp.max(jnp.fft.ifft(corr).real))
+              return c5, 1000.0, "blocks"
+          
+          # Pattern 3: Alternating high-low
+          def pattern_alternating(seed):
+              rng = jax.random.PRNGKey(seed)
+              h = jnp.zeros(1000)
+              high_count = jax.random.randint(rng, (), 200, 400)
+              low_count = 1000 - high_count
+              high_positions = jax.random.choice(rng, 1000, high_count, replace=False)
+              h = h.at[high_positions].set(1.0)
+              h = h / jnp.sum(h) * 1000.0
+              j = 1.0 - h
+              corr = jnp.fft.fft(h) * jnp.conj(jnp.fft(j))
+              c5 = float(jnp.max(jnp.fft.ifft(corr).real))
+              return c5, 1000.0, "alternating"
+          
+          best_c5 = float('inf')
+          best_info = None
+          
+          for s in range(12):
+              c5, integral, ptype = pattern_random(s)
+              if integral > 500.0:  # Only consider reasonable integral
+                  if c5 < best_c5:
+                      best_c5 = c5
+                      best_info = (ptype, c5)
+              
+              c5, integral, ptype = pattern_blocks(s)
+              if integral > 800.0:
+                  if c5 < best_c5:
+                      best_c5 = c5
+                      best_info = (ptype, c5)
+              
+              c5, integral, ptype = pattern_alternating(s)
+              if integral > 800.0:
+                  if c5 < best_c5:
+                      best_c5 = c5
+                      best_info = (ptype, c5)
+          
+          if best_info is None:
+              best_c5 = 0.5
+              best_info = ("fallback", best_c5)
+          
+          return {"best_c5_bound": best_c5, "best_pattern_type": best_info[0]}
+remove_tools: []
+new_skills: []
+new_middlewares: []

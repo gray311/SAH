@@ -1,0 +1,193 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are a C++ polygon optimizer for axis-aligned fish capture (mackerels minus sardines + 1).
+  Coordinate space: [0,100000]x[0,100000], N=5000 mackerels, N=5000 sardines.
+  
+  STRATEGY: Find mackerel-dense clusters via direct coordinate analysis, build minimal bounding boxes around them, connect with corridors, refine with LARGE shifts.
+  
+  PHASE 1: Cluster Discovery
+  - Parse all mackerel coordinates from input
+  - Cluster mackerels using 10000-unit proximity grouping
+  - For each cluster, compute bounding box and fish counts
+  
+  PHASE 2: Bounding Box Construction
+  - Select top 10-15 clusters by net score
+  - Create minimal axis-aligned rectangles for each
+  
+  PHASE 3: Corridor Connection
+  - Connect adjacent clusters with minimal corridors
+  
+  PHASE 4: Polygon Assembly
+  - Combine into single polygon, ensure no self-intersection
+  
+  PHASE 5: AGGRESSIVE HILL CLIMBING
+  - Try shifts: ±500, ±1000, ±2000, ±3000, ±5000 units
+  - Repeat 2 refinement rounds
+  
+  PHASE 6: Multiple Restarts
+  - Run 10-15 restarts with different selection criteria
+  
+  Tools: edit_solution, evaluate_solution, probe_solution, finish
+  
+  KEY DIFFERENCE from seed: Use direct cluster analysis with LARGE shifts (±500..5000) instead of coarse grid and small shifts (±5..25).
+skill_description: Direct mackerel cluster analysis with minimal bounding boxes. Find groups of mackerels within 10000 units, build bounding boxes, connect top clusters, aggressive hill climbing with ±500..5000 shifts, 10-15 diverse restarts.
+skill_body: |
+  # Cluster and Bounding Box Strategy
+  
+  ## Core Strategy
+  Find mackerel clusters via 10000-unit proximity, build minimal bounding boxes, connect top clusters with corridors, use LARGE hill climbing shifts (±500..5000).
+  
+  ## Phase 1: Cluster Discovery
+  1. Parse all mackerel coordinates
+  2. Use 10000-unit proximity grouping
+  3. Compute bounding box, mackerel count, sardine count for each cluster
+  
+  ## Phase 2: Bounding Box Construction
+  - Select top 10-15 clusters by net score
+  - Create minimal axis-aligned rectangles
+  
+  ## Phase 3: Corridor Connection
+  - Connect adjacent clusters with minimal corridors
+  
+  ## Phase 4: Polygon Assembly
+  - Order by score and combine
+  - Ensure no self-intersection, perimeter <= 400,000
+  
+  ## Phase 5: AGGRESSIVE Hill Climbing
+  For each edge, try LARGE shifts: ±500, ±1000, ±2000, ±3000, ±5000 units
+  Repeat 2 refinement rounds
+  
+  ## Phase 6: Multiple Restarts
+  Run 10-15 restarts with different strategies
+  
+  ## Why Large Shifts?
+  Small shifts (±5..25) barely change which fish are captured. Large shifts can move edges between fish clusters, dramatically improving scores.
+tool_descriptions:
+  edit_solution: 'Replace EVOLVE-BLOCK with C++ implementing direct mackerel cluster analysis: cluster mackerels using 10000-unit proximity, build minimal bounding boxes, connect top clusters, aggressive hill climbing with ±500..5000 shifts, 10-15 diverse restarts. Ensure <2.0s execution.'
+  evaluate_solution: Run C++ program. Returns score (mackerels-sardines+1), validity, remaining evaluations (budget=30). Each run has ~2.0s search window.
+  probe_solution: Use for quick bounding box scoring - count fish in rectangular regions.
+  finish: End when you have a working cluster-based solution with aggressive hill climbing.
+sampling:
+  temperature: 1.0
+  top_p: 0.95
+  top_k: 25
+  max_tokens: 14336
+agent:
+  max_iterations: 40
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 15000
+new_tools:
+- name: cluster_analyzer
+  description: 'Analyze mackerel clusters from input. Returns clusters within 10000 units with bounding boxes and fish counts.'
+  input_schema:
+    type: object
+    properties: {}
+  implementation_py: |
+    def run(ctx, args):
+        import json, math
+        
+        input_names = ctx.list_task_inputs()
+        if not input_names:
+            return {"clusters": []}
+        
+        try:
+            mackerel_text = ctx.read_input_sample(input_names[0], nrows=15000)
+            coords = []
+            for line in mackerel_text.split('\n')[:5000]:
+                line = line.strip()
+                if line:
+                    parts = line.split()
+                    if len(parts) >= 2:
+                        try:
+                            coords.append((int(parts[0]), int(parts[1])))
+                        except:
+                            pass
+            mackerels = coords[:5000]
+        except:
+            return {"clusters": []}
+        
+        if not mackerels:
+            return {"clusters": []}
+        
+        clusters = []
+        threshold = 10000.0
+        
+        for mack in mackerels:
+            assigned = False
+            for cluster in clusters:
+                min_dist = float('inf')
+                for cx, cy in cluster['points']:
+                    dist = math.sqrt((mack[0] - cx)**2 + **(mack[1] - cy)2)
+                    if dist < min_dist:
+                        min_dist = dist
+                if min_dist <= threshold:
+                    cluster['points'].append(mack)
+                    cluster['mackerel_count'] += 1
+                    assigned = True
+                    break
+            if not assigned:
+                clusters.append({
+                    'points': [mack],
+                    'mackerel_count': 1,
+                    'sardine_count': 0,
+                    'min_x': mack[0], 'max_x': mack[0],
+                    'min_y': mack[1], 'max_y': mack[1],
+                    'net_score': 1
+                })
+        
+        sardine_coords = []
+        if input_names:
+            try:
+                sardine_text = ctx.read_input_sample(input_names[1], nrows=15000)
+                for line in sardine_text.split('\n')[:5000]:
+                    if line:
+                        parts = line.split()
+                        if len(parts) >= 2:
+                            try:
+                                sardine_coords.append((int(parts[0]), int(parts[1])))
+                            except:
+                                pass
+            except:
+                pass
+        
+        for cluster in clusters:
+            min_x = min(p[0] for p in cluster['points'])
+            max_x = max(p[0] for p in cluster['points'])
+            min_y = min(p[1] for p in cluster['points'])
+            max_y = max(p[1] for p in cluster['points'])
+            cluster['min_x'], cluster['max_x'], cluster['min_y'], cluster['max_y'] = min_x, max_x, min_y, max_y
+            
+            if sardine_coords:
+                cluster['sardine_count'] = sum(1 for sx, sy in sardine_coords if cluster['min_x'] <= sx <= cluster['max_x'] and cluster['min_y'] <= sy <= cluster['max_y'])
+            cluster['net_score'] = cluster['mackerel_count'] - cluster['sardine_count'] + 1
+        
+        clusters.sort(key=lambda c: c['net_score'], reverse=True)
+        return {"clusters": clusters[:20]}
+new_skills:
+- name: cluster-playbook
+  description: Direct cluster analysis with large shifts. Find mackerel groups via 10000-unit proximity, build bounding boxes, connect clusters, aggressive hill climbing with ±500..5000 shifts.
+  body: |
+    # Cluster Playbook
+    
+    ## Core Idea
+    Find mackerel clusters via 10000-unit proximity, build bounding boxes, connect top clusters, use LARGE hill climbing shifts.
+    
+    ## Steps
+    1. Parse mackerel coordinates
+    2. Cluster using 10000-unit proximity
+    3. Build bounding boxes for each cluster
+    4. Select top 10-15 by net score
+    5. Connect with corridors
+    6. AGGRESSIVE hill climbing: shifts ±500..5000, 2 rounds
+    7. 10-15 diverse restarts
+    
+    ## Key Difference
+    Use LARGE shifts (±500..5000) instead of small shifts (±5..25). This allows moving edges between fish clusters for dramatic score improvements.
+new_middlewares:
+- name: large_shift_reminder
+  hook: before_model
+  description: Remind solver to use large hill climbing shifts
+  implementation_py: |
+    def before_model(hook_input):
+        return "Use LARGE hill climbing shifts (±500..5000) to move polygon edges between fish clusters for dramatic improvements."

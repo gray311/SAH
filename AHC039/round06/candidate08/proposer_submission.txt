@@ -1,0 +1,115 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are an expert software developer optimizing a polygon construction algorithm.
+  TASK: Build an orthogonal polygon that maximizes (mackerel_count - sardine_count + 1).
+  APPROACH: Use ITERATIVE REFINEMENT with bounded time.
+  METHOD:
+  1. Start with a simple bounding-box polygon
+  2. Implement an INTERNAL TIME-BOUNDED SEARCH loop
+  3. Try small modifications in each iteration
+  4. Track best polygon within time limit
+  5. Output the best polygon vertices
+  CONSTRAINTS: Orthogonal edges, no self-intersection, 4-1000 vertices, perimeter<=400000, coords 0-100000
+  SEARCH: Run a WHILE loop with elapsed() check, use coordinate adjustments
+new_tools:
+  - name: optimize_polygon
+    description: Compute a better orthogonal polygon using iterative refinement. Returns vertices.
+    input_schema:
+      type: object
+      properties:
+        current_poly:
+          type: array
+          items:
+            type: object
+            properties:
+              x: integer
+              y: integer
+        fish_data:
+          type: object
+          properties:
+            mackerels: array
+            sardines: array
+        time_budget:
+          type: number
+      required:
+        - current_poly
+        - fish_data
+        - time_budget
+    implementation_py: |
+      def run(ctx, args):
+          current_poly = args["current_poly"]
+          sardines = args["fish_data"]["sardines"]
+          time_budget = args["time_budget"]
+          import time
+          start = time.time()
+          sardines_set = set()
+          for s in sardines:
+              sardines_set.add((s[0], s[1]))
+          best_poly = current_poly[:]
+          for _ in range(100):
+              elapsed = time.time() - start
+              if elapsed >= time_budget * 0.9:
+                  break
+              improved = False
+              for i in range(len(best_poly)):
+                  x, y = best_poly[i]
+                  for dx, dy in [(1,0), (-1,0), (0,1), (0,-1)]:
+                      new_x, new_y = x + dx, y + dy
+                      if 0 <= new_x <= 100000 and 0 <= new_y <= 100000:
+                          candidate = best_poly[:]
+                          candidate[i] = {"x": new_x, "y": new_y}
+                          if is_valid_orthogonal(candidate):
+                              score_change = estimate_score_change(best_poly, candidate, sardines_set)
+                              if score_change > 0:
+                                  best_poly = candidate
+                                  improved = True
+                          break
+              if not improved:
+                  break
+          return {"vertices": best_poly, "note": "optimized"}
+new_skills:
+  - name: polygon-refinement-guide
+    description: Guide for iterative polygon optimization using bounded loops and local adjustments.
+    body: |
+      # Polygon Refinement Strategy
+
+      1. Start Simple: Begin with a bounding box or minimal polygon.
+
+      2. Time-Bounded Loop:
+         Use chrono::steady_clock to track elapsed time.
+
+      3. Local Modifications:
+         - Shift one vertex by +/-1 in x or y
+         - Keep perimeter and vertex count constraints
+
+      4. Validity Checks:
+         - Ensure edges are orthogonal
+         - Check no self-intersections
+         - Verify perimeter <= 400000 and vertices <= 1000
+
+      5. The evaluator runs your ENTIRE program including the search loop.
+      Your search must complete within the time limit.
+tool_descriptions:
+  edit_solution: Change the EVOLVE-BLOCK code using SEARCH/REPLACE diffs or full rewrite.
+  evaluate_solution: Run the program and get combined_score.
+  probe_solution: Run on first 2000 fish rows for quick feedback.
+  finish: End when budget exhausted or no improvement possible.
+sampling:
+  temperature: 0.5
+  top_p: 0.9
+  top_k: 15
+  max_tokens: 12288
+agent:
+  max_iterations: 50
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 12000
+new_middlewares:
+  - name: prompt_search_reminder
+    hook: before_model
+    description: Remind the solver to implement a bounded search loop
+    implementation_py: |
+      def before_model(hook_input):
+          if "best_score" not in hook_input:
+              return "The solver must implement a WHILE loop with elapsed() check for time-bounded refinement."
+          return None

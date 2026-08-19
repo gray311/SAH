@@ -1,0 +1,188 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are solving the Erdos minimum overlap problem: find a step function h: [0,2] -> [0,1] with integral(h)=1 that minimizes max_k integral h(x)(1-h(x+k)) dx.
+
+  Current best bound: C5 <= 0.38092303510845016
+
+  KEY INSIGHT: The seed program uses 12 Gaussian/sigmoid initializations. These are all smooth, continuous functions. The optimal solution likely requires DISCRETE step functions with sharp boundaries.
+
+  STRATEGY: Generate TRULY DISCRETE step functions (piecewise constant with sharp jumps), not smooth sigmoid curves.
+
+  Steps:
+
+  1. CALL generate_discrete_steps to create 5-8 piecewise constant functions with SHARP BOUNDARIES (no smoothing)
+
+  2. For each step function, verify integral = 1 exactly. If not, adjust the heights/widths.
+
+  3. Use probe_solution to check c5_bound for step functions that satisfy the constraint.
+
+  4. Call evaluate_solution on step functions with c5_bound < 0.37.
+
+  5. If no success, EDIT _get_best_initialization to replace ALL Gaussian/sigmoid patterns with ONE pattern: directly construct a piecewise constant function with specified breakpoints and heights.
+
+  6. Focus on constructing h as a sum of rectangle functions: h(x) = sum of [height_i * indicator([a_i, b_i))].
+
+  Key insight: Break the Gaussian/sigmoid assumption entirely. The optimal solution is likely a TRUE STEP FUNCTION, not a smoothed curve.
+skill_description: Find discrete step functions with sharp boundaries, not smooth sigmoid curves. Use probes to screen piecewise constant candidates.
+skill_body: |
+  # Discrete Step Function Strategy for Erdos Optimizer
+
+  ## Why Smooth Functions Fail
+  The seed's 12 patterns all produce smooth sigmoid curves. The optimal Erdos solution likely requires TRUE STEP FUNCTIONS with sharp boundaries.
+
+  ## Workflow
+
+  ### Phase 1: Generate Discrete Step Functions
+  Call generate_discrete_steps to create piecewise constant functions:
+  - Rectangle pulses: sum of indicator functions on [a_i, b_i)
+  - Multi-interval constructions: disjoint intervals with different heights
+  - Symmetric vs asymmetric patterns
+
+  ### Phase 2: Enforce Exact Constraint
+  For each step function:
+  1. Compute integral exactly: sum of (height * width) for each interval
+  2. If integral != 1, rescale or adjust interval widths
+  3. Only consider functions with integral = 1 (within numerical tolerance)
+
+  ### Phase 3: Probe and Evaluate
+  - Use probe_solution on step functions with valid integral
+  - Target: c5_bound < 0.37 (below current best 0.3809)
+  - Full evaluation only on best 2-3 step function candidates
+
+  ### Phase 4: If No Success, Direct Edit
+  Replace _get_best_initialization with a direct piecewise constant constructor:
+  ```python
+  def _get_best_initialization(self, seed):
+      # Directly return a piecewise constant latent (no sigmoid!)
+      # Specify intervals and heights explicitly
+  ```
+
+  ## Critical: Avoid Sigmoid
+  The seed applies jax.nn.sigmoid(latent). For step functions, either:
+  - Skip sigmoid entirely and use step functions as latent
+  - Use sigmoid with very large magnitude to approximate step function behavior
+
+  ## Expected Outcome
+  - True step functions can achieve lower C5 than smooth curves
+  - Piecewise constant functions match the "step function" problem statement
+sampling:
+  temperature: 0.9
+  top_p: 0.9
+  top_k: 15
+  max_tokens: 16384
+agent:
+  max_iterations: 60
+middleware:
+  budget_reminder_from_left: 3
+  long_tool_output_max_chars: 12000
+new_tools:
+  - name: generate_discrete_steps
+    description: |
+      Generate 6 piecewise constant step functions with SHARP boundaries (no smoothing).
+      Patterns: rectangle pulses, multi-interval, symmetric blocks, asymmetric blocks,
+      two-level construction, three-level construction. Each is a true step function
+      (indicator sums), not a sigmoid curve.
+    input_schema:
+      type: object
+      properties: {}
+    implementation_py: |
+      def run(ctx, args):
+          import numpy as np
+          N = 800
+          domain = 2.0
+          dx = domain / N
+          constructions = {}
+          
+          # Pattern 1: Two equal rectangles
+          h = np.zeros(N)
+          w = 1.0  # total width must be 1 for integral=1
+          h[:int(N*w/2)] = 2.0
+          h[int(N*w/2):int(N*w)] = 2.0
+          constructions['two_rect'] = h
+          
+          # Pattern 2: Three equal rectangles
+          h = np.zeros(N)
+          w = 1.0
+          for i in range(3):
+              start = int(N * i / 3)
+              end = int(N * (i+1) / 3)
+              h[start:end] = 3.0
+          constructions['three_rect'] = h
+          
+          # Pattern 3: Symmetric block (high in center)
+          h = np.zeros(N)
+          center_width = 0.6
+          h[int(N*(1-center_width)/2):int(N*(1+center_width)/2)] = 1/center_width
+          constructions['symmetric_center'] = h
+          
+          # Pattern 4: Asymmetric block (high on left)
+          h = np.zeros(N)
+          left_width = 0.4
+          h[:int(N*left_width)] = 1/left_width
+          constructions['asymmetric_left'] = h
+          
+          # Pattern 5: Two-level (high, medium, low regions)
+          h = np.zeros(N)
+          regions = [0.3, 0.5, 0.2]
+          heights = [5/0.3, 2/0.5, 0.5/0.2]  # normalize to integral=1
+          for i, (r, ht) in enumerate(zip(regions, heights)):
+              start = int(N * sum(regions[:i]))
+              end = int(N * sum(regions[:i+1]))
+              h[start:end] = ht
+          constructions['two_level'] = h
+          
+          # Pattern 6: Four equal segments
+          h = np.zeros(N)
+          for i in range(4):
+              start = int(N * i / 4)
+              end = int(N * (i+1) / 4)
+              h[start:end] = 4.0
+          constructions['four_rect'] = h
+          
+          return {"constructions": constructions, "num_constructions": 6}
+new_skills:
+  - name: discrete-step-construction
+    description: |
+      Construct true step functions (piecewise constant) with sharp boundaries, not smooth sigmoid curves.
+      Key: integral must equal exactly 1.
+    body: |
+      # Discrete Step Construction for Erdos Problem
+
+      ## Core Principle
+      The problem asks for a STEP FUNCTION, not a smoothed curve. Generate piecewise constant
+      functions with SHARP boundaries, then enforce integral = 1 exactly.
+
+      ## Construction Patterns
+      1. Rectangle pulses: sum of indicator functions on disjoint intervals
+      2. Multi-interval: k intervals with heights chosen to satisfy integral=1
+      3. Symmetric: symmetric placement around x=1
+
+      ## Critical Constraint
+      Integral must be EXACTLY 1: sum of (height_i * width_i) = 1.0
+      If your construction doesn't satisfy this, it will be rejected by the evaluator.
+
+      ## From Step to Latent
+      The seed's _get_best_initialization returns a latent that gets passed through sigmoid.
+      For step functions, you have two options:
+      1. Return the step function directly (modify _get_best_initialization to skip sigmoid)
+      2. Use very large magnitudes in the step function so sigmoid approximates a hard step
+
+      ## Why This Works
+      Smooth sigmoid curves spread mass and create overlap. True step functions can
+      achieve lower C5 by concentrating mass in optimal locations without smoothing.
+tool_descriptions:
+  edit_solution: |
+    Modify the EVOLVE-BLOCK. To use a specific step function:
+    - Replace _get_best_initialization to return a single piecewise constant function
+    - Remove the sigmoid call or use it only if you want approximate steps
+    - Ensure the integral of h over [0,2] equals exactly 1
+    - Set num_restarts=1, seed_start=0 (only one initialization run)
+  evaluate_solution: |
+    Run full evaluation. Returns combined_score = 0.38092303510845016 / c5_bound.
+    Value > 1 means new record (c5_bound < 0.380923).
+  probe_solution: |
+    Quick approximate evaluation (500 intervals). Returns c5_bound estimate and
+    constraint satisfaction check (integral ≈ 1). Use to screen step functions
+    before full evaluation.
+  finish: |
+    Submit when combined_score > 1.0 (c5_bound < 0.38092303510845016).

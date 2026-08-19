@@ -1,0 +1,185 @@
+schema: h2spec/1.0
+system_prompt: "You are solving a competitive programming task: construct a rectilinear polygon that maximizes (mackerels captured - sardines captured). N=5000 each. Score = max(0, a - b + 1).
+
+You have 150 test cases and 20 evaluation budget. Time per eval: ~2 seconds.
+
+KEY ALGORITHM: Implement a greedy polygon growing strategy in main():
+1. Parse all points from stdin (first N mackerels, next N sardines)
+2. Start with a bounding box around ALL mackerels
+3. Iteratively try expanding the polygon in 4 directions (N/S/E/W) that adds mackerels while avoiding/adding sardines
+4. Run 100-300 iterations per test case before outputting final polygon
+
+Each iteration should:
+- Try 4-8 candidate expansions (slide edges outward by 1-100 units)
+- Use KD-tree or sorted lists to quickly query points in expanded region
+- Score each candidate (approximate count with rectangle inclusion)
+- Keep best improvement
+
+CONSTRAINTS:
+- Coordinates 0-100000, integer
+- Perimeter <= 400000 (easy with 400+ vertices)
+- Use consistent winding (clockwise)
+- Output exactly: count then vertices in order
+
+The evaluator checks validity strictly. Your internal search can be as complex as you want as long as it stays under 2 seconds per test case.
+
+PSEUDO-CODE STRUCTURE FOR main():
+for each test case:
+    read N, then 2N points
+    mackerels = points[0:N]
+    sardines = points[N:2N]
+    mx_min, mx_max, my_min, my_max = bounds(mackerels)
+    poly = [(mx_min, my_min), (mx_max, my_min), (mx_max, my_max), (mx_min, my_max)]
+    
+    for iteration in 100..300:
+        best_score = score(poly, mackerels, sardines)
+        best_poly = poly
+        
+        for dir in [N, S, E, W]:
+            for expansion in [1, 10, 50, 100]:
+                cand_poly = expand_in_direction(poly, dir, expansion)
+                if valid(cand_poly):
+                    cand_score = score(cand_poly, mackerels, sardines)
+                    if cand_score > best_score:
+                        best_score = cand_score
+                        best_poly = cand_poly
+        
+        poly = best_poly
+    
+    output best_poly
+
+Edit your EVOLVE-BLOCK to implement this strategy. Focus on making the internal loop efficient enough for 150 cases in 2 seconds each."
+skill_description: "Solve geometric polygon construction problems with greedy expansion strategies. You have 20 evals and 150 test cases - optimize for speed per case."
+skill_body: "# Greedy Polygon Growing Algorithm
+
+## Problem
+Maximize: mackerels inside polygon - sardines inside polygon
+Score: max(0, captured_mackerels - captured_sardines + 1)
+
+## Strategy: Greedy Expansion from Bounding Box
+
+### Algorithm Overview
+1. Parse input: N mackerels + N sardines
+2. Start with bounding box covering ALL mackerels
+3. For 100-300 iterations:
+   - Try expanding polygon in 4 cardinal directions
+   - Each expansion: push one edge outward by delta
+   - Score each candidate polygon (quick rectangle-point inclusion)
+   - Keep best improvement
+4. Output final polygon
+
+### Key Implementation Details
+
+Point Inclusion: A point (x,y) is inside rect [(x1,y1),(x2,y2),(x2,y3),(x1,y3)] iff:
+x1 <= x <= x2 AND y1 <= y <= y3
+
+Score Function: O(n) per call - iterate all points, count those inside polygon
+
+Efficient Expansion:
+- Maintain current poly as 4 coordinates (x_min, x_max, y_min, y_max)
+- Try: expand x_min by -delta, x_max by +delta, y_min by -delta, y_max by +delta
+- For irregular polygons, track each edge position
+
+Optimization:
+- Pre-sort mackerels/sardines by x and y coordinates
+- Use this for fast range queries during expansion search
+- Or: precompute for each point its bounding box contribution
+
+Timeline for 150 test cases in 2 seconds:
+- You need ~0.013 seconds per test case
+- Parsing: 5ms
+- Main loop: 200 iterations
+- Each iteration: 4 directions x 4 deltas = 16 candidate scores
+- Each score: ~5000 point checks = 80k ops
+- Total: 200 x 16 x 80k = 256M ops -> tight but doable in C++
+
+Better approach: Limit to 50 iterations, or use approximate scoring (sample points)
+
+Sample C++ Structure:
+int N = read();
+vector<Point> mackerel(N), sardine(N);
+for(int i=0;i<N;i++) cin >> mackerel[i].x >> mackerel[i].y;
+for(int i=0;i<N;i++) cin >> sardine[i].x >> sardine[i].y;
+
+bounding box:
+int mx_min = inf, mx_max = -inf, my_min = inf, my_max = -inf;
+for(auto& p : mackerel) { mx_min=min(mx_min,p.x); mx_max=max(mx_max,p.x); /*...*/ }
+
+Greedy expansion loop:
+for iteration in 100..300:
+    best_score = score(poly, mackerels, sardines)
+    for dir in [N, S, E, W]:
+        for delta in [1, 10, 50, 100]:
+            cand_score = score(expanded_poly, mackerels, sardines)
+            keep if better
+
+## Output Format
+4
+0 0
+100000 0
+100000 100000
+0 100000
+
+(Example: rectangle covering entire space)"
+tool_descriptions:
+  edit_solution: 'Change the code in # EVOLVE-BLOCK. Use SEARCH/REPLACE diffs for small changes, or full rewrite for structural changes. The fixed entry point (main with CPP_CODE variable) must stay intact. After editing, call evaluate_solution to score.'
+  evaluate_solution: 'Run your program on 150 test cases and return combined_score (higher is better). Budget is 20 evaluations. Track your best score across turns.'
+  probe_solution: 'Cheaper scoring on ~2000 fish (first ~40% of data). Approximate scores only - use to rank variants before full eval. Does not consume eval budget.'
+  finish: 'Submit your best solution when out of evaluations or done improving.'
+sampling:
+  temperature: 0.3
+  top_p: 0.95
+  top_k: 25
+  max_tokens: 10240
+agent:
+  max_iterations: 40
+middleware:
+  budget_reminder_from_left: 3
+  long_tool_output_max_chars: 8000
+new_tools:
+  - name: rectangle_score
+    description: |
+      Estimate score for a rectangular polygon (x_min, x_max, y_min, y_max).
+      Returns: estimated mackerel count, estimated sardine count, net score (a-b+1).
+      Call this BEFORE full evaluation to rank candidate polygons quickly.
+      Use to: (1) explore rectangle parameter space, (2) guide greedy expansion.
+    input_schema: 
+      type: object
+      properties:
+        x_min:
+          type: integer
+        x_max:
+          type: integer
+        y_min:
+          type: integer
+        y_max:
+          type: integer
+    implementation_py: |
+      def run(ctx, args):
+          x_min = args.get('x_min', 0)
+          x_max = args.get('x_max', 100000)
+          y_min = args.get('y_min', 0)
+          y_max = args.get('y_max', 100000)
+          
+          names = ctx.list_task_inputs()
+          if not names:
+              return {"mackerel": 0, "sardine": 0, "score": 1}
+          
+          import numpy as np
+          df = ctx.read_input_df(names[0], nrows=10000)
+          
+          mackerel_count = 0
+          sardine_count = 0
+          for _, row in df.iterrows():
+              x, y = int(row.iloc[0]), int(row.iloc[1])
+              if x_min <= x <= x_max and y_min <= y <= y_max:
+                  if row.name < 5000:
+                      mackerel_count += 1
+                  else:
+                      sardine_count += 1
+          
+          score = max(0, mackerel_count - sardine_count + 1)
+          return {"mackerel": mackerel_count, "sardine": sardine_count, "score": score}
+remove_tools: []
+new_skills: []
+new_middlewares: []

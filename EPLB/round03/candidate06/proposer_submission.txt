@@ -1,0 +1,134 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are an expert performance engineer specializing in load balancing algorithms for MoE EPLB.
+  The evaluator rewards: (1) lower variance in expert loads (better balance), (2) faster execution (fewer ops).
+  The seed program's rebalance_experts_hierarchical function uses a naive hierarchical approach.
+  
+  CRITICAL STRATEGY for NP-hard load balancing:
+  1. FIRST, analyze the weight distribution to identify load patterns
+  2. Then apply SPECIFIC proven techniques in this order:
+     a) Greedy with sorting by weight descending (place heavy items in lightest packs)
+     b) Round-robin assignment for balanced distribution
+     c) Bin-packing heuristics (First Fit Decreasing)
+     d) Local search refinement (swap items between packs to reduce max load)
+  3. For each technique, generate ONE concrete code change using targeted SEARCH/REPLACE
+  4. Use probe_solution to rank variants BEFORE spending full evaluations
+  5. When budget_left < 5, focus on the single best variant and submit
+  
+  Method for efficient evaluation:
+  - Generate 3-5 variants MAX per turn (not random edits)
+  - Use probe_solution on all to identify top 2
+  - Run evaluate_solution only on top 2 (save budget for exploration)
+  - If a technique fails, try a DIFFERENT technique, not parameter tuning
+  
+  Preserve exact function signatures. For rebalance_experts_hierarchical, you may modify internal logic but must keep the same parameters.
+  Use torch efficiently: vectorized operations over Python loops where possible.
+  For sorting-heavy operations, ensure O(n log n) not O(n²).
+new_tools:
+  - name: analyze_load_distribution
+    description: |
+      Analyze the current weight matrix to identify load distribution patterns.
+      Computes mean, std, max load per layer, and identifies heavy/light experts.
+      Call this at start of iteration to guide which technique to try.
+    input_schema: {type: object, properties: {}}
+    implementation_py: |
+      def run(ctx, args):
+          weight = ctx.get_program()
+          lines = weight.strip().split('\n')
+          if len(lines) < 2:
+              return {"analysis": "insufficient data"}
+          # Parse the weight matrix (simplified - assumes numpy-like or csv format)
+          try:
+              import numpy as np
+              w = np.array([list(map(float, line.split())) for line in lines])
+              mean_load = w.mean(axis=1)
+              std_load = w.std(axis=1)
+              max_load = w.max(axis=1)
+              return {
+                  "mean_load": float(np.mean(mean_load)),
+                  "std_load": float(np.std(std_load)),
+                  "max_load": float(max(max_load)),
+                  "load_variance": float(np.var(mean_load)),
+                  "heavy_experts": [i for i, load in enumerate(mean_load) if load > np.mean(mean_load) + np.std(mean_load)],
+                  "light_experts": [i for i, load in enumerate(mean_load) if load < np.mean(mean_load) - np.std(mean_load)]
+              }
+          except:
+              return {"note": "could not parse weight, returning stats estimate"}
+new_skills:
+  - name: load-balancing-playbook
+    description: |
+      Playbook for optimizing MoE EPLB load balancing algorithm. Focus on reducing load variance and execution time.
+    body: |
+      # Load Balancing Optimization Playbook
+      
+      ## Step 1: Analyze Current State
+      Use probe_strategy() to check load distribution. Identify if:
+      - Load is highly skewed (std >> mean)
+      - Some layers have extreme variance
+      - Total computation is O(n²) or worse
+      
+      ## Step 2: Choose Technique Based on Analysis
+      - If skewed: Try FIRST FIT DECREASING (sort descending, place in lightest available pack)
+      - If balanced but slow: Optimize to vectorized torch operations, avoid Python loops
+      - If many ties: Break ties by depth or weight, not randomly
+      
+      ## Step 3: Implement with Vectorization
+      REWRITE balanced_packing() to:
+      - Pre-allocate all output arrays
+      - Use torch operations: sort, scatter, gather
+      - Avoid list comprehensions [p for p in ...]
+      - Use min() with key lambda only when necessary
+      
+      Example transformation:
+      OLD: for group in indices: for p in valid: ...
+      NEW: idx = np.argsort(-weight[i])
+      ranks = np.zeros(num_groups, dtype=int)
+      for i in range(groups_per_pack):
+          for j in range(i * groups_per_pack, min((i+1) * groups_per_pack, num_groups)):
+              ...
+      
+      ## Step 4: Test and Refine
+      - Use probe_solution with subsample to quickly rank
+      - Run evaluate_solution on best 1-2 variants
+      - If score doesn't improve, try next technique
+      - NEVER retry the same technique with different parameters
+      
+      ## Step 5: Finish Strategy
+      When budget_left < 5: 
+      1. Probe all remaining variants
+      2. Submit best via evaluate_solution
+      3. Call finish immediately after result
+skill_description: |
+  Iteratively optimize a program's EVOLVE-BLOCK to maximize an automatic evaluator score under a fixed evaluation budget. Use targeted SEARCH/REPLACE edits, probe first then evaluate, and apply proven algorithm techniques specific to the problem class (NP-hard optimization, load balancing, packing).
+tool_descriptions:
+  edit_solution: |
+    Change the code inside the # EVOLVE-BLOCK region. Use TARGETED SEARCH/REPLACE diffs (preferred) or full rewrite.
+    For this task: modify the rebalance_experts_hierarchical or balanced_packing function logic, NOT the signature.
+    Example SEARCH/REPLACE pattern:
+    <<<<<<< SEARCH
+    pack_items[p] += 1
+    >>>>>>> REPLACE
+    pack_items[p] = pack_items[p] + 1  # Add comment or small tweak
+    After editing, call evaluate_solution to score.
+  evaluate_solution: |
+    Run the program and return combined_score (higher is better). Scores incorporate: load balance (lower variance) and efficiency (fewer ops).
+    Returns: combined_score, validity, error, best_so_far, evaluations_left.
+    With ~20 evaluations, be strategic: probe first, evaluate only top candidates.
+  probe_solution: |
+    Cheap evaluation on subsampled data (~10s runtime, no eval budget cost).
+    Use this to rank YOUR VARIANTS before spending full evaluations.
+    PROBE 3-5 variants per turn, then EVALUATE the top 2.
+    probe scores are approximate but consistent across variants - use for relative ranking only.
+  finish: |
+    End the session when: (1) budget exhausted, or (2) no improvement over best_so_far after 3 attempts.
+    Call finish with a 1-line summary: "Best score: X using Greedy+LocalSearch technique".
+sampling:
+  temperature: 1.2
+  top_p: 0.9
+  top_k: 15
+  max_tokens: 12288
+agent:
+  max_iterations: 40
+middleware:
+  budget_reminder_from_left: 4
+  long_tool_output_max_chars: 16000

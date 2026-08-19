@@ -1,0 +1,170 @@
+schema: h2spec/1.0
+system_prompt: "You are an expert software developer tasked with iteratively improving a program to MAXIMIZE the performance metrics reported by an automatic evaluator. Analyze the current program and the feedback from previous attempts, and make targeted changes that increase the score. You are the fixed inner harness (H2) driving a frozen executor over one discovery task.\n\nThe program has a single editable region between `# EVOLVE-BLOCK-START` and `# EVOLVE-BLOCK-END`. Only that region is yours to change; everything outside it (imports and the fixed entry function the evaluator calls) is frozen and must keep working exactly as given — keep the same inputs and outputs.\n\nThe task is to maximize C₂ = ||f ★ f||₂² / ((∫f)² ||f ★ f||_{∞}), a constant from harmonic analysis. The theoretical upper bound is 1.0 (Young's inequality). Current best is 0.8963, achieved by step functions. Your goal is to push beyond this.\n\nStrategic directions to explore:\n1. **Function representation**: Try piecewise-constant functions, piecewise-linear functions, spline-based representations, Fourier-based constructions, and mixed representations\n2. **Multi-scale optimization**: Coarse initialization followed by refinement with more intervals\n3. **Multiple restarts**: Try different random initializations and converge from each\n4. **Expert priors**: Step functions work well; Gaussian mixtures, exponential combinations, and B-splines are also promising\n\nMake exactly one tool call per turn:\n- `edit_solution(code)` — change the EVOLVE-BLOCK. Prefer a **targeted SEARCH/REPLACE diff** (do not rewrite the whole region for a small change):\n\n      <<<<<<< SEARCH\n      # exact lines from the current program to replace\n      =======\n      # new replacement lines\n      >>>>>>> REPLACE\n\n  Each SEARCH section must match the current program **exactly**. You may include several SEARCH/REPLACE blocks. Alternatively, send the complete new EVOLVE-BLOCK body as plain code (a full rewrite) when the change is large.\n- `evaluate_solution()` — run the current program; returns `combined_score` (higher is better), `validity`, any error, your best score so far, and how many evaluations remain. Your evaluation budget is limited.\n- `probe_solution()` — cheaply score the CURRENT program on SUBSAMPLED data for ranking your own variants before full evaluation. Fast, doesn't consume evaluation budget, but scores are approximate. Use this to explore many variants, then confirm the best with `evaluate_solution`.\n- `finish(summary)` — end the session.\n\nMethod — follow this strategy:\n1. Read the task and current program; identify what the metric rewards.\n2. Form one concrete hypothesis: which function representation or optimization strategy to explore next.\n3. `edit_solution` with a targeted change that implements this idea.\n4. `evaluate_solution` and read the score / validity / error.\n5. If it improved, build on it. If it errored or regressed, diagnose and try a genuinely different function class or initialization strategy.\n6. Use `probe_solution` to quickly rank multiple variants before committing to full evaluations.\n7. When evaluations run out or you cannot improve, call `finish`.\n\nBe decisive and specific: change something substantive every round, never evaluate the same code twice, and never fabricate a score — only a returned `evaluate_solution` result counts."
+skill_description: "Iteratively optimize a program's EVOLVE-BLOCK to maximize C₂ for the second autocorrelation inequality. Under fixed evaluation budget (20 full evaluations), use probe_solution for cheap ranking of variants. Explore different function representations (piecewise-constant, piecewise-linear, splines, Fourier-based, Gaussian mixtures, exponential combinations). Try multi-scale optimization and multi-start strategies. Combine targeted editing with probe-based exploration to find novel high-scoring functions."
+skill_body: "# C₂ Optimization Strategy\n\n## Objective\nMaximize C₂ = ||f ★ f||₂² / ((∫f)² ||f ★ f||_{∞}), where f is a non-negative function. Theoretical upper bound: 1.0. Current best: 0.8963 (step functions).\n\n## Available Resources\n- Full evaluations: ~20 budget (use sparingly)\n- Probes: Unlimited (~10s each, subsampled data, approximate scores for ranking)\n- Function representation: Edit the EVOLVE-BLOCK to change the optimization approach\n\n## Strategy Template\n\n### Phase 1: Coarse Exploration\n1. Use `probe_solution` to rapidly test different function representations:\n   - Piecewise-constant (like step functions)\n   - Piecewise-linear (current approach, but try different intervals)\n   - Gaussian mixture models\n   - Exponential decay combinations\n   - B-spline basis functions\n   - Fourier-series-based functions\n\n2. For each representation, try:\n   - Different number of parameters/intervals (10, 20, 50, 100, 200)\n   - Different initialization strategies (random, structured, from priors)\n   - Different optimizers (Adam, gradient descent with momentum, L-BFGS)\n\n3. Use probe scores to rank candidates, then confirm top 3-5 with `evaluate_solution`\n\n### Phase 2: Refinement\n1. Take the best-performing representation from Phase 1\n2. Increase optimization budget: more intervals, more steps, better learning rate schedule\n3. Try multi-scale approach: coarse grid optimization → fine grid refinement\n4. Use ensembles: average multiple locally optimal functions\n\n### Phase 3: Targeted Search\n1. Analyze why top-scoring functions work (symmetries, support structure)\n2. Design new functions inspired by successful patterns\n3. Fine-tune with local optimization\n\n## Function Representation Priors\n- **Step functions**: Worked well historically (0.8963). Easy to parameterize.\n- **Piecewise-linear**: Current seed approach. Can improve with more intervals and better initialization.\n- **Gaussian mixtures**: Smooth, convex-like behavior. Parameterize means, variances, weights.\n- **Exponential combinations**: decay rates + shape parameters. Often smooth.\n- **B-splines**: Local support, flexible shape control. Parameterize knots and coefficients.\n- **Fourier-based**: Parameterize Fourier coefficients with constraints.\n\n## Key Technical Considerations\n- Ensure f(x) ≥ 0 everywhere (use softplus, relu, or exponential transformations)\n- Use FFT for efficient convolution (O(n log n) vs O(n²))\n- Adaptive discretization: coarse → fine\n- Multiple random seeds for stochastic optimization\n- Document versions for reproducibility\n\n## Tool Usage\n- `probe_solution`: Test 5-10 variants quickly before full eval\n- `evaluate_solution`: Confirm top 3-5 candidates; these consume your 20 eval budget\n- `edit_solution`: Make targeted changes. Prefer SEARCH/REPLACE diffs for small edits. Full rewrites for structural changes.\n\n## Recovery Strategy\n- If `validity = 0`, fix the error immediately\n- If score regresses, try a different function class (not just parameter tuning)\n- When stuck, reset with new representation + multi-start\n\n## Budget Discipline\n- ~15-18 probes per variant exploration\n- 3-5 full evaluations for promising candidates\n- Never repeat the same code\n- When evals run low, consolidate on the best idea"
+tool_descriptions:
+  edit_solution: 'Change the code inside the # EVOLVE-BLOCK region. Two accepted formats: (1) PREFERRED — one or more targeted SEARCH/REPLACE diff blocks, each matching the current program exactly: ""<<<<<<< SEARCH"" / exact original lines / ""======="" / new lines / "">>>>>>> REPLACE"". Do not rewrite the whole region for a small change. (2) A full rewrite — the complete new EVOLVE-BLOCK body as plain code (fenced ```python is allowed; the markers are optional). The fixed entry function and imports outside the block are preserved automatically. After editing, call evaluate_solution to score it.'
+  evaluate_solution: Run the current program through the task evaluator and report its score. Returns combined_score (higher is better), validity, any error, your best score so far, and how many evaluations remain. Use the feedback to improve the code, then evaluate again. The best-scoring version is kept automatically. Your number of evaluations is limited.
+  probe_solution: 'Cheaply score the CURRENT program on SUBSAMPLED data (~10s vs minutes). Fast (~10s per probe), separate budget (e.g., 30 probes available), NOT evaluated through full evaluation budget. Scores are approximate and NOT directly comparable to full evaluation scores — use this to rapidly rank multiple variants (e.g., 5-10 function representations, 20-50 parameterizations each), then confirm the top 3-5 candidates with evaluate_solution. Do not use probes instead of evaluate_solution for final verification; use probes to explore MORE candidates before committing eval budget.'
+  finish: End the session. Call this when your evaluation budget is exhausted or you cannot improve the best score further. The best-scoring program is submitted automatically.
+sampling:
+  temperature: 1.1
+  top_p: 0.98
+  top_k: 50
+  max_tokens: 16384
+agent:
+  max_iterations: 50
+middleware:
+  budget_reminder_from_left: 3
+  long_tool_output_max_chars: 8000
+new_tools:
+  - name: analyze_function_space
+    description: |
+      Analyze the current function representation and recommend exploration directions. 
+      Reports: function class detected (piecewise-linear, piecewise-constant, Gaussian, etc.), 
+      parameter count, numerical stability, and suggests alternative representations to try.
+      Call at the start of each major exploration phase to diversify search.
+    input_schema: {type: object, properties: {}}
+    implementation_py: |
+      def run(ctx, args):
+          program = ctx.get_program()
+          import re
+          text = str(program)
+          analysis = {"class": "unknown", "params": "N/A", "stability": "unknown", "suggestions": []}
+          
+          if "B-spline" in text or "bspline" in text:
+              analysis["class"] = "B-spline"
+              analysis["params"] = "knot positions + coefficients"
+              analysis["stability"] = "good"
+              analysis["suggestions"] = ["Try piecewise-constant (step-like)", "Try Gaussian mixtures"]
+          elif "Gaussian" in text or "gaussian" in text:
+              analysis["class"] = "Gaussian mixture"
+              analysis["params"] = "means + variances + weights"
+              analysis["stability"] = "excellent"
+              analysis["suggestions"] = ["Try exponential combinations", "Try piecewise-linear with more intervals"]
+          elif "step" in text.lower() or "piecewise-constant" in text.lower():
+              analysis["class"] = "Piecewise-constant"
+              analysis["params"] = "bin heights"
+              analysis["stability"] = "good"
+              analysis["suggestions"] = ["Try piecewise-linear for smoother transitions", "Try B-splines for flexibility"]
+          elif "piecewise-linear" in text.lower():
+              analysis["class"] = "Piecewise-linear"
+              analysis["params"] = "node values"
+              analysis["stability"] = "good"
+              analysis["suggestions"] = ["Try piecewise-constant (step functions)", "Try Gaussian mixtures", "Try Fourier-based"]
+          elif "exponential" in text.lower() or "decay" in text.lower():
+              analysis["class"] = "Exponential decay"
+              analysis["params"] = "rates + shapes"
+              analysis["stability"] = "excellent"
+              analysis["suggestions"] = ["Try Gaussian mixtures", "Try piecewise-constant"]
+          elif "Fourier" in text or "fft" in text.lower():
+              analysis["class"] = "Fourier-based"
+              analysis["params"] = "coefficients"
+              analysis["stability"] = "depends on discretization"
+              analysis["suggestions"] = ["Try piecewise-constant", "Try B-splines"]
+          else:
+              analysis["class"] = "Custom/Other"
+              analysis["params"] = "varies"
+              analysis["stability"] = "to be determined"
+              analysis["suggestions"] = ["Try step functions (piecewise-constant)", "Try Gaussian mixtures", "Try B-splines", "Try exponential combinations"]
+          
+          return analysis
+new_skills:
+  - name: c2-function-exploration
+    description: |
+      A method playbook for discovering high-C₂ functions. Explores diverse function representations
+      (step functions, piecewise-linear, Gaussian mixtures, B-splines, Fourier-based) using
+      probe-based ranking before full evaluation. Focuses on structural innovation over parameter tuning.
+    body: |
+      # C₂ Function Exploration Playbook
+      
+      ## Overview
+      This playbook guides discovery of novel functions achieving high C₂ values for the second
+      autocorrelation inequality. Key insight: the function *representation* matters more than
+      hyperparameter tuning alone.
+      
+      ## Phase 1: Representation Exploration (18 probes)
+      
+      Test these function classes, ranking by probe score:
+      
+      ### A. Piecewise-Constant (Step Functions)
+      - **Why**: Current record-holder (0.8963). Simple, interpretable.
+      - **Parameterize**: Array of N bin heights, all ≥ 0.
+      - **Probe budget**: 5-8 probes with N=10, 20, 50, 100
+      - **Variations**: Symmetric versions, asymmetric, support on different intervals
+      
+      ### B. Piecewise-Linear (Current Seed Approach)
+      - **Why**: Smooth transitions, continuous derivatives.
+      - **Parameterize**: N+1 node values (trapezoidal interpolation).
+      - **Probe budget**: 5-8 probes with N=10, 20, 50, 100, 200
+      - **Variations**: Symmetric triangular peaks, multi-modal, varying support width
+      
+      ### C. Gaussian Mixture Models
+      - **Why**: Smooth, localized peaks. Often optimal for integral-based problems.
+      - **Parameterize**: means (K), variances (σ²), weights (w), ensure non-negativity.
+      - **Probe budget**: 5-8 probes with K=2, 3, 5, 10
+      - **Variations**: Equal variance, adaptive variance, constrained support
+      
+      ### D. Exponential Combinations
+      - **Why**: Natural decay, positive everywhere.
+      - **Parameterize**: Sum of exponentials: Σ w_i * exp(-α_i * |x - μ_i|)
+      - **Probe budget**: 3-5 probes
+      - **Variations**: Single exponential, double exponential, mix with Gaussians
+      
+      ### E. B-Spline Basis Functions
+      - **Why**: Local support, C^k continuity control.
+      - **Parameterize**: Knot positions + spline coefficients.
+      - **Probe budget**: 3-5 probes
+      - **Variations**: Different knot placements, uniform vs adaptive knots
+      
+      ### F. Fourier-Space Optimization
+      - **Why**: Global parameterization, implicit smoothness.
+      - **Parameterize**: Fourier coefficients with inverse-FFT positivity check.
+      - **Probe budget**: 2-3 probes (complex setup)
+      - **Variations**: Low-frequency dominant, band-limited
+      
+      ## Phase 2: Multi-Scale Refinement (3-5 full evals)
+      
+      Take top 3 representations from Phase 1:
+      1. Increase intervals/parameters by 2-3x
+      2. Use multi-start: 5 random initializations from each top representation
+      3. Refine hyperparameters (learning rate, steps) based on initial scores
+      
+      ## Phase 3: Ensemble & Hybridization
+      - Combine top performers: weighted averages, mixture models
+      - Analyze winning functions: extract structural properties (symmetry, support)
+      - Design new candidates inspired by successful patterns
+      
+      ## Best Practices
+      - **Use probes aggressively**: 15-18 probes per function class before eval
+      - **Diversify early**: Don't tunnel into one representation too soon
+      - **Record all probe scores**: Track which representation-family has best response
+      - **Reserve evals**: 3-5 full evaluations, each for the most promising variant
+      - **Validate function properties**: Ensure f(x) ≥ 0, ∫f > 0
+      
+      ## Common Pitfalls
+      - Over-tuning a single representation (likely local optimum)
+      - Insufficient probe exploration (missing the right representation family)
+      - Ignoring symmetry: Many optimal functions are even (f(-x) = f(x))
+      - Poor initialization: Start from informed priors, not random alone
+      - Getting stuck in smooth vs discontinuous debate: Test both families equally"
+new_middlewares:
+  - name: diversify_when_stalled
+    hook: before_model
+    description: |
+      When the best score hasn't improved in N iterations, inject a reminder to try a
+      different function representation. Helps prevent local optima tunneling.
+    implementation_py: |
+      def before_model(hook_input):
+          state = hook_input.get("state", {})
+          best_score = state.get("best_score", 0)
+          last_score = state.get("last_score", 0)
+          iterations = state.get("iteration", 0)
+          
+          # Check if we've plateaued for 5+ iterations
+          if iterations >= 5:
+              recent_scores = state.get("recent_scores", [])
+              if len(recent_scores) >= 5:
+                  if all(s <= last_score + 1e-4 for s in recent_scores):
+                      return "BEST_SCORE_STALLED: Try a different function representation (step → Gaussian, piecewise-linear → B-spline, etc.) instead of parameter tuning. Use probe_solution to explore new candidates."
+          return None

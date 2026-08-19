@@ -1,0 +1,146 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are an expert competitive programmer solving a geometric optimization problem.
+
+  TASK: Construct an orthogonal polygon (axis-aligned edges) to maximize (mackerels_inside - sardines_inside + 1), scored as max(0, result).
+
+  CONSTRAINTS: <=1000 vertices, perimeter <=400,000, coordinates 0-100,000, no self-intersections.
+
+  STRATEGY (follow this method):
+  1. ANALYZE the input - call analyze_fish_geometry once to understand the spatial distribution of mackerels and sardines.
+  2. DESIGN a bounding strategy - identify dense mackerel clusters and design a polygon that encloses them while minimizing sardine overlap.
+  3. BUILD incrementally - start with a simple bounding box around mackerels, then refine by:
+     - Adding indentations to exclude sardine clusters
+     - Expanding outward where sardines are sparse
+  4. USE probe_solution aggressively - before committing to a full evaluation:
+     - Generate 3-5 polygon variants with different parameter choices
+     - Probe each to rank them quickly
+     - Pick the best probed variant for full evaluation
+  5. REFINEMENT - after a good score, try local refinements: shift edges, add cutouts around sardines, etc.
+  6. DIVERSITY - if stuck, try completely different strategies: greedy clustering, convex hull variations, strip-based approaches.
+
+  TIME BUDGET: You have ~2 seconds per evaluation. Your internal search must complete within this limit with a 0.05s safety margin.
+
+  CALLING CONVENTION:
+  - edit_solution(code): Change the EVOLVE-BLOCK. Use SEARCH/REPLACE diffs for targeted changes.
+  - evaluate_solution(): Run the program; returns combined_score, validity, error, best_so_far, evaluations_left.
+  - probe_solution(): Cheap approximate evaluation on subsampled data. Call this FIRST to rank variants before full eval.
+  - finish(summary): End the session.
+
+  Remember: The executor iteratively improves the program. Each call to edit_solution should implement ONE concrete hypothesis change. Use the feedback to guide the next iteration.
+skill_description: |
+  Geometric polygon optimization: Construct axis-aligned polygons to maximize mackerels minus sardines. Use probe_solution to rank variants cheaply, then confirm with evaluate_solution. Follow the structured search method in system_prompt.
+skill_body: |
+  # Geometric Polygon Optimization
+
+  ## Method
+  1. **Read task**: Maximize (mackerels - sardines + 1) with an orthogonal polygon.
+
+  2. **Use analyze_fish_geometry**: Call this tool ONCE at the start to get:
+     - Total count of each fish type
+     - Bounding boxes per type
+     - Density estimates
+     - Cluster information
+     This informs your polygon design strategy.
+
+  3. **Design polygon strategy**:
+     - If mackerels are clustered: enclose the cluster tightly
+     - If mackerels are spread: use a larger bounding box with strategic cutouts
+     - Place sardine-exclusion zones by indenting the polygon edges
+
+  4. **Iterate with probing**:
+     - Generate 3-5 variants with different parameters (bounds, cutout positions)
+     - Probe each (fast, uses probe budget)
+     - Rank by probe score
+     - Full-eval only the top 1-2 variants
+
+  5. **Refinement phases**:
+     - Phase 1: Baseline (simple bounding box around mackerels)
+     - Phase 2: Cutouts (add indentations around sardine clusters)
+     - Phase 3: Expansion (extend where sardines are sparse)
+     - Phase 4: Local optimization (small edge adjustments)
+
+  6. **Handle failures**:
+     - If validity=0: Fix the constraint violation (too many vertices, too long perimeter, etc.)
+     - If score decreases: Revert to previous approach, try a genuinely different strategy
+
+  ## Tool calling order
+  1. analyze_fish_geometry (once)
+  2. edit_solution (hypothesis)
+  3. probe_solution (rank 3-5 variants)
+  4. evaluate_solution (best variant only)
+  5. Repeat until no improvement or budget exhausted
+
+  ## Key constraints to respect
+  - Perimeter <= 400,000
+  - Vertices <= 1,000
+  - Coordinates 0-100,000
+  - No self-intersection
+  - Must output a valid orthogonal polygon
+tool_descriptions:
+  edit_solution: |
+    Change the EVOLVE-BLOCK code. Preferred format: SEARCH/REPLACE diff blocks matching the current code exactly. Alternative: full rewrite. The fixed entry function outside the block is preserved.
+  evaluate_solution: |
+    Run the program through the task evaluator. Returns: combined_score (higher is better), validity (1 if valid, 0 if invalid/error), error message, best_so_far score, evaluations_left. Budget: 20 evaluations.
+  probe_solution: |
+    Cheap approximate evaluation on the first ~2000 rows of input data. Fast (~10s vs minutes). Does NOT consume the evaluation budget. Scores are approximate and NOT comparable to full evaluate_solution scores. Use this to RANK multiple variants quickly, then confirm the best one with evaluate_solution. You have 30 probes.
+  finish: |
+    End the session. Submit your best-scoring program. Call this when budget is exhausted or no further improvement is possible.
+sampling:
+  temperature: 0.9
+  top_p: 0.98
+  top_k: 30
+  max_tokens: 12288
+agent:
+  max_iterations: 50
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 10000
+new_tools:
+  - name: analyze_fish_geometry
+    description: |
+      Compute spatial statistics of the fish data to inform polygon design. Returns: total_mackerels, total_sardines, mackerel_bbox, sardine_bbox, mackerel_density, sardine_density, cluster_info. Call this ONCE at the start to understand the data geometry.
+    input_schema: {type: object, properties: {}}
+    implementation_py: |
+      def run(ctx, args):
+          # Count fish and compute bounding boxes
+          mackerels = ctx.read_input_df("mackerels.csv", nrows=5000)
+          sardines = ctx.read_input_df("sardines.csv", nrows=5000)
+          
+          def bbox(df):
+              return {"min_x": int(df['x'].min()), "max_x": int(df['x'].max()),
+                      "min_y": int(df['y'].min()), "max_y": int(df['y'].max())}
+          
+          mackerel_bbox = bbox(mackerels)
+          sardine_bbox = bbox(sardines)
+          
+          def area(p): return (p['max_x'] - p['min_x']) * (p['max_y'] - p['min_y'])
+          mackerel_density = 5000 / max(area(mackerel_bbox), 1)
+          sardine_density = 5000 / max(area(sardine_bbox), 1)
+          
+          # Simple clustering heuristic: distance between bboxes
+          dx = max(0, mackerel_bbox['max_x'] - sardine_bbox['min_x'])
+          dy = max(0, mackerel_bbox['max_y'] - sardine_bbox['min_y'])
+          separation = (dx + dy) / (dx + dy + 1)  # 1 if separate, 0 if overlapping
+          
+          return {
+              "total_mackerels": len(mackerels),
+              "total_sardines": len(sardines),
+              "mackerel_bbox": mackerel_bbox,
+              "sardine_bbox": sardine_bbox,
+              "mackerel_density": round(mackerel_density, 2),
+              "sardine_density": round(sardine_density, 2),
+              "bboxes_separated": 1 if separation > 0.5 else 0
+          }
+remove_tools: []
+new_skills: []
+new_middlewares:
+  - name: remind_probe_first
+    hook: before_model
+    description: |
+      Remind the solver to use probe_solution before full evaluation to rank variants cheaply.
+    implementation_py: |
+      def before_model(hook_input):
+          if hook_input.get("agent_iter", 0) > 0 and "edit_solution" in hook_input.get("last_action", ""):
+              return "After editing, call probe_solution to generate and rank 3-5 variants before calling evaluate_solution on the best one."
+          return None

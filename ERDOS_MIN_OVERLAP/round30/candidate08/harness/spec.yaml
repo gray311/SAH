@@ -1,0 +1,294 @@
+schema: h2spec/1.0
+system_prompt: |
+  Erdos minimum overlap problem (C5): Find h: [0,2]->[0,1] minimizing max_k integral h(x)(1-h(x+k))dx.
+  
+  CONSTRAINT: integral(h) = 1 exactly. h values in [0,1].
+  
+  Current best: C5 <= 0.38092303510845016 (combined_score = 1.0).
+  
+  GOAL: Find h achieving c5_bound < 0.38092303510845016 (combined_score > 1.0).
+  
+  STRATEGY (CRITICAL):
+  
+  1. FIRST: CALL search_patterns(temperature=0.5) to generate 5 diverse initial step functions.
+     Each has precomputed c5_bound via FFT (no training, instant).
+  
+  2. IDENTIFY the BEST pattern candidate (lowest c5_bound).
+  
+  3. CALL mutate_best_pattern with the best candidate. This applies targeted mutations
+     (adjust peak widths, shift centers, modify amplitudes) to create variants.
+     Each mutated variant has precomputed c5_bound via FFT.
+  
+  4. SCREEN all mutated variants with probe_solution (cheap, separate budget).
+  
+  5. CALL evaluate_solution on the TOP 1-2 mutated candidates with c5_bound < 0.375.
+  
+  6. If no improvement after 2 rounds of pattern->mutate->evaluate, call search_patterns with temperature=0.8.
+  
+  7. NEVER call evaluate_solution on c5_bound > 0.375.
+  
+  KEY INSIGHT: The seed optimizer gets stuck. We need to GENERATE diverse patterns, then MUTATE the best ones
+  using domain-specific operations (peak shifting, width adjustment) to escape local optima.
+  
+  TOOL USAGE ORDER: search_patterns -> mutate_best_pattern -> probe_solution -> evaluate_solution (only best candidates)
+skill_description: |
+  Generate diverse patterns via search_patterns, then MUTATE the best pattern with mutate_best_pattern
+  to create refined variants. Screen all with probe_solution, evaluate top candidates only.
+skill_body: |
+  # Erdos C5 Optimization - Pattern Refinement Strategy
+  
+  ## Phase 1: Generate Diverse Patterns
+  
+  1. CALL search_patterns(temperature=0.5)
+     - Returns 5 candidates with precomputed c5_bound via FFT
+     - Each satisfies integral=1, h in [0,1]
+     - Patterns: Golomb (4 marks), Bipartite, Triangular, Multi-peak, Laplace
+  
+  2. IDENTIFY best candidate (lowest c5_bound)
+     - Example: If bipartite has c5_bound=0.378 and others are 0.382+, select bipartite
+  
+  ## Phase 2: Mutate Best Pattern
+  
+  3. CALL mutate_best_pattern with the best candidate
+  
+     This tool creates 3 refined variants by:
+     - Adjusting peak widths (±10%)
+     - Shifting peak centers (±0.1 units)
+     - Modifying peak amplitudes (±0.2)
+     
+     All variants satisfy integral(h)=1 and h in [0,1].
+     Each variant has precomputed c5_bound via FFT (instant).
+  
+  4. EXAMINE all 3 mutated variants
+     - Find the one with lowest c5_bound
+     - Keep only those with c5_bound < 0.375
+  
+  ## Phase 3: Screen and Evaluate
+  
+  5. CALL probe_solution on each mutated variant with c5_bound < 0.375
+     - Probe is cheap (separate budget, ~10s per call)
+     - Keeps evaluation budget for the best candidates
+  
+  6. CALL evaluate_solution on TOP 1-2 candidates with lowest probe scores
+     - Full optimization takes ~59000 steps
+     - Only evaluate if c5_bound < 0.375 (combined_score > 1.01)
+  
+  ## Phase 4: If No Improvement
+  
+  7. If all evaluations yield combined_score <= 1.0:
+     - Call search_patterns(temperature=0.8) for different patterns
+     - Repeat Phase 2-3
+  
+  ## Phase 5: Hyperparameter Tuning (LAST RESORT)
+  
+  Only after exhausting pattern-based search, tune:
+  - num_intervals: 400, 800, 1600, 3200
+  - base_learning_rate: 0.001, 0.005, 0.01
+  - penalty_strength: 40, 80, 120
+  
+  ## Critical Rules
+  
+  - ALWAYS use search_patterns FIRST
+  - ALWAYS call mutate_best_pattern on the best pattern (don't skip to tuning)
+  - NEVER evaluate unless c5_bound < 0.375
+  - Use probe_solution to screen before full evaluation
+  - Stop when combined_score > 1.0
+tool_descriptions:
+  edit_solution: 'Modify EVOLVE-BLOCK hyperparameters systematically.\n\nFor single-candidate testing:
+    set num_restarts=1, num_steps=30000-60000.\n\nFor diversity: keep num_restarts=3-5.\n\nFor fine-grained
+    search: increase num_intervals to 1600 or 3200.\n\nFor stronger integral constraint: increase penalty_strength
+    to 80-120.\n\nFor exploration: try base_learning_rate in [0.001, 0.005, 0.01, 0.02].\n\nKey: Test
+    ONE hyperparameter change at a time to understand impact.'
+  evaluate_solution: Full 59000-step optimization. Returns combined_score = 0.38092303510845016 / c5_bound.\n\nHigher
+    is better. combined_score > 1.0 means c5_bound < 0.38092303510845016 (new record).\n\nUse probe_solution
+    first to filter candidates with c5_bound < 0.382.
+  probe_solution: 'Fast approximate evaluation (500 intervals, analytical c5). Uses probe budget.\n\nApproximate
+    but much cheaper than full eval. Good for screening many candidates.\n\nUse probe to find candidates
+    with c5_bound < 0.382, then evaluate them fully.\n\nBudget: separate from eval budget, typically 30
+    probes available.'
+  finish: Submit when combined_score > 1.0 (c5_bound < 0.38092303510845016).
+sampling:
+  temperature: 0.8
+  top_p: 0.9
+  top_k: 20
+  max_tokens: 12000
+agent:
+  max_iterations: 80
+middleware:
+  budget_reminder_from_left: 8
+  long_tool_output_max_chars: 8000
+new_tools:
+- name: mutate_best_pattern
+  description: |
+    Take the best pattern candidate and create 3 refined variants using domain-specific mutations.
+    
+    Mutations:
+    - Peak width adjustment: ±10% of original width
+    - Peak center shift: ±0.1 units in [0,2]
+    - Amplitude modification: ±0.2 from original
+    
+    All variants satisfy integral(h)=1 and h in [0,1].
+    Each variant has precomputed c5_bound via FFT (instant, no training).
+    
+    Call this AFTER identifying the best pattern from search_patterns.
+    Use probe_solution to screen the 3 variants, then evaluate the best.
+  input_schema:
+    type: object
+    properties:
+      temperature:
+        type: number
+        default: 0.5
+      mutation_magnitude:
+        type: number
+        default: 0.1
+  implementation_py: |
+    def run(ctx, args):
+        import numpy as np
+        
+        # Get best pattern from previous search_patterns call
+        best_pattern = None
+        best_c5 = float('inf')
+        
+        candidates = ctx.scratch_read('search_patterns_output')
+        if candidates and 'candidates' in candidates:
+            for cand in candidates['candidates']:
+                if cand['c5_bound'] < best_c5:
+                    best_c5 = cand['c5_bound']
+                    best_pattern = cand['h']
+        
+        if best_pattern is None:
+            return {"error": "No pattern found in scratch space", "candidates": []}
+        
+        N = 800
+        domain = 2.0
+        dx = domain / N
+        
+        def compute_c5(h_arr):
+            h_padded = np.pad(h_arr, (0, N))
+            j_padded = np.pad(1.0 - h_arr, (0, N))
+            corr = np.fft.ifft(np.fft.fft(h_padded) * np.conj(np.fft.fft(j_padded))).real
+            return np.max(corr * dx)
+        
+        def normalize_and_clip(h_arr):
+            h_norm = h_arr / (np.sum(h_arr) * dx)
+            h_norm = np.clip(h_norm, 0.001, 1.0)
+            h_norm = h_norm / (np.sum(h_norm) * dx)
+            return h_norm
+        
+        def mutate_pattern(h, mutation_type, mag):
+            """Apply a single mutation and return mutated array."""
+            h_mut = h.copy()
+            
+            if mutation_type == 'width':
+                # Find peaks and adjust widths
+                peaks = np.where(h > 0.5)[0]
+                for peak_idx in peaks[:3]:  # Top 3 peaks
+                    if len(peaks) > 1:
+                        peak_val = peaks[np.argmin(np.abs(peaks - peak_idx))]
+                        width_change = int(mag * N)
+                        half_w = len(h) // len(peaks)
+                        start = max(0, peak_idx - half_w + width_change)
+                        end = min(N, peak_idx + half_w + width_change)
+                        h_mut[start:end] = h[start:end] * (1 + 0.1 * np.random.randn())
+            
+            elif mutation_type == 'shift':
+                # Shift all peaks by mag units
+                x = np.linspace(0, 2, N)
+                for peak_idx in np.where(h > 0.5)[0][:3]:
+                    shift_idx = int(mag / dx)
+                    new_peak = peak_idx + shift_idx
+                    if 0 < new_peak < N:
+                        h_mut = h_mut + (h[new_peak] - h[peak_idx])
+                        h_mut[peak_idx] = h[peak_idx]
+                        h_mut[new_peak] = h[new_peak]
+            
+            elif mutation_type == 'amplitude':
+                # Adjust amplitudes of peaks
+                peaks = np.where(h > 0.5)[0]
+                for peak_idx in peaks[:3]:
+                    amp_change = 0.2 * np.random.randn()
+                    h_mut[peak_idx] = np.clip(h_mut[peak_idx] + amp_change, 0.001, 1.0)
+            
+            return normalize_and_clip(h_mut)
+        
+        # Apply 3 different mutations
+        variants = []
+        mutation_types = ['width', 'shift', 'amplitude']
+        for i, mut_type in enumerate(mutation_types):
+            h_mut = mutate_pattern(best_pattern, mut_type, args.get('mutation_magnitude', 0.1))
+            c5_bound = compute_c5(h_mut)
+            variants.append({
+                'h': h_mut.tolist(),
+                'c5_bound': float(c5_bound),
+                'mutation_type': mutation_types[i],
+                'pattern_type': 'mutated'
+            })
+        
+        return {"candidates": variants, "num_candidates": 3}
+new_skills:
+- name: mutate-then-evaluate
+  description: Generate patterns, mutate the best one to create refined variants, screen with probe,
+    evaluate the best. Do not skip mutation phase.
+  body: |
+    # Mutate-Then-Evaluate for Erdos C5
+    
+    ## Core Principle
+    The seed optimizer gets stuck. We need to MUTATE the best pattern to escape local optima.
+    
+    ## Step-by-Step Workflow
+    
+    1. CALL search_patterns(temperature=0.5)
+       - Generates 5 diverse initial patterns
+       - Each has precomputed c5_bound via FFT
+    
+    2. IDENTIFY the best pattern (lowest c5_bound)
+       - Compare all 5 candidates
+       - Select the one with minimum c5_bound
+    
+    3. CALL mutate_best_pattern on the best pattern
+       - Creates 3 refined variants
+       - Each variant has precomputed c5_bound via FFT
+       - Mutations: width adjustment, center shift, amplitude change
+    
+    4. SCREEN all 3 mutated variants with probe_solution
+       - Probe is cheap (separate budget)
+       - Keep variants with c5_bound < 0.375
+    
+    5. CALL evaluate_solution on the BEST 1-2 mutated variants
+       - Only evaluate if c5_bound < 0.375 (combined_score > 1.01)
+       - Full optimization takes ~59000 steps
+    
+    6. If no improvement, REPEAT with search_patterns(temperature=0.8)
+    
+    7. Only after exhausting pattern-based search, tune hyperparameters
+    
+    ## Avoid Common Mistakes
+    - Do NOT skip the mutation phase
+    - Do NOT call evaluate_solution on c5_bound > 0.375
+    - Do NOT tune hyperparameters before trying mutations
+    - ALWAYS use probe_solution before full evaluation
+new_middlewares:
+- name: mutate_reminder
+  hook: before_model
+  description: Ensures solver calls mutate_best_pattern on best pattern before evaluating
+  implementation_py: |
+    def before_model(hook_input):
+        history = hook_input.get("history", [])
+        
+        # Check if we've called search_patterns
+        has_patterns = any("search_patterns" in str(turn.get("tools_used", [])) for turn in history)
+        
+        if not has_patterns:
+            return "First call: Use search_patterns to generate 5 diverse patterns."
+        
+        # Check if we've identified and mutated the best pattern
+        has_mutate = any("mutate_best_pattern" in str(turn.get("tools_used", [])) for turn in history)
+        has_evaluate = any("evaluate_solution" in str(turn.get("tools_used", [])) for turn in history)
+        
+        if has_patterns and not has_mutate:
+            return "You've called search_patterns but haven't called mutate_best_pattern. Find the best pattern and call mutate_best_pattern to create refined variants."
+        
+        if has_mutate and not has_evaluate:
+            return "You've called mutate_best_pattern but haven't evaluated any variants. Use probe_solution to screen, then evaluate the best candidate with c5_bound < 0.375."
+        
+        return None

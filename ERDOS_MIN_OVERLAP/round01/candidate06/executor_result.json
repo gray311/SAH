@@ -1,0 +1,260 @@
+{
+  "task_id": "eft__math__erdos_min_overlap",
+  "source": "eft",
+  "best_score": 0.9783668073329987,
+  "seed_score": 0.7694488256878874,
+  "best_metrics": {
+    "c5_bound": 0.38934582842894677,
+    "combined_score": 0.9783668073329987,
+    "n_points": 200,
+    "eval_time": 9.108497142791748
+  },
+  "best_program": "# EVOLVE-BLOCK-START\nimport numpy as np\nfrom dataclasses import dataclass\n\n\n@dataclass\nclass Hyperparameters:\n    num_intervals: int = 200\n    internal_search_steps: int = 30\n\n\nclass ErdosOptimizer:\n    \"\"\"\n    Direct optimization over step function heights.\n    Uses explicit construction with guaranteed integral constraint.\n    \"\"\"\n\n    def __init__(self, hypers: Hyperparameters):\n        self.hypers = hypers\n        self.domain_width = 2.0\n        self.dx = self.domain_width / self.hypers.num_intervals\n\n    def _compute_c5_bound(self, h_values: np.ndarray) -> float:\n        \"\"\"Compute C5 bound for given h values\"\"\"\n        h = h_values.copy()\n        h = np.clip(h, 0, 1)\n        \n        # Normalize to integral = 1\n        current_sum = np.sum(h)\n        needed_sum = 1.0 / self.dx\n        \n        if current_sum > 0 and abs(current_sum - needed_sum) > 0.01:\n            scale = needed_sum / current_sum\n            h = np.clip(h * scale, 0, 1)\n        \n        j = 1.0 - h\n        N = len(h)\n        \n        h_padded = np.pad(h, (0, N))\n        j_padded = np.pad(j, (0, N))\n        \n        corr_fft = np.fft.fft(h_padded) * np.conj(np.fft.fft(j_padded))\n        correlation = np.fft.ifft(corr_fft).real\n        c5_bound = np.max(correlation) * self.dx\n        return c5_bound\n\n    def _build_block_pattern(self, num_on: int) -> np.ndarray:\n        \"\"\"Build block pattern with exactly num_on intervals set to 1\"\"\"\n        h = np.zeros(self.hypers.num_intervals)\n        h[:num_on] = 1.0\n        return h\n\n    def _normalize_explicit(self, h_values: np.ndarray) -> np.ndarray:\n        \"\"\"Explicit normalization that guarantees integral = 1\"\"\"\n        h = h_values.copy()\n        needed_sum = 1.0 / self.dx\n        current_sum = np.sum(h)\n        \n        if current_sum <= 0:\n            return np.zeros_like(h)\n        \n        # Scale to target\n        scale = needed_sum / current_sum\n        h = np.clip(h * scale, 0, 1)\n        \n        # Fine-tune: adjust values to hit exactly needed_sum\n        for _ in range(1000):\n            current_sum = np.sum(h)\n            if abs(current_sum - needed_sum) < 1e-9:\n                break\n            \n            diff = current_sum - needed_sum\n            \n            if diff > 0:\n                # Too large, decrease some values\n                mask = h > 0.001\n                if np.sum(mask) == 0:\n                    break\n                decrease = diff / np.sum(mask)\n                h[mask] = np.clip(h[mask] - decrease, 0, 1)\n            else:\n                # Too small, increase some values\n                mask = h < 1.0\n                if np.sum(mask) == 0:\n                    break\n                increase = -diff / np.sum(mask)\n                h[mask] = np.clip(h[mask] + increase, 0, 1)\n        \n        return h\n\n    def _coordinate_descent(self, h_init: np.ndarray, steps: int) -> np.ndarray:\n        \"\"\"Coordinate descent optimization\"\"\"\n        h = h_init.copy()\n        \n        for _ in range(steps):\n            improved = False\n            for i in range(len(h)):\n                best_val = h[i]\n                best_score = self._compute_c5_bound(h)\n                \n                # Try variations\n                for delta in [-0.2, -0.15, -0.1, -0.05, 0, 0.05, 0.1, 0.15, 0.2]:\n                    new_val = np.clip(h[i] + delta, 0, 1)\n                    new_h = h.copy()\n                    new_h[i] = new_val\n                    \n                    # Quick integral check\n                    new_integral = np.sum(new_h) * self.dx\n                    if abs(new_integral - 1.0) > 0.05:\n                        continue\n                    \n                    score = self._compute_c5_bound(new_h)\n                    if score < best_score:\n                        best_score = score\n                        best_val = new_val\n                        improved = True\n                \n                if improved:\n                    h[i] = best_val\n            \n            if not improved:\n                break\n        \n        return h\n\n    def run_optimization(self):\n        print(f\"Optimizing with {self.hypers.num_intervals} intervals...\")\n        print(f\"dx = {self.dx}, needed_sum = {1.0/self.dx}\")\n        \n        best_h = None\n        best_score = float('inf')\n        \n        # Strategy 1: Various block patterns\n        for num_on in [50, 60, 70, 80, 90, 100, 110, 120, 130, 140, 150]:\n            h = self._normalize_explicit(self._build_block_pattern(num_on))\n            score = self._compute_c5_bound(h)\n            if score < best_score:\n                best_score = score\n                best_h = h.copy()\n        \n        # Strategy 2: From normalized block patterns with coordinate descent\n        for num_on in [50, 60, 70, 80, 90, 100]:\n            h_init = self._normalize_explicit(self._build_block_pattern(num_on))\n            h_opt = self._coordinate_descent(h_init, self.hypers.internal_search_steps)\n            # Final normalize after optimization\n            h_opt = self._normalize_explicit(h_opt)\n            score = self._compute_c5_bound(h_opt)\n            if score < best_score:\n                best_score = score\n                best_h = h_opt.copy()\n        \n        # Final check\n        integral = np.sum(best_h) * self.dx if best_h is not None else 0\n        print(f\"Final: integral={integral:.6f}, C5={best_score:.8f}\")\n        \n        # Ensure returned h has correct integral\n        if best_h is not None:\n            best_h = self._normalize_explicit(best_h)\n            return np.array(best_h, dtype=np.float64), float(best_score), self.hypers.num_intervals\n        else:\n            h_default = np.ones(self.hypers.num_intervals) * 0.5\n            return np.array(h_default, dtype=np.float64), 1.0, self.hypers.num_intervals\n\n\ndef run():\n    hypers = Hyperparameters()\n    optimizer = ErdosOptimizer(hypers)\n    final_h_values, c5_bound, num_intervals = optimizer.run_optimization()\n\n    return final_h_values, c5_bound, num_intervals\n# EVOLVE-BLOCK-END",
+  "stop_reason": "completed",
+  "ledger": {
+    "max_evaluator_calls": 20,
+    "evaluator_calls": 20,
+    "max_probe_calls": 30,
+    "probe_calls": 0,
+    "edit_calls": 20,
+    "llm_input_tokens": 0,
+    "llm_output_tokens": 0,
+    "llm_calls": 42,
+    "sandbox_seconds": 377.1424939632416
+  },
+  "steps": [
+    {
+      "step": 0,
+      "kind": "seed",
+      "edit_mode": "seed",
+      "edit_note": "seed program",
+      "combined_score": 0.7694488256878874,
+      "validity": 1.0,
+      "error": null,
+      "wall_s": 4.576348781585693,
+      "is_new_best": true
+    },
+    {
+      "step": 1,
+      "kind": "full_rewrite",
+      "edit_mode": "full_rewrite",
+      "edit_note": "spliced new EVOLVE-BLOCK",
+      "combined_score": 0.0,
+      "validity": 0.0,
+      "error": "cannot access local variable 'h_sorted' where it is not associated with a value",
+      "wall_s": 9.427477598190308,
+      "is_new_best": false
+    },
+    {
+      "step": 2,
+      "kind": "full_rewrite",
+      "edit_mode": "full_rewrite",
+      "edit_note": "spliced new EVOLVE-BLOCK",
+      "combined_score": 0.0,
+      "validity": 0.0,
+      "error": "index 97 is out of bounds for axis 0 with size 84",
+      "wall_s": 11.931504011154175,
+      "is_new_best": false
+    },
+    {
+      "step": 3,
+      "kind": "full_rewrite",
+      "edit_mode": "full_rewrite",
+      "edit_note": "spliced new EVOLVE-BLOCK",
+      "combined_score": 0.0,
+      "validity": 0.0,
+      "error": "Integral of h is not close to 1. Got: 2.000000",
+      "wall_s": 13.33305048942566,
+      "is_new_best": false
+    },
+    {
+      "step": 4,
+      "kind": "full_rewrite",
+      "edit_mode": "full_rewrite",
+      "edit_note": "spliced new EVOLVE-BLOCK",
+      "combined_score": 0.0,
+      "validity": 0.0,
+      "error": "Integral of h is not close to 1. Got: 0.000000",
+      "wall_s": 12.48605465888977,
+      "is_new_best": false
+    },
+    {
+      "step": 5,
+      "kind": "full_rewrite",
+      "edit_mode": "full_rewrite",
+      "edit_note": "spliced new EVOLVE-BLOCK",
+      "combined_score": 0.0,
+      "validity": 0.0,
+      "error": "Integral of h is not close to 1. Got: 0.000000",
+      "wall_s": 12.231297731399536,
+      "is_new_best": false
+    },
+    {
+      "step": 6,
+      "kind": "full_rewrite",
+      "edit_mode": "full_rewrite",
+      "edit_note": "spliced new EVOLVE-BLOCK",
+      "combined_score": 0.0,
+      "validity": 0.0,
+      "error": "Integral of h is not close to 1. Got: 0.000000",
+      "wall_s": 12.431767702102661,
+      "is_new_best": false
+    },
+    {
+      "step": 7,
+      "kind": "full_rewrite",
+      "edit_mode": "full_rewrite",
+      "edit_note": "spliced new EVOLVE-BLOCK",
+      "combined_score": 0.0,
+      "validity": 0.0,
+      "error": "Integral of h is not close to 1. Got: 0.000000",
+      "wall_s": 12.435868978500366,
+      "is_new_best": false
+    },
+    {
+      "step": 8,
+      "kind": "full_rewrite",
+      "edit_mode": "full_rewrite",
+      "edit_note": "spliced new EVOLVE-BLOCK",
+      "combined_score": 0.0,
+      "validity": 0.0,
+      "error": "Integral of h is not close to 1. Got: 0.000000",
+      "wall_s": 12.281180381774902,
+      "is_new_best": false
+    },
+    {
+      "step": 9,
+      "kind": "full_rewrite",
+      "edit_mode": "full_rewrite",
+      "edit_note": "spliced new EVOLVE-BLOCK",
+      "combined_score": 0.0,
+      "validity": 0.0,
+      "error": "Integral of h is not close to 1. Got: 0.000000",
+      "wall_s": 12.431968450546265,
+      "is_new_best": false
+    },
+    {
+      "step": 10,
+      "kind": "full_rewrite",
+      "edit_mode": "full_rewrite",
+      "edit_note": "spliced new EVOLVE-BLOCK",
+      "combined_score": 0.0,
+      "validity": 0.0,
+      "error": "Integral of h is not close to 1. Got: 0.100000",
+      "wall_s": 4.470094203948975,
+      "is_new_best": false
+    },
+    {
+      "step": 11,
+      "kind": "full_rewrite",
+      "edit_mode": "full_rewrite",
+      "edit_note": "spliced new EVOLVE-BLOCK",
+      "combined_score": 0.0,
+      "validity": 0.0,
+      "error": "Integral of h is not close to 1. Got: 0.100000",
+      "wall_s": 1.4672667980194092,
+      "is_new_best": false
+    },
+    {
+      "step": 12,
+      "kind": "full_rewrite",
+      "edit_mode": "full_rewrite",
+      "edit_note": "spliced new EVOLVE-BLOCK",
+      "combined_score": 0.0,
+      "validity": 0.0,
+      "error": "Integral of h is not close to 1. Got: 0.996500",
+      "wall_s": 9.229106187820435,
+      "is_new_best": false
+    },
+    {
+      "step": 13,
+      "kind": "full_rewrite",
+      "edit_mode": "full_rewrite",
+      "edit_note": "spliced new EVOLVE-BLOCK",
+      "combined_score": 0.0,
+      "validity": 0.0,
+      "error": "'ErdosOptimizer' object has no attribute '_build_block_pattern'",
+      "wall_s": 0.16489028930664062,
+      "is_new_best": false
+    },
+    {
+      "step": 14,
+      "kind": "full_rewrite",
+      "edit_mode": "full_rewrite",
+      "edit_note": "spliced new EVOLVE-BLOCK",
+      "combined_score": 0.9783668073329987,
+      "validity": 1.0,
+      "error": null,
+      "wall_s": 9.228990316390991,
+      "is_new_best": true
+    },
+    {
+      "step": 15,
+      "kind": "full_rewrite",
+      "edit_mode": "full_rewrite",
+      "edit_note": "spliced new EVOLVE-BLOCK",
+      "combined_score": 0.9624666337320805,
+      "validity": 1.0,
+      "error": null,
+      "wall_s": 18.892463445663452,
+      "is_new_best": false
+    },
+    {
+      "step": 16,
+      "kind": "full_rewrite",
+      "edit_mode": "full_rewrite",
+      "edit_note": "spliced new EVOLVE-BLOCK",
+      "combined_score": 0.9689246918332771,
+      "validity": 1.0,
+      "error": null,
+      "wall_s": 18.000361680984497,
+      "is_new_best": false
+    },
+    {
+      "step": 17,
+      "kind": "full_rewrite",
+      "edit_mode": "full_rewrite",
+      "edit_note": "spliced new EVOLVE-BLOCK",
+      "combined_score": 0.0,
+      "validity": 0.0,
+      "error": "Timeout after 150s",
+      "wall_s": 150.0037009716034,
+      "is_new_best": false
+    },
+    {
+      "step": 18,
+      "kind": "full_rewrite",
+      "edit_mode": "full_rewrite",
+      "edit_note": "spliced new EVOLVE-BLOCK",
+      "combined_score": 0.9783668073329987,
+      "validity": 1.0,
+      "error": null,
+      "wall_s": 17.288689374923706,
+      "is_new_best": false
+    },
+    {
+      "step": 19,
+      "kind": "full_rewrite",
+      "edit_mode": "full_rewrite",
+      "edit_note": "spliced new EVOLVE-BLOCK",
+      "combined_score": 0.9657564104366458,
+      "validity": 1.0,
+      "error": null,
+      "wall_s": 20.440771102905273,
+      "is_new_best": false
+    },
+    {
+      "step": 20,
+      "kind": "full_rewrite",
+      "edit_mode": "full_rewrite",
+      "edit_note": "spliced new EVOLVE-BLOCK",
+      "combined_score": 0.9783668073329987,
+      "validity": 1.0,
+      "error": null,
+      "wall_s": 14.389640808105469,
+      "is_new_best": false
+    }
+  ],
+  "trajectory": null,
+  "error": null
+}

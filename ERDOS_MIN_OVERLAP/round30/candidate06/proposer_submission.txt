@@ -1,0 +1,207 @@
+schema: h2spec/1.0
+system_prompt: |
+  Erdos minimum overlap problem (C5): Find h: [0,2]->[0,1] minimizing max_k integral h(x)(1-h(x+k))dx.
+
+  CONSTRAINT: integral(h) = 1 exactly. h values in [0,1].
+
+  Current best: C5 <= 0.38092303510845016 (combined_score = 1.0).
+
+  GOAL: Find h achieving c5_bound < 0.38092303510845016 (combined_score > 1.0).
+
+  STRATEGY:
+
+  PHASE 1: DIVERSE INITIALIZATION
+  - Use search_patterns to generate 5-10 diverse initial step functions
+  - Screen with probe_solution (cheap, ~10s per candidate)
+  - Evaluate top 2-3 candidates with c5_bound < 0.375 using evaluate_solution
+
+  PHASE 2: ITERATIVE REFINEMENT (if Phase 1 yields no improvement)
+  - If best combined_score <= 1.0, use explore_neighbors to make targeted edits
+  - Start from the best pattern candidate, not the seed
+  - Use small, focused changes: adjust peak positions, split/merge intervals, shift thresholds
+  - Screen each variant with probe_solution before full evaluation
+  - Continue refining until either improvement or budget exhaustion
+
+  KEY INSIGHT: Both diverse initialization AND iterative refinement are needed.
+  Don't rely on hyperparameter tuning alone - the solver must explore the solution space systematically.
+
+  RULES:
+  - NEVER call evaluate_solution on c5_bound > 0.375 (wastes budget)
+  - Use probe_solution to screen all candidates before full evaluation
+  - If stuck, try explore_neighbors with different edit strategies
+  - Track best c5_bound across all attempts
+new_tools:
+  - name: explore_neighbors
+    description: |
+      Make targeted, systematic edits to a candidate step function to explore local neighborhoods.
+      Use this after initial pattern generation when you have a promising candidate but want to refine it.
+      Strategies: (1) Shift peak positions by +/- dx, (2) Split a peak into two smaller peaks,
+      (3) Merge adjacent peaks, (4) Adjust threshold positions in bipartite patterns, (5) Add/remove small peaks.
+      Always normalize to maintain integral=1 and clip to [0,1]. Use probe_solution to screen variants.
+    input_schema:
+      type: object
+      properties:
+        strategy:
+          type: string
+          description: "Edit strategy: 'shift_peak', 'split_peak', 'merge_peaks', 'adjust_threshold', 'add_peak', 'remove_peak'"
+          default: "shift_peak"
+        magnitude:
+          type: number
+          description: "How aggressively to edit (0.1-0.5). Smaller = more conservative."
+          default: 0.2
+        num_variants:
+          type: integer
+          description: "Number of variants to generate (2-10)."
+          default: 5
+    implementation_py: |
+      def run(ctx, args):
+          import numpy as np
+          h = np.array(ctx.get_program().split('\n')[100:200])  # Extract h array from program
+          if len(h) == 0:
+              return {"note": "Could not extract h from program", "variants": []}
+          
+          dx = 2.0 / len(h)
+          variants = []
+          best_c5 = None
+          
+          strategy = args.get("strategy", "shift_peak")
+          magnitude = args.get("magnitude", 0.2)
+          num_variants = args.get("num_variants", 5)
+          
+          for i in range(num_variants):
+              if strategy == "shift_peak":
+                  # Shift peaks left or right
+                  shift = np.random.choice([-1, 1]) * (dx * magnitude)
+                  new_h = h.copy()
+                  new_h = np.roll(new_h, int(shift / dx))
+                  new_h = new_h / (np.sum(new_h) * dx)
+                  new_h = np.clip(new_h, 0.001, 1.0)
+                  new_h = new_h / (np.sum(new_h) * dx)
+                  new_h[0] = 1.0 / len(new_h)  # Normalize
+                  h_new = new_h
+                  
+              elif strategy == "split_peak":
+                  # Split largest peak into two
+                  new_h = h.copy()
+                  max_idx = np.argmax(new_h)
+                  split_idx = max_idx + int(dx * magnitude * len(h))
+                  if split_idx <= len(new_h) - 1:
+                      # Move mass from max to split point
+                      delta = 0.5 * new_h[max_idx]
+                      new_h[max_idx] -= delta
+                      new_h[split_idx] += delta
+                      new_h = new_h / (np.sum(new_h) * dx)
+                  else:
+                      new_h = new_h / (np.sum(new_h) * dx)
+                  h_new = new_h
+                  
+              elif strategy == "adjust_threshold":
+                  # Adjust threshold in bipartite-like pattern
+                  new_h = h.copy()
+                  threshold_idx = np.argmin(new_h)
+                  shift_idx = int(dx * magnitude * len(h))
+                  if threshold_idx + shift_idx < len(new_h):
+                      delta = 0.1 * magnitude
+                      new_h[threshold_idx:threshold_idx+shift_idx] -= delta
+                      new_h[threshold_idx+shift_idx:] += delta
+                      new_h = new_h / (np.sum(new_h) * dx)
+                  else:
+                      new_h = new_h / (np.sum(new_h) * dx)
+                  h_new = new_h
+                  
+              # Normalize and clip
+              h_new = h_new / (np.sum(h_new) * dx)
+              h_new = np.clip(h_new, 0.001, 1.0)
+              h_new = h_new / (np.sum(h_new) * dx)
+              
+              # Compute c5 bound
+              h_padded = np.pad(h_new, (0, len(h_new)))
+              j_padded = np.pad(1.0 - h_new, (0, len(h_new)))
+              corr = np.fft.ifft(np.fft.fft(h_padded) * np.conj(np.fft.fft(j_padded))).real
+              c5_bound = np.max(corr * dx)
+              
+              variants.append({
+                  "h": h_new.tolist(),
+                  "c5_bound": float(c5_bound),
+                  "strategy_applied": strategy
+              })
+          
+          return {"variants": variants, "num_variants": len(variants)}
+sampling:
+  temperature: 1.0
+  top_p: 0.95
+  top_k: 30
+  max_tokens: 15000
+agent:
+  max_iterations: 70
+middleware:
+  budget_reminder_from_left: 6
+  long_tool_output_max_chars: 10000
+new_skills:
+  - name: iterative-refinement-strategy
+    description: Use both diverse initialization and iterative refinement to explore solution space.
+    body: |
+      # Iterative Refinement for Erdos C5
+
+      ## Core Principle
+      Combine diverse initializations with systematic local search.
+      Don't rely on hyperparameter tuning alone.
+
+      ## Step-by-Step Workflow
+
+      1. INITIALIZE with search_patterns
+         - Generate 5-10 diverse step functions
+         - Screen with probe_solution
+         - Identify best candidate (lowest c5_bound)
+
+      2. REFINEMENT with explore_neighbors (if needed)
+         - If best combined_score <= 1.0, call explore_neighbors
+         - Strategy choices:
+           * shift_peak: Move peaks left/right by small delta
+           * split_peak: Divide largest peak into two smaller peaks
+           * merge_peaks: Combine adjacent peaks
+           * adjust_threshold: Modify threshold positions
+         - Set magnitude=0.15 for conservative edits
+         - Generate 5-7 variants
+         - Screen ALL variants with probe_solution
+         - Evaluate only those with c5_bound < 0.375
+
+      3. ITERATE
+         - If refinement yields improvement, continue refining
+         - If no improvement after 2 refinement rounds, try different strategies
+         - Eventually try hyperparameter tuning as last resort
+
+      ## Key Rules
+      - ALWAYS use probe_solution before evaluate_solution
+      - Never waste evals on c5_bound > 0.375
+      - Track best c5_bound across all iterations
+      - Use magnitude=0.15-0.25 for conservative exploration
+      - If explore_neighbors fails twice, try shift_peak vs split_peak
+new_middlewares:
+  - name: refinement_reminder
+    hook: before_model
+    description: Encourage use of explore_neighbors for refinement after pattern generation
+    implementation_py: |
+      def before_model(hook_input):
+          history = hook_input.get("history", [])
+          if not history:
+              return "First call: Use search_patterns to generate diverse initializations."
+          
+          # Check if we've used search_patterns
+          has_patterns = any("search_patterns" in str(turn.get("tools_used", [])) for turn in history)
+          
+          if not has_patterns:
+              return "Reminder: Call search_patterns FIRST to generate diverse initializations before refining."
+          
+          # Check if we have a candidate to refine
+          if has_patterns and not any("explore_neighbors" in str(turn.get("tools_used", [])) for turn in history):
+              return "You've generated patterns. Consider using explore_neighbors to refine the best candidate before hyperparameter tuning."
+          
+          # Check if we've exhausted refinement strategies
+          pattern_count = sum(1 for turn in history if "search_patterns" in str(turn.get("tools_used", [])))
+          neighbor_count = sum(1 for turn in history if "explore_neighbors" in str(turn.get("tools_used", [])))
+          
+          if pattern_count >= 2 and neighbor_count >= 4:
+              return "You've exhausted pattern generation and refinement. Now you can try hyperparameter tuning."
+          
+          return None

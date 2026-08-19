@@ -1,0 +1,158 @@
+schema: h2spec/1.0
+system_prompt: |
+  Erdos minimum overlap: find h: [0,2]->[0,1] minimizing max_k integral h(x)(1-h(x+k))dx.
+  Constraint: integral(h) = 1 exactly.
+  Current best: C5 <= 0.38092303510845016.
+  
+  CRITICAL: The optimizer trains for 59000 steps per candidate. Use diverse INITIALizations.
+  
+  Strategy:
+  1. CALL generate_diverse_initializations to get 3 structurally different latent vectors (values in [-5,5], pre-sigmoid needed by optimizer)
+  2. Each candidate should have DIFFERENT support structure (not just amplitude variations)
+  3. CALL evaluate_solution on ALL 3 candidates (the optimizer will handle integral constraint and training)
+  4. Never filter candidates before evaluation - the optimizer finds valid h from any latent
+  5. If no improvement, use generate_diverse_initializations with higher temperature for more variety
+  
+  Key: The seed optimizer already has pattern generation and training. Give it diverse seeds, let it find the winner.
+skill_description: |
+  Diverse latent initialization strategy: provide the optimizer with structurally different starting points (bimodal, trimodal, sparse, concentrated) rather than trying to pre-compute final solutions. The optimizer trains each to convergence.
+tool_descriptions:
+  edit_solution: |
+    Modify EVOLVE-BLOCK to change hyperparameters or code structure.
+    For single-candidate testing: set num_restarts=1, seed_start=0.
+  evaluate_solution: |
+    Run full 59000-step optimization on a latent initialization.
+    Returns combined_score = 0.38092303510845016 / c5_bound.
+    Higher is better. combined_score > 1.0 means a new record.
+  probe_solution: |
+    Fast approximate evaluation (500 intervals). Less accurate than full eval.
+  finish: |
+    Submit when combined_score > 1.0.
+sampling:
+  temperature: 1.0
+  top_p: 0.95
+  top_k: 50
+  max_tokens: 15000
+agent:
+  max_iterations: 30
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 10000
+new_tools:
+- name: generate_diverse_initializations
+  description: |
+    Generate 3 structurally diverse latent initialization vectors for the Erdos optimizer.
+    
+    Returns 3 latent vectors (values in [-5, 5]) with DIFFERENT support structures:
+    - Candidate 1: Sparse concentrated pattern (energy in narrow region)
+    - Candidate 2: Bimodal pattern (two separated peaks)
+    - Candidate 3: Trimodal or multi-modal pattern (3+ peaks)
+    
+    These are passed to the optimizer's sigmoid activation. The optimizer handles:
+    - Sigmoid to [0,1]
+    - Integral constraint satisfaction via gradient descent
+    - 59000-step training to minimize C5
+    
+    Usage: Call once. Evaluate all 3 candidates fully.
+    input_schema:
+      type: object
+      properties:
+        temp:
+          type: number
+          default: 0.8
+  implementation_py: |
+    def run(ctx, args):
+        import numpy as np
+        N = 800
+        domain = 2.0
+        
+        # Candidate 1: Sparse concentrated (all energy in [0, 0.6])
+        sparse = np.zeros(N)
+        sparse[:int(0.6*N)] = 3.5
+        sparse[int(0.6*N):int(0.8*N)] = -2.0
+        sparse[int(0.8*N):] = 2.0
+        sparse += np.random.randn(N) * 0.3
+        sparse = np.clip(sparse, -5, 5)
+        
+        # Candidate 2: Bimodal (two peaks separated)
+        bimodal = np.zeros(N)
+        center1 = int(0.35 * N)
+        center2 = int(0.85 * N)
+        w = max(1, N // 50)
+        for c in [center1, center2]:
+            for i in range(max(0, c-w), min(N, c+w+1)):
+                bm = np.exp(-((i - c) / w)**2)
+                bimodal[i] += 4.0 * bm
+        bimodal += np.random.randn(N) * 0.3
+        bimodal = np.clip(bimodal, -5, 5)
+        
+        # Candidate 3: Trimodal (three peaks)
+        trimodal = np.zeros(N)
+        for c in [int(0.3*N), int(0.7*N), int(1.3*N)]:
+            w = max(1, N // 80)
+            for i in range(max(0, c-w), min(N, c+w+1)):
+                tm = np.exp(-((i - c) / w)**2)
+                trimodal[i] += 4.0 * tm
+        trimodal += np.random.randn(N) * 0.3
+        trimodal = np.clip(trimodal, -5, 5)
+        
+        # Add noise for diversity
+        sparse += np.random.randn(N) * 0.5
+        bimodal += np.random.randn(N) * 0.5
+        trimodal += np.random.randn(N) * 0.5
+        
+        # Wrap in dicts (optimizer expects latent vectors)
+        return {
+            "candidates": [
+                {"latent": sparse.tolist(), "type": "sparse_concentrated"},
+                {"latent": bimodal.tolist(), "type": "bimodal"},
+                {"latent": trimodal.tolist(), "type": "trimodal"}
+            ],
+            "num_candidates": 3
+        }
+new_skills:
+- name: initialization-strategy
+  description: Generate diverse latent seeds for the optimizer. Evaluate all candidates fully.
+  body: |
+    # Diverse Initialization Strategy for Erdos Problem
+    
+    ## Why This Approach
+    
+    The seed optimizer already has:
+    - 15 different pattern generators
+    - 59000-step training per candidate
+    - Integral constraint handling via gradient penalty
+    
+    The bottleneck is NOT the optimizer - it's getting GOOD initializations.
+    
+    ## Strategy
+    
+    1. CALL generate_diverse_initializations (temp=0.8)
+    
+    2. Get 3 latent vectors with DIFFERENT support structures:
+       - sparse_concentrated: all energy in left half
+       - bimodal: two separated peaks
+       - trimodal: three spread peaks
+    
+    3. CALL evaluate_solution on ALL 3 candidates
+    
+    4. The optimizer will:
+       - Apply sigmoid to get h in [0,1]
+       - Train for 59000 steps to minimize C5
+       - Satisfy integral(h)=1 via gradient penalty
+    
+    5. If no improvement, repeat with temp=1.0
+    
+    ## Key Insights
+    
+    - Don't pre-screen: the optimizer needs to try and validate
+    - Structural diversity matters more than amplitude
+    - 3 evals per iteration is affordable (30 total budget)
+    - Let the optimizer do its job - we just provide diverse seeds
+new_middlewares:
+- name: evaluate_all_candidates
+  hook: before_model
+  description: Remind agent to evaluate all candidates, don't filter
+  implementation_py: |
+    def before_model(hook_input):
+        return "EVALUATE ALL candidates from generate_diverse_initializations. The optimizer handles integral constraint. Don't filter by precomputed scores."

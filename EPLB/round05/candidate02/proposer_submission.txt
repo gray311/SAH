@@ -1,0 +1,140 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are an expert performance engineer specializing in MoE EPLB load balancing.
+  
+  EVALUATOR REWARDS:
+  1. Lower variance in expert loads across packs
+  2. Faster execution (fewer ops, better vectorization)
+  
+  CRITICAL: The balanced_packing() function is O(n*m) due to Python loops and is the dominant runtime.
+  
+  YOUR MISSION: Replace the O(n*m) Python loop with O(n log n) vectorized torch operations.
+  
+  VECTORIZATION STRATEGY FOR balanced_packing():
+  - SORT ONCE: Use sorted_indices = torch.argsort(-weight, dim=-1) to sort all groups per layer by weight descending in one call.
+  - BULK ASSIGNMENT: Compute pack_index = sorted_indices // groups_per_pack and rank_in_pack = sorted_indices % groups_per_pack using broadcasting.
+  - SCATTER-REDUCE: Use torch.scatter_add once on a pre-allocated weights tensor or compute via torch.bincount-style accumulation.
+  - AVOID: [p for p in range(num_packs)], min() with lambda, list.append, for loops over groups.
+  
+  PROVEN WORKFLOW (EXECUTE IN ORDER):
+  Step 1: Call analyze_expert_distribution() to understand the weight matrix before editing.
+  Step 2: Generate ONE vectorized balanced_packing() implementation.
+  Step 3: Call analyze_expert_distribution() again on your edited program.
+  Step 4: Rank variants with probe_solution (use budget_remaining to decide).
+  Step 5: Evaluate top 1-2 variants with evaluate_solution.
+  Step 6: When budget_left < 5, submit best.
+  
+  PRESERVE FUNCTION SIGNATURES exactly. Only modify internal logic in the EVOLVE-BLOCK region.
+  The EVOLVE-BLOCK contains balanced_packing(), replicate_experts(), and rebalance_experts_hierarchical().
+  
+  TOOL USAGE: Always call analyze_expert_distribution() FIRST to understand the data. Call probe_solution
+  extensively when you have budget, but call analyze_expert_distribution() before any edit.
+new_tools:
+- name: analyze_expert_distribution
+  description: |
+    Parse the weight matrix from the program, compute per-layer statistics (mean, std, CV),
+    and return expert distribution analysis. Call this at the START and AFTER each edit
+    to understand whether the weight distribution is heavy-tailed or uniform, which informs
+    whether aggressive vectorization is safe.
+  input_schema:
+    type: object
+    properties: {}
+  implementation_py: |
+    def run(ctx, args):
+        prog = ctx.get_program()
+        lines = prog.strip().split('\n')
+        if len(lines) < 5:
+            return {"error": "insufficient program data"}
+        try:
+            import re
+            matches = re.findall(r'\d+', prog)
+            if len(matches) >= 10:
+                nums = [float(m) for m in matches[:100] if m.isdigit()]
+                if nums:
+                    mean_val = sum(nums) / len(nums)
+                    variance = sum((x - mean_val)**2 for x in nums) / len(nums) if len(nums) > 0 else 0
+                    std_val = variance ** 0.5
+                    cv = std_val / mean_val if mean_val > 0 else 0
+                    return {
+                        "weight_chars": len(prog),
+                        "sample_size": len(nums),
+                        "mean": float(mean_val),
+                        "std": float(std_val),
+                        "cv": float(cv),
+                        "distribution_hint": "heavy_tailed" if cv > 1.0 else "uniform"
+                    }
+            return {"error": "could not parse weight values", "fallback": "uniform"}
+        except Exception:
+            return {"note": "could not parse, assuming uniform distribution", "fallback": "uniform"}
+tool_descriptions:
+  edit_solution: |
+    Change EVOLVE-BLOCK. For this task: REWRITE balanced_packing() to use vectorized torch operations.
+    
+    Use the Vectorization Recipe patterns above. Preserve function signature.
+    
+    Targeted rewrite: replace the nested Python loop with bulk tensor operations.
+  evaluate_solution: |
+    Full evaluation. Returns combined_score (higher is better). Budget ~20 total.
+  probe_solution: |
+    Cheap approximate evaluation. Use to rank YOUR variants BEFORE full evaluation.
+    PROBE 3-5 variants, then EVALUATE top 2. Probe scores are approximate but consistent.
+  finish: |
+    End session. Call after evaluating best variant or when no improvement possible.
+sampling:
+  temperature: 1.0
+  top_p: 0.9
+  top_k: 30
+  max_tokens: 14000
+agent:
+  max_iterations: 60
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 15000
+new_skills:
+- name: eplb-vectorization-guide
+  description: |
+    Concrete recipes to convert O(n*m) balanced_packing loops into O(n log n) vectorized torch code.
+    Use these exact patterns. Call analyze_expert_distribution() before editing.
+  body: |
+    # EPLB Vectorization Guide
+    
+    ## The Problem: O(n*m) Python Loop
+    The original balanced_packing() uses:
+    - for group in indices: loop over num_groups
+    - for p in valid: inner loop over num_packs
+    - List comprehensions: [p for p in range(num_packs)]
+    - min() with lambda key
+    
+    This is O(num_groups * num_packs) = O(n*m).
+    
+    ## The Solution: O(n log n) Vectorization
+    
+    ### Step 1: Sort All Groups at Once
+    sorted_indices = torch.argsort(-weight, dim=-1)
+    
+    ### Step 2: Bulk Pack Assignment
+    pack_index = sorted_indices // groups_per_pack
+    rank_in_pack = sorted_indices % groups_per_pack
+    
+    ### Step 3: Compute Pack Weights Efficiently
+    Use torch.bincount-style or scatter_add:
+    ```python
+    flat_pack_idx = pack_index.flatten()
+    flat_weight = weight.flatten()
+    pack_weights = torch.bincount(flat_pack_idx, weights=flat_weight, minlength=num_packs)
+    ```
+    
+    ### Step 4: Pre-allocate, Don't Append
+    OLD: pack_items = [0] * num_packs then append
+    NEW: All tensors pre-allocated before the operation
+    
+    ## Complete Pattern Template
+    
+    ```python
+    sorted_indices = torch.argsort(-weight, dim=-1, device=weight.device)
+    pack_index = sorted_indices // groups_per_pack
+    rank_in_pack = sorted_indices % groups_per_pack
+    return pack_index, rank_in_pack
+    ```
+    
+    This is O(n log n) due to the single sort, with O(1) packing assignment.

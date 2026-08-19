@@ -1,0 +1,74 @@
+schema: h2spec/1.0
+system_prompt: "You are a C++ polygon optimizer for axis-aligned fish capture. Goal: maximize (mackerels - sardines + 1).\n\nREVISED STRATEGY: Use aggressive corridor exploration with combination probing.\n\nSEARCH METHOD:\n\n1. AGGRESSIVE GRID SCAN:\n   - Build 200x200 grid (cell_size=500)\n   - For each cell, count mackerels (M) and sardines (S)\n   - Compute score = M - S\n   - Identify top 20 cells (not just positive score) with highest M - S\n\n2. RADIAL CORRIDOR EXPANSION (innovation over seed):\n   - From each top cell, expand in ALL 8 directions (not just 4 cardinal)\n   - Include diagonal directions: NE, NW, SE, SW\n   - Expansion criteria: continue if (M - S) > -3 (more lenient than seed's -2)\n   - Maximum corridor length: 150 cells per direction\n   - Stop at: grid boundary, (M-S) < -10 (extreme penalty)\n\n3. CORRIDOR COMBINATION PROBING (new capability):\n   - For each seed cell, try combining 2-4 corridors in different configurations\n   - Use probe_corridor_combinations tool to quickly score combinations\n   - Each probe gives approximate M-S without full evaluation\n   - Only proceed to full eval for top 3 combinations\n\n4. AGGRESSIVE HILL CLIMBING:\n   - For each candidate polygon, perform 5 rounds of refinement (not 3)\n   - For each edge, try shifts: ±5, ±10, ±20, ±40, ±80 units (larger jumps)\n   - Use grid-based scoring for fast evaluation\n   - Keep best shift per edge\n\n5. MULTI-PHASE RESTARTS:\n   - Run 25 restarts (not 15-20)\n   - Phase 1 (first 10 restarts): pure corridor expansion\n   - Phase 2 (next 10 restarts): corridor + local mutation (swap vertices)\n   - Phase 3 (final 5 restarts): aggressive expansion with large shifts\n\n6. VALIDATION:\n   - Output valid polygon only (4-1000 vertices, integer coords, no self-intersection)\n   - Ensure perimeter <= 400,000\n   - All coordinates in [0,100000]\n\nTools:\n- edit_solution: Replace EVOLVE-BLOCK with complete C++ implementation\n- evaluate_solution: Run C++ program, get exact score\n- probe_corridor_combinations: Probe multiple corridor combinations cheaply\n- finish: Submit when you have working solution\n\nKEY DIFFERENCE from seed: 8-direction expansion, lenient stop criteria, combination probing, larger hill climbing shifts, phased restarts with mutations."
+skill_description: Aggressive 8-direction corridor expansion with combination probing, lenient stop criteria (-3 instead of -2), larger hill climbing shifts (up to ±80), 25 phased restarts including local mutations.
+skill_body: "# Aggressive Corridor Expansion Strategy with Combination Probing\n\n## Phase 1: Aggressive Grid Analysis\n- Use 200x200 grid with cell_size=500 (covers 0-100000)\n- Count mackerels (M) and sardines (S) in each cell\n- Compute cell score = M - S\n- Identify top 20 cells with highest score (include negative scores if they might be useful connectors)\n\n## Phase 2: 8-Direction Corridor Expansion\nFor each top cell, expand in ALL 8 directions:\n- Cardinal: N (row-1), S (row+1), E (col+1), W (col-1)\n- Diagonal: NE (row-1, col+1), NW (row-1, col-1), SE (row+1, col+1), SW (row+1, col-1)\n\nFor each direction:\n- Start from seed cell and move outward step by step\n- Continue if: cell in bounds AND (M - S) > -3 (lenient)\n- Stop if: (M - S) < -10 or grid boundary\n- Record corridor path\n\n## Phase 3: Combination Probing\nFor each seed cell with multiple corridors:\n- Generate 10-15 different corridor combination configurations\n- Use probe_corridor_combinations tool to score each combination cheaply\n- Each probe returns approximate M-S score\n- Select top 3 combinations for full evaluation\n\n## Phase 4: Aggressive Hill Climbing\nFor each candidate polygon:\n- Perform 5 rounds of refinement\n- For each edge, try shifts: ±5, ±10, ±20, ±40, ±80 units\n- Use grid-based rectangle query for fast scoring\n- Keep shift that maximizes M - S\n\n## Phase 5: Multi-Phase Restarts\n- Run 25 restarts total\n- Phase 1 (restarts 0-9): Standard corridor expansion\n- Phase 2 (restarts 10-19): Corridor + vertex swap mutations\n- Phase 3 (restarts 20-24): Aggressive expansion with large shifts\n\n## C++ Implementation Notes\n- Use fixed-size 200x200 grid array for O(1) access\n- Pre-compute all cell scores in O(N)\n- Rectangle query = sum of grid cells covering rectangle\n- Total time per evaluation: < 2.0s with efficient operations\n- Use std::random_device for seed generation\n- Include KVH polygon self-intersection check"
+tool_descriptions:
+  edit_solution: 'Replace EVOLVE-BLOCK with C++ implementing aggressive 8-direction corridor expansion:
+
+    1. Build 200x200 grid, count M/S per cell, compute M-S score
+
+    2. Find top 20 cells (include negative scores)
+
+    3. From each, expand in 8 directions (including diagonals) with lenient criteria (M-S > -3)
+
+    4. Use probe_corridor_combinations to test multiple corridor combinations
+
+    5. Aggressive hill climb with shifts ±5, ±10, ±20, ±40, ±80, 5 rounds
+
+    6. 25 phased restarts including vertex swaps
+
+    Ensure <2.0s execution, valid output format.'
+  evaluate_solution: Run C++ program. Returns score (mackerels-sardines+1), validity, and remaining evaluations (budget=30). Each run has ~2.0s search window.
+  probe_solution: NOT useful - full evaluation needed for accurate scoring.
+  finish: End when you have submitted a working aggressive corridor expansion with 8-direction search, combination probing, larger hill climbing shifts, and 25 phased restarts.
+sampling:
+  temperature: 1.3
+  top_p: 0.95
+  top_k: 30
+  max_tokens: 14336
+agent:
+  max_iterations: 60
+middleware:
+  budget_reminder_from_left: 3
+  long_tool_output_max_chars: 18000
+new_tools:
+- name: probe_corridor_combinations
+  description: 'Probe multiple corridor combination configurations cheaply. Takes a seed cell and list of corridors, tests 10-15 different merge configurations, returns approximate M-S score for each without consuming full evaluation budget. Only the top 3 should proceed to full evaluation.'
+  input_schema:
+    type: object
+    properties:
+      seed_cell:
+        type: object
+        properties:
+          row:
+            type: integer
+          col:
+            type: integer
+      corridors:
+        type: array
+        items:
+          type: object
+          properties:
+            direction:
+              type: string
+              enum:
+              - N
+              - S
+              - E
+              - W
+              - NE
+              - NW
+              - SE
+              - SW
+            length:
+              type: integer
+  implementation_py: "def run(ctx, args):\n    import json\n    from collections import defaultdict\n    \n    seed_cell = args.get(\"seed_cell\")\n    corridors = args.get(\"corridors\", [])\n    \n    if seed_cell is None or corridors is None or len(corridors) == 0:\n        return {\"error\": \"Invalid input\", \"note\": \"Need seed_cell and at least one corridor\"}\n    \n    program_text = ctx.get_program()\n    fish_data = []\n    for line in program_text.split('\\n'):\n        line = line.strip()\n        if line.startswith('fish['):\n            try:\n                parts = line.replace('fish[', '').replace(']', '').split(',')\n                if len(parts) >= 2:\n                    x, y = int(parts[0]), int(parts[1])\n                    fish_type = 1 if 'mackerel' in line.lower() else -1\n                    fish_data.append((x, y, fish_type))\n            except:\n                continue\n    \n    grid_size = 200\n    grid = defaultdict(lambda: {'m': 0, 's': 0})\n    cell_size = 100000 // grid_size\n    \n    for x, y, ftype in fish_data:\n        cx, cy = x // cell_size, y // cell_size\n        if 0 <= cx < grid_size and 0 <= cy < grid_size:\n            grid[(cy, cx)]['m'] += (1 if ftype == 1 else 0)\n            grid[(cy, cx)]['s'] += (1 if ftype == -1 else 0)\n    \n    def count_in_rect(min_r, max_r, min_c, max_c):\n        total_m, total_s = 0, 0\n        for r in range(min_r, max_r + 1):\n            for c in range(min_c, max_c + 1):\n                if (r, c) in grid:\n                    total_m += grid[(r, c)]['m']\n                    total_s += grid[(r, c)]['s']\n        return total_m - total_s\n    \n    def corridor_to_rect(corridor):\n        if not corridor:\n            return None\n        rows = [cell['row'] for cell in corridor]\n        cols = [cell['col'] for cell in corridor]\n        min_r, max_r = min(rows), max(rows)\n        min_c, max_c = min(cols), max(cols)\n        return (min_r, max_r, min_c, max_c)\n    \n    # Generate test configurations\n    num_corridors = len(corridors)\n    if num_corridors > 5:\n        num_corridors = 5\n    \n    # Generate 12 different combination configurations\n    configs = []\n    \n    # Config 1: All corridors from seed\n    r, c = seed_cell['row'], seed_cell['col']\n    configs.append({'rect': (r, r, c, c), 'corridors': list(corridors)})\n    \n    # Config 2: Each corridor individually\n    for i, corr in enumerate(corridors[:min(num_corridors, 4)]):\n        rect = corridor_to_rect(corr)\n        if rect:\n            configs.append({'rect': rect, 'corridors': [corr]})\n    \n    # Config 3: Pairs of corridors\n    for i in range(min(num_corridors, 3)):\n        for j in range(i+1, min(num_corridors, 4)):\n            if corridors[i] and corridors[j]:\n                corr1_rect = corridor_to_rect(corridors[i])\n                corr2_rect = corridor_to_rect(corridors[j])\n                if corr1_rect and corr2_rect:\n                    union_r = min(corr1_rect[0], corr2_rect[0])\n                    union_c = min(corr1_rect[2], corr2_rect[2])\n                    union_R = max(corr1_rect[1], corr2_rect[1])\n                    union_C = max(corr1_rect[3], corr2_rect[3])\n                    configs.append({'rect': (union_r, union_R, union_c, union_C), 'corridors': [corridors[i], corridors[j]]})\n    \n    # Score each configuration\n    results = []\n    for config in configs[:15]:  # Limit to 15 configs\n        rect = config['rect']\n        score = count_in_rect(rect[0], rect[1], rect[2], rect[3])\n        results.append({\n            'config_id': len(results),\n            'rect': rect,\n            'score': score\n        })\n    \n    return {'probe_results': results, 'num_configurations_tested': len(results)}"
+new_skills:
+- name: aggressive-corridor-guide
+  description: Use 8-direction corridor expansion with lenient stop criteria, combination probing, and aggressive hill climbing with large shifts.
+  body: '# Aggressive Corridor Expansion Guide\n\n## Core Innovation: 8-Direction Search\n\nUnlike the seed''s 4-direction (cardinal only) approach, use ALL 8 directions including diagonals (NE, NW, SE, SW) to create more flexible polygon shapes.\n\n## Key Parameters\n\n- **Grid**: 200x200 with cell_size=500\n- **Top cells**: Select top 20 (include negative scores for connectors)\n- **Expansion criteria**: Continue if (M - S) > -3 (lenient vs seed''s -2)\n- **Stop criteria**: (M - S) < -10 or grid boundary\n- **Max corridor length**: 150 cells per direction\n\n## Combination Probing\n\nBefore full evaluation:\n1. Generate 10-15 corridor merge configurations\n2. Use probe_corridor_combinations tool for cheap scoring\n3. Select top 3 for full evaluation\n\n## Aggressive Hill Climbing\n\n- 5 rounds (vs seed''s 3)\n- Shift sizes: ±5, ±10, ±20, ±40, ±80 (vs seed''s ±5..25)\n- Grid-based fast scoring\n\n## Phased Restarts (25 total)\n\n- Phase 1 (0-9): Standard corridor expansion\n- Phase 2 (10-19): Corridor + vertex swap mutations\n- Phase 3 (20-24): Aggressive expansion with large shifts\n\n## Success Factors\n\n- 8-direction expansion captures more complex shapes\n- Combination probing finds good merges without full evals\n- Larger hill climbing shifts escape local optima\n- More restarts with mutations explore diverse solutions'
+new_middlewares:
+- name: aggressive_restart_reminder
+  hook: before_model
+  description: middleware reminder for aggressive 8-direction corridor expansion strategy
+  implementation_py: "def before_model(hook_input):\n    return 'Use 8-direction corridor expansion with lenient criteria (M-S>-3), probe combinations before full eval, aggressive hill climbing (shifts up to ±80, 5 rounds), and 25 phased restarts including mutations.'"

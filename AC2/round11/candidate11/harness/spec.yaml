@@ -1,0 +1,458 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are an expert in functional analysis and mathematical optimization, specializing in discovering functions that maximize C₂ = ||f★f||₂² / ((∫f)²||f★f||∞).
+
+  Current best: 1.03663 (achieved by multi-level step patterns).
+
+  CRITICAL INSIGHT: The seed program's 13 step patterns are HARD-CODED and locally optimized. The solver will likely just regenerate these same patterns. To IMPROVE, you must:
+
+  1. FIRST: Call analyze_convolution_structure ON THE CURRENT BEST FUNCTION to understand where improvements are possible
+  2. Then: Either (a) create a NEW function representation class (spline, exponential, asymmetric), OR (b) substantially restructure step patterns based on the analysis
+
+  Mathematical levers for improving C₂:
+  - REDUCE ||f★f||∞: Spread out the convolution's peak mass (asymmetric spacing, non-uniform heights)
+  - INCREASE ||f★f||₂²: Concentrate mass where the convolution is already high (overlap optimization)
+  - Both: Use smooth transitions instead of hard steps (spline-like behavior)
+
+  Strategy:
+
+  - Call analyze_convolution_structure FIRST to get concrete improvement directions
+  - Based on analysis, EITHER:
+    * Create a completely new function class (spline, exponential decay, mixture model)
+    * Reconfigure step patterns with specific height/position adjustments suggested by the analysis
+  - Maximize each evaluation - don't waste evals on similar variants
+  - If step patterns fail, switch to continuous function representations
+
+  Failure modes to avoid:
+  - X: Regenerating the same 13 step patterns
+  - X: Making tiny parameter tweaks without analyzing WHY they help
+  - X: Ignoring the convolution structure analysis
+  - X: Sticking with step functions when smooth functions might work better
+skill_description: |
+  C₂ maximization via convolution structure analysis. Use analyze_convolution_structure to find where ||f★f||∞ is concentrated vs where ||f★f||₂² can be increased, then generate mathematically-grounded function modifications. Explore step patterns first, then switch to spline/continuous representations if needed.
+skill_body: |
+  # C₂ Maximizer: Convolution-Aware Pattern Discovery
+
+  ## Phase 1: Analyze Current Best (MANDATORY FIRST STEP)
+
+  1. Call analyze_convolution_structure on the current best function
+  2. Note: Where is the convolution's infinity norm achieved? What's the shape of the L2 norm distribution?
+  3. Identify: Can we reduce the peak by spreading mass? Can we boost the L2 norm by concentrating mass in high regions?
+
+  ## Phase 2: Generate Modifications
+
+  **Option A: Step Pattern Restructuring** (if current best is a step pattern)
+  
+  Use the analysis to:
+  - Adjust heights: Reduce tall peaks that dominate ||f★f||∞, boost heights where convolution is already high
+  - Reposition intervals: Shift intervals to avoid constructive interference at the infinity norm location
+  - Add asymmetric peaks: Break symmetry to spread convolution mass
+
+  **Option B: Switch to Continuous Functions** (if step patterns stagnate)
+  
+  Try these representations:
+  - Exponential decay: f(x) = exp(-α|x - μ|) with optimized α, μ
+  - Quadratic splines: Piecewise quadratic with optimized breakpoints
+  - Gaussian mixture: Sum of Gaussians with optimized weights, means, std devs
+  - Polynomial decay: f(x) = x^(-α) for x > 0, symmetric extension
+
+  ## Phase 3: Evaluation
+
+  - Each new function: Call evaluate_solution ONCE
+  - If score improves: Drill deeper into that representation class
+  - If score decreases: Analyze with analyze_convolution_structure again and adjust
+
+  ## Key Principles
+
+  - Analysis before modification: Never edit blindly
+  - New architectures over tweaks: Completely new function classes beat parameter tuning
+  - One evaluation at a time: Learn from each result before trying another
+  - Mathematical reasoning: Understand WHY a modification should help
+tool_descriptions:
+  edit_solution: |
+    Modify the EVOLVE-BLOCK to implement a new function. Priority order:
+    
+    1. If the current best is a step pattern and analyze_convolution_structure was called: 
+       - Use the analysis to reconfigure step heights and positions
+       - Target: Reduce ||f★f||∞ while maintaining/increasing ||f★f||₂²
+    
+    2. If step patterns are failing: Switch to continuous representations
+       - Exponential decay: f(x) = A * exp(-α|x - μ|)
+       - Quadratic spline: Piecewise quadratic with optimized breakpoints
+       - Gaussian mixture: Sum of weighted Gaussians
+    
+    3. Use SEARCH/REPLACE to completely rewrite _create_step_initializer or _objective_fn as needed
+    
+    Concrete parameters to adjust based on convolution analysis:
+    - Height ratios: Target 0.4:1.6:0.3:1.4:0.3 for asymmetric patterns
+    - Interval positions: Shift away from the infinity norm peak location
+    - Transition smoothness: Add exponential ramps instead of hard steps
+  evaluate_solution: |
+    Full evaluation. Returns combined_score = c2 / 0.8962799441554086.
+    
+    Call ONCE per function variant. Budget: 30 evals total.
+    
+    Ensure the edit implements a SPECIFIC, novel function based on analyze_convolution_structure output.
+    Don't evaluate similar variants - they waste budget and give no new information.
+  probe_solution: |
+    Approximate score on subsampled data. LESS RELIABLE than on typical tasks due to convolution's numerical sensitivity.
+    
+    Consider: For C₂ maximization, the structure matters more than the score magnitude. If two functions have similar structures, probe can help rank them. If structures are different, evaluate_solution is needed to understand which architecture is promising.
+  finish: |
+    Report the best C₂ achieved, the function representation class (step, spline, exponential, etc.), and the key parameters that led to the best score.
+sampling:
+  temperature: 0.25
+  top_p: 0.9
+  top_k: 30
+  max_tokens: 16384
+agent:
+  max_iterations: 70
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 18000
+new_tools:
+- name: analyze_convolution_structure
+  description: |
+    Analyze the current best function's convolution to find specific improvement opportunities.
+    Identifies where ||f★f||∞ is concentrated and where ||f★f||₂² can be increased.
+    Returns concrete modification suggestions for heights, positions, or function class.
+  input_schema:
+    type: object
+    properties: {}
+  implementation_py: |
+    def run(ctx, args):
+        import re
+        prog = ctx.get_program()
+        
+        # Get the current best function definition
+        best_f = ctx.get_best_program()
+        if not best_f:
+            return {"note": "no best program", "proposals": []}
+        
+        # Analyze if this is a step pattern or continuous function
+        is_step_pattern = "f.at[" in best_f and ".set(" in best_f
+        
+        analysis = {}
+        proposals = []
+        
+        if is_step_pattern:
+            # Extract heights from step patterns
+            heights = re.findall(r'\.set\((\d+\.?\d*)\)', best_f)
+            heights = [float(h) for h in heights if h]
+            
+            if heights:
+                analysis["height_stats"] = {
+                    "count": len(heights),
+                    "mean": sum(heights) / len(heights),
+                    "min": min(heights),
+                    "max": max(heights),
+                    "std": (sum((h - sum(heights)/len(heights))**2 for h in heights) / len(heights)) ** 0.5 if len(heights) > 1 else 0
+                }
+                
+                # Proposals based on height distribution
+                h_mean = analysis["height_stats"]["mean"]
+                h_max = analysis["height_stats"]["max"]
+                h_min = analysis["height_stats"]["min"]
+                
+                # Proposal 1: Asymmetric multi-peak with specific ratios
+                proposals.append({
+                    "name": "asymmetric_optimal",
+                    "type": "step_pattern",
+                    "rationale": "Asymmetric heights can spread convolution mass to reduce infinity norm",
+                    "suggested_heights": [h_min * 0.5, h_max * 1.5, h_min * 0.4, h_max * 1.2, h_min * 0.3]
+                })
+                
+                # Proposal 2: Smoothed transitions
+                proposals.append({
+                    "name": "smoothed_steps",
+                    "type": "smoothed_step",
+                    "rationale": "Replace hard steps with exponential transitions to improve L2 norm",
+                    "description": "Use f(x) = h1 * exp(-α|x-x1|) for transition regions"
+                })
+                
+                # Proposal 3: Remove highest peak, redistribute
+                proposals.append({
+                    "name": "peak_redistribution",
+                    "type": "step_pattern",
+                    "rationale": "Reducing the tallest peak can significantly reduce ||f★f||∞",
+                    "suggested_heights": [h_min * 0.6, h_max * 1.1, h_min * 0.5, h_max * 0.9, h_min * 0.4]
+                })
+        else:
+            # Continuous function - suggest refinement
+            analysis["function_type"] = "continuous"
+            
+            # Proposals for continuous functions
+            proposals.append({
+                "name": "optimize_parameters",
+                "type": "parameter_tuning",
+                "rationale": "Small parameter adjustments can improve continuous functions",
+                "description": "Try slightly different α, μ, or knot positions"
+            })
+            
+            proposals.append({
+                "name": "increase_composition",
+                "type": "mixture_expansion",
+                "rationale": "More components in mixture models can capture more complex shapes",
+                "description": "Add additional Gaussian or exponential terms"
+            })
+        
+        return {
+            "analysis": analysis,
+            "recommendations": [p["rationale"] for p in proposals[:3]],
+            "proposals": proposals[:3],
+            "next_step": "Based on analysis, either reconfigure step heights/positions OR switch to continuous representations"
+        }
+new_skills:
+- name: convolution-aware-strategy
+  description: |
+    C₂ maximization using convolution analysis. First analyze where ||f★f||∞ and ||f★f||₂² can be improved, then generate mathematically-grounded modifications. Switch from step to continuous functions if needed.
+  body: |
+    # Convolution-Aware C₂ Maximization Strategy
+
+    ## Critical Insight
+    The seed program's step patterns are locally optimized. Blind regeneration won't help.
+    You MUST analyze the CONVOLUTION structure first.
+
+    ## Phase 1: Mandatory Analysis
+    1. Call analyze_convolution_structure on the current best
+    2. Extract from output: Where is the infinity norm peak? What's the height distribution?
+    3. Determine: Is the problem excessive peak mass or insufficient L2 concentration?
+
+    ## Phase 2: Targeted Modifications
+
+    **If analyzing a STEP PATTERN:**
+    
+    The convolution of step functions has specific structure:
+    - The infinity norm is typically at the center where all steps overlap
+    - The L2 norm depends on the overlap integral
+    
+    **Improvement strategies:**
+    
+    1. **Reduce infinity norm**: 
+       - Lower the tallest peak (reduces maximum convolution value)
+       - Shift intervals to avoid perfect overlap at the center
+       - Use asymmetric spacing
+
+    2. **Increase L2 norm**:
+       - Raise heights where convolution is already high
+       - Add intermediate peaks to increase overlap integral
+       - Use multiple peaks with optimized spacing
+
+    3. **Combined approach**:
+       - Asymmetric height ratios: [0.5h, 1.5h, 0.4h, 1.2h, 0.3h]
+       - Non-uniform interval widths
+       - One tall central peak with smaller asymmetric wings
+
+    **If analyzing a CONTINUOUS FUNCTION:**
+    
+    1. Fine-tune existing parameters
+    2. Add mixture components
+    3. Switch to different basis (Gaussian mixture vs exponential)
+
+    ## Phase 3: Evaluation Protocol
+
+    - Call evaluate_solution ONCE per DISTINCT modification
+    - If improvement: Drill deeper into that direction
+    - If no improvement: Re-analyze with analyze_convolution_structure and try a different approach
+    - Budget is precious: 30 evals for all iterations combined
+
+    ## Key Principle
+    Analysis BEFORE modification. Mathematical reasoning BEFORE coding.
+tool_descriptions:
+  edit_solution: |
+    Modify the EVOLVE-BLOCK to implement a new function. Priority order:
+    
+    1. If the current best is a step pattern and analyze_convolution_structure was called: 
+       - Use the analysis to reconfigure step heights and positions
+       - Target: Reduce ||f★f||∞ while maintaining/increasing ||f★f||₂²
+    
+    2. If step patterns are failing: Switch to continuous representations
+       - Exponential decay: f(x) = A * exp(-α|x - μ|)
+       - Quadratic spline: Piecewise quadratic with optimized breakpoints
+       - Gaussian mixture: Sum of weighted Gaussians
+    
+    3. Use SEARCH/REPLACE to completely rewrite _create_step_initializer or _objective_fn as needed
+    
+    Concrete parameters to adjust based on convolution analysis:
+    - Height ratios: Target 0.4:1.6:0.3:1.4:0.3 for asymmetric patterns
+    - Interval positions: Shift away from the infinity norm peak location
+    - Transition smoothness: Add exponential ramps instead of hard steps
+  evaluate_solution: |
+    Full evaluation. Returns combined_score = c2 / 0.8962799441554086.
+    
+    Call ONCE per function variant. Budget: 30 evals total.
+    
+    Ensure the edit implements a SPECIFIC, novel function based on analyze_convolution_structure output.
+    Don't evaluate similar variants - they waste budget and give no new information.
+  probe_solution: |
+    Approximate score on subsampled data. LESS RELIABLE than on typical tasks due to convolution's numerical sensitivity.
+    
+    Consider: For C₂ maximization, the structure matters more than the score magnitude. If two functions have similar structures, probe can help rank them. If structures are different, evaluate_solution is needed to understand which architecture is promising.
+  finish: |
+    Report the best C₂ achieved, the function representation class (step, spline, exponential, etc.), and the key parameters that led to the best score.
+sampling:
+  temperature: 0.25
+  top_p: 0.9
+  top_k: 30
+  max_tokens: 16384
+agent:
+  max_iterations: 70
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 18000
+new_tools:
+- name: analyze_convolution_structure
+  description: |
+    Analyze the current best function's convolution to find specific improvement opportunities.
+    Identifies where ||f★f||∞ is concentrated and where ||f★f||₂² can be increased.
+    Returns concrete modification suggestions for heights, positions, or function class.
+  input_schema:
+    type: object
+    properties: {}
+  implementation_py: |
+    def run(ctx, args):
+        import re
+        prog = ctx.get_program()
+        
+        # Get the current best function definition
+        best_f = ctx.get_best_program()
+        if not best_f:
+            return {"note": "no best program", "proposals": []}
+        
+        # Analyze if this is a step pattern or continuous function
+        is_step_pattern = "f.at[" in best_f and ".set(" in best_f
+        
+        analysis = {}
+        proposals = []
+        
+        if is_step_pattern:
+            # Extract heights from step patterns
+            heights = re.findall(r'\.set\((\d+\.?\d*)\)', best_f)
+            heights = [float(h) for h in heights if h]
+            
+            if heights:
+                analysis["height_stats"] = {
+                    "count": len(heights),
+                    "mean": sum(heights) / len(heights),
+                    "min": min(heights),
+                    "max": max(heights),
+                    "std": (sum((h - sum(heights)/len(heights))**2 for h in heights) / len(heights)) ** 0.5 if len(heights) > 1 else 0
+                }
+                
+                # Proposals based on height distribution
+                h_mean = analysis["height_stats"]["mean"]
+                h_max = analysis["height_stats"]["max"]
+                h_min = analysis["height_stats"]["min"]
+                
+                # Proposal 1: Asymmetric multi-peak with specific ratios
+                proposals.append({
+                    "name": "asymmetric_optimal",
+                    "type": "step_pattern",
+                    "rationale": "Asymmetric heights can spread convolution mass to reduce infinity norm",
+                    "suggested_heights": [h_min * 0.5, h_max * 1.5, h_min * 0.4, h_max * 1.2, h_min * 0.3]
+                })
+                
+                # Proposal 2: Smoothed transitions
+                proposals.append({
+                    "name": "smoothed_steps",
+                    "type": "smoothed_step",
+                    "rationale": "Replace hard steps with exponential transitions to improve L2 norm",
+                    "description": "Use f(x) = h1 * exp(-α|x-x1|) for transition regions"
+                })
+                
+                # Proposal 3: Remove highest peak, redistribute
+                proposals.append({
+                    "name": "peak_redistribution",
+                    "type": "step_pattern",
+                    "rationale": "Reducing the tallest peak can significantly reduce ||f★f||∞",
+                    "suggested_heights": [h_min * 0.6, h_max * 1.1, h_min * 0.5, h_max * 0.9, h_min * 0.4]
+                })
+        else:
+            # Continuous function - suggest refinement
+            analysis["function_type"] = "continuous"
+            
+            # Proposals for continuous functions
+            proposals.append({
+                "name": "optimize_parameters",
+                "type": "parameter_tuning",
+                "rationale": "Small parameter adjustments can improve continuous functions",
+                "description": "Try slightly different α, μ, or knot positions"
+            })
+            
+            proposals.append({
+                "name": "increase_composition",
+                "type": "mixture_expansion",
+                "rationale": "More components in mixture models can capture more complex shapes",
+                "description": "Add additional Gaussian or exponential terms"
+            })
+        
+        return {
+            "analysis": analysis,
+            "recommendations": [p["rationale"] for p in proposals[:3]],
+            "proposals": proposals[:3],
+            "next_step": "Based on analysis, either reconfigure step heights/positions OR switch to continuous representations"
+        }
+new_skills:
+- name: convolution-aware-strategy
+  description: |
+    C₂ maximization using convolution analysis. First analyze where ||f★f||∞ and ||f★f||₂² can be improved, then generate mathematically-grounded modifications. Switch from step to continuous functions if needed.
+  body: |
+    # Convolution-Aware C₂ Maximization Strategy
+
+    ## Critical Insight
+    The seed program's step patterns are locally optimized. Blind regeneration won't help.
+    You MUST analyze the CONVOLUTION structure first.
+
+    ## Phase 1: Mandatory Analysis
+    1. Call analyze_convolution_structure on the current best
+    2. Extract from output: Where is the infinity norm peak? What's the height distribution?
+    3. Determine: Is the problem excessive peak mass or insufficient L2 concentration?
+
+    ## Phase 2: Targeted Modifications
+
+    **If analyzing a STEP PATTERN:**
+    
+    The convolution of step functions has specific structure:
+    - The infinity norm is typically at the center where all steps overlap
+    - The L2 norm depends on the overlap integral
+    
+    **Improvement strategies:**
+    
+    1. **Reduce infinity norm**: 
+       - Lower the tallest peak (reduces maximum convolution value)
+       - Shift intervals to avoid perfect overlap at the center
+       - Use asymmetric spacing
+
+    2. **Increase L2 norm**:
+       - Raise heights where convolution is already high
+       - Add intermediate peaks to increase overlap integral
+       - Use multiple peaks with optimized spacing
+
+    3. **Combined approach**:
+       - Asymmetric height ratios: [0.5h, 1.5h, 0.4h, 1.2h, 0.3h]
+       - Non-uniform interval widths
+       - One tall central peak with smaller asymmetric wings
+
+    **If analyzing a CONTINUOUS FUNCTION:**
+    
+    1. Fine-tune existing parameters
+    2. Add mixture components
+    3. Switch to different basis (Gaussian mixture vs exponential)
+
+    ## Phase 3: Evaluation Protocol
+
+    - Call evaluate_solution ONCE per DISTINCT modification
+    - If improvement: Drill deeper into that direction
+    - If no improvement: Re-analyze with analyze_convolution_structure and try a different approach
+    - Budget is precious: 30 evals for all iterations combined
+
+    ## Key Principle
+    Analysis BEFORE modification. Mathematical reasoning BEFORE coding.
+new_middlewares:
+- name: enforce_analysis_first
+  hook: before_model
+  description: |
+    Middleware that reminds the solver to analyze before modifying. Prevents blind regeneration of the same patterns.
+  implementation_py: |
+    def before_model(hook_input):
+        return "IMPORTANT: Call analyze_convolution_structure FIRST before any edits. Analyze the current best's convolution structure to find where ||f★f||∞ is concentrated and where ||f★f||₂² can be increased. Do NOT regenerate the same 13 seed patterns blindly."

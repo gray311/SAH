@@ -1,0 +1,241 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are a C++ polygon optimizer for axis-aligned fish capture. Goal: maximize (mackerels - sardines + 1).
+
+  CRITICAL STRATEGY: Exploit axis-aligned rectangle union properties and use directional growth from high-density regions.
+
+  SEARCH METHOD (encodes in EVOLVE-BLOCK C++ code):
+
+  1. X-Y COORDINATE BINNING:
+     - Bin fish positions into a 400x400 grid (cell_size=250)
+     - For each bin, compute score = mackerels - sardines
+     - Identify top 8 bins with highest positive score
+
+  2. RECTANGLE PROLIFERATION:
+     - For each top bin, grow rectangles in all axis-aligned combinations
+     - Try: fixed size rectangles, growing rectangles, and unions of 2-3 adjacent rectangles
+     - Use efficient bounding box expansion with early termination
+
+  3. DIRECTIONAL GROWTH (key innovation):
+     - From high-scoring rectangles, attempt to extend in one direction only
+     - This creates L-shaped or elongated structures that can capture clusters
+     - Extension continues while marginal gain > 0 and perimeter < 400,000
+
+  4. STRAIGHT-LINE UNIONS:
+     - Combine multiple collinear rectangles into a single shape
+     - This reduces perimeter penalty while maintaining coverage
+     - Valid only if rectangles share an edge (no overlap, just adjacency)
+
+  5. HILL CLIMBING:
+     - For each candidate: try vertex shifts of ±10, ±20 units on all edges
+     - Use efficient O(1) score lookup from coordinate bins for small movements
+     - Repeat 2 rounds, keep best
+
+  6. RESTART STRATEGY:
+     - 8 restarts with seeds from: top bins, bounding box corners, random offsets
+     - Each restart explores: single rectangles, L-shapes, straight-line unions
+     - Track best polygon across all restarts
+
+  7. VALIDATION:
+     - Output valid polygon (4-1000 vertices, integer coords, no self-intersection)
+     - Perimeter <= 400,000, coords in [0,100000]
+
+  Tools:
+  - edit_solution: Replace EVOLVE-BLOCK with complete C++ implementation
+  - evaluate_solution: Run C++ program, get score
+  - probe_solution: NOT useful - full evaluation needed
+  - finish: End when you have encoded a working optimizer
+
+  Preserve EVOLVE-BLOCK markers, exact I/O format (m then vertices), <2.0s execution.
+  KEY IMPROVEMENT: Coordinate binning + rectangle union strategies for efficient exploration.
+skill_description: |
+  Coordinate-binning rectangle optimizer. Bin fish into 400x400 grid, grow rectangles from high-score bins, use directional growth for L-shapes, combine collinear rectangles, hill climb with ±10..20 shifts, 8 restarts.
+skill_body: |
+  # Coordinate-Binning Rectangle Optimization Strategy
+
+  ## Phase 1: Coordinate Binning
+  - Create 400x400 grid over [0,100000]² (cell_size = 250)
+  - For each fish, increment bin at (x/250, y/250)
+  - Compute bin score = mackerels - sardines
+  - Identify top 8 bins with score > 0
+
+  ## Phase 2: Rectangle Proliferation
+  For each top bin:
+  - Grow rectangle: start from bin center, expand step-by-step in all 4 directions
+  - At each expansion step, compute rectangle score using bin sums
+  - Try multiple sizes: small (100x100), medium (200x200), large (up to bounds)
+  - For each size, compute score and track best
+
+  ## Phase 3: Directional Growth
+  From best rectangle found:
+  - Try extending in single directions (N, S, E, W) to create L-shapes
+  - Each extension adds a new rectangle adjacent to current shape
+  - Continue while: marginal gain > 0, total perimeter < 400,000, vertices < 1000
+  - This captures fish in connected regions efficiently
+
+  ## Phase 4: Straight-Line Unions
+  - Find multiple rectangles that share a common edge (collinear adjacent)
+  - Union them into a single rectangle (no overlap, just side-by-side)
+  - This reduces perimeter penalty
+  - Try all pairs of adjacent high-scoring rectangles
+
+  ## Phase 5: Hill Climbing
+  For each candidate polygon:
+  - For each vertex, try shifts: ±10, ±20 units (in x or y direction, whichever increases freedom)
+  - Score each variant using bin sums (O(1) per query)
+  - Repeat 2 refinement rounds
+  - Keep best improvement
+
+  ## Phase 6: Restarts
+  - 8 restarts with diverse seeds:
+    * Top 3 bins
+    * Corners of bounding box (0,0), (0,100000), (100000,0), (100000,100000)
+    * Best rectangle from first restart + random offset (±3000)
+  - Each restart explores single rects, L-shapes, unions
+  - Output best polygon
+
+  ## C++ Implementation Notes
+  - Use coordinate binning for O(1) score queries
+  - Binning pre-computation: O(N) at startup
+  - Rectangle query: sum bins covered by rectangle (efficient with inclusion-exclusion)
+  - Total time per evaluation: < 1.8s
+  - All coordinates integers, validate no self-intersection
+tool_descriptions:
+  edit_solution: 'Replace EVOLVE-BLOCK with C++ implementing coordinate-binning optimizer:
+
+    1. 400x400 grid binning for fast score lookup
+
+    2. Rectangle growth from top bins
+
+    3. Directional extension for L-shapes
+
+    4. Collinear rectangle unions for perimeter reduction
+
+    5. Hill climbing with ±10..20 vertex shifts
+
+    6. 8 restarts with diverse seeds
+
+    Ensure <2.0s execution, valid output, perimeter <= 400,000.'
+  evaluate_solution: Run C++ program. Returns score (mackerels-sardines+1), validity, and remaining evaluations (budget=30).
+  probe_solution: NOT useful - full evaluation needed for accurate scoring.
+  finish: End when you have submitted a working coordinate-binning optimizer with rectangle unions.
+sampling:
+  temperature: 0.9
+  top_p: 0.95
+  top_k: 25
+  max_tokens: 14336
+agent:
+  max_iterations: 40
+middleware:
+  budget_reminder_from_left: 4
+  long_tool_output_max_chars: 15000
+new_tools:
+- name: expand_corridor
+  description: 'Expand a corridor from a seed cell in a given direction, avoiding sardine-dense regions.
+
+    Returns the corridor path as a list of cell coordinates and final cell score.'
+  input_schema:
+    type: object
+    properties:
+      seed_cell:
+        type: object
+        properties:
+          row:
+            type: integer
+          col:
+            type: integer
+      direction:
+        type: string
+        enum:
+        - N
+        - S
+        - E
+        - W
+      max_length:
+        type: integer
+        default: 100
+  implementation_py: "def run(ctx, args):\n    import json\n    \n    seed_cell = args.get(\"seed_cell\")\n    direction = args.get(\"direction\")\n    max_length = args.get(\"max_length\", 100)\n    \n    if seed_cell is None:\n        return {\"error\": \"seed_cell not provided\"}\n    if direction is None:\n        return {\"error\": \"direction not provided\"}\n    \n    grid_size = 200\n    \n    # Parse program to extract fish positions\n    program_text = ctx.get_program()\n    fish_data = []\n    for line in program_text.split('\\n'):\n        line = line.strip()\n        if line.startswith('fish['):\n            try:\n                parts = line.replace('fish[', '').replace(']', '').split(',')\n                if len(parts) >= 2:\n                    x, y = int(parts[0]), int(parts[1])\n                  fish_type = 1 if 'mackerel' in line.lower() else -1\n                    fish_data.append((x, y, fish_type))\n            except:\n                continue\n    \n    # Build grid\n    grid\
+    \ = [[{'m': 0, 's': 0} for _ in range(grid_size)] for _ in range(grid_size)]\n    cell_size = 100000\
+    \ // grid_size\n    \n    for x, y, ftype in fish_data:\n        cx, cy = x // cell_size, y // cell_size\n\
+    \        if 0 <= cx < grid_size and 0 <= cy < grid_size:\n            if ftype == 1:\n           \    grid[cy][cx]['m'] += 1\n            else:\n                grid[cy][cx]['s'] += 1\n    \n  \n    # Direction deltas\n    deltas = {\n        \"N\": (-1, 0),\n        \"S\": (1, 0),\n        \"\
+    E\": (0, 1),\n        \"W\": (0, -1)\n    }\n    if direction not in deltas:\n        return {\"error\"\
+    : \"invalid direction\"}\n    dr, dc = deltas[direction]\n    \n    # Expand corridor\n    corridor\
+    \ = [seed_cell]\n    curr_r, curr_c = seed_cell[\"row\"], seed_cell[\"col\"]\n    max_score = grid[curr_r][curr_c][\"\
+    m\"] - grid[curr_r][curr_c][\"s\"]\n    \n    for _ in range(max_length):\n        new_r, new_c =\
+    \ curr_r + dr, curr_c + dc\n        if not (0 <= new_r < grid_size and 0 <= new_c < grid_size):\n\
+    \            break\n        \n        m_count = grid[new_r][new_c][\"m\"]\n        s_count = grid[new_r][new_c][\"\
+    s\"]\n        score = m_count - s_count\n        \n        # Stop conditions\n        if score < 0\
+    \ and s_count > m_count + 2:\n            break\n        \n        corridor.append({\"row\": new_r,\
+    \ \"col\": new_c, \"m\": m_count, \"s\": s_count, \"score\": score})\n        curr_r, curr_c = new_r,\
+    \ new_c\n    \n    return {\n        \"corridor\": corridor,\n        \"length\": len(corridor),\n\
+    \        \"final_score\": corridor[-1][\"score\"] if corridor else 0\n    }"
+new_skills:
+- name: binning-guide
+  description: |
+    Use coordinate binning for fast rectangle scoring, grow rectangles from high-density bins, extend directionally for L-shapes, union collinear rectangles, hill climb, 8 restarts.
+  body: |
+    # Coordinate-Binning Rectangle Optimization Guide
+
+    ## Core Idea
+    Replace complex KD-tree with simple coordinate binning for O(1) score queries. Grow rectangles from high-scoring bins and combine collinear ones for better perimeter efficiency.
+
+    ## Phase 1: Binning
+    - Create 400x400 grid over [0,100000]² (cell_size = 250)
+    - For each fish, increment bin at floor(x/250), floor(y/250)
+    - Store: bins[row][col] = {mackerels, sardines}
+    - Compute: bin_score = mackerels - sardines
+    - Find top 8 bins with positive score
+
+    ## Phase 2: Rectangle Growth
+    For each top bin:
+    - Start from bin center (round coordinates to nearest 250)
+    - Expand step-by-step: at each step, grow rectangle by 25 or 50 units
+    - At each size, score = sum of all bins covered by rectangle
+    - Use inclusion-exclusion or cumulative sums for efficiency
+    - Track best single rectangle
+
+    ## Phase 3: Directional Extension
+    From best rectangle, try extending in one direction:
+    - North: add row above, keep columns
+    - South: add row below
+    - East: add column to right
+    - West: add column to left
+    - Continue while: marginal score > 0, perimeter < 400,000
+    - Creates L-shaped or elongated structures
+
+    ## Phase 4: Collinear Unions
+    - Find rectangles that share an edge (adjacent, no overlap)
+    - Union: merge into single rectangle, reducing perimeter
+    - Score the union and compare to individual rects
+    - Try all pairs of high-scoring adjacent rectangles
+
+    ## Phase 5: Hill Climbing
+    - For each candidate polygon:
+      * For each vertex: try shifts ±10, ±20 in valid direction
+      * Score using bin sums (O(1) per query)
+      * Repeat 2 rounds
+      * Keep best improvement
+    - Must maintain: no self-intersection, integer coords, valid polygon
+
+    ## Phase 6: Restarts
+    - 8 restarts with seeds from:
+      * Top 3 bins
+      * Four corners of [0,100000]²
+      * Best from first restart + random offset ±3000
+    - Each restart explores: single rects, directional extensions, unions
+    - Track best polygon across all restarts
+
+    ## Key Success Factors
+    - Binning provides O(1) score queries (critical for time limit)
+    - Rectangle growth explores shapes systematically
+    - Directional extension captures connected clusters
+    - Collinear unions reduce perimeter penalty
+    - Hill climbing fine-tunes vertex positions
+    - Restarts with diverse seeds avoid local optima
+new_middlewares:
+- name: exploration_reminder
+  hook: before_model
+  description: Remind solver to use binning and rectangle unions
+  implementation_py: |
+    def before_model(hook_input):
+        return "Use 400x400 coordinate binning for O(1) score queries, grow rectangles from top bins, extend directionally for L-shapes, combine collinear rectangles for perimeter reduction, hill climb ±10..20, 8 restarts."

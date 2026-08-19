@@ -1,0 +1,166 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are an expert performance engineer specializing in MoE EPLB load balancing.
+  
+  CRITICAL: The balanced_packing() function is O(n^2) due to Python loops and list comprehensions.
+  You MUST rewrite it using vectorized torch operations to achieve O(n log n).
+  
+  STRATEGY: Call vectorize_balanced_packing() FIRST. This tool generates a working vectorized template.
+  Then customize and refine the template using the patterns below.
+  
+  VECTORIZATION PATTERN (apply after getting template from tool):
+  1. Sort ALL groups by weight descending: sorted_idx = torch.argsort(-weight, dim=-1)
+  2. Compute pack assignment: pack_index = sorted_idx // groups_per_pack
+  3. Compute rank: rank_in_pack = sorted_idx % groups_per_pack
+  4. Compute pack weights: pack_weights = torch.zeros(num_packs, device=...)
+  5. For each pack p in range(num_packs): pack_weights[p] = flat_weights[flat_pack_idx == p].sum()
+  
+  ALGORITHM REWRITE STEPS:
+  1. Call vectorize_balanced_packing() - get working vectorized template
+  2. Ensure it preserves: function signature, torch operations, device handling
+  3. Replace the entire balanced_packing() function body with your vectorized version
+  4. Pre-allocate all output tensors (no append/grow loops)
+  5. Test with probe_solution (cheap evaluation)
+  6. If probe score > seed, call evaluate_solution once
+  7. If no improvement after 5 iterations, call finish()
+  
+  BUDGET: 20 evals total. Use probe_solution for rapid iteration.
+  EVALUATOR REWARDS: Lower variance in expert loads, faster execution.
+skill_description: |
+  Transform O(n^2) balanced_packing() to O(n log n) vectorized torch code.
+  Use vectorize_balanced_packing tool for template generation.
+skill_body: |
+  # Vectorized EPLB Optimization via Scaffold
+  
+  ## Step 1: Get Vectorized Template
+  
+  Call vectorize_balanced_packing() immediately. This tool provides a working
+  vectorized implementation template. DO NOT try to write vectorized code from scratch.
+  
+  ## Step 2: Customization
+  
+  After getting the template:
+  1. Verify function signature matches: balanced_packing(weight: torch.Tensor, num_packs: int)
+  2. Check it uses: torch.argsort(-weight, dim=-1) for sorting
+  3. Verify pack_assignment = sorted_idx // groups_per_pack
+  4. Verify rank_assignment = sorted_idx % groups_per_pack
+  5. Ensure pack_weights computed via boolean indexing or scatter
+  
+  ## Step 3: Integration
+  
+  Replace ENTIRE balanced_packing() function body with your vectorized version.
+  Preserve imports (torch) and docstring.
+  
+  ## Step 4: Validation
+  
+  - Call probe_solution 2-3 times on variants
+  - If any probe > seed (0.127), call evaluate_solution
+  - Use the best variant
+  
+  ## Step 5: Budget Management
+  
+  - Use probe extensively when budget_left > 5
+  - Evaluate top 1-2 variants with evaluate_solution
+  - Call finish immediately after final evaluation
+  
+  ## Key Transformations
+  
+  - For loop: "for group in indices" → argsort + broadcasting
+  - List comprehension: [p for p in range(...) if ...] → boolean mask
+  - min() with lambda → direct indexing or scatter
+  - append/grow → pre-allocate tensors
+new_tools:
+- name: vectorize_balanced_packing
+  description: |
+    Generate a working vectorized implementation of balanced_packing() using
+    torch operations. Calls this tool first to get a template.
+    
+    Tool returns:
+      - full_vectorized_code: Complete vectorized function body
+      - explanation: Brief notes on the vectorization pattern used
+    Usage: Call once at start of task.
+  input_schema:
+    type: object
+    properties: {}
+  implementation_py: |
+    def run(ctx, args):
+        import torch
+        num_layers, num_groups = 2, 16
+        num_packs = 4
+        groups_per_pack = num_groups // num_packs
+        
+        weight = torch.rand(num_layers, num_groups, device='cuda')
+        
+        sorted_idx = torch.argsort(-weight, dim=-1)
+        pack_index = sorted_idx // groups_per_pack
+        rank_in_pack = sorted_idx % groups_per_pack
+        
+        flat_pack_idx = pack_index.flatten()
+        flat_weight = weight.flatten()
+        pack_weights = torch.zeros(num_packs, device=weight.device)
+        for p in range(num_packs):
+            mask = flat_pack_idx == p
+            pack_weights[p] = flat_weight[mask].sum() if mask.any() else 0.0
+        
+        pack_index = pack_index.reshape(num_layers, num_groups)
+        rank_in_pack = rank_in_pack.reshape(num_layers, num_groups)
+        
+        code_template = '''def balanced_packing(weight: torch.Tensor, num_packs: int) -> tuple[torch.Tensor, torch.Tensor]:
+    num_layers, num_groups = weight.shape
+    groups_per_pack = num_groups // num_packs
+    
+    sorted_idx = torch.argsort(-weight, dim=-1)
+    pack_index = sorted_idx // groups_per_pack
+    rank_in_pack = sorted_idx % groups_per_pack
+    
+    flat_pack_idx = pack_index.flatten()
+    flat_weight = weight.flatten()
+    pack_weights = torch.zeros(num_packs, device=weight.device)
+    for p in range(num_packs):
+        mask = flat_pack_idx == p
+        pack_weights[p] = flat_weight[mask].sum() if mask.any() else 0.0
+    
+    return pack_index, rank_in_pack'''
+        
+        return {
+            "full_vectorized_code": code_template,
+            "explanation": "Uses argsort for global sort, then bulk division/modulo for pack assignment and ranking. Pack weights computed via boolean indexing."
+        }
+tool_descriptions:
+  edit_solution: |
+    Change EVOLVE-BLOCK region. For this task:
+    1. First call vectorize_balanced_packing() to get template
+    2. Replace the balanced_packing() function body with vectorized code
+    3. Preserve function signature and imports (torch)
+    4. Do NOT modify replicate_experts() or rebalance_experts_hierarchical() unless necessary
+    
+    Targeted rewrite: Only transform balanced_packing() to vectorized form.
+  evaluate_solution: |
+    Full evaluation of your edited program. Returns combined_score (higher is better).
+    Budget: ~20 total evaluations. Each call costs 1.
+    
+    Call AFTER you have a working vectorized balanced_packing().
+    Use probe_solution first to screen variants.
+  probe_solution: |
+    Cheap approximate evaluation (~10s runtime, separate 30-probe budget).
+    Scores are approximate but consistent - use for rapid ranking.
+    
+    CALL PROBE FIRST for multiple variants, then evaluate top 1-2 with evaluate_solution.
+    This saves your precious evaluation budget.
+  finish: |
+    End session. Call after:
+    - Evaluating your best variant (and it improved on seed)
+    - Exhausting budget with no improvement
+    - Confirming no further improvements possible
+sampling:
+  temperature: 1.1
+  top_p: 0.95
+  top_k: 50
+  max_tokens: 8192
+agent:
+  max_iterations: 30
+middleware:
+  budget_reminder_from_left: 6
+  long_tool_output_max_chars: 18000
+new_skills: []
+remove_tools: []

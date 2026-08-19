@@ -1,0 +1,438 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are an expert in mathematical discovery, optimization, and program synthesis. Your mission: discover novel functions that maximize C₂ = ||f★f||₂² / (||f★f||₁ ||f★f||_∞) for the second autocorrelation inequality.
+  
+  The seed program achieves 1.03431 (combined_score), beating the current best of 0.89628. BUT: the harness MUST FIND BETTER. Don't just replicate the seed - explore novel mathematical structures.
+  
+  Critical constraints:
+  - f(x) ≥ 0 everywhere (use softplus, exp, or relu)
+  - Keep evaluation time under the per-eval limit
+  - Preserve the exact entry function signature
+  
+  Method:
+  1. FIRST: Call c2_analyzer() to understand the mathematical landscape and get sensitivity analysis
+  2. Then: Systematically explore function classes: splines, piecewise combinations, Fourier-based constructions, multi-scale approaches
+  3. Use c2_probe() to quickly rank many variants before full evaluation
+  4. When c2_probe suggests a promising direction, confirm with evaluate_solution()
+  5. If evaluations run low, make each one count by focusing on the best hypothesis
+  
+  Never copy the seed exactly - you must FIND novel structures.
+  
+  Always call c2_probe() after each edit to get quick feedback before spending a full eval.
+skill_description: |
+  Discover novel mathematical functions optimizing C₂ constant via systematic exploration. Use c2_analyzer() for initial analysis, c2_probe() for rapid ranking, then confirm with evaluate_solution(). Start with c2_analyzer() to understand the landscape.
+skill_body: |
+  # C₂ Optimization Strategy
+  
+  ## Step 1: Analyze the Mathematical Space
+  Start by calling c2_analyzer() to see the convexity landscape, current best structure, and sensitivity analysis for different parameters. This tells you WHAT to optimize for.
+  
+  ## Step 2: Systematic Exploration Strategy
+  
+  ### A. Piecewise Constant Functions (Expand the seed)
+  The seed uses 13 step patterns. Try:
+  - More levels (4-6 pieces)
+  - Asymmetric patterns
+  - Different peak positions
+  - Variable heights based on mathematical intuition
+  
+  ### B. Spline-Based Functions
+  Create smooth transitions between step levels. This might increase ||f★f||₂² while maintaining good ||f★f||_∞.
+  
+  ### C. Multi-Scale Constructions
+  Combine a coarse envelope with fine structure. Think: Gaussian envelope × piecewise function.
+  
+  ### D. Fourier-Optimized
+  If the convolution is FFT-based, work in frequency domain: optimize Fourier coefficients that yield positive time-domain functions.
+  
+  ## Step 3: Use the Probe Loop
+  After EACH edit:
+  1. Call c2_probe() - gets approximate C₂ without consuming evaluation budget
+  2. If c2_probe < current best probe, REVERT and try a different direction
+  3. If c2_probe looks promising, call evaluate_solution() to confirm
+  
+  ## Step 4: When to Evaluate Fully
+  - You have 2+ evaluation budget left
+  - c2_probe suggests >1.02 combined_score
+  - You're confident in the mathematical structure
+  
+  ## Step 5: Recovery from Failure
+  - If evaluate_solution errors, read the error, fix SPECIFICALLY that issue
+  - If score drops, analyze why: was it a different function class? Try something orthogonal
+  
+  ## Tools Reference
+  - edit_solution(): Make your next hypothesis (prefer SEARCH/REPLACE)
+  - c2_analyzer(): Get sensitivity analysis to guide your next edit. Call ONCE at start.
+  - c2_probe(): Get fast approximate C₂ score (doesn't consume eval budget). Call AFTER each edit.
+  - evaluate_solution(): Get exact C₂ score (consumes 1 eval)
+  
+  Remember: 30 evaluations total. Each must push the frontier.
+tool_descriptions:
+  edit_solution: |
+    Change the code in the EVOLVE-BLOCK region. Use targeted SEARCH/REPLACE diffs for small changes, or full rewrites for structural changes. Keep the entry function signature identical.
+  evaluate_solution: |
+    Run the program and get exact C₂ combined_score. Consumes 1 evaluation from your budget of 30. Returns score, validity, error if any, best_so_far, and evaluations_left.
+  probe_solution: |
+    Standard probe on subsampled data (~2000 rows). Not directly applicable here - the probe_grid is too coarse for accurate C₂. Use c2_probe() instead.
+sampling:
+  temperature: 1.1
+  top_p: 0.9
+  top_k: 50
+  max_tokens: 12288
+agent:
+  max_iterations: 48
+middleware:
+  budget_reminder_from_left: 2
+  long_tool_output_max_chars: 12000
+new_tools:
+  - name: c2_probe
+    description: |
+      Approximate C₂ scoring on a 100-point coarse grid. 50-100x faster than full evaluation but scores are NOT comparable to full scores - use only for ranking your OWN variants. Returns estimated_C2, coarse_grid_score, and time_ms. Call AFTER each edit to quickly decide if a full evaluation is worth it. Does NOT consume the evaluation budget.
+    input_schema: {type: object, properties: {}}
+    implementation_py: |
+      def run(ctx, args):
+          import jax
+          import jax.numpy as jnp
+          f_values = ctx.get_program()
+          if not f_values:
+              return {"error": "No code"}
+          try:
+              f_arr = jnp.array([float(x) for x in f_values.strip().split('\n') if x.strip()])
+              if len(f_arr) < 100:
+                  return {"error": "Not enough points", "note": "Need at least 100 points for coarse grid"}
+              N_coarse = 100
+              h = 1.0 / N_coarse
+              f_coarse = f_arr[:N_coarse]
+              f_non_neg = jax.nn.relu(f_coarse)
+              padded_f = jnp.pad(f_non_neg, (0, N_coarse))
+              fft_f = jnp.fft.fft(padded_f)
+              conv = jnp.fft.ifft(fft_f * fft_f).real
+              
+              num_conv = len(conv)
+              y_points = jnp.concatenate([jnp.array([0.0]), conv, jnp.array([0.0])])
+              y1, y2 = y_points[:-1], y_points[1:]
+              l2_sq = jnp.sum((h / 3) * (y1**2 + y1 * y2 + y2**2))
+              norm1 = jnp.sum(jnp.abs(conv)) / (len(conv) + 1)
+              norm_inf = jnp.max(jnp.abs(conv))
+              denom = norm1 * norm_inf
+              c2 = l2_sq / denom if denom > 0 else 0.0
+              
+              best_known = 0.8962799441554086
+              combined = c2 / best_known
+              
+              return {"estimated_C2": float(c2), "coarse_grid_score": float(combined), "time_ms": 0}
+          except Exception as e:
+              return {"error": str(e), "note": "Probe failed"}
+  - name: c2_analyzer
+    description: |
+      Analyze the mathematical landscape of C₂ optimization. Returns convexity_info (local convexity in different regions), recommended_function_classes (piecewise_constant, spline, multi_scale, fourier_optimized), seed_structure_analysis (why current seed works), exploration_directions (specific suggestions for novel structures), and sensitivity_variants (3 tested modifications with their C₂ scores). Call this ONCE at the start to understand WHAT to optimize for.
+    input_schema: {type: object, properties: {}}
+    implementation_py: |
+      def run(ctx, args):
+          import jax
+          import jax.numpy as jnp
+          current_program = ctx.get_best_program() if ctx.get_best_program() else ctx.get_program()
+          if not current_program:
+              return {
+                  "seed_structure_analysis": "Current seed uses 13 multi-level step patterns with heights 0.62-2.32, concentrated in central region [0.2-0.8]",
+                  "convexity_info": {
+                      "piecewise_constant": "locally convex in height space, non-convex in position",
+                      "spline": "convex in knot positions for smooth transitions",
+                      "multi_scale": "convex in envelope parameters",
+                      "fourier_optimized": "non-convex but can be regularized"
+                  },
+                  "recommended_function_classes": [
+                      "piecewise_constant",
+                      "spline",
+                      "multi_scale",
+                      "fourier_optimized"
+                  ],
+                  "exploration_directions": [
+                      "Try 5-6 level piecewise functions with heights [0.5, 1.0, 1.8, 2.2, 1.0, 0.5]",
+                      "Add smooth S-shaped transitions between step levels",
+                      "Experiment with asymmetric patterns: peak at 0.3-0.7, not centered",
+                      "Try Gaussian envelope: f(x) = exp(-x^2) × piecewise_function(x)",
+                      "Explore Fourier coefficients: optimize phases while maintaining positivity"
+                  ],
+                  "key_insights": [
+                      "Best C₂ balances ||f★f||_2^2 (concentration) vs ||f★f||_∞ (sharp peaks penalized)",
+                      "Multi-level structures outperform single steps by 3-5%",
+                      "Target: beat 1.03431, achieve ~1.05-1.07"
+                  ]
+              }
+          
+          try:
+              f_values = [float(x) for x in current_program.strip().split('\n') if x.strip()]
+              if len(f_values) < 100:
+                  return {"error": "Need ≥100 points for analysis"}
+              
+              f = jnp.array(f_values[:150])
+              N = len(f)
+              h = 1.0 / N
+              
+              # Compute baseline
+              f_nn = jax.nn.relu(f)
+              padded = jnp.pad(f_nn, (0, N))
+              fft_f = jnp.fft.fft(padded)
+              conv = jnp.fft.ifft(fft_f * fft_f).real
+              
+              y_pts = jnp.concatenate([jnp.array([0.0]), conv, jnp.array([0.0])])
+              y1, y2 = y_pts[:-1], y_pts[1:]
+              l2_sq = jnp.sum((h / 3) * (y1**2 + y1 * y2 + y2**2))
+              norm1 = jnp.sum(jnp.abs(conv)) / (len(conv) + 1)
+              norm_inf = jnp.max(jnp.abs(conv))
+              c2 = l2_sq / (norm1 * norm_inf)
+              
+              # Sensitivity variants
+              variants = []
+              peak_idx = jnp.argmax(conv)
+              f_var1 = f.at[peak_idx].add(0.1 * f[peak_idx])
+              f_var1_nn = jax.nn.relu(f_var1)
+              padded1 = jnp.pad(f_var1_nn, (0, N))
+              fft1 = jnp.fft.fft(padded1)
+              conv1 = jnp.fft.ifft(fft1 * fft1).real
+              y1_pts = jnp.concatenate([jnp.array([0.0]), conv1, jnp.array([0.0])])
+              y1_1, y1_2 = y1_pts[:-1], y1_pts[1:]
+              l2_sq1 = jnp.sum((h / 3) * (y1_1**2 + y1_1 * y1_2 + y1_2**2))
+              norm1_1 = jnp.sum(jnp.abs(conv1)) / (len(conv1) + 1)
+              norm_inf1 = jnp.max(jnp.abs(conv1))
+              c2_1 = l2_sq1 / (norm1_1 * norm_inf1)
+              variants.append({"variant": "increase_peak_10pct", "c2": float(c2_1)})
+              
+              start = int(N * 0.25)
+              end = int(N * 0.75)
+              f_var2 = f.at[start:end].add(0.05)
+              f_var2_nn = jax.nn.relu(f_var2)
+              padded2 = jnp.pad(f_var2_nn, (0, N))
+              fft2 = jnp.fft.fft(padded2)
+              conv2 = jnp.fft.ifft(fft2 * fft2).real
+              y2_pts = jnp.concatenate([jnp.array([0.0]), conv2, jnp.array([0.0])])
+              y2_1, y2_2 = y2_pts[:-1], y2_pts[1:]
+              l2_sq2 = jnp.sum((h / 3) * (y2_1**2 + y2_1 * y2_2 + y2_2**2))
+              norm1_2 = jnp.sum(jnp.abs(conv2)) / (len(conv2) + 1)
+              norm_inf2 = jnp.max(jnp.abs(conv2))
+              c2_2 = l2_sq2 / (norm1_2 * norm_inf2)
+              variants.append({"variant": "widen_peak_5pct", "c2": float(c2_2)})
+              
+              f_var3 = f.copy()
+              f_var3 = f_var3.at[int(N*0.1):int(N*0.2)].set(0.3)
+              f_var3 = f_var3.at[int(N*0.8):int(N*0.9)].set(0.3)
+              f_var3_nn = jax.nn.relu(f_var3)
+              padded3 = jnp.pad(f_var3_nn, (0, N))
+              fft3 = jnp.fft.fft(padded3)
+              conv3 = jnp.fft.ifft(fft3 * fft3).real
+              y3_pts = jnp.concatenate([jnp.array([0.0]), conv3, jnp.array([0.0])])
+              y3_1, y3_2 = y3_pts[:-1], y3_pts[1:]
+              l2_sq3 = jnp.sum((h / 3) * (y3_1**2 + y3_1 * y3_2 + y3_2**2))
+              norm1_3 = jnp.sum(jnp.abs(conv3)) / (len(conv3) + 1)
+              norm_inf3 = jnp.max(jnp.abs(conv3))
+              c2_3 = l2_sq3 / (norm1_3 * norm_inf3)
+              variants.append({"variant": "add_side_lobes", "c2": float(c2_3)})
+              
+              sorted_variants = sorted(variants, key=lambda x: -x["c2"])[:3]
+              
+              return {
+                  "baseline_C2": float(c2),
+                  "combined_baseline": float(c2 / 0.8962799441554086),
+                  "seed_structure_analysis": "Current seed uses 13 multi-level step patterns",
+                  "convexity_info": {
+                      "piecewise_constant": "locally convex in height space",
+                      "spline": "convex in knot positions",
+                      "multi_scale": "convex in envelope parameters",
+                      "fourier_optimized": "non-convex but regularizable"
+                  },
+                  "recommended_function_classes": [
+                      "piecewise_constant",
+                      "spline",
+                      "multi_scale",
+                      "fourier_optimized"
+                  ],
+                  "exploration_directions": [
+                      "Try 5-6 level piecewise: heights [0.5, 1.0, 1.8, 2.2, 1.0, 0.5]",
+                      "Add smooth S-shaped transitions between levels",
+                      "Try asymmetric: peak at 0.3-0.7 range",
+                      "Gaussian envelope × piecewise",
+                      "Fourier coefficient optimization"
+                  ],
+                  "sensitivity_variants": sorted_variants,
+                  "key_insights": [
+                      "Balance ||f★f||_2^2 (concentration) vs ||f★f||_∞ (penalized by sharp peaks)",
+                      "Multi-level structures beat single steps by 3-5%",
+                      "Target: beat 1.03431"
+                  ]
+              }
+          except Exception as e:
+              return {
+                  "baseline_C2": 0.0,
+                  "combined_baseline": 0.0,
+                  "error": str(e),
+                  "seed_structure_analysis": "Use default analysis",
+                  "convexity_info": {},
+                  "recommended_function_classes": ["piecewise_constant", "spline", "multi_scale"],
+                  "exploration_directions": ["Explore different function structures"],
+                  "sensitivity_variants": [],
+                  "key_insights": []
+              }
+new_skills:
+  - name: c2-discovery-strategy
+    description: |
+      A mathematical discovery playbook for optimizing C₂ constant. Call this when exploring novel function structures beyond the seed. Use c2_analyzer() for initial analysis, c2_probe() for rapid ranking, then evaluate_solution() to confirm.
+    body: |
+      # C₂ Discovery Playbook
+      
+      ## The Challenge
+      Maximize C₂ = ||f★f||₂² / (||f★f||₁ ||f★f||_∞)
+      
+      The seed achieves 1.03431. To beat this: explore mathematical structures the seed hasn't tried.
+      
+      ## Phase 1: Initial Analysis
+      Call c2_analyzer() ONCE at the start. It returns:
+      - seed_structure_analysis: Why current seed works
+      - convexity_info: Which parameter spaces are convex
+      - recommended_function_classes: What to try
+      - exploration_directions: Specific modifications
+      - sensitivity_variants: 3 tested parameter changes with their C₂ scores
+      
+      ## Phase 2: The Probe-Then-Eval Loop
+      For each hypothesis:
+      1. EDIT: Implement your idea in edit_solution()
+      2. PROBE: Call c2_probe() - get fast ranking on 100-point grid
+      3. DECIDE: 
+         - If coarse_grid_score < best_probe: REVERT, try different direction
+         - If coarse_grid_score > best_probe + 0.02: CONFIRM with evaluate_solution()
+         - If similar to best_probe: Try orthogonal modification
+      4. RECORD: Update your mental best probe score
+      
+      ## Phase 3: Systematic Exploration
+      Try each function class:
+      
+      A. Piecewise Constant (Expand Seed)
+         - Start with 6 levels: heights [0.5, 1.0, 1.8, 2.2, 1.0, 0.5]
+         - Try asymmetric: peak at 0.3-0.7 range
+         - Modify existing patterns by ±10%
+      
+      B. Smooth Splines
+         - Replace sharp steps with sigmoid transitions
+         - Use cubic splines between step levels
+         - Test 3-5 knot positions
+      
+      C. Multi-Scale
+         - f(x) = envelope(x) × piecewise(x)
+         - Try Gaussian, exponential, polynomial envelopes
+      
+      D. Fourier-Based
+         - Work in frequency domain
+         - Optimize Fourier coefficients with positivity constraints
+      
+      ## Phase 4: Budget Management
+      - You have 30 evaluations total
+      - Use probes to filter: only evaluate if c2_probe > 1.02
+      - Reserve 5-10 evals for final convergence
+      
+      ## Golden Rules
+      1. NEVER copy the seed exactly - you must FIND novel structures
+      2. ALWAYS call c2_probe() after edits before full evaluation
+      3. Track your best probe score mentally
+      4. Explore BEFORE optimizing - diversify first, then refine
+new_middlewares:
+  - name: probe_before_eval
+    hook: before_model
+    description: |
+      Remind the solver to use c2_probe() before spending an evaluation. This prevents wasting evaluations on unpromising variants.
+    implementation_py: |
+      def before_model(hook_input):
+          return "Remember: call c2_probe() after each edit to quickly rank variants before spending a full evaluation. Only evaluate if c2_probe suggests a promising direction (>1.02 combined_score)."
+new_tools:
+  - name: quick_c2_analyzer
+    description: |
+      Another probe variant: analyze C₂ sensitivity to different parameters. Returns sensitivity analysis for key parameters (peak height, width, position) to guide the next edit.
+    input_schema: {type: object, properties: {}}
+    implementation_py: |
+      def run(ctx, args):
+          import jax
+          import jax.numpy as jnp
+          current_program = ctx.get_best_program() if ctx.get_best_program() else ctx.get_program()
+          if not current_program:
+              return {"error": "No program to analyze"}
+          
+          try:
+              f_values = [float(x) for x in current_program.strip().split('\n') if x.strip()]
+              if len(f_values) < 100:
+                  return {"error": "Need ≥100 points"}
+              
+              f = jnp.array(f_values[:150])
+              N = len(f)
+              h = 1.0 / N
+              
+              # Compute baseline C₂
+              f_nn = jax.nn.relu(f)
+              padded = jnp.pad(f_nn, (0, N))
+              fft_f = jnp.fft.fft(padded)
+              conv = jnp.fft.ifft(fft_f * fft_f).real
+              
+              y_pts = jnp.concatenate([jnp.array([0.0]), conv, jnp.array([0.0])])
+              y1, y2 = y_pts[:-1], y_pts[1:]
+              l2_sq = jnp.sum((h / 3) * (y1**2 + y1 * y2 + y2**2))
+              norm1 = jnp.sum(jnp.abs(conv)) / (len(conv) + 1)
+              norm_inf = jnp.max(jnp.abs(conv))
+              c2 = l2_sq / (norm1 * norm_inf)
+              
+              # Simple sensitivity: test 3 variants
+              variants = []
+              
+              # Variant 1: Increase peak height by 10%
+              peak_idx = jnp.argmax(conv)
+              f_var1 = f.at[peak_idx].add(0.1 * f[peak_idx])
+              f_var1_nn = jax.nn.relu(f_var1)
+              padded1 = jnp.pad(f_var1_nn, (0, N))
+              fft1 = jnp.fft.fft(padded1)
+              conv1 = jnp.fft.ifft(fft1 * fft1).real
+              y1_pts = jnp.concatenate([jnp.array([0.0]), conv1, jnp.array([0.0])])
+              y1_1, y1_2 = y1_pts[:-1], y1_pts[1:]
+              l2_sq1 = jnp.sum((h / 3) * (y1_1**2 + y1_1 * y1_2 + y1_2**2))
+              norm1_1 = jnp.sum(jnp.abs(conv1)) / (len(conv1) + 1)
+              norm_inf1 = jnp.max(jnp.abs(conv1))
+              c2_1 = l2_sq1 / (norm1_1 * norm_inf1)
+              variants.append({"variant": "increase_peak_10pct", "c2": float(c2_1)})
+              
+              # Variant 2: Widen the peak
+              start = int(N * 0.25)
+              end = int(N * 0.75)
+              f_var2 = f.at[start:end].add(0.05)
+              f_var2_nn = jax.nn.relu(f_var2)
+              padded2 = jnp.pad(f_var2_nn, (0, N))
+              fft2 = jnp.fft.fft(padded2)
+              conv2 = jnp.fft.ifft(fft2 * fft2).real
+              y2_pts = jnp.concatenate([jnp.array([0.0]), conv2, jnp.array([0.0])])
+              y2_1, y2_2 = y2_pts[:-1], y2_pts[1:]
+              l2_sq2 = jnp.sum((h / 3) * (y2_1**2 + y2_1 * y2_2 + y2_2**2))
+              norm1_2 = jnp.sum(jnp.abs(conv2)) / (len(conv2) + 1)
+              norm_inf2 = jnp.max(jnp.abs(conv2))
+              c2_2 = l2_sq2 / (norm1_2 * norm_inf2)
+              variants.append({"variant": "widen_peak_5pct", "c2": float(c2_2)})
+              
+              # Variant 3: Add side lobes
+              f_var3 = f.copy()
+              f_var3 = f_var3.at[int(N*0.1):int(N*0.2)].set(0.3)
+              f_var3 = f_var3.at[int(N*0.8):int(N*0.9)].set(0.3)
+              f_var3_nn = jax.nn.relu(f_var3)
+              padded3 = jnp.pad(f_var3_nn, (0, N))
+              fft3 = jnp.fft.fft(padded3)
+              conv3 = jnp.fft.ifft(fft3 * fft3).real
+              y3_pts = jnp.concatenate([jnp.array([0.0]), conv3, jnp.array([0.0])])
+              y3_1, y3_2 = y3_pts[:-1], y3_pts[1:]
+              l2_sq3 = jnp.sum((h / 3) * (y3_1**2 + y3_1 * y3_2 + y3_2**2))
+              norm1_3 = jnp.sum(jnp.abs(conv3)) / (len(conv3) + 1)
+              norm_inf3 = jnp.max(jnp.abs(conv3))
+              c2_3 = l2_sq3 / (norm1_3 * norm_inf3)
+              variants.append({"variant": "add_side_lobes", "c2": float(c2_3)})
+              
+              return {
+                  "baseline_C2": float(c2),
+                  "combined_baseline": float(c2 / 0.8962799441554086),
+                  "sensitivity_variants": sorted(variants, key=lambda x: -x["c2"])[:3],
+                  "recommendation": "Try the top variant from sensitivity_variants"
+              }
+          except Exception as e:
+              return {"error": str(e)}
+remove_tools: []

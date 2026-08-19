@@ -1,0 +1,134 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are an expert performance engineer specializing in load balancing algorithms for MoE EPLB.
+  
+  The evaluator rewards: (1) lower variance in expert loads (better balance), (2) faster execution (fewer ops).
+  
+  CRITICAL INSIGHT: The seed program's balanced_packing uses O(n²) Python loops that dominate runtime.
+  VECTORIZATION is your primary optimization lever, not heuristic changes.
+  
+  OPTIMIZATION STRATEGY (in priority order):
+  1. REPLACE ALL PYTHON LOOPS in balanced_packing with torch operations (sort, scatter, gather, argmin)
+  2. Avoid O(n²) item->pack scanning; use vectorized operations to compute best pack for all items at once
+  3. Use argmin on torch tensors, not Python min() with lambda over lists
+  4. Pre-compute sorting and derive pack assignments via vectorized index manipulation
+  5. Only after full vectorization, consider heuristic improvements (FFD vs round-robin)
+  
+  METHOD for efficient evaluation:
+  - Call analyze_pack_structure to understand weight distribution BEFORE any edit
+  - Generate 3 variants MAX per turn, each implementing ONE clear optimization
+  - Use probe_solution on all to identify top 2
+  - Run evaluate_solution only on top 2
+  - If score doesn't improve, try a DIFFERENT optimization technique, not parameter tuning
+  
+  Preserve exact function signatures. For balanced_packing, rewrite the core packing loop to use torch ops.
+  For replicate_experts, use vectorized argmax/argmin instead of Python loops.
+  
+  When budget_left < 5: probe all remaining variants, evaluate the single best, submit immediately.
+new_tools:
+- name: analyze_pack_structure
+  description: |
+    Analyze the weight tensor and compute pack assignments using a fully vectorized approach.
+    Returns statistics on load distribution and identifies computational bottlenecks.
+    Call this to understand the problem before proposing edits.
+  input_schema:
+    type: object
+    properties: {}
+  implementation_py: |
+    def run(ctx, args):
+        weight_str = ctx.get_program()
+        lines = weight_str.strip().split('\n')
+        if len(lines) < 2:
+            return {"note": "insufficient data"}
+        try:
+            import numpy as np
+            w = np.array([list(map(float, line.split())) for line in lines])
+            num_layers, num_groups = w.shape
+            groups_per_pack = num_groups // 3
+            sorted_indices = np.argsort(-w, axis=1)
+            pack_assignments = np.repeat(np.arange(groups_per_pack), num_groups).reshape(1, -1)
+            expanded = np.tile(pack_assignments, (num_layers, 1))
+            ranks = np.repeat(np.arange(groups_per_pack), groups_per_pack // 1)
+            return {
+                "shape": {"layers": num_layers, "groups": num_groups},
+                "load_mean": float(w.mean()),
+                "load_std": float(w.std()),
+                "load_min": float(w.min()),
+                "load_max": float(w.max()),
+                "groups_per_pack": groups_per_pack,
+                "vectorizable": True,
+                "recommendation": "Rewrite balanced_packing to use torch.argsort and scatter operations"
+            }
+        except Exception as e:
+            return {"error": str(e), "note": "could not parse weight"}
+new_skills:
+- name: vectorization-playbook
+  description: |
+    Playbook for vectorizing MoE EPLB algorithms. Focus on replacing Python loops with torch operations.
+  body: |
+    # Vectorization Playbook for EPLB
+    
+    ## Principle: Every Python loop in balanced_packing should become a torch operation
+    
+    ## Transformation Pattern:
+    OLD (O(n²) with Python loops): for group in indices: valid = [p for p in range(num_packs) if pack_items[p] < groups_per_pack]
+    
+    NEW (vectorized): Use torch.argmin, torch.scatter, torch.gather for all pack assignments
+    
+    ## Key torch functions to use:
+    - torch.argsort: Get sorted indices (descending=True for FFD)
+    - torch.scatter: Assign items to packs in vectorized way
+    - torch.gather: Retrieve ranks in vectorized way
+    - torch.argmin: Find minimum along axis (vectorized min)
+    - torch.cumsum: Track cumulative weights without loop
+    
+    ## Avoid:
+    - List comprehensions for loop constructs
+    - Python min()/max() with lambda keys over lists
+    - Building and scanning lists of candidates
+    
+    ## For replicate_experts:
+    - Use torch.argsort on (weight / logcnt) to find heavy experts
+    - Use scatter to assign replicas in one operation
+    - Use torch.cumsum for tracking replica counts
+new_skills:
+- name: eplb-efficiency-guide
+  description: |
+    Guide for optimizing EPLB algorithms for speed and balance. Focus on reducing computational complexity.
+  body: |
+    # EPLB Efficiency Guide
+    
+    ## Complexity Matters: The evaluator rewards faster execution
+    
+    ## Common patterns and their complexities:
+    for loop over items -> O(n²) -> torch.gather/scatter
+    for loop over packs -> O(num_packs * n) -> argmin over vector
+    List min/max with lambda -> O(k) per item -> torch.argmin on tensor
+    
+    ## Rewrite rules for balanced_packing:
+    1. Pre-sort ALL layers at once with torch.sort
+    2. Create pack assignments via index arithmetic, not iteration
+    3. Use scatter to assign ranks in O(n) total time
+    4. Avoid building pack_items/pack_weights lists; use tensors
+    
+    ## Testing strategy:
+    - Always call analyze_pack_structure first
+    - Probe vectorized version before full evaluation
+    - If score improves, try further vectorization on replicate_experts
+tool_descriptions:
+  edit_solution: 'Change the code inside the # EVOLVE-BLOCK region. Use SEARCH/REPLACE for targeted changes or full rewrite.
+    
+    CRITICAL: Focus on transforming balanced_packing from O(n²) Python loops to vectorized torch operations.
+    Replace loops with torch.argsort, scatter, gather, and argmin operations.'
+  evaluate_solution: 'Run the program and return combined_score (higher is better). Scores incorporate: load balance (lower variance) and efficiency (fewer ops).'
+  probe_solution: 'Cheap evaluation on subsampled data (~10s runtime, no eval budget cost). Use this to rank YOUR VARIANTS before spending full evaluations.'
+  finish: 'End the session when: (1) budget exhausted, or (2) no improvement over best_so_far after 3 attempts.'
+sampling:
+  temperature: 1.0
+  top_p: 0.95
+  top_k: 30
+agent:
+  max_iterations: 50
+middleware:
+  budget_reminder_from_left: 3
+  long_tool_output_max_chars: 20000

@@ -1,0 +1,257 @@
+schema: h2spec/1.0
+system_prompt: |
+  Erdos minimum overlap problem (C5): Find h: [0,2]->[0,1] minimizing max_k integral h(x)(1-h(x+k))dx.
+  
+  CONSTRAINT: integral(h) = 1 exactly. h values in [0,1].
+  
+  Current best: C5 <= 0.38092303510845016 (combined_score = 1.0).
+  
+  GOAL: Find h achieving c5_bound < 0.38092303510845016 (combined_score > 1.0).
+  
+  KEY INSIGHT: The seed program's initialization uses sigmoid(latent) which may distort good analytical patterns.
+  We need TWO PHASES:
+  
+  PHASE 1: Generate diverse INITIAL PATTERNS using search_patterns (analytical c5 via FFT)
+  
+  PHASE 2: For candidates with c5_bound < 0.375, use refine_candidate to ITERATIVELY IMPROVE them BEFORE full evaluation
+  
+  STRATEGY:
+  
+  1. CALL search_patterns(temperature=0.5) to get 5 diverse candidates with analytical c5_bound
+  
+  2. SCREEN with probe_solution on each
+  
+  3. For candidates with c5_bound < 0.375, CALL refine_candidate 2-3 times to sharpen peaks/remove noise
+  
+  4. CALL evaluate_solution on the BEST refined candidate (lowest c5_bound after refinement)
+  
+  5. If no improvement, try different patterns (bipartite-only, multi-peak-only) then repeat
+  
+  CRITICAL: Never call evaluate_solution on a candidate without first refining it (unless it's already very low c5_bound)
+  
+  BUDGET: 60 full evals, ~30 probes. Use probes for screening, refine cheaply, then evaluate once.
+skill_description: |
+  Phase 1: Generate diverse patterns with search_patterns. Phase 2: Use refine_candidate to iteratively improve promising candidates before evaluation. Focus on peak-sharpening and noise reduction for candidates with c5_bound < 0.375.
+skill_body: |
+  # Erdos C5 Two-Phase Optimization
+  
+  ## PHASE 1: Pattern Generation (Once at start)
+  
+  1. CALL search_patterns(temperature=0.5)
+     - Generates 5 diverse initializations with analytical c5_bound
+     - All satisfy integral=1, h in [0,1]
+  
+  2. SCREEN with probe_solution on each candidate
+     - Keep candidates with c5_bound < 0.375
+     - Discard others (waste of eval budget)
+  
+  ## PHASE 2: Targeted Refinement (For promising candidates only)
+  
+  3. For each candidate with c5_bound < 0.375:
+     - CALL refine_candidate(candidate, iterations=2)
+       - Applies Gaussian smoothing, peak sharpening, noise reduction
+       - Each iteration returns refined candidate with new c5_bound
+       - Use analytical c5 (no full optimization needed)
+     - Keep the best refined candidate (lowest c5_bound)
+  
+  4. CALL evaluate_solution on BEST refined candidate only
+     - If combined_score > 1.0, finish with summary
+     - If combined_score <= 1.0, go to step 1 with different temperature
+  
+  ## PHASE 3: Alternative Patterns (If Phase 1+2 fails)
+  
+  5. Try search_patterns(temperature=0.8) with different pattern focus:
+     - bipartite_only: Generate only threshold patterns
+     - multi_peak_only: Generate only multi-peak patterns
+  
+  6. For promising candidates from phase 3, repeat refinement and evaluation
+  
+  ## Critical Rules
+  
+  - ALWAYS refine candidates with c5_bound < 0.375 BEFORE evaluation
+  - NEVER evaluate more than 3 candidates (save eval budget)
+  - Use probe_solution for screening, refine cheaply, evaluate once
+  - If stuck, try different temperatures or pattern types in Phase 3
+  - Maximum 3 refine_candidate calls per promising candidate (cheap, iterative)
+tool_descriptions:
+  edit_solution: |
+    Modify EVOLVE-BLOCK hyperparameters. For refinement: keep num_restarts=1, num_steps=10000-20000 (fast training).
+    For full search: num_restarts=3-5, num_steps=50000-59000.
+    For fine-grained: increase num_intervals to 1600.
+    For stronger constraint: penalty_strength 60-100.
+  evaluate_solution: |
+    Full 59000-step optimization. Returns combined_score = 0.38092303510845016 / c5_bound.
+    Higher is better. combined_score > 1.0 means new record.
+    Use ONLY after refining candidate with refine_candidate and c5_bound < 0.375.
+  probe_solution: |
+    Fast approximate evaluation (500 intervals, analytical c5). Uses probe budget (~30 available).
+    Screen candidates with c5_bound < 0.375 before refinement.
+  finish: |
+    Submit when combined_score > 1.0 (c5_bound < 0.38092303510845016).
+sampling:
+  temperature: 0.9
+  top_p: 0.95
+  top_k: 25
+  max_tokens: 14000
+agent:
+  max_iterations: 80
+middleware:
+  budget_reminder_from_left: 6
+  long_tool_output_max_chars: 8000
+new_tools:
+  - name: refine_candidate
+    description: |
+      Refine a candidate step function h via targeted mutations: Gaussian smoothing, peak sharpening,
+      noise reduction. Each iteration uses analytical FFT-based c5 computation (no full optimization).
+      
+      Input: {'h': list of N values in [0,1], 'current_c5': float, 'focus': 'smoothing'|'sharpening'|'noise_removal'}
+      
+      Output: {'h': refined list, 'c5_bound': float, 'iterations': int}
+      
+      Use when c5_bound < 0.375 to iteratively improve candidate before full evaluation.
+      Call 2-3 times per promising candidate. This is analytical (cheap) and allows local search.
+    input_schema:
+      type: object
+      properties:
+        h:
+          type: array
+          items:
+            type: number
+        current_c5:
+          type: number
+        focus:
+          type: string
+          enum:
+            - smoothing
+            - sharpening
+            - noise_removal
+    implementation_py: |
+      def run(ctx, args):
+          import numpy as np
+          h_arr = np.array(args['h'], dtype=np.float64)
+          N = len(h_arr)
+          domain = 2.0
+          dx = domain / N
+          current_c5 = float(args['current_c5'])
+          focus = args['focus']
+          
+          def analytical_c5(h_arr):
+              h_padded = np.pad(h_arr, (0, N))
+              j_padded = np.pad(1.0 - h_arr, (0, N))
+              corr = np.fft.ifft(np.fft.fft(h_padded) * np.conj(np.fft.fft(j_padded))).real
+              return float(np.max(corr * dx))
+          
+          iterations = 0
+          
+          if focus == 'sharpening':
+              # Sharpen peaks: increase values at local maxima
+              for _ in range(3):
+                  peaks = h_arr > h_arr - 0.02  # Local maxima
+                  h_arr[peaks] = np.minimum(h_arr[peaks] + 0.05, 1.0)
+                  iterations += 1
+              
+              # Normalize to integral=1
+              h_arr = h_arr / (np.sum(h_arr) * dx)
+              h_arr = np.clip(h_arr, 0.001, 1.0)
+              h_arr = h_arr / (np.sum(h_arr) * dx)
+          
+          elif focus == 'smoothing':
+              # Gaussian smoothing to reduce noise
+              kernel_size = 5
+              for _ in range(3):
+                  kernel = np.exp(-np.arange(kernel_size)**2 / (2*0.5**2))
+                  kernel /= kernel.sum()
+                  h_arr = np.convolve(h_arr, kernel, mode='same')
+                  h_arr = h_arr[:N]
+                  iterations += 1
+              
+              # Normalize
+              h_arr = h_arr / (np.sum(h_arr) * dx)
+              h_arr = np.clip(h_arr, 0.001, 1.0)
+              h_arr = h_arr / (np.sum(h_arr) * dx)
+          
+          elif focus == 'noise_removal':
+              # Threshold small values
+              threshold = 0.02
+              for _ in range(3):
+                  small = h_arr < threshold
+                  h_arr[small] = 0.0
+                  iterations += 1
+              
+              # Normalize
+              h_arr = h_arr / (np.sum(h_arr) * dx)
+              h_arr = np.clip(h_arr, 0.001, 1.0)
+              h_arr = h_arr / (np.sum(h_arr) * dx)
+          
+          final_c5 = analytical_c5(h_arr)
+          return {'h': h_arr.tolist(), 'c5_bound': final_c5, 'iterations': iterations}
+new_skills:
+  - name: two-phase-c5-search
+    description: |
+      Phase 1: Generate diverse patterns with search_patterns, screen with probe_solution.
+      Phase 2: Refine promising candidates (c5_bound < 0.375) with refine_candidate 2-3 times before evaluation.
+      This avoids wasting full evals on unpromising candidates.
+    body: |
+      # Two-Phase C5 Optimization Strategy
+      
+      ## PHASE 1: Pattern Generation and Screening
+      
+      1. CALL search_patterns(temperature=0.5)
+         - Get 5 candidates with analytical c5_bound
+      
+      2. CALL probe_solution on each candidate
+         - Identify candidates with c5_bound < 0.375
+      
+      ## PHASE 2: Targeted Refinement
+      
+      3. For EACH candidate with c5_bound < 0.375:
+         a. CALL refine_candidate(candidate, focus='smoothing', iterations=2)
+         b. CALL refine_candidate(result, focus='sharpening', iterations=2)
+         c. Keep the best refined candidate (lowest c5_bound)
+      
+      4. CALL evaluate_solution on ONLY THE BEST refined candidate
+         - If combined_score > 1.0, finish
+         - If not, go to Phase 3
+      
+      ## PHASE 3: Alternative Patterns
+      
+      5. CALL search_patterns(temperature=0.8) with focus on different pattern types
+         - Try bipartite-only, multi-peak-only
+      
+      6. Repeat Phase 2 for promising candidates
+      
+      ## Critical Rules
+      
+      - NEVER evaluate a candidate without refinement if c5_bound < 0.375
+      - MAX 3 full evaluations (save eval budget)
+      - refine_candidate is analytical (cheap, can call 2-3x per candidate)
+      - If no improvement after 2 temperatures, restart with new patterns
+new_middlewares:
+  - name: refine_reminder
+    hook: before_model
+    description: |
+      Middleware to remind executor to refine candidates before evaluation.
+      Prevents wasting full evals on unpromising candidates.
+    implementation_py: |
+      def before_model(hook_input):
+          history = hook_input.get("history", [])
+          if not history:
+              return "First call: Use search_patterns to generate diverse candidates."
+          
+          # Check if we're about to evaluate without refinement
+          last_action = history[-1].get("tool_used", "")
+          if last_action == "search_patterns":
+              return "You called search_patterns. Next: screen with probe_solution, then refine candidates with c5_bound < 0.375 using refine_candidate before evaluation."
+          
+          # Check if we're about to evaluate without refinement
+          if last_action == "evaluate_solution":
+              has_refined = any("refine_candidate" in str(t.get("tools_used", [])) for t in history[-3:])
+              if not has_refined:
+                  return "WARNING: You're evaluating without refinement! Call refine_candidate 2-3 times on candidates with c5_bound < 0.375 first."
+          
+          # Check pattern usage
+          pattern_count = sum(1 for t in history if "search_patterns" in str(t.get("tools_used", [])))
+          if pattern_count >= 2 and last_action == "probe_solution":
+              return "You've called search_patterns twice. It's okay to evaluate now if you've refined promising candidates."
+          
+          return None

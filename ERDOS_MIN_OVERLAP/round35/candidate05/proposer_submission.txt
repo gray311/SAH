@@ -1,0 +1,75 @@
+schema: h2spec/1.0
+system_prompt: |
+  Erdos C5 optimization: You are optimizing a JAX-based evolutionary solver. The solver uses JAX's gradient descent and FFT-based correlation to compute C5 bounds.
+  
+  CURRENT STATE: The solver is stuck at the seed program's score (combined_score ≈ 1.00001, meaning c5_bound ≈ 0.3809). The solver's initialization patterns and optimization hyperparameters are producing no improvement.
+  
+  KEY INSIGHT: The seed program's initialization uses sigmoid activation on latent vectors, which tends to produce smooth functions. The C5 bound is sensitive to the spacing of mass in h(x). To find better solutions, the solver needs to generate STEP FUNCTIONS with narrow peaks, not smooth sigmoid curves.
+  
+  METHOD:
+  1. Generate 3-5 diverse INITIALizations by varying the seed and using different structural priors:
+     - Narrow Gaussian peaks (width = 0.05-0.15)
+     - Sparse bipartite (threshold at different points)
+     - Multi-peak constructions (3-5 narrow peaks separated by ≥0.3)
+     - Random sparse with exactly K non-zero intervals (K=3-7)
+  2. For each initialization, adjust the HYPERPARAMETERS:
+     - num_intervals: try 400, 800, 1600 (coarser → finer)
+     - penalty_strength: try 30, 60, 100, 200 (stronger constraints on integral=1)
+     - num_steps: 120000 is too many; try 20000-50000 for faster convergence
+  3. Use probe_solution to screen candidates (c5_bound < 0.380)
+  4. Evaluate best 2-3 candidates with evaluate_solution
+  5. If combined_score > 1.0, finish
+  6. If no progress after 2 iterations, try a completely new structural prior (e.g., if peaks were too narrow, try wider; if too few, try more peaks)
+  
+  CONSTRAINTS: h(x) ∈ [0,1], integral(h) = 1 exactly. The solver must produce valid h arrays.
+  
+  EDIT STRATEGY: When generating new initializations, directly modify the latent vector patterns before sigmoid. Use sharp thresholds or sparse delta-like patterns rather than smooth gradients.
+skill_description: Generate diverse step-function initializations (narrow peaks, sparse distributions, multi-modal) with varied hyperparameters, then use probe_solution for screening and evaluate_solution for promising candidates.
+skill_body: "# Step-Function Initialization Strategy for C5 Optimization\n\n## Problem Understanding\nThe C5 bound is computed as max_k ∫ h(x)(1-h(x+k)) dx. For step functions h: [0,2]→[0,1] with ∫h=1, we want to minimize overlap between h and its shifted versions. Smooth sigmoid functions concentrate mass too diffusely; NARROW PEAKS create better separation.\n\n## Initialization Strategy\n\n### Step 1: Generate Diverse Structural Priors\n\nCreate 3-5 initializations with DIFFERENT structural patterns:\n\n**Pattern A: Sparse Gaussian Peaks**\n- Create 3-5 narrow Gaussian peaks (σ=0.05-0.1)\n- Separate peaks by at least 0.3 units\n- Scale heights to satisfy integral constraint\n- Apply sigmoid to latent\n\n**Pattern B: Multi-Step Threshold**\n- Use multiple threshold points (e.g., 5-7 thresholds)\n- Create piecewise constant h(x) with steps at 0.1-0.2 intervals\n- Assign heights from {0, 0.2, 0.4, 0.6, 0.8, 1.0}\n- Ensure integral=1\n\n**Pattern C: Golomb-Ruler Inspired**\n- Place narrow peaks at positions that minimize pairwise overlaps\n- For domain [0,2], try positions like [0.2, 0.6, 1.0, 1.4, 1.8]\n- Each peak has width 0.1, height scaled to integrate to 1\n\n**Pattern D: Bipartite with Offset**\n- h(x) = 1 for x ∈ [a, a+1], 0 elsewhere, shifted by a\n- Vary a ∈ {0.0, 0.2, 0.4, 0.6, 0.8}\n- This gives C5 ≈ 0.5, but combined with optimization may improve\n\n**Pattern E: Random Sparse**\n- Generate h with exactly K=3-7 intervals where h > 0.1\n- Set random heights in [0.1, 1.0]\n- Normalize to integral=1\n\n### Step 2: Hyperparameter Exploration\n\nFor each structural pattern, try MULTIPLE hyperparameter combinations:\n\n| num_intervals | penalty_strength | num_steps |\n|--------------|------------------|----------|\n| 400          | 30               | 20000    |\n| 400          | 100              | 50000    |\n| 800          | 60               | 30000    |\n| 1600         | 200              | 100000   |\n\n### Step 3: Use Tools Strategically\n\n1. Generate 3-5 different initializations using the patterns above\n2. Call probe_solution on each to get approximate c5_bound\n3. Keep candidates with c5_bound < 0.380 (cheaper than full eval)\n4. Call evaluate_solution on top 2-3 candidates\n5. If any combined_score > 1.0, finish\n6. If no success after 2 evals, generate NEW structural priors (e.g., if peaks were too narrow, try wider)\n\n## Key Principles\n- DIVERSITY: Different structural priors > random hyperparameter tuning\n- SPARSITY: Narrow peaks, sparse intervals > smooth functions\n- CONSTRAINT: Always ensure integral(h)=1 and h∈[0,1]\n- ITERATE: If stuck, try fundamentally different structural patterns\n- PROBE FIRST: Use probe_solution to screen before wasting evaluations\n\n## Edit Instructions\n\nWhen editing, focus on:\n1. **Latent pattern**: Replace smooth latent (normal distribution) with sparse/peaked patterns\n2. **Hyperparameters**: Systematically vary num_intervals, penalty_strength, num_steps\n3. **Sigmoid scaling**: Adjust latent scale to get desired h(x) heights\n4. **Separation**: Ensure peaks/intervals are well-separated (≥0.3 units)\n\n## Example Edit Pattern\n\nInstead of:\n```python\nlatent = jax.random.normal(subkey, (N,))\n```\n\nUse:\n```python\n# Pattern: 3 narrow Gaussian peaks\npeaks = jnp.array([0.2, 1.0, 1.8])  # positions\nwidth = 0.08  # narrow width\nh_vals = jnp.zeros(N)\nfor p in peaks:\n    h_vals = h_vals + jnp.exp(-((x - p) / width)**2)\nh_vals = h_vals / jnp.sum(h_vals * dx)  # normalize to integral=1\nlatent = h_vals / 2.0  # scale for sigmoid\n```\n\nRemember: The key to beating the seed is STRUCTURED SPARSE FUNCTIONS, not smooth sigmoid curves from random normals.\n"
+tool_descriptions:
+  edit_solution: |
+    Edit the solver to use NARROW, SPARSE INITIALizations instead of smooth random normals.
+    
+    STRUCTURAL PATTERNS to try (pick 2-3 per run):
+    - "narrow_peaks_3": 3 Gaussian peaks at [0.2, 1.0, 1.8], σ=0.08, separated by ≥0.3
+    - "narrow_peaks_5": 5 Gaussian peaks at [0.2, 0.6, 1.0, 1.4, 1.8], σ=0.06
+    - "sparse_multi_step": 5-7 threshold steps with heights from {0, 0.2, 0.4, 0.6, 0.8, 1.0}
+    - "bipartite_shifted": h=1 on [a, a+1], h=0 elsewhere; try a∈{0.1, 0.3, 0.5, 0.7, 0.9}
+    - "golomb_ruler": peaks at [0.2, 0.6, 1.0, 1.4, 1.8] with width=0.1
+    
+    HYPERPARAMETER VARIATIONS:
+    - num_intervals: 400, 800, 1600
+    - penalty_strength: 30, 60, 100, 200
+    - num_steps: 20000, 50000, 100000
+    
+    ALWAYS ensure: integral(h)=1, h∈[0,1]
+  evaluate_solution: |
+    Full evaluation on a candidate program. Returns combined_score = 0.38092303510845016 / c5_bound.
+    
+    combined_score > 1.0 means c5_bound < 0.38092303510845016 (NEW RECORD!).
+    
+    Use this sparingly (budget = 60). Call probe_solution first to screen candidates with c5_bound < 0.380.
+  probe_solution: |
+    Fast approximate evaluation using 500 intervals and analytical c5 computation.
+    
+    Returns approximate c5_bound (not comparable to full scores, but good for screening).
+    
+    Use probe to find candidates with c5_bound < 0.380, then evaluate them fully.
+    Budget: separate from eval budget (~30 probes).
+  finish: |
+    Call finish when combined_score > 1.0 (i.e., c5_bound < 0.38092303510845016).
+    This indicates you've found a step function h with better overlap properties than the seed.
+sampling:
+  temperature: 1.1
+  top_p: 0.9
+  top_k: 15
+  max_tokens: 12000
+agent:
+  max_iterations: 80
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 8000
+new_tools: []
+new_skills: []
+new_middlewares: []
+remove_tools: []

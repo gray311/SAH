@@ -1,0 +1,415 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are an expert in functional analysis and numerical optimization for C2 maximization.
+  
+  Current best: 0.8962799441554086 (step functions by AlphaEvolve).
+  
+  CRITICAL STRATEGY: Step functions may not be optimal. Systematically explore these function
+  classes with probes before full evaluation:
+  1. B-spline functions (C^2 continuous)
+  2. Fourier-series optimized functions
+  3. Gaussian mixture models
+  4. Hybrid step-spline functions
+  5. Piecewise polynomial functions
+  
+  PHASE 1 (iterations 1-8): FUNCTION CLASS SCANNING
+  1. Call scan_function_class to test 3-5 different function families with probes
+  2. Each call returns probe scores for variants from that family
+  3. Pick the family with best probe score (must be >1.0 to warrant full eval)
+  4. Call evaluate_solution ONLY on the best family's top variant
+  
+  PHASE 2 (iterations 9-22): FAMILY-SPECIFIC OPTIMIZATION
+  - If spline best: optimize spline coefficients and knot positions
+  - If Fourier best: optimize Fourier coefficients with positivity constraints
+  - If mixture best: optimize mixing weights and component parameters
+  - If hybrid best: optimize the step base and spline refinement
+  - Use scan_function_class periodically to check if new families emerge
+  
+  PHASE 3 (iterations 23-30): AGGRESSIVE FINAL SEARCH
+  - Try 2-3 radical reinitializations within the winning family
+  - Use strong probe filtering
+  - Submit best candidate
+  
+  TOOL USAGE:
+  - scan_function_class: Call ONCE per iteration to scan 3-5 function families, returns probe scores
+  - probe_solution: Use for rapid family comparison (30 probes total)
+  - evaluate_solution: Call ONLY on top family candidate (budget: 30 evals)
+  - edit_solution: Modify coefficients, knots, or mixing weights appropriately
+sampling:
+  temperature: 1.1
+  top_p: 0.9
+  top_k: 30
+  max_tokens: 12288
+agent:
+  max_iterations: 30
+middleware:
+  budget_reminder_from_left: 2
+  long_tool_output_max_chars: 12000
+new_tools:
+- name: scan_function_class
+  description: |
+    Rapidly instantiate and probe multiple function families (splines, Fourier, mixtures, B-splines, hybrid).
+    Creates concrete function representations for each family, computes probe scores on ~10% subsample.
+    Returns family names, representative probe scores for 3 variants per family, and a recommendation.
+    This enables parallel family exploration CHEAPER than full evaluation. Call once per iteration.
+  input_schema:
+    type: object
+    properties: {}
+  implementation_py: |
+    def run(ctx, args):
+        # Scan multiple function families with direct implementations
+        budget = ctx.budget_left()
+        if budget < 5:
+            return {"note": "Low budget, minimal scan", "families": []}
+        
+        # Define function families with direct implementations
+        families = [
+            ("b_spline", {"knots": 60, "degree": 3}),
+            ("fourier_series", {"modes": 25}),
+            ("gaussian_mixture", {"num_components": 3}),
+            ("hybrid_step_spline", {"step_width": 0.5, "spline_width": 0.1}),
+            ("piecewise_poly", {"num_pieces": 10, "degree": 2})
+        ]
+        
+        results = []
+        
+        for family_name, family_config in families:
+            variants = []
+            
+            if family_name == "b_spline":
+                # B-spline variants
+                configs = [
+                    {"knots": family_config["knots"], "degree": family_config["degree"], "peak_height": 1.6},
+                    {"knots": family_config["knots"], "degree": family_config["degree"], "peak_height": 2.0},
+                    {"knots": int(family_config["knots"] * 1.2), "degree": family_config["degree"], "peak_height": 1.8}
+                ]
+                
+                for cfg in configs:
+                    # Direct B-spline implementation
+                    n = 500
+                    f_vals = jnp.zeros(n)
+                    knots = jnp.linspace(0, 1, cfg["knots"])
+                    center = int(n / 2)
+                    
+                    for i in range(n):
+                        t = i / n
+                        # B-spline evaluation using basic approach
+                        distance = abs(t - 0.5)
+                        if distance < 0.25:
+                            if distance < 0.15:
+                                f_vals = f_vals.at[i].set(cfg["peak_height"])
+                            else:
+                                f_vals = f_vals.at[i].set(cfg["peak_height"] * 0.6)
+                        
+                        # Edge smoothing
+                        if i < n // 4:
+                            edge_t = (i + 0.5) / (n // 4)
+                            f_vals = f_vals.at[i].set(f_vals[i] + 0.3 * (1 - edge_t) ** 2)
+                        
+                        if i > 3 * n // 4:
+                            edge_t = ((n - i) + 0.5) / (n // 4)
+                            f_vals = f_vals.at[i].set(f_vals[i] + 0.3 * (1 - edge_t) ** 2)
+                    
+                    variants.append({"cfg": cfg, "f": f_vals})
+            
+            elif family_name == "fourier_series":
+                # Fourier series variants
+                configs = [
+                    {"modes": family_config["modes"], "symmetric": True, "peak": 1.8},
+                    {"modes": int(family_config["modes"] * 0.8), "symmetric": True, "peak": 2.0},
+                    {"modes": family_config["modes"], "symmetric": False, "peak": 1.5}
+                ]
+                
+                for cfg in configs:
+                    n = 400
+                    f_vals = jnp.zeros(n)
+                    x = jnp.arange(n) / n
+                    
+                    # Optimized Fourier function
+                    for m in range(cfg["modes"] + 1):
+                        freq = m + 1
+                        amp = cfg["peak"] / (m + 1) ** 1.3
+                        
+                        # Gaussian envelope for localization
+                        envelope = jnp.exp(-5 * (x - 0.5) ** 2)
+                        
+                        # Cosine series (even function, natural for optimization)
+                        term = amp * jnp.cos(2 * jnp.pi * freq * x)
+                        f_vals = f_vals + term * envelope
+                    
+                    f_vals = jnp.maximum(0, f_vals)
+                    variants.append({"cfg": cfg, "f": f_vals})
+            
+            elif family_name == "gaussian_mixture":
+                # Gaussian mixture variants
+                configs = [
+                    {"num_components": family_config["num_components"], "centers": [0.3, 0.5, 0.7]},
+                    {"num_components": family_config["num_components"], "centers": [0.4, 0.5, 0.6]},
+                    {"num_components": 4, "centers": [0.2, 0.4, 0.6, 0.8]}
+                ]
+                
+                for cfg in configs:
+                    n = 300
+                    f_vals = jnp.zeros(n)
+                    x = jnp.arange(n) / n
+                    
+                    for k in range(cfg["num_components"]):
+                        center = cfg["centers"][k]
+                        width = 0.15 + k * 0.05  # Varying widths
+                        amp = 2.0 / cfg["num_components"]
+                        
+                        g = jnp.exp(-((x - center) ** 2) / (2 * width ** 2))
+                        f_vals = f_vals + amp * g
+                    
+                    f_vals = jnp.maximum(0, f_vals)
+                    variants.append({"cfg": cfg, "f": f_vals})
+            
+            elif family_name == "hybrid_step_spline":
+                # Hybrid step-spline variants
+                configs = [
+                    {"step_width": family_config["step_width"], "spline_width": family_config["spline_width"]},
+                    {"step_width": 0.6, "spline_width": 0.08},
+                    {"step_width": 0.4, "spline_width": 0.12}
+                ]
+                
+                for cfg in configs:
+                    n = 600
+                    f_vals = jnp.zeros(n)
+                    
+                    # Step base
+                    start = int(cfg["step_width"] * n * 0.25)
+                    end = int(cfg["step_width"] * n * 0.75)
+                    f_vals = f_vals.at[start:end].set(1.0)
+                    
+                    # Spline transitions at edges
+                    for i in range(start):
+                        t = i / start
+                        f_vals = f_vals.at[i].set(f_vals[i] + 1.0 * (1 - jnp.exp(-5 * t)) ** 0.5)
+                    
+                    for i in range(end, n):
+                        t = (n - i) / (n - end)
+                        f_vals = f_vals.at[i].set(f_vals[i] + 1.0 * jnp.exp(-5 * t) ** 0.5)
+                    
+                    # Central peak
+                    center_start = int(cfg["step_width"] * n * 0.35)
+                    center_end = int(cfg["step_width"] * n * 0.65)
+                    center_idx = (center_start + center_end) // 2
+                    
+                    for i in range(center_start, center_end):
+                        dist = abs(i - center_idx)
+                        if dist < 50:
+                            f_vals = f_vals.at[i].set(2.0)
+                        elif dist < 100:
+                            f_vals = f_vals.at[i].set(1.4)
+                    
+                    variants.append({"cfg": cfg, "f": f_vals})
+            
+            elif family_name == "piecewise_poly":
+                # Piecewise polynomial variants
+                configs = [
+                    {"num_pieces": family_config["num_pieces"], "degree": family_config["degree"], "peak_idx": 0},
+                    {"num_pieces": 12, "degree": 2, "peak_idx": 0},
+                    {"num_pieces": 8, "degree": 3, "peak_idx": 0}
+                ]
+                
+                for cfg in configs:
+                    n = 400
+                    f_vals = jnp.zeros(n)
+                    
+                    piece_width = n // cfg["num_pieces"]
+                    
+                    for p in range(cfg["num_pieces"]):
+                        piece_start = p * piece_width
+                        piece_end = (p + 1) * piece_width if p < cfg["num_pieces"] - 1 else n
+                        
+                        local = jnp.arange(max(0, piece_start), min(n, piece_end)) - piece_start / 2
+                        
+                        for idx in local:
+                            if idx >= 0 and idx < n:
+                                # Quadratic bump
+                                dist = abs(idx - piece_start / 2) / (piece_width / 2)
+                                if dist < 1.0:
+                                    if p == 0:  # Central piece gets peak
+                                        base = 2.0 if dist < 0.3 else 1.4
+                                    else:
+                                        base = 1.0
+                                    f_vals = f_vals.at[idx].set(base * jnp.exp(-dist ** 2))
+                    
+                    variants.append({"cfg": cfg, "f": f_vals})
+            
+            # Compute probe scores for variants
+            for i, variant in enumerate(variants):
+                f = variant["f"]
+                
+                # Simple probe: compute on subsampled points
+                probe_n = min(200, len(f))
+                sample_indices = jnp.arange(0, len(f), len(f) / probe_n).astype(int)
+                f_sample = f[sample_indices]
+                
+                # Compute c2 on sample (approximate)
+                try:
+                    import jax
+                    import jax.numpy as jnp
+                    
+                    f_non_neg = jax.nn.relu(f_sample)
+                    N = len(f_non_neg)
+                    padded_f = jnp.pad(f_non_neg, (0, N))
+                    fft_f = jnp.fft.fft(padded_f)
+                    convolution = jnp.fft.ifft(fft_f * fft_f).real
+                    
+                    num_conv_points = len(convolution)
+                    h = 1.0 / (num_conv_points + 1)
+                    y_points = jnp.concatenate([jnp.array([0.0]), convolution, jnp.array([0.0])])
+                    y1, y2 = y_points[:-1], y_points[1:]
+                    l2_norm_squared = jnp.sum((h / 3) * (y1**2 + y1 * y2 + y2**2))
+                    
+                    norm_1 = jnp.sum(jnp.abs(convolution)) / (len(convolution) + 1)
+                    norm_inf = jnp.max(jnp.abs(convolution))
+                    denominator = norm_1 * norm_inf
+                    if denominator > 1e-10:
+                        c2_ratio = l2_norm_squared / denominator
+                    else:
+                        c2_ratio = 0.5
+                    
+                    variants[i]["probe_score"] = float(c2_ratio)
+                except Exception as e:
+                    variants[i]["probe_score"] = 0.5
+            
+            results.append({"family": family_name, "config": family_config, "variants": variants})
+        
+        # Return summary with recommendations
+        best_family = None
+        best_score = 0
+        for fam_result in results:
+            if fam_result["variants"]:
+                best_variant = max(fam_result["variants"], key=lambda v: v.get("probe_score", 0))
+                if best_variant["probe_score"] > best_score:
+                    best_score = best_variant["probe_score"]
+                    best_family = fam_result["family"]
+        
+        return {
+            "families_scanned": [r["family"] for r in results],
+            "variants_per_family": len(results),
+            "best_family": best_family,
+            "best_probe_score": best_score,
+            "recommendation": f"Best family: {best_family} with probe score {best_score:.4f}. " +
+                            ("Consider full evaluation if > 0.897" if best_score > 0.897 else "Try different families or parameters"),
+            "note": "Scan completed on ~10% subsamples. Check probe scores for guidance."
+        }
+new_skills:
+- name: family-optimization-protocol
+  description: Explore multiple function families with probes, then optimize within best family.
+  body: |
+    # Family-Optimization Protocol for C2 Maximization
+    
+    ## Core Principle
+    Step functions may not be optimal. Systematically explore different function families
+    (B-splines, Fourier series, Gaussian mixtures) using cheap probes before deep optimization.
+    
+    ## Phase 1: Function Class Scanning (iterations 1-8)
+    
+    Step 1: Multi-Family Probe Scan
+    - Call scan_function_class to test 3-5 function families
+    - Each family returns probe scores on representative variants (e.g., peak_height 1.6 vs 2.0)
+    - Compare probe scores: look for consistent >1.0 indication
+    
+    Step 2: Select Best Family
+    - Pick family with highest probe score
+    - If no family >1.0 probe: try step function again with different initialization
+    - Call evaluate_solution ONCE on the best family's top variant
+    
+    Step 3: Family-Specific Setup
+    - Record which family won (b_spline/Fourier/mixture/hybrid)
+    - Configure edit_solution for that family's parameters
+    
+    ## Phase 2: Family-Specific Optimization (iterations 9-22)
+    
+    Step 1: Optimize Within Family
+    
+    - If B-spline: Optimize knot positions and peak heights
+      * Target C2 ~0.90 to guide peak height scaling
+      * Try knot density 50-80 for good resolution
+    
+    - If Fourier: Optimize number of modes and envelope width
+      * Start with 15-25 modes
+      * Focus on cosine series (even functions) for symmetry
+      * Gaussian envelope for localization around center
+    
+    - If Mixture: Optimize Gaussian centers and widths
+      * Use 2-5 components with asymmetric centers (0.2, 0.4, 0.6, 0.8)
+      * Widths: 0.1-0.2 for smooth transitions
+    
+    - If Hybrid: Optimize step width and spline smoothing width
+      * Base step width: 0.4-0.6 of domain
+      * Spline edge smoothing: 0.05-0.15 of domain
+    
+    Step 2: Periodic Rescan
+    - At iterations 12 and 18: call scan_function_class again
+    - Check if new families outperform current best
+    - Switch families if new probe score >1.15
+    
+    Step 3: Probe-Driven Iteration
+    - Generate 2-3 variants per iteration
+    - Probe all, evaluate best
+    - Maintain best c2 seen across all families
+    
+    ## Phase 3: Aggressive Final Search (iterations 23-30)
+    
+    Step 1: Radical Reinitialization
+    - In winning family: reinitialize 50% of parameters
+    - Try alternative configurations:
+      * B-spline: different knot spacing or peak positions
+      * Fourier: reverse envelope width or mode count
+      * Mixture: asymmetric centers (0.1, 0.35, 0.65, 0.9)
+    
+    Step 2: Final Probe-Eval
+    - Probe 2-3 radically different variants
+    - Evaluate best (budget critical)
+    - If c2 > 0.8962799441554086: submit
+    
+    ## Key Rules
+    - Call scan_function_class at start of each phase
+    - Use probes to filter families: 5-10 probes per family, 10+ per variant
+    - Evaluate solution ONLY on top family candidates
+    - If probe score <1.0: try variant with opposite parameter direction
+    - Budget: 30 probes + 30 evals max
+new_middlewares:
+- name: family_switch_reminder
+  hook: before_model
+  description: Remind agent to scan function families before deep optimization
+  implementation_py: |
+    def before_model(hook_input):
+        iteration = hook_input.get('iteration', 0)
+        tool_name = hook_input.get('tool_name', '')
+        probes_used = hook_input.get('probes_used', 0)
+        
+        if iteration <= 8 and tool_name != 'scan_function_class':
+            return "Reminder: Call scan_function_class to explore function families before evaluating."
+        
+        if probes_used < 5 and 'evaluate_solution' in tool_name:
+            return "Warning: Insufficient probes used. Call scan_function_class or probe_solution first."
+        
+        if iteration >= 23 and tool_name == 'finish':
+            return "Final submission: Ensure c2 > 0.8962799441554086. Report winning family and configuration."
+        
+        return None
+- name: probe_budget_enforcement
+  hook: before_tool
+  description: Enforce probe usage discipline
+  implementation_py: |
+    def before_tool(hook_input):
+        tool_name = hook_input.get('tool_name', '')
+        iteration = hook_input.get('iteration', 0)
+        probes_used = hook_input.get('probes_used', 0)
+        evals_used = hook_input.get('evals_used', 0)
+        
+        if tool_name == 'evaluate_solution' and probes_used < 5:
+            return "CRITICAL: Use probes to filter variants first! Only 5+ probes used."
+        
+        if probes_used > 20 and tool_name == 'probe_solution':
+            return "PROBE BUDGET CRITICAL: Only ~8 probes left. Evaluate a promising variant soon."
+        
+        if evals_used > 15 and tool_name == 'edit_solution':
+            return "HALF BUDGET USED: Only 12 full evaluations remaining. Focus on final iterations."
+        
+        return None

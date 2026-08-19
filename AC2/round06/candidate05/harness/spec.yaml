@@ -1,0 +1,286 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are an expert in functional analysis and mathematical optimization. Your task: maximize C2 = ||f * f||₂² / ((∫f)² ||f * f||_∞) for the second autocorrelation inequality.
+
+  Key facts:
+  - Theoretical upper bound: 1.0 (Young's inequality)
+  - Current best in literature: 0.8963 (step functions)
+  - Seed program's combined_score: 1.02872 (your baseline)
+  - Target: surpass 1.02872 to set a new record
+
+  CRITICAL INSIGHT: The seed program uses a multi-start optimization framework with 9 initializations. DO NOT try to rewrite the entire optimization. Instead, systematically tune its hyperparameters:
+  1. Vary num_intervals: [150, 250, 350, 500, 700] - finer resolution may capture better step functions
+  2. Vary learning_rate: [0.05, 0.1, 0.15, 0.2] - the seed uses 0.125
+  3. Vary stagnation_window: [50, 100, 200, 300] - seed uses 100
+  4. Vary reinit_fraction: [0.05, 0.1, 0.15, 0.2] - seed uses 0.11
+  5. Vary num_steps: [20000, 30000, 50000] - seed uses 40000
+
+  WORKFLOW:
+  1. Use hyperparameter_sweeper tool to generate 3-4 diverse configurations from a grid search
+  2. Probe each configuration (call probe_solution) to rank them
+  3. Evaluate the TOP 2 configurations only
+  4. If no improvement after 2 evals, try different hyperparameter combinations
+  5. NEVER waste evals - maximum 4 full evaluations total
+
+  PROBE-BEFORE-EVAL DISCIPLINE:
+  - Generate 4-5 hyperparameter configurations
+  - Probe each (cheap, ~10s each, separate budget of ~30 probes)
+  - Rank by probe score
+  - Evaluate TOP 2 only
+
+  TOOL USAGE:
+  - hyperparameter_sweeper: Generate concrete hyperparameter configs to test (new tool)
+  - probe_solution: Test configurations cheaply (~10s, separate budget)
+  - evaluate_solution: Only for top 2-3 candidates after probing
+  - finish: When done
+skill_description: |
+  Systematically sweep hyperparameters in the multi-start optimization framework. Test num_intervals, learning_rate, stagnation_window, reinit_fraction in combination. Probe 4+ configs before evaluating. Target >1.02872.
+skill_body: |
+  # C2 Optimization: Hyperparameter Sweeping Strategy
+
+  ## Objective
+  Maximize C2 > 1.02872. Current baseline: 1.02872 (seed). Target: surpass this.
+
+  ## Key Insight
+  The seed program already implements a multi-start optimization framework with step-function initializations. The breakthrough comes from tuning hyperparameters, not rewriting the entire optimization.
+
+  ## Hyperparameter Grid to Explore
+
+  ### num_intervals: 150, 250, 350, 500, 700
+  - Seed uses 350
+  - Hypothesis: Finer resolution (500-700) may better approximate optimal step functions
+  - Alternative: Coarser (150-250) may converge faster and avoid local minima
+
+  ### learning_rate: 0.05, 0.1, 0.125, 0.15, 0.2
+  - Seed uses 0.125
+  - Hypothesis: Higher LR (0.15-0.2) may escape shallow local minima
+  - Alternative: Lower LR (0.05-0.1) may find smoother convergence
+
+  ### stagnation_window: 50, 100, 200, 300
+  - Seed uses 100
+  - Hypothesis: Larger window (200-300) prevents premature reinitialization
+  - Alternative: Smaller window (50-100) may escape local minima faster
+
+  ### reinit_fraction: 0.05, 0.1, 0.11, 0.15, 0.2
+  - Seed uses 0.11
+  - Hypothesis: Higher fraction (0.15-0.2) diversifies search more
+  - Alternative: Lower fraction (0.05-0.1) preserves good solutions longer
+
+  ### num_steps: 20000, 30000, 40000, 50000
+  - Seed uses 40000
+  - Hypothesis: More steps (50000) may find better local minima
+  - Alternative: Fewer steps (20000-30000) may find global optimum faster
+
+  ## Execution Protocol
+
+  ### Phase 1: Configuration Generation
+  1. Call hyperparameter_sweeper with diverse seeds to get 4-5 configurations
+  2. Each config specifies: num_intervals, learning_rate, stagnation_window, reinit_fraction, num_steps
+
+  ### Phase 2: Probe-Based Ranking
+  1. For each of 4-5 configurations, call probe_solution
+  2. Record probe scores and rank configurations
+  3. Select TOP 2 configurations by probe score
+
+  ### Phase 3: Full Evaluation
+  1. For each of the TOP 2 configs, call evaluate_solution (full run)
+  2. Track which hyperparameters yielded improvement
+  3. If still no improvement after 2 evals, try different hyperparameter combinations
+
+  ### Phase 4: Deep Dive (if needed)
+  - If top configuration shows promise: refine hyperparameters around that point
+  - If no improvement after 4 evals: SWITCH strategy (try polynomial decay or Gaussian mixtures)
+
+  ## Critical Success Factors
+  - Probe 4+ configurations BEFORE any full evaluation
+  - Maximum 4 full evaluations total
+  - Use hyperparameter_sweeper for structured exploration
+  - Systematic grid search beats random mutations
+  - Track which hyperparameter combinations worked best
+
+  ## Tool Usage Priority
+  1. hyperparameter_sweeper - generate concrete hyperparameter configs
+  2. probe_solution - rank many configurations cheaply
+  3. evaluate_solution - confirm only top 2 candidates
+  4. finish - when evals exhausted or score > 1.02872 achieved
+tool_descriptions:
+  edit_solution: |
+    Change the code inside the # EVOLVE-BLOCK region. To vary hyperparameters:
+    - Modify OptimizerHyperparameters fields: num_intervals, learning_rate, num_steps, warmup_steps, stagnation_window, reinit_fraction, reinit_std, reinit_interval
+    - Or modify _create_multi_start(num_starts=...) to change number of initializations
+    - Key: Keep the multi-start framework intact, just tune its parameters
+  evaluate_solution: |
+    Run the full evaluator. Returns combined_score. Use sparingly (max ~20 total). Only evaluate after probing and hyperparameter selection.
+  probe_solution: |
+    Cheap score on subsampled data (~10s vs minutes). Separate budget (~30 available). Use for ranking hyperparameter configurations. Call this 4-6 times per sweep before any evaluate.
+  finish: |
+    End the session. Call when budget exhausted or score > 1.02872 achieved.
+sampling:
+  temperature: 0.6
+  top_p: 0.9
+  top_k: 30
+  max_tokens: 16384
+agent:
+  max_iterations: 50
+middleware:
+  budget_reminder_from_left: 3
+  long_tool_output_max_chars: 10000
+new_tools:
+  - name: hyperparameter_sweeper
+    description: |
+      Generate diverse hyperparameter configurations for the multi-start optimizer. Each call with seed_num returns a config specifying num_intervals, learning_rate, stagnation_window, reinit_fraction, num_steps, and reinit_std. Call with seed_num=0,1,2,3,4 to get 5 diverse configs. Use these configs to guide probe-based evaluation.
+    input_schema:
+      type: object
+      properties:
+        seed_num:
+          type: integer
+          description: Random seed for config generation (0-99)
+    implementation_py: |
+      def run(ctx, args):
+          import random
+          seed_num = args.get("seed_num", 42)
+          random.seed(seed_num)
+          
+          # Predefined ranges for each hyperparameter
+          intervals_options = [150, 250, 350, 500, 700]
+          lr_options = [0.05, 0.1, 0.125, 0.15, 0.2]
+          stagnation_options = [50, 100, 200, 300]
+          reinit_frac_options = [0.05, 0.1, 0.11, 0.15, 0.2]
+          steps_options = [20000, 30000, 40000, 50000]
+          reinit_std_options = [0.01, 0.015, 0.02, 0.025, 0.03]
+          
+          # Select one option from each range
+          num_intervals = random.choice(intervals_options)
+          learning_rate = random.choice(lr_options)
+          stagnation_window = random.choice(stagnation_options)
+          reinit_fraction = random.choice(reinit_frac_options)
+          num_steps = random.choice(steps_options)
+          reinit_std = random.choice(reinit_std_options)
+          warmup_steps = min(int(num_steps * 0.1), 5000)
+          reinit_interval = stagnation_window // 3 if stagnation_window > 100 else 50
+          
+          return {
+              "config": {
+                  "num_intervals": num_intervals,
+                  "learning_rate": learning_rate,
+                  "num_steps": num_steps,
+                  "warmup_steps": warmup_steps,
+                  "stagnation_window": stagnation_window,
+                  "reinit_fraction": reinit_fraction,
+                  "reinit_std": reinit_std,
+                  "reinit_interval": reinit_interval,
+                  "best_c2": 0.0
+              },
+              "seed": seed_num,
+              "note": f"Config {seed_num}: intervals={num_intervals}, lr={learning_rate}, steps={num_steps}, stagnation={stagnation_window}"
+          }
+new_skills:
+  - name: hyperparameter-grid-search
+    description: |
+      Method playbook for C2 optimization using systematic hyperparameter sweeping in the multi-start framework. Probe 4+ configs before eval, max 4 evals.
+    body: |
+      # C2 Optimization: Hyperparameter Grid Search
+
+      ## Objective
+      Maximize C2 > 1.02872. Current baseline: 1.02872 (seed). Target: surpass this.
+
+      ## Strategy: Systematic Hyperparameter Sweeping
+
+      The seed program uses a multi-start optimization framework. The key to improvement is tuning hyperparameters, not rewriting the entire optimization.
+
+      ### Hyperparameter Grid
+
+      #### num_intervals: 150, 250, 350, 500, 700
+      - Purpose: Controls discretization resolution
+      - Hypothesis: Finer resolution (500-700) better approximates optimal step functions
+      - Trade-off: More intervals = more parameters to optimize, slower convergence
+
+      #### learning_rate: 0.05, 0.1, 0.125, 0.15, 0.2
+      - Purpose: Step size in gradient descent
+      - Hypothesis: Higher LR (0.15-0.2) escapes local minima; lower LR (0.05-0.1) finds smoother convergence
+      - Seed uses: 0.125
+
+      #### stagnation_window: 50, 100, 200, 300
+      - Purpose: How many steps before reinitialization kicks in
+      - Hypothesis: Larger window (200-300) preserves good solutions; smaller window (50-100) escapes local minima faster
+      - Seed uses: 100
+
+      #### reinit_fraction: 0.05, 0.1, 0.11, 0.15, 0.2
+      - Purpose: Fraction of function to perturb during reinitialization
+      - Hypothesis: Higher fraction (0.15-0.2) diversifies search; lower fraction (0.05-0.1) preserves good solutions
+      - Seed uses: 0.11
+
+      #### num_steps: 20000, 30000, 40000, 50000
+      - Purpose: Total optimization steps
+      - Hypothesis: More steps (50000) finds better local minima; fewer steps (20000-30000) may find global optimum faster
+      - Seed uses: 40000
+
+      #### reinit_std: 0.01, 0.015, 0.02, 0.025, 0.03
+      - Purpose: Standard deviation of reinitialization noise
+      - Hypothesis: Higher std (0.025-0.03) diversifies more; lower std (0.01-0.015) is more conservative
+
+      ## Execution Protocol
+
+      ### Phase 1: Configuration Generation (1 iteration)
+      1. Call hyperparameter_sweeper with seed_num=0,1,2,3,4
+      2. Get 5 diverse hyperparameter configurations
+      3. Each config specifies all optimizer hyperparameters
+
+      ### Phase 2: Probe-Based Ranking (2-3 iterations)
+      1. For each of the 5 configs, call probe_solution
+      2. Record probe scores and rank configurations
+      3. Select TOP 2 configurations by probe score
+
+      ### Phase 3: Full Evaluation (1-2 iterations)
+      1. For each of the TOP 2 configs, call evaluate_solution
+      2. Track which hyperparameters yielded improvement
+      3. If still no improvement after 2 evals, try different hyperparameter combinations
+
+      ### Phase 4: Deep Dive or Reset
+      - If top configuration shows promise: refine hyperparameters around that point (try 1-2 adjacent values)
+      - If no improvement after 4 evals: SWITCH strategy (try polynomial decay, Gaussian mixtures, or the seed's original multi-start with original hyperparams)
+
+      ## Critical Success Factors
+      - Probe 4+ hyperparameter configurations BEFORE any full evaluation
+      - Maximum 4 full evaluations total
+      - Use hyperparameter_sweeper for structured grid search
+      - Systematic exploration beats random mutations
+      - Track which hyperparameter combinations worked best
+      - Diversify: try different num_intervals with different learning_rates
+
+      ## Tool Usage Priority
+      1. hyperparameter_sweeper - generate concrete hyperparameter configs
+      2. probe_solution - rank many configurations cheaply
+      3. evaluate_solution - confirm only top 2 candidates
+      4. finish - when evals exhausted or score > 1.02872 achieved
+new_middlewares:
+  - name: enforce_hyperparameter_diversity
+    hook: before_model
+    description: |
+      Enforce diversity in hyperparameter exploration. Warn if same hyperparameters used repeatedly or if only one config family is explored.
+    implementation_py: |
+      def before_model(hook_input):
+          state = hook_input.get("state", {})
+          iteration = state.get("iteration", 0)
+          configs_tried = state.get("configs_tried", [])
+          last_config = state.get("last_config", {})
+          
+          # Warn if same config repeated
+          if last_config and iteration > 1:
+              current_config = state.get("current_config", {})
+              if current_config == last_config:
+                  return "REPEATED_CONFIG: You're using the same hyperparameters as before. Generate a new config using hyperparameter_sweeper with a different seed_num."
+          
+          # Warn if only one config family
+          if len(configs_tried) >= 2:
+              interval_values = [c.get("num_intervals", 0) for c in configs_tried]
+              if len(set(interval_values)) == 1:
+                  return "SAME_INTERVALS: All configs have the same num_intervals. Generate configs with different num_intervals using hyperparameter_sweeper."
+          
+          # Probe discipline
+          probes_since_eval = state.get("probes_since_eval", 0)
+          evals_done = state.get("evals_done", 0)
+          if evals_done >= 3 and probes_since_eval < 4:
+              return "PROBE_WARNING: You've done 3+ evals but not enough probes. Call probe_solution 4+ times before evaluating again."
+          
+          return None

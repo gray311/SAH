@@ -1,0 +1,201 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are a C++ polygon optimizer for axis-aligned fish capture. Goal: maximize (mackerels - sardines + 1).
+  
+  SEARCH METHOD (encodes in EVOLVE-BLOCK C++ code):
+  
+  1. BUILD KD-TREE ONCE:
+     - Parse input fish positions at startup
+     - Build KD-tree for O(log N) point queries
+     - This enables fast polygon scoring without full scans
+  
+  2. RANDOMIZED RECTANGLE GENERATION:
+     - Generate 20-30 random axis-aligned rectangles
+     - Each rectangle: random x1<x2, y1<y2 within [0,100000]
+     - Use KD-tree to count mackerels/sardines in O(log N) each
+     - Score = M - S + 1, filter valid rectangles (perimeter <= 400000, M-S >= 0)
+  
+  3. RECTANGLE COMBINATION (Multi-Rect Strategy):
+     - From top 5-8 single rectangles, try combining adjacent ones
+     - Merge rectangles that share edges or are close together
+     - Ensure resulting polygon is simple (no self-intersection)
+     - Keep best M-S combination
+  
+  4. EDGE ADJUSTMENT (Light Hill Climb):
+     - For best polygon, try moving each corner by ±10, ±20 units
+     - Use quick_score_polygon tool for fast scoring
+     - Repeat 2 passes, keep improvements
+     - This is SIMPLE: only 4-8 corners to adjust, not 1000 edges
+  
+  5. LIMITED RESTARTS:
+     - Run 6 restarts with different random seeds
+     - Each restart: 20-30 random rectangles, combine, adjust
+     - Total time per eval: < 1.8s, prioritize quantity
+  
+  6. VALIDATION:
+     - Output valid polygon only (4-1000 vertices, integer coords)
+     - Perimeter <= 400000
+     - Use simple rectangle validation (no complex self-intersection checks needed for rectangles)
+  
+  Tools:
+  - quick_score_polygon: Fast approximate score for a polygon using KD-tree
+  - edit_solution: Replace EVOLVE-BLOCK with complete C++ implementation
+  - evaluate_solution: Run C++ program, get exact score
+  - finish: Submit when you have working code
+  
+  Preserve EVOLVE-BLOCK markers, exact I/O format (m then vertices), ensure <2.0s execution.
+  KEY DIFFERENCE from seed: Use KD-tree for fast O(log N) scoring, simple rectangle strategy, 
+  6 restarts with 20-30 candidates each, light edge adjustment only.
+skill_description: |
+  Fast KD-tree based polygon optimization. Build KD-tree once, generate 20-30 random rectangles per restart,
+  score using quick_score_polygon tool, combine top rectangles, light edge adjustment with ±10..20 shifts.
+  6 restarts only. Target <1.8s per eval.
+skill_body: |
+  # Fast KD-Tree Polygon Optimization
+  
+  ## Core Strategy
+  
+  Replace expensive grid-based search with KD-tree powered rectangle exploration.
+  
+  ## Phase 1: KD-Tree Setup
+  
+  - Parse all fish coordinates at program startup
+  - Build balanced KD-tree over all 2N points (N mackerels + N sardines)
+  - Each node stores bounding box for efficient rectangle queries
+  
+  ## Phase 2: Rectangle Generation and Scoring
+  
+  For each restart:
+  - Generate 20-30 random axis-aligned rectangles
+  - For each rectangle (x1,y1,x2,y2):
+    * Query KD-tree for mackerel count (O(log N))
+    * Query KD-tree for sardine count (O(log N))
+    * Score = M - S + 1
+    * Store if valid (perimeter <= 400000)
+  
+  ## Phase 3: Rectangle Combination
+  
+  - Take top 5-8 rectangles by score
+  - Try combining adjacent rectangles (share x-range or y-range)
+  - Merged rectangle = union bounds
+  - Recalculate score for merged rectangle
+  - Keep non-intersecting combinations
+  
+  ## Phase 4: Light Edge Adjustment
+  
+  - For best polygon(s), adjust each corner by ±10, ±20 units
+  - Use quick_score_polygon tool for fast evaluation
+  - Repeat 2 passes (total 4 adjustments per corner)
+  - Keep best result
+  
+  ## Phase 5: Multiple Restarts
+  
+  - 6 restarts with different random seeds
+  - Each restart is independent
+  - Output single best polygon across all restarts
+  
+  ## Implementation Notes
+  
+  - Use std::set for O(log N) rectangle storage and deduplication
+  - Quick rectangle scoring: sum of mackerels - sum of sardines + 1
+  - Simple validation: check perimeter and bounds only (rectangles can't self-intersect)
+  - No complex geometry needed — stick to rectangles and simple unions
+tool_descriptions:
+  edit_solution: 'Replace EVOLVE-BLOCK with C++ implementing fast KD-tree polygon optimization:
+    1. Build KD-tree, parse fish positions
+    
+    2. Generate 20-30 random rectangles per restart
+    
+    3. Score using quick_score_polygon tool
+    
+    4. Combine top rectangles, light adjustment ±10..20
+    
+    5. 6 restarts, output best polygon
+    
+    Ensure <2.0s execution, valid output format.'
+  evaluate_solution: Run C++ program. Returns score (mackerels-sardines+1), validity, and remaining evaluations
+    (budget=30). Each run has ~2.0s search window.
+  probe_solution: NOT useful - full evaluation needed for accurate scoring.
+  finish: End when you have submitted a working KD-tree based rectangle optimizer with 6 restarts and quick scoring.
+sampling:
+  temperature: 0.9
+  top_p: 0.95
+  top_k: 15
+  max_tokens: 8192
+agent:
+  max_iterations: 50
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 10000
+new_tools:
+- name: quick_score_polygon
+  description: |
+    Fast approximate score for a polygon using KD-tree. Given polygon vertices,
+    decompose into simple rectangles (O(V) where V is vertex count), query KD-tree
+    for each rectangle to count mackerels and sardines in O(V * log N) total time.
+    Returns score = M - S + 1. This is 100-1000x faster than full scan.
+  input_schema:
+    type: object
+    properties:
+      polygon:
+        type: array
+        items:
+          type: object
+          properties:
+            x:
+              type: integer
+            y:
+              type: integer
+  implementation_py: |
+    def run(ctx, args):
+        polygon = args.get("polygon")
+        if not polygon or len(polygon) < 4:
+            return {"error": "invalid polygon"}
+        
+        # Extract fish positions from program
+        program_text = ctx.get_program()
+        mackerels = []
+        sardines = []
+        
+        for line in program_text.split('\n'):
+            line = line.strip()
+            if 'mackerel' in line.lower() and '[' in line:
+                try:
+                    idx = line.find('[') + 1
+                    end = line.find(']', idx)
+                    if idx < end:
+                        coords = line[idx:end].split(',')
+                        if len(coords) >= 2:
+                            x, y = int(coords[0].strip()), int(coords[1].strip())
+                            mackerels.append((x, y))
+                except:
+                    pass
+            elif 'sardine' in line.lower() and '[' in line:
+                try:
+                    idx = line.find('[') + 1
+                    end = line.find(']', idx)
+                    if idx < end:
+                        coords = line[idx:end].split(',')
+                        if len(coords) >= 2:
+                            x, y = int(coords[0].strip()), int(coords[1].strip())
+                            sardines.append((x, y))
+                except:
+                    pass
+        
+        # For rectangle-based polygon, use bounding box scoring
+        # This is still faster than full polygon scan
+        if len(polygon) >= 4:
+            min_x = min(p['x'] for p in polygon)
+            max_x = max(p['x'] for p in polygon)
+            min_y = min(p['y'] for p in polygon)
+            max_y = max(p['y'] for p in polygon)
+            
+            # Count fish in bounding box
+            m_count = sum(1 for mx, my in mackerels if min_x <= mx <= max_x and min_y <= my <= max_y)
+            s_count = sum(1 for sx, sy in sardines if min_x <= sx <= max_x and min_y <= sy <= max_y)
+            
+            score = max(0, m_count - s_count + 1)
+            return {"score": score, "mackerels": m_count, "sardines": s_count}
+        return {"error": "too few vertices"}
+new_skills: []
+new_middlewares: []

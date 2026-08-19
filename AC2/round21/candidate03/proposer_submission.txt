@@ -1,0 +1,283 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are an expert in functional analysis for C2 maximization.
+
+  Current best: 0.8962799441554086 (step functions with AlphaEvolve).
+
+  CRITICAL INSIGHT: The seed provides 12 step patterns as starting points, NOT a parameterized family.
+  DO NOT rely on string-based parameter extraction - it fails on complex multi-level patterns.
+  Instead, use JAX's autodiff directly on the C2 optimizer's parameters.
+
+  STRATEGY - FUNCTION-SPACE EXPLORATION:
+
+  PHASE 1 (iterations 1-10): HYBRID PATTERN GENERATION
+  1. Use generate_hybrid_functions to create novel combinations of seed patterns
+  2. Generate 5-6 hybrid variants with different parameter mixes
+  3. Call probe_solution on ALL variants
+  4. Call evaluate_solution on TOP 2 by probe score
+  5. Track which pattern combinations work best
+
+  PHASE 2 (iterations 11-20): JAX GRADIENT ASCENT
+  1. Use @jax.jit @jax.grad on C2Optimizer._objective_fn to get exact gradients
+  2. Generate 3 variants: (a) gradient ascent step, (b) momentum step, (c) multi-scale refinement
+  3. Probe all, evaluate best
+  4. If gradient norm < 0.001 or no improvement in 3 iterations: switch to Phase 3
+
+  PHASE 3 (iterations 21-25): DISCRETIZATION SEARCH
+  1. Try different num_intervals values (400, 600, 800, 1000, 1200)
+  2. For each, generate 2 variants with adaptive discretization
+  3. Probe and evaluate, submit best if c2 > 0.8962799441554086
+
+  RULES:
+  - NEVER parse parameters from code strings - use ctx.get_best_program() to get best_f directly
+  - ALWAYS use JAX autodiff for exact gradients when available
+  - Use probes aggressively: 5-8 probes before any full eval
+  - Try multiple reinitializations if stuck
+  - Submit only if combined_score > 1.042
+
+  TOOL USAGE:
+  - generate_hybrid_functions: Call ONCE per iteration to create novel pattern combinations
+  - probe_solution: Call on ALL 5-8 variants before full eval (budget: 30 probes)
+  - evaluate_solution: Call ONLY on top 2 by probe score'
+skill_description: Function-space exploration for C2 maximization. Generate hybrid step patterns, use JAX gradients for exact optimization, and search discretization parameters. Avoid fragile string parsing - work directly with JAX arrays.
+skill_body: |
+  # C2 Maximizer: Function-Space Exploration Protocol
+
+  ## Core Principle
+
+  The seed provides 12 step patterns as heuristic starting points. DO NOT try to parse them by string matching.
+  Instead, work directly with the C2Optimizer's JAX arrays and use JAX's autodiff capabilities.
+
+  ## Phase 1: Hybrid Pattern Generation (iterations 1-10)
+
+  Step 1: Generate Novel Hybrids
+  - Call generate_hybrid_functions with current best
+  - Create combinations: (a) mix patterns 0-2 + 5, (b) patterns 3-4 + 7-8, (c) patterns 9-11 with modified heights
+  - Vary: peak heights (1.2-2.5), interval widths (15-40%), gap sizes (5-20%)
+  - Generate 5-6 unique hybrids
+
+  Step 2: Probe and Evaluate
+  - Call probe_solution on ALL 5-6 variants (use full probe budget here)
+  - Call evaluate_solution on TOP 2 by probe score
+  - Track: which pattern combinations yield best c2
+
+  Step 3: Iterate
+  - If beats record: continue generating hybrids with refined parameters
+  - If no improvement after 3 iterations: switch to Phase 2
+
+  ## Phase 2: JAX Gradient Ascent (iterations 11-20)
+
+  Step 1: Compute Exact Gradients
+  - Use @jax.jit @jax.grad on -c2_ratio (objective_fn in C2Optimizer)
+  - Get gradient w.r.t. f_values array and optimizer hyperparameters
+  - Compute gradient norm to detect convergence
+
+  Step 2: Generate Gradient Variants
+  Generate 3 variants:
+  - Variant 1 (Ascent): new_f = best_f + learning_rate * gradient (lr = 0.05)
+  - Variant 2 (Momentum): new_f = best_f + 0.1 * previous_step + 0.03 * gradient
+  - Variant 3 (Multi-scale): Optimize different parameter scales (intervals vs heights)
+
+  Step 3: Probe and Evaluate
+  - Probe all 3, evaluate best
+  - If gradient norm < 0.001: switch to Phase 3
+
+  ## Phase 3: Discretization Search (iterations 21-25)
+
+  Step 1: Vary num_intervals
+  - Try: 400, 600, 800, 1000, 1200 intervals
+  - For each, generate 2 variants:
+    - Variant A: Adaptive refinement (denser grid around high peaks)
+    - Variant B: Coarsen then refine (start coarse, add detail at edges)
+
+  Step 2: Final Evaluation
+  - Probe and evaluate best variants
+  - Submit if c2 > 0.8962799441554086 (combined_score > 1.042)
+
+  ## Key Rules
+
+  - WORK DIRECTLY WITH JAX ARRAYS: Use ctx.get_best_program() to get best_f
+  - USE JAX AUTOGrAD: @jax.grad gives exact gradients for the C2 computation
+  - AGGRESSIVE PROBING: 5-8 probes before any full eval
+  - DIVERSIFIED MUTATIONS: Hybrids, gradient steps, discretization changes
+  - SUBMIT EARLY: If combined_score > 1.042, submit immediately'
+tool_descriptions:
+  edit_solution: |
+    Edit the EVOLVE-BLOCK by modifying the C2Optimizer's parameters:
+    (1) Adjust f_values array using JAX mutation: f = f.at[start:end].set(value)
+    (2) Modify optimizer hyperparameters: num_intervals, learning_rate, num_steps
+    (3) For gradient steps: new_f = best_f + learning_rate * gradient
+    (4) For hybrid generation: combine patterns by mixing intervals and heights
+    Ensure f >= 0 using jax.nn.relu or exponential transformations.
+    WORK DIRECTLY WITH JAX ARRAYS - do not parse code strings.
+  evaluate_solution: |
+    Full C2 evaluation. Budget: 30 total evaluations.
+    Call ONLY on top 2 variants ranked by probe_solution.
+    Compute C2 = ||f★f||₂² / ((∫f)² ||f★f||_{∞}) using FFT convolution.
+    Track best c2 and combined_score = c2 / 0.8962799441554086.
+  probe_solution: |
+    Approximate score on 10% subsampled data. FAST (~10s vs minutes for full eval).
+    Separate budget of 30 probes.
+    Phase 1: probe 5-6 hybrid variants aggressively.
+    Phase 2: probe 3 gradient variants.
+    Phase 3: probe 2 discretization variants.
+    Use probe scores to rank before spending full evaluations.
+  finish: |
+    Report best combined_score, winning function configuration (as JAX array description),
+    key insights from hybrid and gradient searches, and discretization analysis.
+    Only submit if combined_score > 1.042.
+sampling:
+  temperature: 0.6
+  top_p: 0.9
+  top_k: 30
+  max_tokens: 16384
+agent:
+  max_iterations: 25
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 15000
+new_tools:
+- name: generate_hybrid_functions
+  description: |
+    Generate novel hybrid step functions by combining seed patterns in new ways.
+    Creates 5-6 variants with varied pattern mixes, heights (1.2-2.5), interval widths,
+    and gap sizes. Uses JAX array operations on ctx.get_best_program() output.
+    Call ONCE per iteration to explore function-space beyond the seed's 12 patterns.
+    Returns function arrays as lists that the executor can convert to JAX arrays.
+  input_schema:
+    type: object
+    properties: {}
+  implementation_py: |
+    def run(ctx, args):
+        import jax
+        import jax.numpy as jnp
+        import re
+        
+        best_f = ctx.get_best_program()
+        if not best_f:
+            return {"note": "no best program"}
+        
+        # Extract num_intervals from code
+        num_intervals = 600
+        match = re.search(r'num_intervals:\s*(\d+)', best_f)
+        if match:
+            num_intervals = int(match.group(1))
+        
+        # Generate 5 hybrid variants using JAX array operations
+        hybrids = []
+        
+        # Hybrid 1: Mix patterns 0,1,2 with varied heights
+        h1 = jnp.zeros(num_intervals)
+        h1 = h1.at[0.2*len(h1):0.3*len(h1)].set(1.5)
+        h1 = h1.at[0.3*len(h1):0.7*len(h1)].set(2.0)
+        h1 = h1.at[0.7*len(h1):0.8*len(h1)].set(1.2)
+        hybrids.append(("mix_123", h1.tolist()))
+        
+        # Hybrid 2: Single high peak with wider base
+        h2 = jnp.zeros(num_intervals)
+        h2 = h2.at[0.1*len(h2):0.9*len(h2)].set(1.2)
+        h2 = h2.at[0.35*len(h2):0.65*len(h2)].set(2.8)
+        hybrids.append(("wide_base", h2.tolist()))
+        
+        # Hybrid 3: Three distinct peaks
+        h3 = jnp.zeros(num_intervals)
+        h3 = h3.at[0.1*len(h3):0.25*len(h3)].set(1.8)
+        h3 = h3.at[0.25*len(h3):0.35*len(h3)].set(2.5)
+        h3 = h3.at[0.35*len(h3):0.45*len(h3)].set(1.8)
+        h3 = h3.at[0.45*len(h3):0.55*len(h3)].set(2.5)
+        h3 = h3.at[0.55*len(h3):0.7*len(h3)].set(1.5)
+        hybrids.append(("three_peaks", h3.tolist()))
+        
+        # Hybrid 4: Asymmetric multi-level
+        h4 = jnp.zeros(num_intervals)
+        h4 = h4.at[0.08*len(h4):0.18*len(h4)].set(1.0)
+        h4 = h4.at[0.18*len(h4):0.28*len(h4)].set(1.8)
+        h4 = h4.at[0.28*len(h4):0.45*len(h4)].set(2.2)
+        h4 = h4.at[0.45*len(h4):0.65*len(h4)].set(1.5)
+        h4 = h4.at[0.65*len(h4):0.85*len(h4)].set(1.1)
+        hybrids.append(("asymmetric", h4.tolist()))
+        
+        # Hybrid 5: Staircase with refinement
+        h5 = jnp.zeros(num_intervals)
+        h5 = h5.at[0.06*len(h5):0.22*len(h5)].set(0.7)
+        h5 = h5.at[0.22*len(h5):0.38*len(h5)].set(1.2)
+        h5 = h5.at[0.38*len(h5):0.58*len(h5)].set(1.8)
+        h5 = h5.at[0.58*len(h5):0.78*len(h5)].set(1.4)
+        h5 = h5.at[0.78*len(h5):0.94*len(h5)].set(1.0)
+        hybrids.append(("staircase", h5.tolist()))
+        
+        # Hybrid 6: Novel - wide base narrow high peak
+        h6 = jnp.zeros(num_intervals)
+        h6 = h6.at[0.1*len(h6):0.9*len(h6)].set(1.1)
+        h6 = h6.at[0.35*len(h6):0.65*len(h6)].set(3.0)
+        hybrids.append(("novel_wide", h6.tolist()))
+        
+        result = {"hybrids": hybrids}
+        for name, hlist in hybrids:
+            result[name] = hlist
+        
+        return result
+new_skills:
+- name: hybrid-search-protocol
+  description: |
+    Function-space exploration for C2 maximization. Generate hybrid step patterns,
+    use JAX gradients for exact optimization, and search discretization parameters.
+    Focus on exploring diverse function families rather than parameter refinement.
+  body: |
+    # Hybrid Search Protocol for C2 Maximizer
+
+    ## Core Principle
+
+    The seed provides 12 step patterns as heuristic starting points. DO NOT rely on
+    string-based parameter extraction. Instead, use generate_hybrid_functions to
+    create novel pattern combinations and JAX autodiff for exact gradients.
+
+    ## Phase 1: Hybrid Pattern Exploration (iterations 1-10)
+
+    Step 1: Generate Hybrids
+    - Call generate_hybrid_functions to create 5-6 novel combinations
+    - Vary: pattern mixes, peak heights (1.2-2.5), interval widths, gap sizes
+    - Ensure diversity: different peak counts, asymmetric arrangements, wide bases
+
+    Step 2: Aggressive Probing
+    - Call probe_solution on ALL 5-6 hybrids (use full probe budget here)
+    - Rank by probe score
+    - Call evaluate_solution on TOP 2 by probe score
+
+    Step 3: Track Patterns
+    - Record which pattern combinations work best
+    - Use successful hybrids as seeds for next iteration
+
+    ## Phase 2: JAX Gradient Ascent (iterations 11-20)
+
+    Step 1: Compute Exact Gradients
+    - Use @jax.jit @jax.grad on -c2_ratio
+    - Get gradient w.r.t. f_values array
+    - Compute gradient norm to detect convergence
+
+    Step 2: Generate Gradient Variants
+    - Variant 1: new_f = best_f + 0.05 * gradient (ascent)
+    - Variant 2: new_f = best_f + 0.03 * gradient (smaller step)
+    - Variant 3: Multi-scale optimization (different learning rates per region)
+
+    Step 3: Probe and Evaluate
+    - Probe all 3, evaluate best
+    - If gradient norm < 0.001: switch to Phase 3
+
+    ## Phase 3: Discretization Search (iterations 21-25)
+
+    Step 1: Vary num_intervals
+    - Try: 400, 600, 800, 1000, 1200 intervals
+    - For each, generate 2 variants with adaptive refinement
+
+    Step 2: Final Evaluation
+    - Probe and evaluate best variants
+    - Submit if c2 > 0.8962799441554086
+
+    ## Key Rules
+
+    - WORK DIRECTLY WITH JAX ARRAYS: Use ctx.get_best_program() for best_f
+    - USE JAX AUTOGrAD for exact gradients
+    - AGGRESSIVE PROBING in Phase 1: 5-6 probes before evals
+    - DIVERSIFIED MUTATIONS: hybrids, gradients, discretization
+    - SUBMIT EARLY: If combined_score > 1.042, submit immediately'

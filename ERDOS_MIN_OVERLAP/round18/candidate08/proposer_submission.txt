@@ -1,0 +1,116 @@
+schema: h2spec/1.0
+system_prompt: |
+  Erdos minimum overlap problem: find h: [0,2]->[0,1] minimizing max_k integral h(x)(1-h(x+k))dx.
+  
+  Constraint: integral(h) = 1 exactly.
+  
+  Current best: C5 <= 0.38092303510845016 (combined_score > 1.0 means new record).
+  
+  SEED OPTIMIZER: Runs 59000 training steps per candidate using sigmoid-scaled latent vectors.
+  
+  STRATEGY - Pattern-Based Search:
+  
+  1. CALL generate_valid_simple to get 3 EXACTLY integral=1 step functions:
+     - Bipartite: h=2 on [0.5,1.0)
+     - Two-block: h=1 on [0,0.5) and [1,1.5)
+     - Tri-step: h=2.5 on [0.4,0.8)
+  
+  2. Check c5_bound < 0.38 (integral is 1.0 by construction)
+  
+  3. CALL evaluate_solution ONLY if c5_bound < 0.38
+  
+  4. If nothing passes, regenerate or use generate_ready_candidates(temperature=0.8)
+  
+  Budget: 30 evals. Max 4-5 full evaluations.
+  
+  Finish when combined_score > 1.0.
+skill_description: |
+  Generate exact integral=1 step functions, compute c5 via FFT, evaluate if c5 < 0.38.
+tool_descriptions:
+  edit_solution: 'Edit EVOLVE-BLOCK to set optimizer. For step candidates: num_restarts=1, pass h as latent, num_steps=59000.'
+  evaluate_solution: 'Run 59000-step optimizer. Returns combined_score = 0.38092303510845016 / c5_bound. combined_score > 1.0 is new record.'
+  probe_solution: 'Fast FFT c5 estimate on 500 intervals.'
+  finish: 'Submit when combined_score > 1.0 or after exhausting budget.'
+new_tools:
+  - name: generate_valid_simple
+    description: |
+      Generate 3 EXACTLY integral=1 step function candidates.
+      
+      Patterns are pure step functions (values 0, 1, 2, 2.5).
+      Optimizer applies sigmoid() to convert to [0,1].
+      
+      Precomputed c5_bound via FFT. Integral is EXACTLY 1.0.
+      
+      ACCEPT if c5_bound < 0.38.
+    input_schema:
+      type: object
+      properties: {}
+    implementation_py: |
+      def run(ctx, args):
+          import numpy as np
+          N = 800
+          dx = 2.0 / N
+          
+          bipartite_h = np.zeros(N)
+          bipartite_h[int(0.5*N):int(1.0*N)] = 2.0
+          corr = np.fft.ifft(np.fft.fft(np.pad(bipartite_h, (0,N))) * np.conj(np.fft.fft(np.pad(1.0-bipartite_h, (0,N))))).real
+          bipartite_c5 = np.max(corr * dx)
+          
+          two_block_h = np.zeros(N)
+          two_block_h[:int(0.5*N)] = 1.0
+          two_block_h[int(1.0*N):int(1.5*N)] = 1.0
+          corr = np.fft.ifft(np.fft.fft(np.pad(two_block_h, (0,N))) * np.conj(np.fft.fft(np.pad(1.0-two_block_h, (0,N))))).real
+          two_block_c5 = np.max(corr * dx)
+          
+          tri_h = np.zeros(N)
+          tri_h[int(0.4*N):int(0.8*N)] = 2.5
+          corr = np.fft.ifft(np.fft.fft(np.pad(tri_h, (0,N))) * np.conj(np.fft.fft(np.pad(1.0-tri_h, (0,N))))).real
+          tri_c5 = np.max(corr * dx)
+          
+          return {
+              "candidates": [
+                  {"name": "bipartite_step", "h": bipartite_h.tolist(), "c5_bound": float(bipartite_c5)},
+                  {"name": "two_block", "h": two_block_h.tolist(), "c5_bound": float(two_block_c5)},
+                  {"name": "tri_step", "h": tri_h.tolist(), "c5_bound": float(tri_c5)}
+              ]
+          }
+sampling:
+  temperature: 0.7
+  top_p: 0.92
+  top_k: 25
+  max_tokens: 13000
+agent:
+  max_iterations: 35
+middleware:
+  budget_reminder_from_left: 3
+  long_tool_output_max_chars: 8000
+new_skills:
+  - name: simple-step-strategy
+    description: Generate exact integral=1 step functions, compute c5 via FFT, evaluate if c5 < 0.38.
+    body: |
+      # Step Function Strategy
+      
+      Three patterns with integral=1 by construction:
+      1. Bipartite: h=2 on [0.5,1)
+      2. Two-block: h=1 on [0,0.5) and [1,1.5)
+      3. Tri-step: h=2.5 on [0.4,0.8)
+      
+      Workflow:
+      1. generate_valid_simple -> 3 candidates
+      2. Check c5_bound < 0.38
+      3. evaluate_solution on accepted
+      4. If no progress: regenerate with higher T
+      
+      Budget: 30 evals, max 4-5 full evaluations
+new_middlewares:
+  - name: validate_step_candidate
+    hook: before_model
+    description: Check c5 < 0.38 before evaluation
+    implementation_py: |
+      def before_model(hook_input):
+          state = hook_input.get("state", {})
+          last = state.get("last_candidate", {})
+          c5 = last.get("c5_bound", None)
+          if c5 is not None and c5 >= 0.38:
+              return "Candidate c5_bound = " + str(c5) + " >= 0.38. Skip.\n"
+          return None

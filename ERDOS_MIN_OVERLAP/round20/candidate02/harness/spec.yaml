@@ -1,0 +1,331 @@
+schema: h2spec/1.0
+system_prompt: |
+  Erdos minimum overlap: Find h: [0,2]->[0,1] minimizing max_k integral h(x)(1-h(x+k))dx.
+  
+  Constraint: integral(h) = 1 exactly.
+  Current best: C5 <= 0.38092303510845016.
+  Goal: Beat seed score of 0.999968 (c5_bound < 0.380923).
+  
+  CRITICAL STRATEGY: The seed optimizer uses 15 diverse pattern initializations and trains for 59000 steps each.
+  - DON'T just generate new patterns; the optimizer already has 15.
+  - INSTEAD, modify HOW the optimizer works: change initialization scales, add bias terms, adjust learning dynamics.
+  
+  Specific tactics:
+  1. Increase num_intervals from 800 to 1600 or 3200 for finer discretization
+  2. Adjust base_learning_rate (try 0.003, 0.01, 0.001) to change convergence
+  3. Modify penalty_strength (try 30, 100, 200) to affect constraint satisfaction
+  4. Add bias to latent (add 1.0 or -1.0 shift) to change sigmoid output distribution
+  5. Change num_restarts to 1 for focused search OR increase to 5 for more diversity
+  
+  After each edit, call evaluate_solution and analyze the new c5_bound.
+  If no improvement after 3-4 edits, try completely different strategies.
+  
+  Use probe_solution to screen edits cheaply before full evaluation.
+skill_description: |
+  Optimize the Erdos optimizer by modifying hyperparameters and initialization strategies.
+  Target: c5_bound < 0.380923 (combined_score > 1.0).
+skill_body: |
+  # Optimization Strategy for Erdos Min-Overlap
+  
+  ## Understanding the Problem
+  
+  We minimize: max_k integral_0^2 h(x)(1-h(x+k))dx
+  
+  The seed program uses 15 pattern initializations, trains for 59000 steps each,
+  with num_intervals=800, learning_rate=0.0062, penalty=61.0.
+  
+  ## Key Failure Modes to Address
+  
+  1. **Insufficient exploration**: The optimizer may be stuck in a local minimum.
+     - Try increasing num_intervals to capture finer structure
+     - Try different learning rates (0.003, 0.01) for different convergence dynamics
+  
+  2. **Poor initialization**: The 15 patterns may not explore the right region.
+     - Add bias to latent (shift sigmoid output)
+     - Try smaller/noise patterns (latent*0.5 instead of full range)
+  
+  3. **Constraint violation**: integral(h) != 1.0 hurts quality.
+     - Increase penalty_strength (100, 200) to enforce constraint harder
+     - Use num_restarts=1 to focus on single good path
+  
+  ## Edit Strategy
+  
+  ### Single-Parameter Edits ( safest )
+  - num_intervals: 800 -> 1600 or 3200 (finer discretization)
+  - base_learning_rate: 0.0062 -> 0.003 or 0.01
+  - penalty_strength: 61.0 -> 30.0 or 100.0
+  - num_restarts: 3 -> 1 or 5
+  
+  ### Structural Edits (risky but potentially effective)
+  - In _get_best_initialization: modify latent scaling
+    - latent + noise*0.5 instead of noise*0.3-1.0
+    - Add bias: latent + 1.0 or latent - 0.5
+  
+  ## Workflow
+  
+  1. Call probe_solution on current code (if available)
+  2. Propose ONE specific edit to hyperparameters or initialization
+  3. Call evaluate_solution on the edited version
+  4. Analyze: c5_bound improved? If yes, commit. If no, try different edit.
+  5. Repeat until c5_bound < 0.380923 or 20 evals used.
+  
+  ## Critical Notes
+  
+  - The EVOLVE-BLOCK is in the class definition; edits are structural.
+  - Small hyperparameter changes are safer than rewriting logic.
+  - probe_solution can approximate c5_bound before full eval.
+  - If stuck, try num_intervals=3200 with different learning rate.
+tool_descriptions:
+  edit_solution: |
+    Modify EVOLVE-BLOCK to change hyperparameters or code structure.
+    
+    Key parameters to tune:
+    - num_intervals: 800 -> 1600/3200 (finer discretization, may improve)
+    - base_learning_rate: 0.0062 -> 0.003/0.01 (different convergence)
+    - penalty_strength: 61.0 -> 30.0/100.0 (constraint enforcement)
+    - num_restarts: 3 -> 1 (focused) or 5 (more diversity)
+    
+    For code edits, modify _get_best_initialization latent scaling.
+    Keep edits minimal and testable.
+  evaluate_solution: |
+    Run full optimization on edited code. Returns combined_score = 0.380923/c5_bound.
+    combined_score > 1.0 means c5_bound < 0.380923 (new record).
+  probe_solution: |
+    Fast approximate c5_bound using 500 intervals and analytical computation.
+    Check integral constraint and c5_bound before full eval.
+  finish: |
+    Submit when combined_score > 1.0 (c5_bound < 0.38092303510845016).
+sampling:
+  temperature: 0.9
+  top_p: 0.95
+  top_k: 30
+  max_tokens: 16384
+agent:
+  max_iterations: 40
+middleware:
+  budget_reminder_from_left: 2
+  long_tool_output_max_chars: 6000
+new_tools:
+  - name: mutate_optimizer
+    description: |
+      Make a targeted edit to the Erdos optimizer's hyperparameters or initialization.
+      
+      Use when:
+      - Current c5_bound is worse than best known (0.380923)
+      - You want to try new initialization strategies
+      - You need to adjust optimizer dynamics
+      
+      Edits focus on:
+      1. num_intervals: finer discretization (800 -> 1600/3200)
+      2. base_learning_rate: different convergence dynamics
+      3. penalty_strength: better constraint enforcement
+      4. latent initialization: bias terms, noise scaling
+      5. Pattern modifications in _get_best_initialization
+      
+      This tool returns the exact code edit and a brief rationale.
+    input_schema:
+      type: object
+      properties:
+        parameter:
+          type: string
+          description: "Which parameter to mutate: num_intervals, base_learning_rate, penalty_strength, num_restarts, latent_bias"
+        value:
+          type: number
+          description: "New value for the parameter"
+    implementation_py: |
+      def run(ctx, args):
+          import re
+          parameter = args.get("parameter", "num_intervals")
+          new_value = args.get("value", None)
+          
+          code = ctx.get_program()
+          edit = None
+          rationale = ""
+          
+          if parameter == "num_intervals":
+              old_val = re.search(r"num_intervals:\s*(\d+)", code)
+              if old_val:
+                  old_num = int(old_val.group(1))
+                  if new_value:
+                      edit = re.sub(
+                          r"num_intervals:\s*\d+",
+                          f"num_intervals: {int(new_value)}",
+                          code
+                      )
+                      rationale = f"Changed num_intervals from {old_num} to {int(new_value)} for finer discretization"
+          
+          elif parameter == "base_learning_rate":
+              old_val = re.search(r"base_learning_rate:\s*[\d.]+", code)
+              if old_val and new_value:
+                  edit = re.sub(
+                      r"base_learning_rate:\s*[\d.]+",
+                      f"base_learning_rate: {float(new_value)}",
+                      code
+                  )
+                  rationale = f"Changed base_learning_rate to {float(new_value)} for different convergence dynamics"
+          
+          elif parameter == "penalty_strength":
+              old_val = re.search(r"penalty_strength:\s*[\d.]+", code)
+              if old_val and new_value:
+                  edit = re.sub(
+                      r"penalty_strength:\s*[\d.]+",
+                      f"penalty_strength: {float(new_value)}",
+                      code
+                  )
+                  rationale = f"Changed penalty_strength to {float(new_value)} for better constraint enforcement"
+          
+          elif parameter == "num_restarts":
+              old_val = re.search(r"num_restarts:\s*(\d+)", code)
+              if old_val:
+                  old_num = int(old_val.group(1))
+                  if new_value:
+                      edit = re.sub(
+                          r"num_restarts:\s*\d+",
+                          f"num_restarts: {int(new_value)}",
+                          code
+                      )
+                      rationale = f"Changed num_restarts from {old_num} to {int(new_value)}"
+          
+          elif parameter == "latent_bias":
+              # Add bias term to initialization
+              old_code = """latent = latent + jax.random.normal(subkey, (N,)) * 0.3"""
+              if old_code in code:
+                  edit = code.replace(old_code, """latent = latent + jax.random.normal(subkey, (N,)) * 0.3
+              latent = latent + 1.0  # Add bias to shift sigmoid output""")
+                  rationale = "Added latent bias (+1.0) to shift sigmoid output distribution"
+              else:
+                  # Try to find any latent noise line and add bias after
+                  patterns = [
+                      r"latent = latent \+ jax\.random\.normal\(subkey, \(N,\)\) \* [\d.]+",
+                      r"latent = latent \+ jax\.random\.normal\(subkey, \(N,\)\) \* [0-9]"
+                  ]
+                  for pat in patterns:
+                      match = re.search(pat, code)
+                      if match:
+                          latent_line = match.group(0)
+                          edit = code.replace(latent_line, latent_line.rstrip() + "\n              latent = latent + 1.0")
+                          rationale = "Added latent bias after noise term"
+                          break
+          
+          if edit:
+              return {
+                  "edit": edit,
+                  "parameter": parameter,
+                  "new_value": new_value,
+                  "rationale": rationale,
+                  "success": True
+              }
+          else:
+              return {
+                  "edit": None,
+                  "parameter": parameter,
+                  "new_value": new_value,
+                  "rationale": f"Could not find parameter {parameter} to edit",
+                  "success": False,
+                  "error": "Edit not applied"
+              }
+new_skills:
+  - name: optimizer-tuning
+    description: Tune Erdos optimizer hyperparameters and initialization for better c5_bound.
+    body: |
+      # Optimizer Tuning for Erdos Min-Overlap
+      
+      ## The Challenge
+      
+      The seed program uses:
+      - num_intervals=800 (discretization)
+      - base_learning_rate=0.0062
+      - penalty_strength=61.0
+      - num_restarts=3
+      - 15 pattern initializations
+      
+      Current best c5_bound: 0.380923
+      Goal: c5_bound < 0.380923
+      
+      ## Why Current Fails
+      
+      The optimizer converges quickly to local minima with the current hyperparameters.
+      The 15 patterns may not explore the right region of function space.
+      
+      ## Tuning Strategy
+      
+      ### Hyperparameter Adjustments
+      
+      1. **num_intervals**: Increase from 800 to 1600 or 3200
+         - Finer discretization captures more structure
+         - May find better step functions
+      
+      2. **base_learning_rate**: Try 0.003, 0.01, or 0.005
+         - Lower LR: more stable convergence, might escape local minima
+         - Higher LR: faster exploration, might find better regions
+      
+      3. **penalty_strength**: Try 30, 100, or 200
+         - Higher penalty: stricter integral=1 constraint
+         - Lower penalty: more flexibility in function shape
+      
+      4. **num_restarts**: Try 1 (focused) or 5 (more diversity)
+         - Fewer restarts: commit to single optimization path
+         - More restarts: explore multiple starting points
+      
+      ### Initialization Modifications
+      
+      5. **Latent bias**: Add +1.0 or -0.5 bias to latent
+         - Shifts sigmoid output toward higher or lower values
+         - May create better h(x) distributions
+      
+      6. **Noise scaling**: Reduce noise from 0.3-1.0 to 0.1-0.5
+         - Smoother initializations, might converge better
+      
+      ## Using the mutate_optimizer Tool
+      
+      Call mutate_optimizer with:
+      - parameter: "num_intervals"
+        value: 1600
+      
+      or
+      
+      - parameter: "base_learning_rate"
+        value: 0.003
+      
+      or
+      
+      - parameter: "latent_bias"
+        value: null  # triggers bias addition
+      
+      After mutation, evaluate and check if c5_bound improved.
+      
+      ## Success Criteria
+      
+      - c5_bound < 0.380923 (combined_score > 1.0)
+      - integral(h) ≈ 1.0 (within 1%)
+      - Use probe_solution to screen before full eval
+new_middlewares:
+  - name: focus_on_hypothesis
+    hook: before_model
+    description: |
+      Middleware that focuses the solver on making targeted hyperparameter edits
+      rather than attempting wholesale code rewrites.
+    implementation_py: |
+      def before_model(hook_input):
+          state = hook_input.get("state", {})
+          evals_left = state.get("evals_left", 0)
+          edits_made = state.get("edits_made", 0)
+          
+          if edits_made < 2 and evals_left >= 5:
+              return (
+                  "You haven't made any edits yet. Call mutate_optimizer to make a targeted hyperparameter edit.\n"
+                  "Focus on: num_intervals, base_learning_rate, penalty_strength, or latent_bias.\n"
+                  "Don't try to rewrite the optimizer; tweak existing parameters."
+              )
+          elif edits_made >= 3 and evals_left >= 2:
+              return (
+                  f"You've made {edits_made} edits. If none improved, try a different parameter.\n"
+                  "Consider: num_intervals=3200, base_learning_rate=0.003, or adding latent_bias.\n"
+                  "Use probe_solution to check before full eval."
+              )
+          elif evals_left >= 1 and edits_made < 5:
+              return (
+                  f"{evals_left} evals left. Make one targeted edit with mutate_optimizer.\n"
+                  "If you've already tried many params, consider completely different strategies.\n"
+              )
+          return None

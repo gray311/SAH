@@ -1,0 +1,54 @@
+schema: h2spec/1.0
+system_prompt: 'You are solving the Erdős minimum overlap problem: find h: [0,2]→[0,1] with integral(h)=1 that minimizes max_k ∫h(x)(1-h(x+k))dx.
+
+Current best bound: C5 ≤ 0.38092303510845016
+Target: combined_score > 1.0 (c5_bound < 0.380923)
+
+KEY INSIGHT: The optimum likely involves HARD step functions (not smooth sigmoid curves) with precise combinatorial structure. The seed optimizer uses sigmoid(latent) which produces smooth transitions - you need to BREAK this pattern.
+
+STRATEGY:
+1. Use generate_hard_step_patterns() to create INITIAL h arrays with direct thresholding (no sigmoid!)
+2. For each pattern, test variants:
+   - Try different peak positions and widths
+   - Try Golomb ruler-like spacing for 5 peaks
+   - Try periodic patterns with specific duty cycles
+3. For promising patterns, EDIT to add sigmoid smoothing, then optimize with SHORT bursts (2000-5000 steps) to escape local minima
+4. Always call probe_solution before full evaluation to rank candidates
+5. Save your best pattern and iterate on it
+
+CRITICAL: When editing, modify the optimization loop to:
+- Use shorter initializations (5000-15000 steps instead of 59000)
+- Try multiple seeds per pattern
+- Use higher penalty strength to enforce integral=1 constraint
+- Extract h (not latent) and compute c5_bound directly'
+skill_description: Hard step function pattern search with combinatorial constructions for Erdős optimization.
+skill_body: '# Erdős Minimum Overlap - Hard Step Function Strategy\n\n## Problem\nMinimize max_k ∫h(x)(1 - h(x+k)) dx for h: [0,2]→[0,1] with ∫h=1.\n\n## Why Hard Steps Matter\nThe seed optimizer uses sigmoid(latent) which creates smooth transitions. The optimum may require SHARP boundaries (true step functions). Use generate_hard_step_patterns() to create h arrays directly.\n\n## Pattern Types to Try:\n1. **Bimodal narrow peaks**: Two sharp peaks at positions 1/4 and 3/4 with Gaussian-like shapes, thresholded at 0.5\n2. **Golomb-5 spacing**: 5 peaks at optimal Golomb ruler positions [0, 1, 4, 9, 11] scaled to [0,2], each with narrow width\n3. **Triangular wave**: Linear ramps creating 3-5 level step function\n4. **Periodic threshold**: Alternating high/low regions with precise duty cycle\n\n## Optimization Workflow:\n1. Generate 4-5 hard step patterns using generate_hard_step_patterns()\n2. For each, run optimization with 5000-10000 steps, lr=0.01-0.05, penalty=10000-50000\n3. Use probe_solution to quickly rank (uses subsampled data, very fast)\n4. Evaluate top 2-3 candidates with evaluate_solution\n5. If no improvement, try different pattern parameters or seeds\n\n## Critical Edits:\n- In _get_best_initialization, add a "hard_step" mode that calls generate_hard_step_patterns() and directly uses those h arrays\n- Remove the sigmoid wrapping for initial tests, then add it back only if it helps\n- Use jnp.where for hard thresholds, not sigmoid()\n- Track c5_bound directly in probe/evaluation, not just optimization loss\n- Save the best h pattern and refine its parameters across iterations'
+tool_descriptions:
+  edit_solution: Modify the EVOLVE-BLOCK. Call generate_hard_step_patterns() to get h arrays, edit _get_best_initialization to add hard_step mode, modify optimizer to use shorter runs and higher penalties. Always include probe_solution ranking.
+  evaluate_solution: Returns combined_score (higher=better). Target > 1.0.
+  probe_solution: Quick c5_bound estimate on subsampled data (separate budget, ~10s). Use this to rank variants BEFORE full evaluation.
+  finish: When you cannot improve combined_score beyond 1.0 or have exhausted the budget.
+sampling:
+  temperature: 1.1
+  top_p: 0.99
+  top_k: 50
+  max_tokens: 16384
+agent:
+  max_iterations: 70
+middleware:
+  budget_reminder_from_left: 2
+  long_tool_output_max_chars: 12000
+new_tools:
+- name: generate_hard_step_patterns
+  description: 'Generate 4-5 HARD step function patterns for Erdős problem. Each pattern is a direct h array (no sigmoid) with sharp boundaries. Returns dict with keys: bimodal_hard, golomb_5_hard, triangular_hard, periodic_hard, random_shifted. Each value is h array where h∈[0,1] directly (created by thresholding latent arrays). Call this FIRST to get diverse starting points.'
+  input_schema:
+    type: object
+    properties: {}
+  implementation_py: 'def run(ctx, args):\n    import jax.numpy as jnp\n    import numpy as np\n    N = 800\n    domain = 2.0\n    dx = domain / N\n    rng = np.random.default_rng(123)\n    patterns = {}\n    x = np.linspace(0, domain, N)\n    \n    # 1. Bimodal hard: Two sharp peaks thresholded\n    a1, a2 = 0.25, 0.75\n    bw1, bw2 = 0.12, 0.12\n    latent = np.exp(-((x-a1)/bw1)**2 * 25) + np.exp(-((x-a2)/bw2)**2 * 25)\n    h = jnp.clip(jnp.array([1.0 if v > 0.3 else 0.0 for v in latent]), 0, 1)\n    h_norm = h / np.sum(h) * N\n    patterns["bimodal_hard"] = h_norm\n    \n    # 2. Golomb-5 hard: 5 peaks at optimal spacing\n    marks = np.array([0.0, 0.5, 1.25, 1.75, 2.0])\n    bws = np.array([0.08, 0.08, 0.09, 0.09, 0.1])\n    latent = np.zeros(N)\n    for m, bw in zip(marks, bws):\n        latent += np.exp(-((x-m)/bw)**2 * 30)\n    h = jnp.clip(jnp.array([1.0 if v > 0.2 else 0.0 for v in latent]), 0, 1)\n    h_norm = h / np.sum(h) * N\n    patterns["golomb_5_hard"] = h_norm\n    \n    # 3. Triangular hard: 3-level linear pattern\n    levels = [0.0, 0.5, 1.0]\n    starts = [0.0, 0.666, 1.333]\n    h_tri = np.zeros(N)\n    for s, l in zip(starts, levels):\n        h_tri = np.where(x >= s, h_tri + l, h_tri)\n    h_tri = np.clip(h_tri, 0, 1)\n    h_tri = h_tri / np.sum(h_tri) * N\n    patterns["triangular_hard"] = h_tri\n    \n    # 4. Periodic hard: alternating with duty cycle\n    duty = 0.4\n    h_per = np.where(x < 0.5 * duty, 1.0, 0.0)\n    h_per_norm = h_per / np.sum(h_per) * N\n    patterns["periodic_hard"] = h_per_norm\n    \n    # 5. Random shifted peaks\n    np.random.seed(456)\n    np.random.seed(789)\n    num_peaks = 5\n    peak_positions = np.sort(np.random.uniform(0.1, 1.9, num_peaks))\n    bw = 0.1\n    latent = np.zeros(N)\n    for p in peak_positions:\n        latent += np.exp(-((x-p)/bw)**2 * 20)\n    h_rand = jnp.clip(jnp.array([1.0 if v > 0.25 else 0.0 for v in latent]), 0, 1)\n    h_rand = h_rand / np.sum(h_rand) * N\n    patterns["random_shifted"] = h_rand\n    \n    return {"patterns": patterns, "pattern_keys": list(patterns.keys())}'
+remove_tools: []
+new_skills: []
+new_middlewares:
+- name: probe_first_reminder
+  hook: before_model
+  description: 'Before generating any solution, remind the solver to call generate_hard_step_patterns() FIRST to get diverse hard step function starting points.'
+  implementation_py: 'def before_model(hook_input):\n    if hook_input.get("iteration", 0) == 0:\n        return "IMPORTANT: Call generate_hard_step_patterns() FIRST to create 4-5 hard step function patterns (bimodal_hard, golomb_5_hard, triangular_hard, periodic_hard, random_shifted). Do NOT use sigmoid-smoothed latents. Edit the optimizer to try SHORT bursts (5000-10000 steps) on each pattern with HIGH penalty (10000-50000). Use probe_solution to rank before full evaluation." if not hook_input.get("skip_probe", False) else None\n    elif hook_input.get("iteration", 0) % 3 == 0:\n        return "REMINDER: Try a different hard step pattern variant or parameter. Consider adjusting peak positions, widths, or threshold levels. Use probe_solution to quickly test 2-3 variants before full evaluation." if not hook_input.get("skip_probe", False) else None\n    return None'

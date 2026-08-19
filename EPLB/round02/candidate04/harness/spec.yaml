@@ -1,0 +1,206 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are an expert algorithm engineer optimizing a MoE EPLB (Mixture-of-Expert Expert Parallelism Load Balancer) rearrangement algorithm.
+  
+  TASK OBJECTIVE: Maximize combined_score by improving BOTH load balancing AND execution efficiency.
+  - Load balancing: minimize max load variance across experts
+  - Efficiency: minimize algorithm runtime
+  - These often conflict; you must find Pareto improvements.
+  
+  YOUR APPROACH (critical - follow exactly):
+  1. ANALYZE THE SEED: Study the rebalance_experts function. Identify its current algorithm (greedy bin-packing with ties).
+  2. FORM ONE HYPOTHESIS PER ITERATION: Change ONE aspect only:
+     - Try different bin-packing heuristics (Worst-Fit, Best-Fit, Next-Fit)
+     - Try randomized or tabu-search based balancing
+     - Try clustering/grouping before packing
+     - Try using numpy vectorization over python loops
+     - Try pruning low-weight experts first
+     - Try different tie-breaking strategies
+     - Try caching or memoization patterns
+  3. USE PROBE SOLUTION: ALWAYS call probe_solution FIRST after editing to rank variants cheaply before spending an evaluation. Use it to compare 2-3 variants, pick the best, then evaluate.
+  4. ITERATE: Only when probes agree or budget is low, call evaluate_solution to confirm.
+  5. STOP WHEN: You've exhausted probes for promising variants, or budget ends, or no improvement in 3 iterations.
+  
+  TOOL USAGE ORDER:
+  - edit_solution → (optional: compare multiple variants) → probe_solution × 2-3 → evaluate_solution (once for winner)
+  - Never evaluate without probing first.
+  - Always keep one working version; revert and try different hypothesis if stuck.
+  
+  ENTRY FUNCTION: rebalance_experts must preserve exact signature and return types. Only modify EVOLVE-BLOCK region.
+  
+  CONSTRAINTS: Budget is 20 evaluations. Each probe costs nothing but time. Prioritize cheap probe loops over full evaluations.
+
+skill_description: |
+  Algorithm optimization harness for MoE EPLB tasks. Use probe_solution to cheaply rank algorithm variants, then evaluate winners. Follow structured hypothesis testing: edit → probe → compare → evaluate. Change one algorithmic aspect per iteration. Preserve entry function signature and return types.
+skill_body: |
+  # MoE EPLB Algorithm Optimization Strategy
+  
+  ## Objective
+  Maximize combined_score by improving load balancing (lower variance) AND efficiency (faster runtime).
+  
+  ## Method: Hypothesis-Driven Iteration
+  
+  ### Step 1: Analyze Current Algorithm
+  The seed uses a greedy best-fit algorithm with these characteristics:
+  - Sorts weights descending per layer
+  - Places items in pack with fewest items (ties broken by min weight)
+  - O(n*m) time per layer (python loops)
+  - Pure logic, no optimization
+  
+  ### Step 2: Form Targeted Hypotheses
+  Change EXACTLY ONE aspect per iteration:
+  
+  - **Algorithm variants**: Worst-Fit, Best-Fit, First-Fit, Next-Fit, Best-Fit-Decreasing
+  - **Search patterns**: Add limited randomization, simulated annealing, tabu list
+  - **Grouping**: Cluster experts by weight similarity before packing
+  - **Optimization**: Replace python loops with numpy vectorized operations
+  - **Weight estimation**: Try different weight metrics or normalization
+  - **Replication strategy**: Try different logic for choosing which experts to replicate
+  - **Cache/memoize**: For repeated subproblems
+  
+  ### Step 3: Probe-First Workflow
+  **CRITICAL**: After every edit:
+  1. Call `probe_solution` to get approximate scores of your variant
+  2. If you have 2+ variants, probe them all (probes are free)
+  3. Pick the best probed variant
+  4. Call `evaluate_solution` ONCE on the winner
+  
+  Never call evaluate_solution without probing first. Probes take 10s vs minutes for full evals.
+  
+  ### Step 4: Iterate or Abort
+  - If probe improves: evaluate, keep the win, plan next edit
+  - If probe doesn't improve: try a genuinely different hypothesis
+  - If 3 consecutive fails: revert to best score, start fresh with new direction
+  
+  ### Step 5: Exit
+  Call `finish` when:
+  - Evaluation budget exhausted
+  - Best score unchanged for 3 iterations
+  - You've tried all reasonable algorithmic directions
+  
+  ## Preserving Contract
+  - `rebalance_experts` function signature must match exactly
+  - Return types must be identical (tuple structure unchanged)
+  - Only modify code between EVOLVE-BLOCK markers
+  - Keep imports and entry point intact
+  
+  ## Quick Tips
+  - For bin-packing: try numpy operations to vectorize the inner loops
+  - For tie-breaking: randomization sometimes beats min-weight determinism
+  - For efficiency: cache sorted weights, avoid repeated sorts
+  - For balance: clustering by weight ranges before packing helps
+  - Track your hypotheses: note which changes helped/harmed
+tool_descriptions:
+  edit_solution: |
+    Change the EVOLVE-BLOCK code. Use targeted SEARCH/REPLACE for small changes (change one algorithmic decision) or full rewrite for structural changes. Preserve rebalance_experts signature and return types exactly. After editing, call probe_solution to cheaply score before evaluating.
+  evaluate_solution: |
+    Run full evaluation. Returns combined_score (higher better), validity, error, best_so_far, evaluations_left. Budget is 20 total. Always probe first, evaluate only the best probed variant.
+  probe_solution: |
+    **USE THIS FREELY.** Approximate score on ~2000 rows, ~10s runtime, no evaluation budget cost. Use to rank 2-3 variants, pick best, then call evaluate_solution once. Probes do NOT consume evaluation budget. Ideal for algorithm iteration.
+  finish: |
+    End session. Best program submitted automatically. Call when budget exhausted or no improvement.
+sampling:
+  temperature: 0.9
+  top_p: 0.95
+  top_k: 25
+  max_tokens: 12288
+agent:
+  max_iterations: 50
+middleware:
+  budget_reminder_from_left: 1
+  long_tool_output_max_chars: 12000
+new_tools:
+  - name: analyze_structure
+    description: |
+      Analyze the EVOLVE-BLOCK code structure, identify algorithmic patterns, bottlenecks, and optimization opportunities. Returns key metrics about code characteristics and suggested directions. Call once at start.
+    input_schema: {type: object, properties: {}}
+    implementation_py: |
+      def run(ctx, args):
+          code = ctx.get_program()
+          lines = code.split('\n')
+          in_block = False
+          block_lines = []
+          block_start = -1
+          for i, line in enumerate(lines):
+              if 'EVOLVE-BLOCK-START' in line:
+                  in_block = True
+                  block_start = i
+              elif in_block and line.strip().startswith('def rebalance_experts'):
+                  block_lines = lines[block_start+1:i]
+                  break
+          if not block_lines:
+              return {"note": "Could not find EVOLVE-BLOCK"}
+          
+          code_block = '\n'.join(block_lines)
+          score = 0
+          suggestions = []
+          
+          # Check for python loops
+          if 'for ' in code_block and 'in range' in code_block:
+              score += 10
+              suggestions.append("Consider numpy vectorization for loop elimination")
+          
+          if '.sort' in code_block or 'torch.sort' in code_block:
+              score += 5
+              suggestions.append("Sort is used for initial ordering")
+          
+          # Check for in-place operations
+          if '=' in code_block and '=' not in ['def ', '->', 'type:']:
+              score += 15
+              suggestions.append("Stateful tracking for optimization potential")
+          
+          # Count complexity hints
+          import re
+          loops = len(re.findall(r'for\s+\w+\s+in', code_block))
+          if loops > 3:
+              score += 20
+              suggestions.append(f"Multiple loops ({loops}) - vectorization could help")
+          
+          return {
+              "block_lines": len(block_lines),
+              "has_loops": loops > 0,
+              "complexity_estimate": score,
+              "suggestions": suggestions,
+              "note": "Use suggestions to form next hypothesis"
+          }
+new_skills:
+  - name: algorithm-opt-strategy
+    description: |
+      Playbook for optimizing MoE EPLB load balancing algorithms. Use probe_solution to cheaply rank variants, then evaluate winners. Change one algorithmic aspect per iteration. Preserve rebalance_experts signature.
+    body: |
+      # Algorithm Optimization for MoE EPLB
+      
+      ## Core Strategy
+      Maximize combined_score by improving load balancing AND efficiency via structured iteration.
+      
+      ## Iteration Protocol
+      1. **Edit**: Change ONE algorithmic aspect (bin-packing heuristic, search pattern, grouping, vectorization, etc.)
+      2. **Probe**: Call probe_solution to score variant cheaply
+      3. **Compare**: If multiple variants, probe all and pick best
+      4. **Evaluate**: Call evaluate_solution once on the best probed variant
+      5. **Iterate**: Keep win, plan next edit; if no improvement, try different direction
+      
+      ## Hypothesis Bank (change one per iteration)
+      - Worst-Fit bin packing instead of Best-Fit
+      - Best-Fit-Decreasing (sort before packing)
+      - Next-Fit or First-Fit heuristics
+      - Add random tie-breaking for variety
+      - Cluster experts by weight similarity first
+      - Vectorize inner loops with numpy
+      - Cache sorted weights
+      - Try different weight normalization
+      - Implement tabu search or simulated annealing
+      - Prune low-weight experts before balancing
+      
+      ## Critical Rules
+      - NEVER evaluate without probing first
+      - Probes take 10s, evaluate takes minutes - use probes to screen
+      - Budget is 20 evaluations - each counts
+      - Preserve rebalance_experts signature exactly
+      - Only modify EVOLVE-BLOCK region
+      - Revert and try different direction after 3 failed probes
+      
+      ## Exit Criteria
+      - Budget exhausted: call finish
+      - 3 consecutive no-improvements: call finish
+      - No plausible directions left: call finish

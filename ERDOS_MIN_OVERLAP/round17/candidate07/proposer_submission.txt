@@ -1,0 +1,159 @@
+schema: h2spec/1.0
+system_prompt: |
+  Erdos minimum overlap problem: find h: [0,2]->[0,1] minimizing max_k integral h(x)(1-h(x+k))dx.
+
+  Constraint: integral(h) = 1 exactly.
+
+  Current best: C5 <= 0.38092303510845016 (from 5-mark Golomb ruler: marks at [0.0, 0.4, 0.8, 1.2, 1.6]).
+
+  Strategy:
+
+  1. USE optimize_golomb_marks to FIND BETTER 5-MARK GOLOMB RULER placements. This tool exhaustively searches integer mark positions on [0,2] discretized to 200 buckets, then returns the best 5 marks with lowest analytical c5_bound.
+
+  2. EDIT the seed's _get_best_initialization to use the MARKS returned by optimize_golomb_marks (replace the hardcoded [0.0, 0.4, 0.8, 1.2, 1.6] with the optimized marks).
+
+  3. CALL evaluate_solution ONCE on the edited program (with num_restarts=1, seed_start=0).
+
+  4. If combined_score > 1.0, call finish. Otherwise, try different mark counts (4, 6, 7) using optimize_golomb_marks.
+
+  Key: The seed already has a working Golomb ruler implementation - just need BETTER MARK PLACEMENTS, not new architectures.
+skill_description: |
+  Golomb ruler optimization: use optimize_golomb_marks to find optimal 5-mark placements, then edit the code to use those marks. Only 1 eval needed per candidate.
+tool_descriptions:
+  edit_solution: |
+    Modify EVOLVE-BLOCK to change:
+    - Golomb ruler marks: replace [0.0, 0.4, 0.8, 1.2, 1.6] with new marks from optimize_golomb_marks
+    - hyperparameters for single-candidate testing (num_restarts=1, seed_start=0)
+  evaluate_solution: |
+    Run the optimized program. Returns combined_score = 0.38092303510845016 / c5_bound.
+    combined_score > 1.0 means new record.
+  probe_solution: |
+    Fast approximate c5 bound (500 intervals).
+  finish: |
+    Submit when combined_score > 1.0.
+sampling:
+  temperature: 0.7
+  top_p: 0.95
+  top_k: 30
+  max_tokens: 14000
+agent:
+  max_iterations: 20
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 10000
+new_tools:
+  - name: optimize_golomb_marks
+    description: |
+      Exhaustively search 5-mark Golomb ruler placements on domain [0,2].
+      Discretizes domain to 200 buckets, searches all C(200,5) combinations (impractical), so uses greedy hill-climbing: start from [50,100,150,175,195], then iteratively perturb each mark by ±1 bucket, keeping improvements. Returns the best 5 marks (as floats in [0,2]) with their analytical c5_bound computed via FFT on N=800 intervals.
+    input_schema:
+      type: object
+      properties:
+        num_marks:
+          type: integer
+          default: 5
+          description: number of marks to optimize
+    implementation_py: |
+      def run(ctx, args):
+          import numpy as np
+          num_marks = args.get("num_marks", 5)
+          num_buckets = 200
+          domain = 2.0
+          
+          def compute_c5(marks):
+              N = 800
+              dx = domain / N
+              h = np.zeros(N)
+              for m in marks:
+                  idx = int(m * N)
+                  h[idx] = 1.0
+              j = 1.0 - h
+              h_padded = np.pad(h, (0, N))
+              j_padded = np.pad(j, (0, N))
+              corr_fft = np.fft.fft(h_padded) * np.conj(np.fft.fft(j_padded))
+              correlation = np.fft.ifft(corr_fft).real
+              c5 = np.max(correlation * dx)
+              return c5
+          
+          # Greedy hill climbing
+          marks = [domain * i / (num_buckets - 1) for i in range(num_marks)]
+          best_marks = marks[:]
+          best_c5 = compute_c5(best_marks)
+          
+          improved = True
+          while improved:
+              improved = False
+              new_marks = best_marks[:]
+              for i in range(len(best_marks)):
+                  for delta in [-1, 1]:
+                      new_idx = best_marks[i].num_buckets * delta
+                      if new_idx == 0:
+                          continue
+                      new_marks[i] = best_marks[i] + delta / num_buckets * domain
+                      c5 = compute_c5(new_marks)
+                      if c5 < best_c5:
+                          best_c5 = c5
+                          best_marks = new_marks[:]
+                          improved = True
+                          break
+                  if improved:
+                      break
+          
+          return {
+              "marks": [float(m) for m in best_marks],
+              "c5_bound": float(best_c5),
+              "num_marks": num_marks
+          }
+new_skills:
+  - name: golomb-refinement
+    description: |
+      Optimize Golomb ruler mark placements using optimize_golomb_marks, then edit the code to use the new marks.
+    body: |
+      # Golomb Ruler Refinement for Erdos Problem
+      
+      ## Strategy
+      
+      The seed program has a working 5-mark Golomb ruler construction with marks at [0.0, 0.4, 0.8, 1.2, 1.6].
+      To improve, call optimize_golomb_marks to find BETTER mark placements, then EDIT the code to use those marks.
+      
+      ## Workflow
+      
+      1. CALL optimize_golomb_marks(num_marks=5)
+         - Returns: marks (list of 5 floats in [0,2]), c5_bound (analytical)
+      
+      2. EDIT the seed's _get_best_initialization method:
+         - Find the Golomb ruler pattern (pattern == 12)
+         - Replace the hardcoded marks [0.0, 0.4, 0.8, 1.2, 1.6] with the optimized marks
+         - Keep the rest of the pattern unchanged
+      
+      3. SET hyperparameters: num_restarts=1, seed_start=0 (single-candidate test)
+      
+      4. CALL evaluate_solution ONCE
+      
+      5. If combined_score > 1.0, call finish. Otherwise, try num_marks=4, 6, 7.
+      
+      ## Why This Works
+      
+      - The seed already has correct Golomb ruler implementation - just needs better marks
+      - optimize_golomb_marks does cheap greedy search (no training)
+      - Only 1 eval needed per candidate
+      - Hill-climbing on 200 buckets finds local optimum quickly
+new_middlewares:
+  - name: edit_after_optimize
+    hook: before_model
+    description: |
+      If optimize_golomb_marks returned new marks and no code edit has been made, remind the solver to edit the code to use those marks.
+    implementation_py: |
+      def before_model(hook_input):
+          state = hook_input.get("state", {})
+          last_tool = state.get("last_tool", "")
+          marks_cached = state.get("optimal_marks", None)
+          code_cached = state.get("code_edited", False)
+          
+          if last_tool == "optimize_golomb_marks" and marks_cached is not None and not code_cached:
+              return (
+                  f"optimize_golomb_marks returned marks: {marks_cached}. "
+                  "EDIT the code to use these marks in the Golomb ruler pattern (pattern 12). "
+                  "Then call evaluate_solution with num_restarts=1, seed_start=0."
+              )
+          return None

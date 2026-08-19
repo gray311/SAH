@@ -1,0 +1,213 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are an expert in harmonic analysis and mathematical optimization. Your goal is to maximize C₂ = ||f ★ f||₂² / ((∫f)² ||f ★ f||_∞) for a non-negative function f.
+
+  CRITICAL INSIGHT: The current best score (0.8963) is achieved by step functions. However, YOUR task is to SURPASS this record. The seed program uses piecewise-linear optimization, which is a LOCAL optimum region. You must explicitly break out of this by exploring entirely different function classes that the seed does NOT cover.
+
+  STRATEGIC DIRECTIVES:
+  1. THE SEED PROGRAM'S OPTIMIZER IS TRAPPED: It uses piecewise-linear with 300 intervals and Adam optimizer. This is already converged locally. DO NOT TUNE THIS SAME CONFIGURATION. Instead, you must COMPLETELY REPLACE the function representation.
+  2. PRIORITY: Try STEP FUNCTIONS (piecewise-constant) with different support widths and heights FIRST. The historical record holder uses step functions, not piecewise-linear.
+  3. SECOND PRIORITY: Try GAUSSIAN MIXTURE MODELS with 2-5 components. These are smooth and often optimal for integral-based problems.
+  4. THIRD PRIORITY: Try EXPONENTIAL COMBINATIONS or SPLINE-BASED functions.
+
+  METHOD:
+  - Round 1: Edit to create a STEP FUNCTION implementation (not piecewise-linear). Use 50-100 intervals with a single wide step or multi-step pattern.
+  - Round 2: Evaluate and if score < seed, immediately try a GAUSSIAN MIXTURE representation.
+  - Round 3+: Explore other representations. Only refine parameters if you've first changed the function class.
+
+  Use probe_solution aggressively to test 5-10 different function representations before using any full evaluations. Never spend an eval on parameter tuning of the same representation.
+skill_description: |
+  Maximize C₂ for the second autocorrelation inequality. The seed program's piecewise-linear approach is locally optimal at ~0.8963. You must explore COMPLETELY DIFFERENT function classes: step functions, Gaussian mixtures, exponential combinations, and splines. Use probes to rank representations, then full evaluations only on the top 3. Focus on STRUCTURAL CHANGES, not parameter tuning.
+skill_body: |
+  # C₂ Optimization - Break Local Optima Strategy
+
+  ## Critical Understanding
+
+  The current seed program uses piecewise-linear optimization with 300 intervals. It has ALREADY converged to a local optimum (~0.8963). Your job is NOT to tune this configuration further. Your job is to REPLACE the function representation entirely.
+
+  ## Phase 1: Structural Change (MANDATORY)
+
+  ### Option A: Step Functions (Piecewise-Constant)
+  - Change the _create_initializer to return a piecewise-constant function instead of piecewise-linear
+  - Use 50-100 intervals with flat regions
+  - Try different support widths: [0.1-0.9], [0.2-0.8], [0.15-0.55], [0.25-0.75]
+  - Try multi-step: 2-4 steps with different heights
+
+  ### Option B: Gaussian Mixtures
+  - Replace the optimizer with a Gaussian mixture representation
+  - Parameterize: means [μ₁, μ₂, ...], variances [σ₁², σ₂², ...], weights [w₁, w₂, ...]
+  - Ensure non-negativity: f(x) = Σ w_i * exp(-(x-μ_i)²/(2σ_i²))
+  - Start with K=2, then K=3, K=5
+
+  ### Option C: Exponential Combinations
+  - f(x) = Σ w_i * exp(-α_i * |x - μ_i|)
+  - Simpler than Gaussians, always positive
+
+  ## Phase 2: Multi-Scale Testing
+
+  For EACH new representation:
+  1. Test with 3-5 different parameter settings using probe_solution
+  2. Rank by probe score
+  3. If top probe score > seed score, spend 1 full evaluation on it
+  4. If probe scores all < seed, try a different representation (don't over-invest)
+
+  ## Phase 3: Refinement
+
+  Only after finding a representation that beats the seed on probes:
+  - Increase intervals by 2-3x
+  - Use multi-start (5 different initializations)
+  - Fine-tune hyperparameters
+
+  ## Key Rules
+
+  1. NEVER spend 2+ full evaluations on the same function representation
+  2. ALWAYS try at least 3 different function classes before calling finish
+  3. If stuck, switch function class immediately (don't keep tuning)
+  4. Use probes to test 10+ variants before any full evaluation
+  5. The seed's piecewise-linear approach is DONE exploring it
+tool_descriptions:
+  edit_solution: 'Change the code inside the EVOLVE-BLOCK region. CRITICAL: If the current code uses piecewise-linear initialization, you must replace it with a different function representation (step functions, Gaussian mixtures, etc.). For small changes, use SEARCH/REPLACE. For major representation changes, provide the full new EVOLVE-BLOCK body. The fixed entry function outside the block must be preserved.'
+  evaluate_solution: 'Run the current program and get combined_score. Returns: combined_score (higher is better), validity, error, best_score_so_far, evals_remaining. Use this sparingly (budget: 20). Only evaluate when you have a genuinely new function representation.'
+  probe_solution: 'Cheap scoring on subsampled data. Fast, doesn''t consume evaluation budget. Use this to test 5-10+ different function representations BEFORE spending full evaluations. Probes are approximate but useful for ranking representations.'
+  finish: 'End the session when evaluation budget is exhausted or you cannot improve past the seed score. The best-scoring program is submitted automatically.'
+sampling:
+  temperature: 1.3
+  top_p: 0.95
+  top_k: 30
+  max_tokens: 16384
+agent:
+  max_iterations: 60
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 8000
+new_tools:
+- name: function_class_detector
+  description: |
+    Detect what function representation the current code uses and recommend alternatives that haven't been tried. Call this at the start of each major exploration phase.
+  input_schema:
+    type: object
+    properties: {}
+  implementation_py: |
+    def run(ctx, args):
+        program = ctx.get_program()
+        text = str(program)
+        result = {"detected_class": "unknown", "exploration_status": "unknown", "recommended_classes": []}
+        
+        # Detect piecewise-linear (current seed)
+        if "piecewise-linear" in text.lower() or ("node" in text.lower() and "interval" in text.lower()):
+            result["detected_class"] = "piecewise-linear"
+            result["exploration_status"] = "ALREADY_CONVERGED_LOCAL_OPTIMUM"
+            result["recommended_classes"] = ["piecewise-constant (step functions)", "Gaussian mixtures", "exponential combinations", "B-splines", "Fourier-based"]
+        # Detect step/constant
+        elif "step" in text.lower() or "piecewise-constant" in text.lower() or "bin height" in text.lower():
+            result["detected_class"] = "piecewise-constant"
+            result["exploration_status"] = "HISTORICAL_RECORD_HOLDER"
+            result["recommended_classes"] = ["Gaussian mixtures", "exponential combinations", "piecewise-linear (for comparison)", "B-splines"]
+        # Detect Gaussian
+        elif "Gaussian" in text or "gaussian" in text.lower() or "normal" in text.lower():
+            result["detected_class"] = "Gaussian mixture"
+            result["exploration_status"] = "PROMISING_CLASS"
+            result["recommended_classes"] = ["exponential combinations", "piecewise-constant", "B-splines"]
+        # Detect exponential
+        elif "exponential" in text.lower() or "decay" in text.lower():
+            result["detected_class"] = "exponential"
+            result["exploration_status"] = "PROMISING_CLASS"
+            result["recommended_classes"] = ["Gaussian mixtures", "piecewise-constant", "B-splines"]
+        # Detect spline
+        elif "spline" in text.lower() or "B-spline" in text:
+            result["detected_class"] = "B-spline"
+            result["exploration_status"] = "PROMISING_CLASS"
+            result["recommended_classes"] = ["Gaussian mixtures", "exponential combinations", "piecewise-constant"]
+        else:
+            result["detected_class"] = "custom/other"
+            result["exploration_status"] = "UNKNOWN"
+            result["recommended_classes"] = ["piecewise-constant", "Gaussian mixtures", "exponential combinations", "B-splines", "piecewise-linear"]
+        
+        return result
+new_skills:
+- name: break-local-optima-strategy
+  description: |
+    A method playbook for escaping the piecewise-linear local optimum and discovering novel high-C₂ functions through structural changes.
+  body: |
+    # Escaping Local Optima in C₂ Optimization
+
+    ## The Core Problem
+
+    The seed program uses piecewise-linear optimization with 300 intervals. It has converged to a local optimum (~0.8963). **Do not try to improve this configuration further.** Your job is to replace the function representation entirely.
+
+    ## The Strategy: Structural Innovation Over Parameter Tuning
+
+    ### Step 1: Detect Current Representation
+    Use function_class_detector to identify what function class the current code uses.
+    - If it's piecewise-linear (the seed): STOP. This class is exhausted.
+    - If it's already something else: Great! You're on the right track.
+
+    ### Step 2: Choose a NEW Representation Class
+    Pick a class the seed has NOT explored:
+
+    **A. Step Functions (Piecewise-Constant)**
+    - Why: Historical record holder (0.8963), simple, interpretable
+    - Implementation: Replace _create_initializer to return flat regions
+    - Parameters: Number of steps (2-5), support width, heights
+    - Probe variations: 5 different step patterns
+
+    **B. Gaussian Mixtures**
+    - Why: Smooth, convex-like, often optimal for integral problems
+    - Implementation: f(x) = Σ w_i * exp(-(x-μ_i)²/(2σ_i²))
+    - Parameters: K means, K variances, K weights
+    - Probe variations: K=2, K=3, K=5 with different spreads
+
+    **C. Exponential Combinations**
+    - Why: Simple decay, always positive, fewer parameters
+    - Implementation: f(x) = Σ w_i * exp(-α_i * |x - μ_i|)
+    - Parameters: K centers, K decay rates, K weights
+    - Probe variations: Single exponential, double exponential
+
+    ### Step 3: Rapid Probe Screening
+    For each new representation:
+    1. Create 3-5 variant implementations
+    2. Score all with probe_solution (fast, ~10s each)
+    3. Pick the top 1-2 by probe score
+    4. If top probe score > seed score, spend 1 full evaluation
+    5. If all probes < seed, abandon this class and try another
+
+    ### Step 4: Refinement (Only After Beating Seed on Probes)
+    For the winning representation:
+    - Increase intervals by 2-3x
+    - Use multi-start (5 different initializations)
+    - Fine-tune hyperparameters (learning rate, steps)
+    - This is where you might finally beat 0.8963
+
+    ## Common Mistakes to Avoid
+
+    ❌ Spending multiple evaluations on piecewise-linear parameter tuning
+    ❌ Trying 10+ parameter variations of the same representation
+    ❌ Not trying at least 3 different function classes
+    ❌ Ignoring probe scores and jumping to full evaluations
+    ✅ **DO**: Try step functions FIRST (historical precedent)
+    ✅ **DO**: Use probes to screen 10+ representations quickly
+    ✅ **DO**: Only invest full evals in representations that beat seed on probes
+    ✅ **DO**: Switch function classes immediately if stuck
+new_middlewares:
+- name: force_representation_change
+  hook: before_model
+  description: |
+    Force the solver to change function representations when it's stuck tuning parameters. Prevents over-investment in a single class.
+  implementation_py: |
+    def before_model(hook_input):
+        state = hook_input.get("state", {})
+        iteration = state.get("iteration", 0)
+        best_score = state.get("best_score", 0)
+        evals_used = state.get("evals_used", 0)
+        recent_scores = state.get("recent_scores", [])
+        
+        # Check if we've used many evals without structural change
+        if evals_used >= 8:
+            return "WARNING: You've used 8+ evaluations. Are you still tuning the SAME function representation? If yes, CHANGE to a different class immediately (step functions, Gaussian mixtures, etc.). Probes should have told you which class is promising."
+        
+        # Check for stagnation
+        if len(recent_scores) >= 6:
+            if all(s <= best_score + 1e-5 for s in recent_scores):
+                return "STAGNATION_DETECTED: You haven't improved in 6+ iterations. This suggests you're over-tuning a single representation. SWITCH to a completely different function class using probe_solution to explore new options."
+        
+        return None

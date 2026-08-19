@@ -1,0 +1,287 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are an expert software developer tasked with iteratively improving a program to MAXIMIZE the performance metrics reported by an automatic evaluator. Analyze the current program and the feedback from previous attempts, and make targeted changes that increase the score. You are the fixed inner harness (H2) driving a frozen executor over one discovery task.
+
+  The program has a single editable region between # EVOLVE-BLOCK-START and # EVOLVE-BLOCK-END. Only that region is yours to change;
+   everything outside it (imports and the fixed entry function the evaluator calls) is frozen and must
+   keep working exactly as given — keep the same inputs and outputs.
+
+  The task is to maximize C2 = ||f * f||2^2 / ((integral(f))^2 ||f * f||_inf), a constant from harmonic analysis. The theoretical upper bound
+   is 1.0 (Young's inequality). Current best is 0.8963, achieved by step functions. Your goal is to push
+   beyond this.
+
+  STRATEGY: You have a LIMITED evaluation budget (~20 full evaluations). Use probe_solution EXTENSIVELY to explore different function representations BEFORE spending evals.
+
+  Function families to explore (in order):
+  1. Piecewise-constant (step functions): Current record-holders (0.8963). Try different step widths, heights, supports
+  2. Piecewise-linear: Current seed approach. Try more intervals, different node placements
+  3. Gaussian mixtures: Smooth, localized peaks. Parameterize means, variances, weights
+  4. B-spline representations: Local support, C^k continuity
+  5. Exponential combinations: Natural decay, positive everywhere
+  6. Multi-modal piecewise: Combine features from above
+
+  CRITICAL WORKFLOW:
+  1. Call representational_probe at the START to understand current function class
+  2. Use probe_solution to test 10+ variants of NEW function classes (NOT parameter tuning of same class)
+  3. Only after probing, use evaluate_solution for top 3-5 candidates
+  4. If no improvement after 5 evals, call representational_probe again and switch to a completely different function family
+  5. NEVER spend eval budget on the same function family more than 2-3 times without trying something new
+
+  Strategic directions:
+  - Diversify early: Don't tunnel into one representation
+  - Use probes to rank MANY variants before evals
+  - After each eval, analyze what worked and design the next exploration round
+  - When stuck, RESET with a completely different function class (not just hyperparameter changes)
+
+  Make exactly one tool call per turn:
+  - edit_solution(code) — change the EVOLVE-BLOCK. Use SEARCH/REPLACE for targeted changes.
+  - evaluate_solution() — run the current program; returns combined_score (higher is better).
+  - probe_solution() — cheaply score the CURRENT program on SUBSAMPLED data for ranking.
+  - representational_probe() — analyze current function representation and suggest alternatives.
+  - finish(summary) — end the session.
+skill_description: |
+  Iteratively optimize a program's EVOLVE-BLOCK to maximize C2 for the second autocorrelation inequality. UNDER THE EVALUATION BUDGET, use probe_solution for cheap ranking of function representations, and representational_probe to systematically explore different function families (step functions, Gaussian mixtures, B-splines, etc.). Diversify exploration rather than tuning a single representation.
+skill_body: |
+  # C2 Optimization Playbook: Systematic Function Representation Exploration
+
+  ## Objective
+  Maximize C2 = ||f * f||2^2 / ((integral(f))^2 ||f * f||_inf). Theoretical max: 1.0. Current record: 0.8963 (step functions).
+
+  ## Core Principle: Representation > Parameter Tuning
+  The search space is dominated by FUNCTION FAMILY, not hyperparameters. Before spending evals on tuning, you MUST explore different representations.
+
+  ## Phase 1: Initial Representation Probe
+  1. Call representational_probe to understand what function class your current code implements
+  2. Note the suggestions for alternative representations
+  3. If not exploring step functions (current record-holders), create a step-function variant immediately
+
+  ## Phase 2: Probe-Based Exploration (Before ANY Full Eval)
+  For EACH function family, test 8-10 variants using probe_solution:
+
+  ### A. Piecewise-Constant (Step Functions)
+  - Vary: step width (0.1n to 0.9n), number of steps (2-10), heights (1.0-2.0)
+  - Try: symmetric, asymmetric, multi-level steps
+  - Expected: Should match or beat 0.8963 baseline
+
+  ### B. Piecewise-Linear (Current Seed)
+  - Vary: num_intervals (100, 200, 500), node values, support width
+  - Try: triangular peaks, trapezoids, multi-modal
+  - Expected: Smooth transitions, potentially better than steps
+
+  ### C. Gaussian Mixtures
+  - Vary: K=2,3,5,10 Gaussians; means=uniform or clustered; sigma=small, medium, large
+  - Ensure: non-negative (use softplus or exp transformation)
+  - Expected: Smooth, potentially higher C2 due to better concentration
+
+  ### D. B-Splines
+  - Vary: knot positions (uniform, adaptive), coefficients
+  - Expected: Flexible, local control
+
+  ### E. Exponential Combinations
+  - Vary: sum of 2-5 exponentials with different decay rates
+  - Expected: Natural decay, positive everywhere
+
+  ## Phase 3: Full Evaluation (After Probing)
+  1. Select top 3 candidates from probe scores
+  2. Each: run with MULTIPLE random seeds (2-3 per candidate)
+  3. Use evaluate_solution for these only
+  4. Track: which function family performs best
+
+  ## Phase 4: Deep Dive or Reset
+  - If top family: increase budget (more intervals, more steps), try ensembles
+  - If NO improvement: call representational_probe, SWITCH to a completely different function family
+  - NEVER spend more than 5 evals on the same function family without trying something new
+
+  ## Critical Success Factors
+  - Diversify early: First 10-15 probes should cover 4+ function families
+  - Probe before eval: For each family, probe 8+ variants before 1 eval
+  - Reset strategy: When stuck at same score for 3 evals, switch function families
+  - Record keeping: Track which family, which variant, which probe/eval score
+
+  ## Tool Usage Priority
+  1. representational_probe — understand current state, get suggestions
+  2. probe_solution — explore MANY variants cheaply (use liberally!)
+  3. edit_solution — implement new function class or variant
+  4. evaluate_solution — confirm top candidates only (budget is limited!)
+  5. finish — when evals exhausted or no improvement possible
+tool_descriptions:
+  edit_solution: 'Change the code inside the # EVOLVE-BLOCK region. Two accepted formats: (1) PREFERRED — one or more targeted SEARCH/REPLACE diff blocks, each matching the current program exactly. (2) A full rewrite — the complete new EVOLVE-BLOCK body as plain code. The fixed entry function and imports outside the block are preserved automatically. After editing, call evaluate_solution to score it.'
+  evaluate_solution: 'Run the current program through the task evaluator and report its score. Returns combined_score (higher is better), validity, any error, your best score so far, and how many evaluations remain. Use the feedback to improve the code, then evaluate again. The best-scoring version is kept automatically. Your number of evaluations is limited.'
+  probe_solution: 'Cheaply score the CURRENT program on SUBSAMPLED data (~10s vs minutes). Fast (~10s per probe), separate budget (e.g., 30 probes available), NOT evaluated through full evaluation budget. Scores are approximate and NOT directly comparable to full evaluation scores — use this to rapidly rank multiple variants, then confirm the top 3-5 candidates with evaluate_solution.'
+  finish: 'End the session. Call this when your evaluation budget is exhausted or you cannot improve the best score further. The best-scoring program is submitted automatically.'
+sampling:
+  temperature: 1.2
+  top_p: 0.97
+  top_k: 25
+  max_tokens: 16384
+agent:
+  max_iterations: 60
+middleware:
+  budget_reminder_from_left: 3
+  long_tool_output_max_chars: 8000
+new_tools:
+  - name: representational_probe
+    description: |
+      Analyze the current function representation in the code and recommend alternative function families to explore. Call at the start of exploration and whenever stuck. Reports: detected function class (piecewise-constant, piecewise-linear, Gaussian mixture, B-spline, exponential, etc.), parameter count, numerical stability, and specific alternative representations to try. Use its suggestions to switch to a COMPLETELY DIFFERENT function family (not parameter tuning) to escape local optima and discover better C2 values. Call this BEFORE using probe_solution to ensure you're exploring diverse function classes.
+    input_schema:
+      type: object
+      properties: {}
+    implementation_py: |
+      def run(ctx, args):
+          program = ctx.get_program()
+          text = str(program)
+          
+          analysis = {
+              "detected_class": "unknown",
+              "params_count": "N/A",
+              "stability": "unknown",
+              "alternatives": []
+          }
+          
+          if "piecewise-linear" in text.lower() or "trapezoidal" in text.lower():
+              analysis["detected_class"] = "Piecewise-linear"
+              analysis["params_count"] = "N+1 node values"
+              analysis["stability"] = "good"
+              analysis["alternatives"] = [
+                  "Try piecewise-constant (step functions) - current record holders at 0.8963",
+                  "Try Gaussian mixtures - smooth localized peaks may concentrate better",
+                  "Try B-spline basis - local support with C^k continuity"
+              ]
+          elif "step" in text.lower() or "piecewise-constant" in text.lower():
+              analysis["detected_class"] = "Piecewise-constant (step functions)"
+              analysis["params_count"] = "N bin heights"
+              analysis["stability"] = "excellent"
+              analysis["alternatives"] = [
+                  "Try piecewise-linear - smooth transitions may improve convolution behavior",
+                  "Try Gaussian mixtures - test if smoothness helps",
+                  "Try multi-level steps - varying heights in different regions"
+              ]
+          elif "gaussian" in text.lower() or "normal" in text.lower():
+              analysis["detected_class"] = "Gaussian mixture"
+              analysis["params_count"] = "K means + variances + weights"
+              analysis["stability"] = "excellent"
+              analysis["alternatives"] = [
+                  "Try piecewise-constant - discrete steps may work better",
+                  "Try piecewise-linear - test smoothness vs sharpness",
+                  "Try exponential combinations - natural decay alternative"
+              ]
+          elif "spline" in text.lower() or "bspline" in text.lower():
+              analysis["detected_class"] = "B-spline"
+              analysis["params_count"] = "knot positions + coefficients"
+              analysis["stability"] = "good"
+              analysis["alternatives"] = [
+                  "Try piecewise-constant - simpler, fewer parameters",
+                  "Try Gaussian mixtures - smoother behavior",
+                  "Try exponential combinations"
+              ]
+          elif "exponential" in text.lower() or "decay" in text.lower():
+              analysis["detected_class"] = "Exponential combination"
+              analysis["params_count"] = "decay rates + shapes + weights"
+              analysis["stability"] = "excellent"
+              analysis["alternatives"] = [
+                  "Try piecewise-constant - test if sharp transitions help",
+                  "Try Gaussian mixtures - test smooth vs sharp",
+                  "Try piecewise-linear - intermediate smoothness"
+              ]
+          elif "fourier" in text.lower() or "fft" in text.lower():
+              analysis["detected_class"] = "Fourier-based"
+              analysis["params_count"] = "coefficients"
+              analysis["stability"] = "depends on discretization"
+              analysis["alternatives"] = [
+                  "Try piecewise-constant - simpler representation",
+                  "Try Gaussian mixtures",
+                  "Try B-splines"
+              ]
+          else:
+              analysis["detected_class"] = "Custom/Other"
+              analysis["params_count"] = "varies"
+              analysis["stability"] = "to be determined"
+              analysis["alternatives"] = [
+                  "Try step functions (piecewise-constant) - current record holders",
+                  "Try Gaussian mixtures - smooth localized peaks",
+                  "Try B-splines - local support flexibility",
+                  "Try exponential combinations - natural positive decay"
+              ]
+          
+          return analysis
+new_skills:
+  - name: c2-systematic-exploration
+    description: |
+      A method playbook for discovering high-C2 functions through systematic representation exploration. Uses probe-based ranking to test multiple function families before committing evaluation budget. Emphasizes diversification over deep tuning of a single representation.
+    body: |
+      # C2 Systematic Exploration Playbook
+
+      ## Core Insight
+      The search for better C2 values is dominated by FUNCTION REPRESENTATION, not hyperparameter tuning. The current record (0.8963) is achieved by step functions. Your harness must systematically explore multiple representations.
+
+      ## Exploration Protocol
+
+      ### Step 1: Initial Probe (Call representational_probe)
+      - Understand what function class your current code implements
+      - Get recommendations for alternatives
+      - If you are on piecewise-linear, immediately test step functions
+
+      ### Step 2: Probe-Based Family Exploration
+      For EACH of these function families, test 8-10 variants using probe_solution BEFORE any full evaluation:
+
+      #### Family A: Piecewise-Constant (Step Functions)
+      - 3 variants: narrow steps (0.1n), wide steps (0.5n), multi-level (3 heights)
+      - Expected: Should match or beat 0.8963 baseline
+
+      #### Family B: Piecewise-Linear (Current Seed)
+      - 4 variants: intervals=100, 200, 500; triangular peak; trapezoid
+      - Expected: Test if smoothness helps
+
+      #### Family C: Gaussian Mixtures
+      - 4 variants: K=2,3,5,10; equal variance; clustered means
+      - Expected: Smooth concentration may improve C2
+
+      #### Family D: B-Splines
+      - 2 variants: uniform knots, adaptive knots
+      - Expected: Test local support benefits
+
+      #### Family E: Exponential Combinations
+      - 2 variants: single exponential, double exponential
+      - Expected: Natural decay behavior
+
+      ### Step 3: Full Evaluation (Limited Budget)
+      - Select top 3 candidates from probe scores
+      - Each: 2-3 random seeds with evaluate_solution
+      - Track: which family performs best
+
+      ### Step 4: Deep Dive or Reset
+      - If top family shows promise: increase budget (more intervals, more steps)
+      - If NO improvement after 5 evals: RESET with a completely different family
+      - NEVER spend more than 5 evals on the same family without trying something new
+
+      ## Key Rules
+      1. Probe before eval: 8+ probes per family, max 3-5 evals
+      2. Diversify early: First exploration should cover 4+ families
+      3. Reset strategy: When stuck, switch function families, don't tune same one
+      4. Record scores: Track which family, which variant achieved what
+
+      ## Avoid These Pitfalls
+      - Tuning hyperparameters of a single representation for 10+ iterations
+      - Spending all 20 evals on piecewise-linear before trying steps
+      - Ignoring that step functions (0.8963) are the current record - test them!
+      - Not using probes - they are your primary exploration tool
+      - Overthinking: 3-5 good evals are enough; diversify more than optimize
+new_middlewares:
+  - name: enforce_diversification
+    hook: before_model
+    description: |
+      Middleware that enforces exploration diversity by reminding the solver to switch function families when stuck on a single representation for multiple iterations.
+    implementation_py: |
+      def before_model(hook_input):
+          state = hook_input.get("state", {})
+          iteration = state.get("iteration", 0)
+          family_streak = state.get("family_streak", 0)
+          
+          if iteration >= 5 and family_streak >= 5:
+              families_explored = state.get("families_explored", [])
+              if len(families_explored) < 3:
+                  return "DIVERSIFICATION_STALLED: You've been exploring the same function family for 5 iterations. Call representational_probe and switch to a DIFFERENT function family (not parameter tuning of the same one). Use probe_solution to test 8+ variants of a new family before evaluating." 
+              elif len(families_explored) >= 3:
+                  return "DIVERSIFICATION_STALLED: You've explored 3+ families but not improved. Re-examine your strategy - are you tuning or exploring? Switch to a completely different function class."
+          
+          return None

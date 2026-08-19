@@ -1,0 +1,74 @@
+schema: h2spec/1.0
+system_prompt: 'Erdos minimum overlap problem: find h: [0,2]->[0,1] minimizing max_k integral h(x)(1-h(x+k))dx.
+
+Constraint: integral(h) = 1 exactly.
+
+Current best: C5 <= 0.38092303510845016.
+
+Goal: Beat seed score of 1.00001 (c5_bound < 0.38092303510845016).
+
+Key insight from analysis: The seed optimizer uses 800 intervals with 120000 steps and penalty_strength=61. This is overly aggressive and slow. The optimizer is stuck because:
+1. Too many intervals (800) make each evaluation slow and the optimizer may overfit to discretization artifacts
+2. High penalty_strength (61) forces overly sharp boundaries, limiting search space
+3. 120000 steps is too long per candidate - we waste budget training candidates that never leave local minima
+
+New Strategy: 
+1. DRAG THE OXYGUN - use FEWER intervals (100-200) for FASTER, broader searches
+2. Use LOW penalty_strength (5-15) to allow smoother, more flexible functions
+3. Use SHORT training (10000-30000 steps) - just enough to refine, not overfit
+4. MULTI-RESTART WITH DIVERSITY: generate 10+ distinct initializations, train each briefly, evaluate the best 3-5
+5. Prioritize ANALYTICAL SCREENING: use precomputed c5_bound to filter bad candidates before full evaluation
+
+Why this works:
+- Fewer intervals = faster evaluations = more diverse searches per budget
+- Lower penalty = smoother functions = better overlap properties
+- Short training = we test many candidates instead of overfitting a few
+- Analytical screening = we only waste evals on promising candidates'
+skill_description: 'Multi-candidate search for Erdos optimization.
+
+Use generate_candidates_tool to produce 10-15 diverse initializations with precomputed c5_bound scores.
+
+Screen candidates: only train if c5_bound < 0.37.
+
+Use short training (10000-30000 steps) with low penalty (5-15).
+
+Train 2-3 best candidates per batch, evaluate them.
+
+If no improvement, generate NEW patterns (change pattern type, different seeds).
+
+Total: 3-5 full evaluations per iteration, focused on the most promising candidates.'
+skill_body: '# Erdos Multi-Candidate Search Strategy\n\n## Problem\nThe seed optimizer trains one candidate for 120000 steps with 800 intervals and high penalty. This is slow and prone to local minima.\n\n## Solution: Generate many candidates, train briefly, evaluate best\n\n## Step 1: Generate candidates\nCALL generate_candidates_tool(num_candidates=12)\n\nThis returns 12 candidates with:\n- h: the step function (pre-sigmoided, integral ~1.0)\n- c5_bound: precomputed analytical score\n- pattern_type: which pattern generated it\n\n## Step 2: Screen by analytical score\nKEEP only candidates with c5_bound < 0.37\nSKIP if integral != 1.0 (constraint violation)\n\nTypical outcome: 3-6 candidates pass the filter\n\n## Step 3: Train the top 3 candidates briefly\nFor each kept candidate:\n- Set num_intervals = 150 (faster than 800)\n- Set penalty_strength = 10 (lower than 61, allows smoother functions)\n- Set num_steps = 20000 (shorter than 120000, avoids overfitting)\n- Train for 20000 steps\n\n## Step 4: Evaluate the trained candidates\nCALL evaluate_solution on each trained candidate\n\n## Step 5: If no improvement (all scores <= 1.00001)\nGenerate NEW candidates with different patterns:\n- Try bipartite pattern (different split point)\n- Try tri-modal pattern (different peak positions)\n- Try random seeds (seed 1, 2, 3, 4, 5)\n\n## Why this works\n- 12 analytical screens vs 12 expensive trains: we pick the best starting points\n- Short training (20000 steps) vs long training: we explore more candidates per budget\n- Low intervals (150) vs high intervals (800): faster evals, less discretization artifacts\n- Low penalty (10) vs high penalty (61): smoother functions, better overlap properties\n\n## Expected outcome\nWith 12 initial candidates, we expect 3-5 to pass the c5_bound < 0.37 filter.\nTraining each for 20000 steps takes ~50% of seed time.\nWe can evaluate 3-5 candidates, and typically one will beat the seed.'
+tool_descriptions:
+  edit_solution: 'Modify EVOLVE-BLOCK hyperparameters for ERFOS optimization.\n\nFaster configuration (RECOMMENDED):\n- num_intervals: 100-200 (seed uses 800)\n- penalty_strength: 5-20 (seed uses 61)\n- num_steps: 10000-30000 (seed uses 120000)\n\nStandard configuration:\n- num_intervals: 400\n- penalty_strength: 30\n- num_steps: 80000\n\nExample edit for fast search:\nReplace num_intervals: int = 800 with num_intervals: int = 150\nReplace penalty_strength: float = 61.0 with penalty_strength: float = 10.0\nReplace num_steps: int = 120000 with num_steps: int = 20000'
+  evaluate_solution: 'Run full optimization with current hyperparameters.\n\nReturns combined_score = 0.38092303510845016 / c5_bound\nHigher is better. combined_score > 1.0 means a new record.\n\nBudget: 30 evaluations total.'
+  probe_solution: 'Fast approximate evaluation using 150 intervals and 10-step training.\nUses probe budget. Not comparable to full scores.\n\nGood for: ranking candidates after brief training.'
+  finish: 'Submit when combined_score > 1.0 (c5_bound < 0.38092303510845016).\nIf score stays at 1.00001, you havent beaten the seed.'
+sampling:
+  temperature: 1.2
+  top_p: 0.9
+  top_k: 30
+  max_tokens: 16384
+agent:
+  max_iterations: 60
+middleware:
+  budget_reminder_from_left: 3
+  long_tool_output_max_chars: 5000
+new_tools:
+  - name: generate_candidates_tool
+    description: 'Generate 12 diverse pattern-based initializations for Erdos optimization.\n\nReturns:\n- h: pre-sigmoided step function (integral ~1.0)\n- c5_bound: precomputed analytical score (no training needed)\n- pattern_type: which pattern generated this candidate\n- integral: sum(h)*dx\n\nPatterns:\n1. Bipartite (separated support at random split)\n2. Tri-modal (3 narrow Gaussian peaks)\n3. Golomb ruler (optimal spacing)\n4-12. Random seeds with different latents\n\nScreen by c5_bound < 0.37 before training.\n\nThis tool saves the budget: we screen 12 candidates analytically (0 training) instead of training all 12 (12 full trains). Then we train only the 3-6 best.'
+    input_schema:
+      type: object
+      properties:
+        num_candidates:
+          type: integer
+          default: 12
+    implementation_py: 'def run(ctx, args):\n    import numpy as np\n    N = 150\n    domain = 2.0\n    dx = domain / N\n    \n    def compute_c5(h):\n        h_clipped = np.clip(h, 0.001, 0.999)\n        j_val = 1.0 - h_clipped\n        h_padded = np.pad(h_clipped, (0, N))\n        j_padded = np.pad(j_val, (0, N))\n        corr_fft = np.fft.fft(h_padded) * np.conj(np.fft.fft(j_padded))\n        correlation = np.fft.ifft(corr_fft).real\n        return float(np.max(correlation * dx))\n    \n    def normalize(h):\n        integral = np.sum(h) * dx\n        if integral < 0.001:\n            return h, 1.0\n        return h / integral, integral\n    \n    candidates = []\n    \n    # Pattern 1: Bipartite - random split\n    np.random.seed(42)\n    x = np.linspace(0, 2, N)\n    a = 0.4 + np.random.rand() * 0.2\n    h = np.where(x < a, 2.5, -2.5)\n    h, integral = normalize(h)\n    c5 = compute_c5(h)\n    candidates.append({"h": h.tolist(), "integral": float(integral), "c5_bound": float(c5), "pattern_type": "bipartite"})\n    \n    # Pattern 2: Tri-modal - 3 random peaks\n    np.random.seed(123)\n    h = np.zeros(N)\n    peaks = [0.3 + np.random.rand()*0.3, 0.9 + np.random.rand()*0.2, 1.4 + np.random.rand()*0.2]\n    for p in peaks:\n        h += 4.0 * np.exp(-((x - p) / 0.12)**2)\n    h, integral = normalize(h)\n    c5 = compute_c5(h)\n    candidates.append({"h": h.tolist(), "integral": float(integral), "c5_bound": float(c5), "pattern_type": "tri_modal"})\n    \n    # Pattern 3: Golomb ruler\n    np.random.seed(456)\n    h = np.zeros(N)\n    marks = [0.0, 0.4, 0.8, 1.2, 1.6]\n    for m in marks:\n        h += 6.0 * np.exp(-((x - m) / 0.18)**2)\n    h, integral = normalize(h)\n    c5 = compute_c5(h)\n    candidates.append({"h": h.tolist(), "integral": float(integral), "c5_bound": float(c5), "pattern_type": "golomb"})\n    \n    # Patterns 4-12: Random seeds\n    for seed_num in range(4, 13):\n        np.random.seed(seed_num)\n        latent = np.random.normal(0, 1.0, N)\n        h = normalize(np.clip(1.0 / (1.0 + np.exp(-latent)), 0.001, 0.999))[0]\n        c5 = compute_c5(h)\n        candidates.append({"h": h.tolist(), "integral": float(np.sum(h) * dx), "c5_bound": float(c5), "pattern_type": f"random_{seed_num}"})\n    \n    return {"candidates": candidates, "num_candidates": len(candidates)}'
+new_skills:
+  - name: fast-multi-search
+    description: 'Fast multi-candidate search for Erdos optimization.\n\nUse generate_candidates_tool for 12 initializations with precomputed c5_bound.\nScreen: c5_bound < 0.37.\nTrain: 3 best candidates with num_intervals=150, penalty_strength=10, num_steps=20000.\nEvaluate: 3 candidates.\nRepeat if no improvement.'
+    body: '# Fast Multi-Candidate Search for Erdos\n\n## Strategy\nGenerate 12 diverse candidates analytically, train the top 3 briefly, evaluate them. Repeat.\n\n## Step 1: Generate\nCALL generate_candidates_tool(num_candidates=12)\n\n## Step 2: Screen\nAnalyze all 12 candidates:\n- Check integral (should be ~1.0)\n- Check c5_bound (precomputed analytical score)\n- KEEP if c5_bound < 0.37\n- SKIP if c5_bound >= 0.37 (too bad, waste training)\n\nTypical: 3-6 candidates pass\n\n## Step 3: Train top 3\nFor each kept candidate (train up to 3):\n- num_intervals = 150 (fast)\n- penalty_strength = 10 (smooth)\n- num_steps = 20000 (brief)\n- Train for 20000 steps\n\n## Step 4: Evaluate\nCALL evaluate_solution on each trained candidate\n\n## Step 5: Iterate\nIf no improvement (all scores <= 1.00001):\n- Generate NEW candidates (different patterns/seeds)\n- Train 3 best again\n\n## Why it works\n- 12 analytical screens = zero training cost\n- 3 short trains = fast, diverse exploration\n- Low intervals + low penalty = faster evals, smoother functions\n- Expected: 1+ improvement per iteration'
+new_middlewares:
+  - name: force_screen_then_train
+    hook: before_model
+    description: 'Middleware to enforce screen-then-train workflow.\n\nRemind solver to screen candidates with c5_bound before training, and to use short training configs.'
+    implementation_py: 'def before_model(hook_input):\n    state = hook_input.get("state", {})\n    evals_left = state.get("evals_left", 0)\n    trains_done = state.get("trains_done", 0)\n    \n    if evals_left >= 5 and trains_done < 1:\n        return (\n            "SCREEN FIRST! Before training any candidate, CALL generate_candidates_tool(12)\\n"\n            "to get 12 candidates with precomputed c5_bound.\\n"\n            "Only train candidates with c5_bound < 0.37.\\n"\n            "Use short training: num_intervals=150, penalty_strength=10, num_steps=20000\\n"\n            "Train 3 candidates max per batch." \n        )\n    elif trains_done >= 1 and evals_left >= 3:\n        return (\n            f"{trains_done} train(s) done. You have {evals_left} evals left.\\n"\n            "Train 3 NEW candidates (not retraining old ones).\\n"\n            "Use num_intervals=150, penalty_strength=10, num_steps=20000\\n"\n            "Low intervals = faster evals, more diversity per budget." \n        )\n    elif evals_left >= 2:\n        return (\n            f"{evals_left} evals left - final stretch!\\n"\n            "Train 2 new candidates if no progress yet.\\n"\n            "Low penalty=10 for smoother functions." \n        )\n    return None'

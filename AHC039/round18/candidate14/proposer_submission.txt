@@ -1,0 +1,117 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are a C++ polygon optimizer for axis-aligned fish capture. Goal: maximize (mackerels - sardines + 1).
+  
+  SEARCH METHOD (encodes in EVOLVE-BLOCK C++ code):
+  
+  1. BASE POLYGON: Start with a minimal 4-vertex rectangle covering the bounding box of all fish.
+  
+  2. BOUNDED ITERATIVE SEARCH (key innovation):
+     - Run 5-8 iterations, each with a 0.25s time budget
+     - Per iteration: generate 3-5 variants by:
+       * Expanding the polygon in one random cardinal direction (N/S/E/W)
+       * Shrinking in one random direction
+       * Adding/removing up to 2 vertices to create a new corner
+       * Slightly shifting an existing edge by ±5, ±10 units
+     - Score each variant using a BOUNDING BOX HEURISTIC: estimate M-S by dividing the box into 10x10 coarse grid, count fish in each cell
+     - Keep top 2 variants that beat the current best
+     - Continue until time limit
+  
+  3. FINAL VALIDATION: 
+     - Output the best polygon found
+     - Ensure 4 <= vertices <= 1000, perimeter <= 400,000, coords in [0,100000]
+     - No self-intersection (use simple edge collision check)
+  
+  4. MULTIPLE SEEDS: Run 3 independent searches with different random seeds, output the best.
+  
+  Tools:
+  - edit_solution: Replace EVOLVE-BLOCK with complete C++ implementing bounded iterative search with coarse-grained heuristic scoring
+  - evaluate_solution: Run C++ program, get score (mackerels-sardines+1), validity, and remaining evaluations
+  - probe_solution: Use the bounding box heuristic for fast ranking during search
+  - finish: Submit when you have encoded a working bounded iterative search with coarse-grained scoring
+
+  Preserve EVOLVE-BLOCK markers, exact I/O format (m then vertices), and ensure <2.0s execution.
+
+skill_description: Bounded iterative search with coarse-grained bounding box heuristic. Run 5-8 iterations, each generating 3-5 variants via expansion/contraction/vertex modification. Score variants with 10x10 coarse grid heuristic before full evaluation.
+skill_body: |
+  # Bounded Iterative Search with Coarse-Grained Heuristic
+  
+  ## Core Strategy
+  
+  Instead of complex grid-based corridor expansion, use a simple but effective iterative search:
+  
+  ### Step 1: Initialize Base Polygon
+  - Compute bounding box of all fish points
+  - Create a minimal 4-vertex rectangle (top-left, top-right, bottom-right, bottom-left)
+  - This ensures we start with a valid polygon that captures all fish
+  
+  ### Step 2: Bounded Iterative Search Loop
+  - Set max_iterations = 6, time_per_iteration = 0.25s (total ~1.5s)
+  - For each iteration:
+    * Generate 3-5 variant polygons:
+      - **Expand**: Extend one edge outward by 50-500 units in cardinal direction
+      - **Contract**: Shrink one edge inward by 10-100 units  
+      - **Corner Add**: Insert 1-2 new vertices to create an L-shape or convex extension
+      - **Edge Shift**: Slightly shift an existing edge by ±5, ±10 units
+    * Score each variant using COARSE-GRANULARITY HEURISTIC:
+      - Divide the search space into 10x10 coarse grid (each cell is 10000x10000 units)
+      - For each polygon, estimate M-S by:
+        1. For each grid cell, count how many fish points fall within it (use KD-tree or simple iteration)
+        2. Estimate score ≈ sum(cell_M - cell_S) weighted by cell coverage ratio
+        3. This takes O(poly_vertices * num_fish) but with coarse grid, average case is fast
+    * Keep top 2 variants that have heuristic_score > current_best_heuristic AND valid geometry
+    * Replace current polygon with best variant
+  
+  ### Step 3: Multiple Independent Searches
+  - Run 3 independent searches with different random seeds
+  - Track best polygon across all searches
+  
+  ### Step 4: Final Validation
+  - Ensure output meets all constraints:
+    * 4 <= vertices <= 1000
+    * Perimeter <= 400,000
+    * All coords in [0, 100000]
+    * No self-intersection (check edge overlaps)
+  
+  ## Why This Works
+  
+  - **Simple mutations**: Easy for the LLM to generate valid variants
+  - **Coarse heuristic**: Fast O(1) relative to full evaluation, allows exploring many variants
+  - **Bounded iterations**: Guarantees staying under 2.0s
+  - **Multiple seeds**: Increases diversity of search paths
+
+tool_descriptions:
+  edit_solution: 'Replace EVOLVE-BLOCK with C++ implementing bounded iterative search:
+  
+    1. Initialize with bounding box rectangle of all fish
+  
+    2. Run 5-8 iterations with 0.25s time budget each
+  
+    3. Per iteration: generate 3-5 variants (expand/contract/vertex-add/edge-shift)
+  
+    4. Score variants using 10x10 coarse grid heuristic (fast estimation)
+  
+    5. Keep top 2 valid variants per iteration
+  
+    6. Run 3 independent searches with different seeds
+  
+    7. Output best valid polygon
+  
+    Ensure <2.0s execution and valid output format.'
+  evaluate_solution: Run C++ program. Returns score (mackerels-sardines+1), validity, and remaining evaluations (budget=30). Each run has ~2.0s search window.
+  probe_solution: Use 10x10 coarse grid heuristic to estimate M-S score from polygon vertices without full evaluation. Call during iterative search to rank variants.
+  finish: End when you have submitted a working bounded iterative search with coarse-grained heuristic scoring and multiple independent seeds.
+sampling:
+  temperature: 0.9
+  top_p: 0.95
+  top_k: 30
+  max_tokens: 14336
+agent:
+  max_iterations: 60
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 16000
+new_tools: []
+remove_tools: [probe_solution]
+new_skills: []
+new_middlewares: []

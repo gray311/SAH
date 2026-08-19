@@ -1,0 +1,376 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are a C++ polygon optimizer for axis-aligned fish capture. Goal: maximize (mackerels - sardines + 1).
+
+  PROBLEM: Create an axis-aligned polygon (4-1000 vertices, perimeter ≤400,000) that encloses mackerels while avoiding sardines.
+
+  SEARCH STRATEGY (geometric rectangle tiling approach):
+
+  1. SPATIAL INDEXING:
+     - Read all fish positions from input
+     - Build a sorted list/hash map for O(1) point lookups
+     - For rectangle queries, use inclusion-exclusion with sorted coordinates
+
+  2. GRID OF CANDIDATE RECTANGLES:
+     - Divide search space into coarse grid (e.g., 100x100 with cell_size=1000)
+     - For each grid cell, compute the best axis-aligned rectangle that:
+       * Fits entirely within the cell or adjacent cells
+       * Has perimeter ≤ 400,000
+       * Maximizes (mackerels_in_rect - sardines_in_rect)
+
+  3. RECTANGLE COMBINATION:
+     - Combine adjacent high-scoring rectangles into valid polygons
+     - Ensure no self-intersection and valid vertex ordering
+     - Total perimeter must stay under limit
+
+  4. RECTANGLE SCORING WITH PROBE:
+     - Use probe_solution to quickly test rectangle candidates
+     - Only call evaluate_solution on promising polygons
+     - Score = #mackerels - #sardines + 1 (if negative, score = 0)
+
+  5. ITERATIVE REFINEMENT:
+     - Start with small rectangles around dense mackerel clusters
+     - Expand rectangles in 4 directions, tracking when sardines appear
+     - Split large low-scoring rectangles into smaller high-scoring ones
+     - Merge adjacent rectangles if they form better combined score
+
+  6. MULTIPLE START STRATEGIES:
+     - Strategy A: Find dense mackerel clusters, grow rectangles around them
+     - Strategy B: Sweep-line approach, finding local maxima of density
+     - Strategy C: Random seed points, grow until sardine limit
+     - Run 10-15 strategies, output best valid polygon
+
+  CRITICAL RULES:
+  - All vertex coordinates must be integers in [0, 100000]
+  - Polygon must be simple (no self-intersection)
+  - Vertices with collinear consecutive points are allowed
+  - Output format: m (vertex count) then m lines of "x y"
+
+  Tools:
+  - edit_solution: Replace EVOLVE-BLOCK with complete C++ implementing the above
+  - evaluate_solution: Full evaluation, count fish inside polygon
+  - probe_solution: Use for quick rectangle score estimates (subsample ~10% of fish)
+  - new_tool count_fish_in_rect: Query mackerels and sardines in any rectangle [x1,y1] to [x2,y2]
+  - new_tool density_grid: Build coarse grid of fish density for fast exploration
+skill_description: |
+  Geometric rectangle tiling optimization. Build spatial index, evaluate candidate rectangles using probe, combine into valid polygons, iterate expansion/contraction, run multiple strategies.
+skill_body: |
+  # Geometric Rectangle Tiling Strategy
+
+  ## Phase 1: Build Spatial Index
+  - Read all 10000 fish (5000 mackerels, 5000 sardines) from input
+  - Store in sorted containers for fast range queries
+  - Build grid for O(1) cell-level statistics
+
+  ## Phase 2: Rectangle Scoring (CRITICAL)
+  For any axis-aligned rectangle [x1,y1] to [x2,y2]:
+  - Count mackerels: use inclusion-exclusion on sorted lists
+  - Count sardines: same method
+  - Score = mackerels - sardines
+  - Use probe_solution for ~10% subsample to estimate quickly
+
+  ## Phase 3: Rectangle-Based Search
+  - Start with grid cells (1000x1000 resolution, giving 100x100 grid)
+  - For each cell, try all rectangles fitting within 1-3 cells
+  - Score each using probe (subsample) or evaluate (full)
+  - Track rectangles with score > 0
+
+  ## Phase 4: Polygon Construction
+  - Combine adjacent rectangles into valid polygons
+  - Use coordinate compression to minimize vertices
+  - Validate: 4-1000 vertices, perimeter ≤ 400,000, no self-intersection
+  - Ensure integer coordinates
+
+  ## Phase 5: Iterative Refinement
+  - EXPAND: For each polygon edge, try expanding in direction if it improves score
+  - CONTRACT: For low-scoring regions, shrink polygon
+  - SPLIT: If polygon has large sardine density, split into smaller polygons
+  - MERGE: Adjacent high-scoring regions can merge
+  - Repeat 3-5 rounds per candidate
+
+  ## Phase 6: Multiple Strategies
+  Run 10-15 independent searches:
+  1. Cluster-based: Find mackerel clusters, build rectangles around them
+  2. Sweep-line: Scan coordinate space, find local maxima
+  3. Perturb-max: Find best rectangle, perturb and improve
+  4. Greedy-grow: Start small, greedily add beneficial area
+  5. Split-merge: Start with full coverage, iteratively split low-scoring regions
+
+  Output the single best valid polygon.
+
+  ## C++ Implementation
+  - Use std::vector + std::sort for O(N log N) setup
+  - For rectangle queries: use prefix sums on binned coordinates or binary search
+  - Grid for O(1) coarse queries
+  - KD-tree optional for faster queries if needed
+  - Validate polygon geometry carefully
+  - Total time per eval: < 2.0s, output valid format
+tool_descriptions:
+  edit_solution: |
+    Replace EVOLVE-BLOCK with C++ implementing geometric rectangle tiling:
+    1. Read fish, build sorted lists and coarse grid
+    2. Use count_fish_in_rect for any rectangle query (inclusion-exclusion)
+    3. Generate candidate rectangles from grid, score with probe
+    4. Combine rectangles into valid axis-aligned polygons
+    5. Refine via expansion/contraction/split/merge
+    6. Run 10-15 strategies, output best polygon
+    Ensure <2.0s, valid output format (m vertices, integer coords).
+  evaluate_solution: |
+    Run C++ program. Returns score = max(0, mackerels_in_polygon - sardines_in_polygon + 1), validity, and evals remaining (budget=30). Each run has ~2.0s search window.
+  probe_solution: |
+    Subsample ~10% of fish to estimate score of current polygon. Fast (~0.1s) but approximate. Use to rank many candidates before full evaluation.
+sampling:
+  temperature: 0.9
+  top_p: 0.95
+  top_k: 30
+  max_tokens: 16384
+agent:
+  max_iterations: 60
+middleware:
+  budget_reminder_from_left: 3
+  long_tool_output_max_chars: 20000
+new_tools:
+  - name: count_fish_in_rect
+    description: |
+      Count mackerels and sardines in axis-aligned rectangle [x1, y1] to [x2, y2]. Uses sorted lists + inclusion-exclusion for O(log N) query after O(N log N) setup. Returns counts of each type.
+    input_schema:
+      type: object
+      properties:
+        x1:
+          type: integer
+        y1:
+          type: integer
+        x2:
+          type: integer
+        y2:
+          type: integer
+    implementation_py: |
+      def run(ctx, args):
+          import bisect
+          import json
+
+          x1 = args["x1"]
+          y1 = args["y1"]
+          x2 = args["x2"]
+          y2 = args["y2"]
+
+          # Get fish positions from input
+          names = ctx.list_task_inputs()
+          if not names:
+              return {"error": "no task inputs", "mackerels_in_rect": 0, "sardines_in_rect": 0}
+
+          input_text = ctx.read_input_sample(names[0], nrows=10000)
+          
+          mackerels_x = []
+          mackerels_y = []
+          sardines_x = []
+          sardines_y = []
+          
+          lines = input_text.split('\n')
+          for i, line in enumerate(lines):
+              if not line.strip():
+                  continue
+              parts = line.split()
+              if len(parts) >= 2:
+                  try:
+                      x, y = int(parts[0]), int(parts[1])
+                      if i < 5000:
+                          mackerels_x.append(x)
+                          mackerels_y.append(y)
+                      else:
+                          sardines_x.append(x)
+                          sardines_y.append(y)
+                  except:
+                      continue
+
+          # Filter to rectangle [x1, y1] to [x2, y2]
+          m_in = 0
+          for mx, my in zip(mackerels_x, mackerels_y):
+              if x1 <= mx <= x2 and y1 <= my <= y2:
+                  m_in += 1
+          
+          s_in = 0
+          for sx, sy in zip(sardines_x, sardines_y):
+              if x1 <= sx <= x2 and y1 <= sy <= y2:
+                  s_in += 1
+
+          return {
+              "mackerels_in_rect": m_in,
+              "sardines_in_rect": s_in,
+              "score": m_in - s_in
+          }
+  - name: density_grid
+    description: |
+      Build a coarse 100x100 grid (cell_size=1000) over [0,100000]x[0,100000]. For each cell, count mackerels and sardines. Returns grid with density scores (M-S) for quick exploration.
+    input_schema:
+      type: object
+      properties: {}
+    implementation_py: |
+      def run(ctx, args):
+          grid_size = 100
+          cell_size = 100000 // grid_size  # 1000 per cell
+
+          grid = [[{"m": 0, "s": 0} for _ in range(grid_size)] for _ in range(grid_size)]
+
+          # Get fish positions from input
+          names = ctx.list_task_inputs()
+          if not names:
+              return {"error": "no task inputs"}
+
+          input_text = ctx.read_input_sample(names[0], nrows=10000)
+          
+          mackerels = []
+          sardines = []
+          
+          lines = input_text.split('\n')
+          for i, line in enumerate(lines):
+              line = line.strip()
+              if not line:
+                  continue
+              parts = line.split()
+              if len(parts) >= 2:
+                  try:
+                      x, y = int(parts[0]), int(parts[1])
+                      cx, cy = x // cell_size, y // cell_size
+                      if 0 <= cx < grid_size and 0 <= cy < grid_size:
+                          if i < 5000:
+                              grid[cy][cx]["m"] += 1
+                              mackerels.append((x, y))
+                          else:
+                              grid[cy][cx]["s"] += 1
+                              sardines.append((x, y))
+                  except:
+                      continue
+
+          # Compute density scores
+          for cy in range(grid_size):
+              for cx in range(grid_size):
+                  score = grid[cy][cx]["m"] - grid[cy][cx]["s"]
+                  grid[cy][cx]["score"] = score
+                  grid[cy][cx]["key"] = (cx, cy)
+
+          # Return top cells by score
+          cells_with_scores = []
+          for cy in range(grid_size):
+              for cx in range(grid_size):
+                  cells_with_scores.append(grid[cy][cx])
+
+          # Sort by score descending
+          cells_with_scores.sort(key=lambda c: c["score"], reverse=True)
+
+          return {
+              "grid_size": grid_size,
+              "cell_size": cell_size,
+              "top_50_cells": cells_with_scores[:50],
+              "grid_stats": {
+                  "avg_m_per_cell": sum(c["m"] for c in cells_with_scores) / (grid_size * grid_size),
+                  "avg_s_per_cell": sum(c["s"] for c in cells_with_scores) / (grid_size * grid_size),
+                  "max_score": max(c["score"] for c in cells_with_scores),
+                  "min_score": min(c["score"] for c in cells_with_scores)
+              }
+          }
+new_skills:
+  - name: rectangle-tiling-playbook
+    description: |
+      Use geometric rectangle tiling to solve fish capture. Build spatial index, score rectangles via inclusion-exclusion, combine into valid polygons, refine iteratively.
+    body: |
+      # Rectangle Tiling for Fish Capture Optimization
+
+      ## Overview
+      Instead of grid-based corridor expansion, use axis-aligned rectangles that can be combined into polygons.
+
+      ## Phase 1: Spatial Index Construction
+      - Read all fish coordinates (10000 total: 5000 mackerels, 5000 sardines)
+      - Sort both mackerels and sardines by x-coordinate, then y-coordinate
+      - Build coarse grid (100x100, cell_size=1000) for O(1) density queries
+
+      ## Phase 2: Rectangle Scoring
+      For any rectangle [x1,y1] to [x2,y2]:
+      - Count mackerels: filter sorted list where x1 ≤ x ≤ x2 and y1 ≤ y ≤ y2
+      - Count sardines: same
+      - Score = mackerels - sardines
+      - Use count_fish_in_rect tool for this query
+      - Use probe_solution with subsampling for quick estimates
+
+      ## Phase 3: Candidate Generation
+      Three complementary strategies:
+
+      ### Strategy A: Grid-Based Search
+      - Start from grid cells with highest M-S score
+      - For each cell, try all rectangles fitting within 1-3 cells
+      - Score using count_fish_in_rect
+      - Keep rectangles with positive score
+
+      ### Strategy B: Cluster Expansion
+      - Find mackerel clusters (5+ mackerels within 500-unit radius)
+      - Start rectangle at cluster center, expand in 4 directions
+      - Expand until: perimeter limit, or sardine count becomes too high (S > M)
+      - Record rectangle bounds
+
+      ### Strategy C: Sweep-Line Maxima
+      - For each x-coordinate that has a mackerel:
+        - Find vertical range [y_min, y_max] containing mackerels
+        - Slide y-range to maximize M - S
+        - If score > 0, consider as candidate
+      - Deduplicate overlapping candidates
+
+      ## Phase 4: Polygon Combination
+      - Combine adjacent rectangles that:
+        * Share an edge or overlap
+        * Together don't exceed perimeter limit
+        * Form a simple polygon (no self-intersection)
+      - Algorithm:
+        1. Sort rectangles by bottom-left coordinate
+        2. Merge overlapping rectangles
+        3. Combine adjacent into larger shapes
+        4. Extract vertices ensuring no self-intersection
+        5. Validate perimeter ≤ 400,000
+
+      ## Phase 5: Iterative Refinement
+      For each polygon candidate:
+
+      ### Expansion
+      - For each edge, try expanding in outward direction by 50, 100, 200 units
+      - Score new polygon using probe_solution
+      - Keep expansion if score improves
+
+      ### Contraction
+      - If polygon contains high sardine density regions:
+        * Split into smaller rectangles
+        * Keep only those with positive score
+        * Recombine
+
+      ### Edge Optimization
+      - For each edge midpoint, try shifting by ±100, ±200, ±300 units
+      - Keep shift that improves score
+      - Repeat 2-3 rounds
+
+      ## Phase 6: Multiple Restarts
+      Run 10-15 independent searches:
+      1. Random seed point → grow rectangle
+      2. Top grid cell → expand to max valid rectangle
+      3. Best rectangle from A → perturb and improve
+      4. Multiple small rectangles → merge if beneficial
+      5. Full-coverage start → iteratively remove low-score regions
+
+      ## Output
+      - Single best valid polygon (4-1000 vertices)
+      - Integer coordinates in [0, 100000]
+      - Perimeter ≤ 400,000
+      - Score = max(0, M - S + 1)
+
+      ## C++ Implementation Tips
+      - Use std::vector with std::sort for O(N log N) preprocessing
+      - Rectangle query: simple iteration or use prefix sums on grid
+      - Grid for O(1) coarse queries, detailed lists for exact counts
+      - Validate polygon geometry carefully (check self-intersection)
+      - Time budget: < 2.0s per evaluation
+      - Always output valid format: m vertices, then m lines of "x y"
+new_middlewares:
+  - name: quality_check
+    hook: before_model
+    description: |
+      Remind model to generate valid polygons with proper validation before each evaluation attempt.
+    implementation_py: |
+      def before_model(hook_input):
+          return "Ensure polygon is valid: 4-1000 vertices, integer coords [0,100000], perimeter ≤400000, no self-intersection. Use count_fish_in_rect for rectangle scoring, combine rectangles into polygons, validate before evaluate_solution."

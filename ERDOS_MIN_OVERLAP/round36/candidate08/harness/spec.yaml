@@ -1,0 +1,221 @@
+schema: h2spec/1.0
+system_prompt: |
+  Erdos minimum overlap problem (C5): Find h: [0,2]->[0,1] minimizing max_k integral h(x)(1-h(x+k))dx.
+
+  CONSTRAINT: integral(h) = 1 exactly. h values in [0,1].
+
+  Current best: C5 <= 0.38092303510845016 (combined_score = 1.0).
+
+  GOAL: Find h achieving c5_bound < 0.38092303510845016 (combined_score > 1.0).
+
+  METHOD FOR THE EDITOR (step-by-step):
+  
+  1. Generate 5-7 diverse INITIAL HYPOTHESES for h using generate_step_function_template.
+     - Use templates: bipartite (single threshold t=0.5), multimodal_3peaks, multimodal_5peaks,
+       golomb_ruler (sparse peaks at 0.0,0.4,0.8,1.2,1.6), sinusoidal_threshold, piecewise_constant.
+     - VARY num_intervals across hypotheses: try 400, 800, 1600, 3200 (discretization matters!).
+     - DO NOT tune hyperparameters yet.
+
+  2. For each hypothesis, call probe_solution to quickly score it (approximate c5_bound).
+     - Keep only hypotheses with c5_bound < 0.385.
+
+  3. For the best 3 hypotheses (lowest c5_bound), call evaluate_solution to get exact scores.
+     - If any has combined_score > 1.0, finish immediately.
+
+  4. If no hypothesis beats the seed, try structure_inspired_mutations on the BEST single hypothesis.
+     - Use mutation types: "spread_peaks", "bipartite", "localized".
+     - Create 3-5 mutants for each type. Probe them, evaluate the best 1-2.
+
+  5. If still stuck, restart from step 1 with different random seeds.
+
+  6. NEVER spend more than 2 full evaluations per hypothesis before probing.
+  7. NEVER jump straight to hyperparameter tuning before exploring diverse structural hypotheses.
+
+  KEY INSIGHT: The seed uses num_intervals=800. The solver should explore a WIDER RANGE of discretizations
+  (400, 800, 1600, 3200) because the optimal step function might need more or fewer intervals.
+  Structural diversity (different templates) is more important than hyperparameter tuning.
+skill_description: Generate diverse step function templates with varied discretization and structure (bipartite, multimodal, Golomb-like, sinusoidal), probe them cheaply, then evaluate the best.
+skill_body: |
+  # Diverse Template Generation Strategy for Erdos C5
+  
+  ## Phase 1: Generate 5-7 Diverse Initial Hypotheses
+  
+  Use generate_step_function_template with DIFFERENT template types:
+  
+  - "bipartite": Single threshold h(x) = 1 if x < 0.5 else 0.
+  - "multimodal_3peaks": Three narrow peaks at x=0.5, 1.0, 1.5 with widths ~0.15.
+  - "multimodal_5peaks": Five narrow peaks at x=0.3, 0.7, 1.0, 1.3, 1.7 with widths ~0.12.
+  - "golomb_ruler": Sparse peaks at [0.0, 0.4, 0.8, 1.2, 1.6] to minimize overlaps.
+  - "sinusoidal_threshold": Smooth transition using sigmoid(sin) to create wave-like structure.
+  - "piecewise_constant": Simple step function with varying intervals.
+  
+  VARY num_intervals: try 400, 800, 1600, 3200. Optimal discretization might differ from seed's 800.
+  
+  ## Phase 2: Probe and Evaluate
+  
+  1. Call probe_solution on EACH hypothesis to get approximate c5_bound.
+  2. Keep only those with c5_bound < 0.385.
+  3. Call evaluate_solution on the best 3 hypotheses (lowest c5_bound).
+  4. If any has combined_score > 1.0, finish.
+  
+  ## Phase 3: Targeted Mutations (if needed)
+  
+  If no hypothesis beats the seed:
+  - Take the BEST single hypothesis (lowest c5_bound from Phase 2).
+  - Use structure_inspired_mutations with target_shifts from correlation_analyzer.
+  - Create 3-5 mutants per mutation type. Probe them, evaluate the best 1-2.
+  
+  ## Key Rules
+  - ALWAYS explore structural diversity FIRST (different templates, different num_intervals).
+  - Use probe_solution to screen many hypotheses cheaply.
+  - Only do hyperparameter tuning AFTER exhausting diverse structural hypotheses.
+tool_descriptions:
+  edit_solution: 'Modify EVOLVE-BLOCK. For template generation, change num_intervals (400, 800, 1600, 3200), peak positions, etc. For mutations, use structure_inspired_mutations.'
+  evaluate_solution: 'Full optimization. Returns combined_score = 0.38092303510845016 / c5_bound. Use probe_solution first to filter candidates with c5_bound < 0.385.'
+  probe_solution: 'Fast approximate evaluation (500 intervals). Returns approximate c5_bound. Use to screen hypotheses before full evaluation.'
+  finish: 'Submit when combined_score > 1.0 (c5_bound < 0.38092303510845016).'
+sampling:
+  temperature: 1.0
+  top_p: 0.9
+  top_k: 30
+  max_tokens: 16384
+agent:
+  max_iterations: 80
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 15000
+new_tools:
+  - name: generate_step_function_template
+    description: |
+      Generate a diverse initial hypothesis for h: step function [0,2]->[0,1] with integral(h)=1.
+      Specify template_type (bipartite, multimodal_3peaks, golomb_ruler, sinusoidal_threshold,
+      piecewise_constant) and num_intervals (400, 800, 1600, 3200) to explore structural diversity.
+      Call 5-7 times with different types/num_intervals before tuning hyperparameters.
+    input_schema:
+      type: object
+      properties:
+        template_type:
+          type: string
+          enum:
+            - bipartite
+            - multimodal_3peaks
+            - multimodal_5peaks
+            - golomb_ruler
+            - sinusoidal_threshold
+            - piecewise_constant
+        num_intervals:
+          type: integer
+          minimum: 100
+          maximum: 5000
+    implementation_py: |
+      def run(ctx, args):
+          import numpy as np
+          template_type = args.get("template_type", "bipartite")
+          num_intervals = args.get("num_intervals", 800)
+          domain = 2.0
+          dx = domain / num_intervals
+          x = np.linspace(0, 2, num_intervals + 1)[0:num_intervals]
+          h = np.zeros(num_intervals)
+          
+          if template_type == "bipartite":
+              t = 0.5
+              h = np.where(x < t, 1.0, 0.0)
+          elif template_type == "multimodal_3peaks":
+              peaks = np.array([0.5, 1.0, 1.5])
+              widths = 0.15
+              for p in peaks:
+                  mask = (x >= p - widths/2) & (x < p + widths/2)
+                  h = h + np.where(mask, 4.0, 0.0)
+              h = np.clip(h, 0.0, 10.0)
+              h = np.tanh(h / 2.0)
+          elif template_type == "multimodal_5peaks":
+              peaks = np.array([0.3, 0.7, 1.0, 1.3, 1.7])
+              widths = 0.12
+              for p in peaks:
+                  mask = (x >= p - widths/2) & (x < p + widths/2)
+                  h = h + np.where(mask, 5.0, 0.0)
+              h = np.clip(h, 0.0, 10.0)
+              h = np.tanh(h / 2.0)
+          elif template_type == "golomb_ruler":
+              marks = np.array([0.0, 0.4, 0.8, 1.2, 1.6])
+              widths = 0.08
+              for m in marks:
+                  mask = (x >= m - widths/2) & (x < m + widths/2)
+                  h = h + np.where(mask, 6.0, 0.0)
+              h = np.clip(h, 0.0, 10.0)
+              h = np.tanh(h / 2.0)
+          elif template_type == "sinusoidal_threshold":
+              a, b, c = 1.5, 2.0, -0.5
+              h = 1.0 / (1.0 + np.exp(-(a * np.sin(2 * np.pi * x / b) + c)))
+          elif template_type == "piecewise_constant":
+              mid = num_intervals // 2
+              h[:mid] = 2.0 / (mid * dx)
+              h[mid:] = 0.0
+              h = np.clip(h, 0.0, 1.0)
+              
+          integral = np.sum(h) * dx
+          if integral > 1e-10:
+              h = h * (1.0 / integral)
+          h = np.clip(h, 0.0, 1.0)
+          
+          h_str = '[' + ','.join(f'{v:.10f}' for v in h) + ']'
+          return {"h": h_str, "template_type": template_type, "num_intervals": num_intervals}
+new_skills:
+  - name: diverse-template-generation
+    description: Generate diverse initial hypotheses with varied structure and discretization. Probe them cheaply before full evaluation.
+    body: |
+      # Diverse Template Generation for Erdos C5
+      
+      ## Strategy: Explore Structural Diversity FIRST
+      
+      The seed uses num_intervals=800 with 14 patterns. Instead:
+      1. Generate 5-7 structurally DIFFERENT hypotheses using generate_step_function_template
+         - Vary template_type: bipartite, multimodal_3peaks, golomb_ruler, sinusoidal_threshold
+         - Vary num_intervals: 400, 800, 1600, 3200 (discretization matters!)
+      2. Probe ALL hypotheses with probe_solution (cheap, ~10s each)
+      3. Evaluate only the best 3 (lowest c5_bound from probing)
+      4. If no improvement, try structure_inspired_mutations on the best hypothesis
+      
+      ## Why this works
+      
+      The current harness modifies the seed's 14 patterns but all share num_intervals=800.
+      The optimal step function might need more intervals (3200) or a completely different structure (bipartite).
+      By exploring structural diversity FIRST, we avoid local optima in the seed's pattern space.
+      
+      ## Workflow
+      
+      1. Call generate_step_function_template 5-7 times with diverse (template_type, num_intervals) pairs.
+      2. Call probe_solution on each candidate.
+      3. Call evaluate_solution on the best 3 candidates (c5_bound < 0.385).
+      4. If combined_score > 1.0, finish.
+      5. If stuck, try mutations on the best hypothesis.
+      
+      ## Key Rules
+      
+      - ALWAYS explore structural diversity (different templates, different num_intervals) BEFORE hyperparameter tuning.
+      - Use probe_solution to screen many hypotheses cheaply (budget: 30 probes).
+      - NEVER evaluate more than 2 hypotheses without probing first.
+      - VARY num_intervals (400, 800, 1600, 3200) as part of template diversity.
+new_middlewares:
+  - name: diversity_reminder
+    hook: before_model
+    description: Remind the solver to explore structural diversity (different templates, num_intervals) before hyperparameter tuning.
+    implementation_py: |
+      def before_model(hook_input):
+          history = hook_input.get("history", [])
+          
+          templates_used = []
+          for turn in history:
+              tools = turn.get("tools_used", [])
+              for t in tools:
+                  if t == "generate_step_function_template":
+                      templates_used.append(t)
+          
+          if len(templates_used) < 5:
+              return f"Remember: You've only called generate_step_function_template {len(templates_used)} times. Generate more diverse templates (try: bipartite, multimodal_3peaks, golomb_ruler, sinusoidal_threshold, piecewise_constant) with different num_intervals (400, 800, 1600, 3200). Do not tune hyperparameters yet!"
+          
+          has_hyper_tuning = any("hyperparameter" in str(turn.get("tools_used", [])) for turn in history[-5:])
+          if has_hyper_tuning and len(templates_used) < 7:
+              return "You're tuning hyperparameters but haven't exhausted diverse templates. Finish generating 7 diverse templates with different num_intervals first!"
+          
+          return None

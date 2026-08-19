@@ -1,0 +1,105 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are an expert mathematician specializing in the Erdős minimum overlap problem.
+  
+  THE OBJECTIVE: Find step functions h: [0,2]->[0,1] with integral=1 that minimize max_k integral h(x)(1-h(x+k))dx.
+  Current best: C5 <= 0.38092303510845016. Goal: beat this to get combined_score > 1.0.
+  
+  KEY INSIGHTS:
+  1. COMBINATORIAL construction problem, not gradient descent. Try mathematically-motivated patterns first.
+  2. Start SMALL: num_intervals=100-200, num_steps=2000-5000.
+  3. Focus on INTEGRAL CONSTRAINT: integral h=1 is critical.
+  4. Patterns: single step, double step, symmetric, concentrated mass.
+  
+  APPROACH:
+  1. Use new_tools to generate candidates with integral constraint handling
+  2. Complete program rewrites, not patches
+  3. Try 3-5 candidate constructions per round
+  4. Switch to direct construction if gradient fails
+  
+  SPECIFIC PATTERNS:
+  - Single: h=1 on [0,1], 0 elsewhere
+  - Double: h=0.5 on two intervals
+  - Piecewise: 2-4 breakpoints
+  
+  Use evaluate_solution directly. REWRITE, don't patch.
+skill_description: |
+  Erdős C5 bound optimization. Finds step functions minimizing max overlap.
+  Strategies: combinatorial constructions, integral constraint handling.
+  Target: combined_score > 1.0.
+tool_descriptions:
+  edit_solution: |
+    Rewrite with COMPLETE program redesign. Simpler architectures, direct construction, explicit integral=1.
+    Bad: tiny tweaks. Good: new program structure.
+  evaluate_solution: |
+    Run program. combined_score > 1.0 = success. ~30 evals. 2-5 per strategy.
+  probe_solution: |
+    Not recommended. Use evaluate_solution directly.
+  finish: |
+    Submit when: combined_score > 1.0, budget exhausted, or no progress.
+sampling:
+  temperature: 1.5
+  top_p: 0.95
+  top_k: 30
+  max_tokens: 16384
+agent:
+  max_iterations: 40
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 15000
+new_tools:
+  - name: construct_candidates
+    description: |
+      Generate step function candidates with integral handling.
+    input_schema:
+      type: object
+      properties: {}
+    implementation_py: |
+      def run(ctx, args):
+          return {"candidates": [
+              {"name": "single", "code": "h=jnp.where(x<=1.0,1.0,0.0)", "integral": 1.0},
+              {"name": "double", "code": "h=jnp.where((x<=0.5)|(x>=1.5),0.5,0.0)", "integral": 0.5},
+              {"name": "concentrated", "code": "h=jnp.where((x>=0.9)&(x<=1.1),0.5,0.0)", "integral": 0.1},
+              {"name": "sin", "code": "h=jnp.clip(jnp.sin(jnp.pi*x)+0.5,0.0,1.0)", "integral": "normalize"},
+              {"name": "piecewise", "code": "h=jnp.where(x<0.5,1.0,0.0)", "integral": 0.5}
+          ], "recommendation": "Test single with num_intervals=100, num_steps=2000. Check integral constraint.", "next": "Measure c5_bound, increase complexity only if < 0.38"}
+new_skills:
+  - name: combinatorial-construction
+    description: |
+      Generate step functions with integral=1 for C5.
+      Use combinatorial patterns before gradient descent.
+    body: |
+      # C5 Combinatorial Construction
+      
+      ## Why Simple Patterns Work
+      Seed: 800 intervals, 59k steps - overkill. Simple candidates better.
+      
+      ## Patterns
+      Single: h=1 on [0,1], integral=1.
+      Double: h=0.5 on [0,0.5] and [1.5,2].
+      Concentrated: h~1 on small interval.
+      Sinusoidal: sin(pi*x)+0.5, clamped, normalized.
+      
+      ## Execution
+      1. Try patterns with num_intervals=100, num_steps=2000
+      2. Measure c5_bound
+      3. Pick best, increase intervals to 200-400
+      4. Fine-tune only if baseline good
+      
+      Success: combined_score > 1.0 (c5_bound < 0.380923).
+new_middlewares:
+  - name: strategy_reminder
+    hook: before_model
+    description: |
+      Remind solver to use combinatorial constructions first.
+    implementation_py: |
+      def before_model(hook_input):
+          if "num_intervals" in str(hook_input).lower() and "800" in str(hook_input):
+              return "WARNING: Don't just use 800 intervals. Try different architectures."
+          if "sigmoid" in str(hook_input).lower() and "latent" in str(hook_input).lower():
+              return "CONSIDER: Try direct constructions before gradient optimization."
+          if "59000" in str(hook_input):
+              return "WARNING: 59000 steps excessive. Start with 2000-5000."
+          if "combined_score" in str(hook_input).lower():
+              return "TARGET: combined_score > 1.0 (c5_bound < 0.380923). Current: 0.999641."
+          return None

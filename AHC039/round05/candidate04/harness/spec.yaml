@@ -1,0 +1,265 @@
+schema: h2spec/1.0
+system_prompt: "You are an expert geometric algorithm engineer optimizing a rectilinear polygon for maximum mackerel capture minus sardine catch.
+
+TASK: Maximize (mackerels inside - sardines inside) + 1 using an orthogonal polygon (axis-aligned edges).
+CONSTRAINTS: <=1000 vertices, perimeter <=400000, integer coords 0-100000, no self-intersection.
+
+METHOD:
+1. ANALYZE: Call analyze_geometry() to find bounding boxes of mackerel clusters and sardine density.
+2. CONSTRUCT: Build a rectilinear polygon around high mackerel density regions while avoiding sardines.
+3. VARY: Try multiple bounding strategies: single large rectangle, multiple smaller rectangles merged, or complex orthogonal paths.
+4. VALIDATE: Ensure no sardine points lie inside the polygon edges or interior.
+5. REFINE: Iteratively adjust polygon boundaries to capture more mackerels per sardine.
+
+TOOLS:
+- edit_solution: Modify the EVOLVE-BLOCK C++ code
+- evaluate_solution: Full score on all 150 test cases (budget is limited)
+- analyze_geometry: NEW - Get geometric insights - bounding boxes, mackerel/sardine distribution
+- probe_solution: Quick approximate score on subsampled data for ranking variants
+
+STRATEGY: The seed program uses KD-trees for point queries but likely outputs poor polygons.
+Focus on constructing rectangles that maximize the ratio mackerels/sardines inside. Try:
+- Multiple seed rectangles centered on mackerel points
+- Expanding rectangles to include nearby mackerels while excluding sardines
+- Merging adjacent rectangles into complex orthogonal polygons
+- Bounding boxes of mackerel clusters vs sardine clusters
+
+Each iteration should try a genuinely different construction approach, not just tweak parameters.
+Call analyze_geometry once early to understand the data, then systematically vary polygon shapes.
+Budget: ~15 evaluations - use probes to rank, 1-2 full evaluations on best candidates.
+
+Remember: The C++ code MUST compile and run within ~1.9s per test case. Simple, correct geometry beats complex failed code."
+skill_description: "Iteratively optimize a geometric algorithm to maximize mackerel capture minus sardine catch in rectilinear polygons. Focus on constructive geometric strategies with bounding boxes and orthogonal polygon design."
+skill_body: "# Rectilinear Polygon Optimization for Mackerel-Sardine Capture
+
+## Objective
+Maximize: (count of mackerels inside) - (count of sardines inside) + 1
+
+## Constraints
+- Orthogonal polygon (edges parallel to x or y axes)
+- Max 1000 vertices, perimeter <= 400,000
+- Integer coordinates 0-100,000
+- No self-intersections
+
+## Strategy Framework
+
+### Phase 1: Data Analysis
+1. Call analyze_geometry() ONCE early to understand:
+   - Mackerel bounding box and cluster distribution
+   - Sardine locations relative to mackerels
+   - Potential high-density regions
+
+### Phase 2: Polygon Construction Strategies
+Try these approaches sequentially, varying parameters:
+
+A. Single Bounding Box
+- Find the bounding box covering most mackerels
+- Compute: count_mackerels - count_sardines
+- Try centers, expanded boxes, shrunk boxes
+
+B. Multiple Rectangles
+- Partition mackerels into clusters
+- Build separate rectangles for each cluster
+- Combine into one orthogonal polygon (chain rectangles)
+
+C. Bounding Box of Mackerel Subset
+- Select top-k densest mackerel regions
+- Take union of their bounding boxes
+- Create orthogonal polygon from union
+
+D. Constraint-Aware Expansion
+- Start with tight mackerel cluster box
+- Expand outward until hitting sardine boundaries
+- Clip sardines from interior
+
+E. Sweep-Line Grid
+- Divide space into grid cells
+- Fill cells with >threshold mackerels
+- Merge adjacent filled cells into orthogonal polygon
+
+### Phase 3: Optimization Loop
+For each strategy:
+1. Vary seed mackerels (subset selection)
+2. Vary expansion/contraction parameters
+3. Vary rectangle merging rules
+4. Probe multiple variants, select best
+5. Full evaluate only on top 1-2 candidates
+
+### Phase 4: Validation
+Before submit:
+- Check perimeter <= 400,000
+- Check vertices <= 1000
+- Ensure no self-intersections
+- Verify all mackerel/sardine counts
+
+## Key Insights
+- Simple rectangles often outperform complex polygons for this task
+- Focus on mackerel density, not just raw count
+- Avoid rectangles with many sardines inside
+- A single tight box around a cluster may beat a loose large box
+- The KD-tree in the seed is useful for fast counting - preserve and enhance it
+- Time budget ~1.9s per test case - avoid O(N^2) internal searches
+
+## Execution Plan
+1. Call analyze_geometry() -> understand data
+2. Edit solution with Strategy A, probe it
+3. If poor, try Strategy B with different clustering
+4. Probe variants to rank, evaluate top 1-2
+5. Iterate with refinements until eval budget exhausted
+6. Call finish() with summary"
+tool_descriptions:
+  edit_solution: "Modify the C++ code in the EVOLVE-BLOCK region. Keep the fixed entry function and preserve KD-tree structures if useful. Each edit should implement ONE concrete geometric strategy (e.g., change bounding box logic, try multiple seed points, vary cluster merging). Prefer targeted SEARCH/REPLACE diffs."
+  evaluate_solution: "Run the C++ program on all 150 test cases. Returns combined_score (higher better), validity (0 if invalid), error message, best score so far, and evaluations remaining. Budget: ~20 evaluations. Use wisely."
+  probe_solution: "Approximate score on subsampled data (~2000 points, first ~30 test cases). Fast and doesn't consume full eval budget. Use to rank multiple polygon variants before committing to full evaluation."
+  finish: "End session when eval budget exhausted or no further improvement possible. Best program auto-submitted."
+sampling:
+  temperature: 0.5
+  top_p: 0.9
+  top_k: 30
+  max_tokens: 12288
+agent:
+  max_iterations: 50
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 10000
+new_tools:
+  - name: analyze_geometry
+    description: "Analyze subsampled mackerel/sardine positions (first ~2000 points from input). Returns key geometric properties: mackerel bounding box, sardine bounding box, number of sardines in mackerel bounding box, estimated mackerel density, and recommended polygon construction approaches. Call once early to guide strategy."
+    input_schema:
+      type: object
+      properties: {}
+    implementation_py: |
+      def run(ctx, args):
+          import math
+          names = ctx.list_task_inputs()
+          if not names:
+              return {"note": "no inputs"}
+          df = ctx.read_input_df(names[0], nrows=2000)
+          
+          if len(df) == 0:
+              return {"mackerel_box": None, "sardine_box": None, 
+                      "sardines_in_mackerel_box": 0, "recommendation": "No data"}
+          
+          x_vals = df['x'].tolist()
+          y_vals = df['y'].tolist()
+          
+          mackerel_points = []
+          sardine_points = []
+          
+          for i in range(min(len(df), 2000)):
+              if i % 2 == 0:
+                  mackerel_points.append((int(x_vals[i]), int(y_vals[i])))
+              else:
+                  sardine_points.append((int(x_vals[i]), int(y_vals[i])))
+          
+          def get_bbox(points):
+              if len(points) == 0:
+                  return None
+              min_x = min(p[0] for p in points)
+              max_x = max(p[0] for p in points)
+              min_y = min(p[1] for p in points)
+              max_y = max(p[1] for p in points)
+              width = max_x - min_x
+              height = max_y - min_y
+              perimeter = 2 * (width + height)
+              return {"min_x": min_x, "max_x": max_x, "min_y": min_y, "max_y": max_y,
+                      "width": width, "height": height, "perimeter": perimeter}
+          
+          mack_box = get_bbox(mackerel_points)
+          sard_box = get_bbox(sardine_points)
+          
+          sardines_in_box = 0
+          if sard_box and mack_box:
+              x_overlap = max(0, min(sard_box["max_x"], mack_box["max_x"]) - 
+                             max(sard_box["min_x"], mack_box["min_x"]))
+              y_overlap = max(0, min(sard_box["max_y"], mack_box["max_y"]) - 
+                             max(sard_box["min_y"], mack_box["min_y"]))
+              area_sard = (sard_box["max_x"] - sard_box["min_x"]) * \
+                         (sard_box["max_y"] - sard_box["min_y"]) + 1
+              if area_sard > 0:
+                  overlap_frac = (x_overlap * y_overlap) / area_sard
+                  sardines_in_box = int(len(sardine_points) * overlap_frac)
+          
+          rec = []
+          if mack_box:
+              rec.append("Use mackerel bounding box: [{}, {}] x [{}, {}], perimeter: {}".format(
+                  mack_box["min_x"], mack_box["max_x"], mack_box["min_y"], mack_box["max_y"], 
+                  mack_box["perimeter"]))
+          
+          if sardines_in_box > 150:
+              rec.append("HIGH SARDINE OVERLAP: Consider smaller, tighter polygon around dense clusters")
+          elif sardines_in_box < 50:
+              rec.append("LOW SARDINE OVERLAP: Large bounding box likely effective")
+          else:
+              rec.append("MODERATE OVERLAP: Try cluster-based approach or exclude sardine-rich regions")
+          
+          return {
+              "mackerel_box": mack_box,
+              "sardine_box": sard_box,
+              "sardines_in_mackerel_box": sardines_in_box,
+              "recommendation": rec
+          }
+new_skills:
+  - name: rectilinear-optimization-strategy
+    description: "Step-by-step playbook for optimizing rectilinear polygons to maximize mackerel capture minus sardine catch. Focus on bounding box strategies, cluster analysis, and constraint-aware construction."
+    body: "# Rectilinear Polygon Optimization Strategy
+
+## Core Idea
+Construct orthogonal polygons that enclose mackerel clusters while avoiding sardines.
+
+## Strategy A: Bounding Box of Mackerel Subset
+1. Select k mackerel points (k in [100, 500]) to represent clusters
+2. Compute their bounding box
+3. Count mackerels inside (use KD-tree or grid)
+4. Count sardines inside
+5. Score = mackerels - sardines + 1
+6. Vary k and seed selection
+
+## Strategy B: Cluster-Based Polygon
+1. Cluster mackerels (simple: by x-coordinate bands or y-coordinate bands)
+2. For each cluster, build a tight bounding box
+3. Merge boxes into one orthogonal polygon (chain them)
+4. Compute score
+
+## Strategy C: Sardine-Avoidance Expansion
+1. Start with mackerel cluster bounding box
+2. Expand each edge outward
+3. Stop when hitting a sardine point or perimeter limit
+4. This excludes sardines from interior
+
+## Strategy D: Grid-Fill Approach
+1. Create 100x100 grid over 0-100000 space
+2. For each cell, count mackerels and sardines
+3. Fill cells with mackerel:sardine ratio > threshold (e.g., > 2:1)
+4. Extract filled cells as orthogonal polygon
+
+## Parameter Variations to Try
+- Subset size: [100, 200, 400, 800, 1000]
+- Grid resolution: [50x50, 100x100, 200x200]
+- Ratio threshold: [1.5, 2.0, 3.0]
+- Expansion amount: [0, 500, 1000, 2000]
+
+## C++ Implementation Tips
+- Pre-sort/cluster mackerels using coordinate bands
+- Use KD-tree for fast point-in-polygon queries
+- Maintain per-test-case best score
+- Avoid O(N^2) operations; use spatial data structures
+- Output valid rectilinear polygon format
+
+## Example C++ Pattern
+# Select k mackerels with smallest y-coordinates
+# Sort mackerels by y
+# Take first k
+# Compute bounding box
+# Output 4 vertices"
+new_middlewares:
+  - name: remind_geometry_first
+    hook: before_model
+    description: "Remind solver to call analyze_geometry first before structural edits, to ground strategy in data."
+    implementation_py: |
+      def before_model(hook_input):
+          history = hook_input.get("history", [])
+          recent_tools = [h.get("tool_name", "") for h in history[-10:]]
+          if "analyze_geometry" not in recent_tools:
+              return "Strategy reminder: The task requires constructing an orthogonal polygon around mackerel clusters while avoiding sardines. Call analyze_geometry() once early to get mackerel/sardine bounding boxes and overlap estimates. Use these to guide your polygon construction. Don't guess blindly - data analysis first!"
+          return None

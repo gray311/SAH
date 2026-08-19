@@ -1,0 +1,291 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are a C++ polygon optimizer for axis-aligned fish capture.
+  Goal: maximize (mackerels_inside - sardines_inside + 1).
+  
+  CORE STRATEGY: Direct cluster-based polygon construction.
+  
+  STEP 1: PARSE FISH COORDINATES
+  - Extract all mackerel (type=1) and sardine (type=-1) coordinates from input
+  - Store as lists of (x, y) tuples
+  
+  STEP 2: CLUSTER MACRO-CHELINES
+  - Use a simple spatial clustering: for each mackerel, check neighbors within 5000 units
+  - Group nearby mackerels into clusters
+  - Track cluster centers and mackerel counts
+  
+  STEP 3: CONSTRUCT CANDIDATE POLYGONS
+  For each cluster:
+  - Build axis-aligned bounding box (min_x, min_y, max_x, max_y)
+  - Check perimeter (2*(max_x-min_x + max_y-min_y)) <= 400,000
+  - Count sardines inside using point-in-rectangle test
+  - Score = mackerels - sardines + 1
+  
+  For union of clusters:
+  - Merge overlapping bounding boxes
+  - Create union polygon
+  - Recompute scores
+  
+  STEP 4: HILL CLIMBING ON EDGES
+  - For each polygon edge, try expanding/contracting by ±10, ±20, ±30 units
+  - Prefer directions that add mackerels without adding sardines
+  - Repeat 2 rounds
+  
+  STEP 5: MULTI-RECTANGLE STRATEGY
+  - Try combining 2-3 separate rectangles (disjoint)
+  - Each rectangle captures a different mackerel cluster
+  - Score = sum of individual scores (no interaction penalty)
+  
+  STEP 6: VALIDATION
+  - Output valid polygon (4-1000 vertices, integer coords, perimeter <= 400,000)
+  - Include # EVOLVE-BLOCK-START and # EVOLVE-BLOCK-END markers
+  
+  TIME BUDGET: Complete within 1.95 seconds (0.05s safety margin)
+  
+  Tools:
+  - edit_solution: Replace EVOLVE-BLOCK with complete C++ implementation
+  - evaluate_solution: Run program, get score
+  - probe_solution: Skip - full evaluation needed for point-based scoring
+  - finish: Submit when you have a working cluster-based strategy
+
+skill_description: |
+  Cluster-based axis-aligned polygon optimization. Parse fish coordinates, cluster mackerels spatially, build bounding boxes around clusters, explicitly count sardines inside each, hill climb edges, try multi-rectangle unions. Time <1.95s.
+skill_body: |
+  # Cluster-Based Polygon Construction Strategy
+  
+  ## Phase 1: Coordinate Extraction
+  - Parse input to extract all mackerel coordinates (type=1) and sardine coordinates (type=-1)
+  - Store in separate vectors for O(1) access
+  
+  ## Phase 2: Spatial Clustering
+  - For each mackerel, check for other mackerels within 5000 units (Euclidean distance)
+  - Use simple BFS/DFS to group connected mackerels into clusters
+  - Track cluster representative (centroid or extreme points) and member count
+  
+  ## Phase 3: Bounding Box Construction
+  For each cluster:
+  - Find min_x, max_x, min_y, max_y among cluster members
+  - Build axis-aligned rectangle [min_x, max_x] × [min_y, max_y]
+  - Verify perimeter = 2*(max_x-min_x + max_y-min_y) <= 400,000
+  
+  ## Phase 4: Sardine Audit
+  For each rectangle:
+  - Count sardines inside: iterate all sardines, check if min_x <= s.x <= max_x and min_y <= s.y <= max_y
+  - Points on boundary count as inside
+  - Score = cluster_mackerels - sardines_inside + 1
+  
+  ## Phase 5: Edge Hill Climbing
+  For each polygon edge:
+  - Try extending edge outward by ±10, ±20, ±30 units
+  - Recompute sardine count for each variant
+  - Keep change that increases score
+  - Repeat 2 refinement rounds
+  
+  ## Phase 6: Multi-Rectangle Strategy
+  - Consider combining 2-3 disjoint rectangles
+  - Total score = sum of individual rectangle scores
+  - This can capture separated mackerel clusters
+  
+  ## Phase 7: Output
+  - Convert final rectangle(s) to polygon vertex format
+  - Output: number of vertices, then vertices (clockwise or counter-clockwise)
+  
+  ## Implementation Notes
+  - Use fast point-in-rectangle test
+  - Total time per evaluation must be < 1.95 seconds
+  - Handle edge cases: empty clusters, single mackerel, all mackerels in one cluster
+
+tool_descriptions:
+  edit_solution: 'Replace EVOLVE-BLOCK with C++ implementing cluster-based polygon construction:
+    1. Parse mackerel and sardine coordinates from input
+    2. Cluster mackerels spatially (within 5000 units)
+    3. Build axis-aligned bounding boxes per cluster
+    4. Count sardines inside each box
+    5. Score = mackerels - sardines + 1
+    6. Hill climb edges by ±10..30 units, 2 rounds
+    7. Try multi-rectangle unions for separated clusters
+    8. Output valid polygon (4-1000 vertices, perimeter <= 400,000)
+    Ensure <1.95s execution.'
+  evaluate_solution: Run C++ program. Returns score (mackerels-sardines+1), validity, and remaining evaluations (budget=30). Each run has ~1.95s search window.
+  probe_solution: NOT useful - full evaluation needed for accurate point-based scoring.
+  finish: End when you have submitted a working cluster-based strategy with bounding boxes, sardine audit, and multi-rectangle support.
+sampling:
+  temperature: 1.2
+  top_p: 0.95
+  top_k: 25
+  max_tokens: 14336
+agent:
+  max_iterations: 60
+middleware:
+  budget_reminder_from_left: 3
+  long_tool_output_max_chars: 15000
+new_tools:
+- name: analyze_mackerel_clusters
+  description: |
+    Analyze mackerel coordinates and identify spatial clusters. Returns cluster info including member count, centroid, bounding box, and estimated score (mackerels - approximate sardines + 1).
+  input_schema:
+    type: object
+    properties: {}
+  implementation_py: |
+    def run(ctx, args):
+        # Parse the C++ program to extract fish coordinates
+        program = ctx.get_program()
+        
+        mackerels = []
+        sardines = []
+        
+        for line in program.split('\n'):
+            line_stripped = line.strip()
+            
+            # Look for mackerel positions: fish[i] = {x: ..., y: ...} or similar patterns
+            if 'mackerel' in line.lower() or 'type' in line.lower() or '1' in line:
+                try:
+                    # Try to extract coordinates
+                    import re
+                    x_match = re.search(r'x[=:]\s*(\d+)', line)
+                    y_match = re.search(r'y[=:]\s*(\d+)', line)
+                    if x_match and y_match:
+                        mackerels.append((int(x_match.group(1)), int(y_match.group(1))))
+                except:
+                    pass
+            
+            # Look for sardine positions
+            if 'sardine' in line.lower() or '-1' in line:
+                try:
+                    import re
+                    x_match = re.search(r'x[=:]\s*(\d+)', line)
+                    y_match = re.search(r'y[=:]\s*(\d+)', line)
+                    if x_match and y_match:
+                        sardines.append((int(x_match.group(1)), int(y_match.group(1))))
+                except:
+                    pass
+        
+        # Simple clustering: group mackerels within 5000 units
+        threshold = 5000
+        clusters = []
+        assigned = set()
+        
+        for i, m in enumerate(mackerels):
+            if i in assigned:
+                continue
+            
+            cluster_members = [m]
+            assigned.add(i)
+            
+            # BFS to find neighbors
+            queue = [i]
+            while queue:
+                curr_idx = queue.pop(0)
+                curr_pt = mackerels[curr_idx]
+                
+                for j, other in enumerate(mackerels):
+                    if j in assigned:
+                        continue
+                    dist = ((curr_pt[0] - other[0])**2 + **(curr_pt[1] - other[1])2)**0.5
+                    if dist <= threshold:
+                        cluster_members.append(other)
+                        assigned.add(j)
+                        queue.append(j)
+            
+            # Compute bounding box
+            xs = [p[0] for p in cluster_members]
+            ys = [p[1] for p in cluster_members]
+            min_x, max_x = min(xs), max(xs)
+            min_y, max_y = min(ys), max(ys)
+            perimeter = 2 * (max_x - min_x + max_y - min_y)
+            
+            # Estimate sardines inside
+            sardines_count = 0
+            for s in sardines:
+                if min_x <= s[0] <= max_x and min_y <= s[1] <= max_y:
+                    sardines_count += 1
+            
+            score = len(cluster_members) - sardines_count + 1
+            
+            clusters.append({
+                "members": len(cluster_members),
+                "centroid": ((sum(xs)/len(xs)), sum(ys)/len(ys)),
+                "bbox": (min_x, max_x, min_y, max_y),
+                "perimeter": perimeter,
+                "sardines_inside": sardines_count,
+                "score": score
+            })
+        
+        return {
+            "total_mackerels": len(mackerels),
+            "total_sardines": len(sardines),
+            "cluster_count": len(clusters),
+            "clusters": clusters,
+            "top_clusters": sorted(clusters, key=lambda c: c["score"], reverse=True)[:5]
+        }
+new_skills:
+- name: cluster-optimization-playbook
+  description: |
+    Cluster mackerels spatially within 5000-unit radius, build bounding boxes per cluster, audit sardines inside, hill climb edges, and try multi-rectangle unions for separated clusters. Time <1.95s.
+  body: |
+    # Cluster Optimization Playbook
+    
+    ## Overview
+    Replace grid-based approaches with direct coordinate analysis. The key insight: optimal polygons are unions of axis-aligned rectangles tightly bounding mackerel clusters, not grid-cell expansions.
+    
+    ## Step 1: Parse Coordinates
+    - Extract all mackerel (type=1) coordinates into a list
+    - Extract all sardine (type=-1) coordinates into a list
+    - These are the ground truth; no grid approximation needed
+    
+    ## Step 2: Spatial Clustering
+    - Set clustering threshold: 5000 units (Euclidean distance)
+    - For each unassigned mackerel:
+      - Find all mackerels within threshold distance
+      - Group them into a cluster (BFS/DFS)
+      - Record cluster centroid and member count
+    
+    ## Step 3: Bounding Box Construction
+    For each cluster:
+    - min_x, max_x = min/max of x-coordinates in cluster
+    - min_y, max_y = min/max of y-coordinates in cluster
+    - Rectangle = [min_x, max_x] × [min_y, max_y]
+    - Perimeter = 2 * (max_x - min_x + max_y - min_y)
+    - Discard if perimeter > 400,000
+    
+    ## Step 4: Sardine Audit (Critical)
+    For each rectangle:
+    - Count sardines where: min_x <= s.x <= max_x AND min_y <= s.y <= max_y
+    - Points on boundary count as inside (problem statement)
+    - Score = mackerels_in_cluster - sardines_inside + 1
+    
+    ## Step 5: Edge Hill Climbing
+    For each rectangle edge:
+    - Try expanding outward by: +10, +20, +30 units
+    - Try contracting inward by: -10, -20, -30 units (if perimeter still valid)
+    - For each variant, recompute sardine count
+    - Keep changes that increase score
+    - Repeat 2 refinement rounds
+    
+    ## Step 6: Multi-Rectangle Strategy
+    - Consider disjoint rectangles as separate entities
+    - Total score = sum of individual rectangle scores (mackerels - sardines + 1 per rect)
+    - This captures separated mackerel clusters more effectively than one large union
+    
+    ## Step 7: Output Format
+    m (vertices)
+    x0 y0
+    x1 y1
+    ...
+    For single rectangle: 4 vertices
+    For union of rectangles: merge shared edges, output combined vertex list
+    
+    ## Key Differences from Grid Approach
+    - No grid abstraction: work directly with coordinates
+    - Precision clustering: 5000-unit threshold, not cell-based
+    - Exact sardine counting: iterate all sardines, not estimate
+    - Multi-rectangle support: disjoint rectangles scored independently
+    - Simpler, more direct optimization path
+
+new_middlewares:
+- name: cluster_focus_reminder
+  hook: before_model
+  description: Redirect solver from grid-corridor strategy to direct cluster-based construction
+  implementation_py: |
+    def before_model(hook_input):
+        return "Use direct cluster-based construction: parse mackerel/sardine coordinates, cluster mackerels within 5000 units, build bounding boxes, audit sardines inside, hill climb edges ±10..30, try multi-rectangle unions. Avoid grid abstraction."

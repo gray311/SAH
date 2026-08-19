@@ -1,0 +1,160 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are solving the Erdos minimum overlap problem: minimize max_k integral h(x)(1-h(x+k)) dx
+  for a step function h: [0,2] -> [0,1] with integral(h)=1.
+
+  Current best bound: C5 <= 0.38092303510845016
+  Goal: Find combined_score > 1.0 (c5_bound < 0.380923)
+
+  CRITICAL WORKFLOW:
+  1. START with the seed program and CALL evaluate_solution ONCE to establish baseline (expected ~0.999855)
+  2. For EVERY edit, FIRST call probe_solution to check constraint satisfaction:
+     - Compute integral(h) from the probe output
+     - If |integral(h) - 1| >= 0.05, DISCARD that variant immediately
+     - If constraint passes, get approximate c5_bound from probe
+  3. Primary search: INCREASE num_intervals to 1600, 3200, 4000, 6400
+     - Finer discretization enables more complex step functions
+     - For each new resolution, test 2-3 LR values (0.001, 0.003, 0.007)
+  4. Secondary: Adjust penalty_strength to 30, 100, 200, 500
+  5. Use probe to RANK variants by approximate c5_bound BEFORE any full eval
+  6. Call evaluate_solution ONLY on top 1-2 probe-ranked variants per resolution
+  7. Keep only the best full-eval result
+  Expected usage pattern: ~6 full evals total (1 baseline + 5 on promising probe variants)
+skill_description: |
+  Resolution-first optimization with strict probe-based constraint filtering. Prioritize higher num_intervals (1600-6400) and use probe to screen invalid programs before full evaluation. Only evaluate variants with |integral(h)-1|<0.05.
+skill_body: |
+  # Erdos Minimum Overlap - Resolution-First Protocol
+  
+  ## Problem Understanding
+  We need to find a step function h: [0,2] to [0,1] with integral(h)=1 that minimizes C5 = max_k integral h(x)(1-h(x+k)) dx.
+  Current seed uses num_intervals=800 and achieves C5 approx 0.380923.
+  To beat this, explore higher resolutions, better optimizer settings, and more diverse initializations.
+  
+  ## Why Probe-Based Constraint Filtering is Critical
+  The seed optimizer may produce h where integral(h) does not equal 1. Evaluating such programs is WASTEFUL.
+  probe_solution returns approximate integral(h) and c5_bound - use it to FILTER and RANK.
+  
+  ## Step-by-Step Search Protocol
+  
+  ### Phase 1: Baseline (1 eval)
+  Evaluate the unmodified seed program. Record baseline_score approx 0.999855.
+  
+  ### Phase 2: Resolution Sweep (Primary - 15 evals)
+  For each resolution in 1600, 3200, 4000, 6400:
+  1. EDIT: num_intervals = resolution
+  2. PROBE: Get integral(h) and c5_approx
+  3. FILTER: If |integral - 1| >= 0.05, DISCARD
+  4. If multiple resolutions pass filter, CALL evaluate_solution on top 1-2
+  6. If no improvement, move to Phase 3
+  
+  ### Phase 3: Learning Rate Fine-tuning (6 evals)
+  For the best resolution: try LR values 0.001, 0.003, 0.007, 0.01
+  - EDIT base_learning_rate, PROBE for constraint
+  - Evaluate only if valid
+  
+  ### Phase 4: Penalty Strength Tuning (3 evals)
+  Try: 30, 100, 200, 500
+  - Use probe to filter
+  
+  ### Phase 5: If Stuck, Expand Initialization (5 evals)
+  Add ONE new pattern to _get_best_initialization():
+  - Four-peak Gaussian: centers at 0.25, 0.5, 0.75, 1.0, width=0.12
+  
+  ## Key Success Factors
+  - ALWAYS probe before evaluating
+  - Focus on resolution as primary search dimension
+  - Keep only the BEST result
+  
+  ## Expected Budget Usage (30 evals total)
+  - 1: baseline evaluation
+  - 8-12: probe calls for filtering and ranking
+  - 5-10: full evaluations on promising variants
+tool_descriptions:
+  edit_solution: |
+    Modify the EVOLVE-BLOCK region. Primary edits:
+    - num_intervals: 1600, 3200, 4000, 6400 (main search dimension)
+    - base_learning_rate: 0.001, 0.003, 0.007, 0.01, 0.015
+    - penalty_strength: 30, 100, 200, 500 (lower helps constraint)
+    - num_steps: 30000, 59000, 100000, 200000
+  evaluate_solution: Run full evaluation. Only call after probe confirms |integral(h)-1|<0.05. Returns combined_score.
+  probe_solution: |
+    Approximate evaluation with constraint checking. Returns integral(h) and c5_approx.
+    WORKFLOW:
+    1. Call probe on every edit
+    2. If |integral - 1| >= 0.05: DISCARD variant
+    3. If valid, record c5_approx for ranking
+    4. Evaluate only top 1-2 ranked valid variants
+  finish: Submit final solution when combined_score > 1.0. If stuck after exhausting strategies, submit with explanation.
+sampling:
+  temperature: 1.3
+  top_p: 0.95
+  top_k: 35
+  max_tokens: 15000
+agent:
+  max_iterations: 80
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 12000
+new_tools:
+- name: construct_structured_init
+  description: 'Generate 3-4 mathematically principled step function initializations for the Erdos problem. Returns dict with keys: bimodal_tight, triangular_3step, periodic_2, golomb_5.'
+  input_schema:
+    type: object
+    properties: {}
+  implementation_py: "def run(ctx, args):\n    import math\n    import numpy as np\n    N = 800\n    domain = 2.0\n    dx = domain / N\n    rng = np.random.default_rng(42)\n    constructions = {}\n    x = np.linspace(0, domain, N)\n    a1, a2 = 0.25, 0.75\n    bw1, bw2 = 0.15, 0.15\n    latent = np.exp(-((x-a1)/bw1)**2 * 20) + np.exp(-((x-a2)/bw2)**2 * 20)\n    latent = (latent - np.min(latent)) / (np.max(latent) - np.min(latent) + 1e-10)\n    constructions['bimodal_tight'] = latent\n    phases = np.array([0.0, 0.333, 0.666])\n    levels = np.array([-5, -2, 5])\n    latent = np.zeros(N)\n    for p, l in zip(phases, levels):\n        in_range = (x >= p) & (x < p + 0.333)\n        latent = latent + l * in_range\n    latent = latent + rng.normal(size=N) * 0.2\n    constructions['triangular_3step'] = latent\n    periodic = 2.0 * (x < 0.5) - 1.0\n    latent = periodic * 4.0\n    latent = latent + rng.normal(size=N) * 0.3\n    constructions['periodic_2'] = latent\n    marks = np.array([0.0, 2*0.25, 2*0.625, 2*0.9375, 2*1.0])\n    kernel_widths = np.array([0.08, 0.1, 0.09, 0.09, 0.1])\n    latent = np.zeros(N)\n    for mark, kw in zip(marks, kernel_widths):\n        latent = latent + 6.0 * np.exp(-((x-mark)/kw)**2 * 15)\n    latent = latent + rng.normal(size=N) * 0.2\n    constructions['golomb_5'] = latent\n    return {\"constructions\": constructions}"
+new_skills:
+- name: constraint-aware-resolution-search
+  description: |
+    Prioritize higher num_intervals (1600-6400) with strict probe-based constraint filtering.
+    Only evaluate programs where |integral(h)-1|<0.05. Use probe to rank valid variants.
+  body: |
+    # Constraint-Aware Resolution-First Search
+    
+    ## Core Strategy
+    The seed program score of 0.999855 indicates it is well optimized for num_intervals=800.
+    To find a NEW upper bound (combined_score > 1.0), we MUST explore higher resolutions.
+    
+    ## The Waste Problem
+    Many hyperparameter variants violate the constraint integral(h)=1.
+    Evaluating such programs wastes precious eval budget.
+    
+    ## Solution: Probe-Based Filtering
+    probe_solution returns approximate integral(h) and c5_bound.
+    Use it to:
+    1. FILTER: Discard any variant with |integral(h) - 1| >= 0.05
+    2. RANK: Order valid variants by c5_approx
+    3. EVALUATE: Only call evaluate_solution on top 1-2 valid variants
+    
+    ## Resolution Sweep (Primary Search)
+    Order: 1600, 3200, 4000, 6400
+    
+    For each resolution:
+    1. EDIT num_intervals to target
+    2. PROBE to check integral, record c5_approx
+    3. If |integral - 1| < 0.05:
+       - If c5_approx is promising (better than or close to best probe), EVALUATE
+       - Keep best full-eval result
+    4. If constraint fails, try different base_learning_rate or penalty_strength
+    
+    ## Learning Rate and Penalty Tuning
+    After finding a resolution that passes constraint:
+    - Try 2-3 LR values: 0.001, 0.003, 0.007, 0.01
+    - Try penalty_strength: 30, 100, 200, 500
+    - Always probe first to filter
+    
+    ## When to Expand Initialization
+    Only if resolution sweep fails:
+    - Add ONE new pattern to _get_best_initialization():
+      - Four-peak Gaussian: centers at 0.25, 0.5, 0.75, 1.0, width=0.12
+      - Code: latent = sum([4 * np.exp(-((x-c)/0.12)**2 * 15) for c in [0.25,0.5,0.75,1.0)])
+    - Restart resolution sweep
+sampling:
+  temperature: 1.3
+  top_p: 0.95
+  top_k: 35
+  max_tokens: 15000
+agent:
+  max_iterations: 80
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 12000

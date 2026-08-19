@@ -1,0 +1,216 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are an expert performance engineer specializing in MoE EPLB load balancing.
+
+  EVALUATOR REWARDS:
+  1. Lower variance in expert loads across packs (load balancing quality)
+  2. Faster execution time of the algorithm
+
+  CRITICAL: The balanced_packing() function uses O(n*m) Python loops. Your goal: reduce runtime WHILE maintaining FFD semantics.
+
+  SIMPLE VECTORIZATION PATTERN (USE THIS):
+  1. Sort once: sorted_indices = torch.argsort(-weight, dim=-1)
+  2. Assign packs via integer division: pack_index = sorted_indices // groups_per_pack
+  3. Assign ranks via modulo: rank_in_pack = sorted_indices % groups_per_pack
+  4. Compute pack weights using a single loop over num_packs (this is small)
+
+  DO NOT:
+  - Use list comprehensions like [p for p in range(num_packs)...]
+  - Use Python loops over groups (the original bottleneck)
+  - Change function signature or behavior - preserve FFD semantics
+
+  STRATEGY:
+  1. First, call analyze_weight_matrix to understand the data
+  2. Implement the SIMPLE vectorization pattern above
+  3. Probe 3 variants: (a) direct vectorization, (b) small optimization to pack_weight loop, (c) blocked processing
+  4. Evaluate top 2
+  5. Call finish after evaluation
+
+  PRESERVE: num_groups % num_packs == 0 invariant, return type, device handling
+skill_description: |
+  Optimize MoE EPLB balanced_packing using FFD-preserving vectorization.
+  Sort once, assign packs via //, ranks via %. Keep num_packs loop small.
+  Use probe for fast ranking before full evaluation.
+skill_body: |
+  # FFD-Preserving Vectorization for balanced_packing()
+
+  ## Problem
+  Original code: O(n*m) where n=num_groups, m=num_packs
+  Uses Python loop over groups, with list comprehensions and min() calls.
+
+  ## Solution: Sort-once, Assign with Arithmetic
+  1. Sort all groups descending: sorted_idx = torch.argsort(-weight, dim=-1)
+  2. Each group's pack = its rank within sorted order // groups_per_pack
+  3. Each group's rank within pack = sorted_idx % groups_per_pack
+  4. Pack weights: compute by grouping sorted indices
+
+  ## Implementation Steps
+
+  ### Step 1: Sort
+  sorted_indices = weight[i].float().sort(-1, descending=True).indices for each layer
+  (or use: sorted_indices = torch.argsort(-weight, dim=-1))
+
+  ### Step 2: Assign packs and ranks (ONE LINE EACH)
+  pack_index = sorted_indices // groups_per_pack
+  rank_in_pack = sorted_indices % groups_per_pack
+
+  ### Step 3: Compute pack weights (small loop over num_packs only)
+  pack_weights = torch.zeros(num_packs, device=weight.device)
+  for p in range(num_packs):
+      mask = (flat_pack_idx == p)
+      pack_weights[p] = flat_weight[mask].sum()
+
+  ### Step 4: Flatten and return
+  Convert pack_index and rank_in_pack back to [num_layers, num_groups] shape
+
+  ## Key Points
+  - This preserves FFD: heaviest items go first, distributed round-robin
+  - Runtime dominated by argsort (O(n log n)) instead of O(n*m)
+  - num_packs loop is small (typically << num_groups)
+
+  ## Common Pitfalls
+  - DO NOT change the sorting criterion (descending by weight)
+  - DO NOT change groups_per_pack = num_groups // num_packs
+  - DO NOT use append() or resize() - pre-allocate tensors
+  - DO NOT forget to return correct shapes
+
+  ## Workflow
+  1. Study the original code to understand FFD semantics
+  2. Apply the pattern above
+  3. Probe to check load variance (should be similar)
+  4. Probe to check runtime (should be 10-100x faster)
+  5. Evaluate best variant
+tool_descriptions:
+  edit_solution: |
+    Change EVOLVE-BLOCK to implement FFD-preserving vectorization.
+    
+    REPLACE the Python loop over groups with:
+    - sorted_indices = torch.argsort(-weight, dim=-1)
+    - pack_index = sorted_indices // groups_per_pack  
+    - rank_in_pack = sorted_indices % groups_per_pack
+    
+    Keep the small loop over num_packs for computing pack_weights.
+    Preserve function signature, return type, device handling.
+    
+    TARGETED REWRITE: Only modify balanced_packing(). Leave replicate_experts() and rebalance_experts_hierarchical() unchanged unless you have a specific fix.
+  evaluate_solution: |
+    Full evaluation. Returns combined_score (higher is better).
+    Budget: ~20 total evals. Score rewards low load variance AND fast runtime.
+    Use only after probing variants.
+  probe_solution: |
+    Cheap approximate evaluation (~10s). Use to rank YOUR variants.
+    
+    Strategy:
+    1. Probe 3-5 variants with different implementations
+    2. Check probe scores - they should show ~same load variance, ~different runtime
+    3. Pick top 2 by runtime
+    4. Evaluate those 2 with evaluate_solution
+    5. Call finish after evaluation
+    
+    Probe scores are approximate but consistent. Use them to avoid wasting eval budget.
+  finish: |
+    End session. Call after you've evaluated your best variant and see its score.
+sampling:
+  temperature: 1.1
+  top_p: 0.9
+  top_k: 30
+  max_tokens: 8192
+agent:
+  max_iterations: 30
+middleware:
+  budget_reminder_from_left: 8
+  long_tool_output_max_chars: 12000
+new_tools:
+- name: check_implementation
+  description: |
+    Parse the modified code, extract balanced_packing(), run basic sanity checks
+    (function signature, imports, tensor operations), and return validation results.
+    Call this before editing to verify your approach.
+  input_schema:
+    type: object
+    properties: {}
+  implementation_py: |
+    def run(ctx, args):
+        prog = ctx.get_program()
+        lines = prog.strip().split('\n')
+        
+        # Check for required imports
+        has_torch = any('import torch' in l or 'from torch' in l for l in lines)
+        
+        # Check balanced_packing exists and has right signature
+        found_func = False
+        has_argsort = False
+        has_floor_div = False
+        has_mod = False
+        has_bad_list_comp = False
+        bad_python_loop = False
+        
+        i = 0
+        while i < len(lines):
+            line = lines[i]
+            if 'def balanced_packing(' in line:
+                found_func = True
+                i += 1
+                # Collect function body
+                while i < len(lines) and not lines[i].strip().startswith('def '):
+                    if 'torch.argsort' in lines[i]:
+                        has_argsort = True
+                    if '// groups_per_pack' in lines[i] or '% groups_per_pack' in lines[i]:
+                        has_floor_div = True
+                        has_mod = True
+                    if '[' in lines[i] and 'for' in lines[i] and 'range(num_packs)' in lines[i]:
+                        bad_python_loop = True
+                    if '[p for p' in lines[i]:
+                        has_bad_list_comp = True
+                    i += 1
+        
+        issues = []
+        if not has_torch:
+            issues.append("Missing torch import")
+        if not found_func:
+            issues.append("balanced_packing function not found")
+        if not has_argsort:
+            issues.append("Missing argsort - not vectorized")
+        if has_bad_list_comp:
+            issues.append("Contains bad list comprehension [p for p in range(num_packs)]")
+        if has_bad_python_loop:
+            issues.append("Contains Python loop over groups")
+        
+        return {
+            "found": found_func,
+            "has_argsort": has_argsort,
+            "has_floor_div": has_floor_div,
+            "has_mod": has_mod,
+            "issues": issues,
+            "status": "valid" if not issues else "invalid"
+        }
+new_skills:
+- name: quick-verify
+  description: |
+    Quick checklist before submitting code. Ensure balanced_packing uses argsort,
+    integer division, and modulo for pack assignment. Call this before finish.
+  body: |
+    # Quick Verification Checklist for balanced_packing()
+    
+    ## Before finishing, verify:
+    
+    1. **Imports**: torch is imported at top of file
+    2. **Function**: balanced_packing(weight, num_packs) exists with same signature
+    3. **Sorting**: Uses torch.argsort(-weight, dim=-1) or similar
+    4. **Packing assignment**: pack_index = sorted_idx // groups_per_pack (integer division)
+    5. **Rank assignment**: rank_in_pack = sorted_idx % groups_per_pack (modulo)
+    6. **No bad loops**: No `for group in indices:` loops
+    7. **No list comps**: No `[p for p in range(num_packs)]` patterns
+    8. **Returns**: Returns torch.Tensor, torch.Tensor (or list of Tensors)
+    
+    ## Common failures:
+    - Forgetting // or using / (float division)
+    - Using list comprehension for pack selection
+    - Changing sorting criterion (must be descending)
+    - Not pre-allocating output tensors
+    - Forgetting device handling
+    
+    ## If check_implementation reports issues:
+    - Fix the specific issues listed
+    - Re-run check_implementation
+    - Only call finish when status is "valid"

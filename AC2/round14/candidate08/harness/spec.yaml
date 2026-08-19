@@ -1,0 +1,263 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are an expert in functional analysis and mathematical optimization for the C2 constant:
+  C2 = ||f★f||₂² / ((∫f)² ||f★f||_∞), where f: ℝ→ℝ is non-negative.
+
+  Current best: 0.8962799441554086 (step function by AlphaEvolve).
+  Combined score: 1.03896 (seed), goal: exceed 1.03896.
+
+  **Critical insight**: Step functions are LOCAL optima. The seed program's EVOLVE-BLOCK contains 5 hybrid step patterns (base_step, two_bumps, asymmetric_bumps, multi_step, three_bumps). To break through, you must:
+
+  1. USE the analyze_patterns tool FIRST to understand the current pattern structure.
+  2. Generate MUTATIONS that are mathematically informed: 
+     - Asymmetric height distributions (break perfect symmetry)
+     - Non-uniform spacing between features
+     - Multi-scale features (nested bumps within bumps)
+     - Edge-case optimization (tapering at boundaries)
+  3. For EACH mutation proposal from analyze_patterns:
+     - Generate ONE concrete implementation
+     - Call probe_solution to rank variants (use all 30 probes for initial screening)
+     - Call evaluate_solution ONLY on top 3-5 by probe score
+  4. If no improvement after 10 iterations, call analyze_patterns again with DIFFERENT parameters.
+
+  **Function constraints**: f(x)≥0 everywhere, ∫f>0, numerically stable convolution (avoid extreme spikes).
+
+  **Strategy**: systematic structured mutation beats random exploration. The seed's patterns are close to optimal - you need clever perturbations, not random changes.
+
+  Tools: edit_solution, evaluate_solution, probe_solution, analyze_patterns.
+
+skill_description: Structured pattern mutation for C₂ maximization. Use analyze_patterns to parse current patterns and generate mathematically-informed mutations. Focus on asymmetric structures, non-uniform spacing, and multi-scale features.
+skill_body: |
+  # C₂ Maximizer: Structured Pattern Mutation Protocol
+
+  ## Core Principle
+
+  The seed's step patterns are LOCAL optima. To beat them, use SYSTEMATIC MUTATIONS based on mathematical insights, not random tweaks.
+
+  ## Phase 1: Pattern Analysis (Iteration 1)
+
+  1. Call analyze_patterns ONCE to parse the EVOLVE-BLOCK and extract:
+     - Number of intervals, pattern types present
+     - Current heights, widths, positions
+     - Symmetry properties, spacing regularity
+
+  2. Analyze output to identify mutation opportunities:
+     - Are heights symmetric? (try asymmetric)
+     - Is spacing uniform? (try non-uniform)
+     - Missing multi-scale features? (add nested bumps)
+     - Boundary handling optimal? (add tapering)
+
+  ## Phase 2: Structured Mutation Generation
+
+  Generate mutations in this order of mathematical promise:
+
+  **Mutation Type A: Asymmetric Height Distribution**
+  - For symmetric patterns, create asymmetric heights
+  - Example: change [1.40, 1.40, 1.40] → [1.38, 1.42, 1.35]
+  - Rationale: Breaking symmetry can reduce ||f★f||_∞
+
+  **Mutation Type B: Non-Uniform Spacing**
+  - Replace uniform intervals with non-uniform spacing
+  - Example: 0.20n → 0.18n, 0.18n → 0.22n
+  - Rationale: Clustering features in certain regions can improve L2/∞ ratio
+
+  **Mutation Type C: Multi-Scale Features**
+  - Add nested bumps within existing features
+  - Example: base step + small bump on top of large bump
+  - Rationale: Captures finer structure in convolution
+
+  **Mutation Type D: Boundary Tapering**
+  - Add smooth decay at edges instead of sharp cutoffs
+  - Example: linear ramp from base_height to 0 over last 5%
+  - Rationale: Reduces Gibbs-like artifacts in convolution
+
+  **Mutation Type E: Edge Case Enhancement**
+  - Add small features near domain boundaries
+  - Rationale: May capture convolution contributions missed by central focus
+
+  ## Phase 3: Probe-Based Selection
+
+  1. For each mutation type, generate 2-3 concrete implementations
+  2. Call probe_solution for ALL of them (use the 30-probe budget)
+  3. Rank by probe score, select top 3-5
+  4. Call evaluate_solution ONLY on top candidates
+
+  ## Phase 4: Iteration and Diversification
+
+  If stuck after 10 iterations:
+  - Call analyze_patterns with different seed parameters
+  - Try completely different mutation order (A→E instead of E→A)
+  - Focus on mutation types that worked partially before
+
+  Key: Structured, mathematically-motivated mutations beat random changes.
+tool_descriptions:
+  edit_solution: |
+    Apply a mutation from analyze_patterns output. Use SEARCH/REPLACE to modify:
+    - Height values: change base_height, bump_height by 0.02-0.10
+    - Width parameters: adjust interval fractions by ±0.02 (e.g., 0.20 → 0.22)
+    - Position offsets: shift all intervals by ±0.02n
+    - Add/remove features: add small bump, remove one bump, add tapering
+    Target ONE change per edit to isolate effects.
+  evaluate_solution: |
+    Full evaluation. Returns combined_score. Call ONCE per top-ranked variant (from probe filtering).
+    Budget: 30 evals total. Ensure variant is complete and non-negative before calling.
+  probe_solution: |
+    Approximate score on 10% subsampled data. FAST, uses separate 30-probe budget.
+    CALL THIS BEFORE evaluate_solution to filter variants. Reliable for ranking within similar classes.
+  finish: |
+    Report best C₂ achieved, which mutation type produced it, and brief mathematical rationale.
+sampling:
+  temperature: 0.9
+  top_p: 0.98
+  top_k: 30
+agent:
+  max_iterations: 80
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 15000
+new_tools:
+  - name: analyze_patterns
+    description: |
+      Parse the EVOLVE-BLOCK to extract pattern parameters (heights, widths, positions) and identify mutation opportunities. Returns structured analysis and mutation proposal.
+    input_schema:
+      type: object
+      properties: {}
+    implementation_py: |
+      def run(ctx, args):
+          import re
+          code = ctx.get_program()
+          
+          # Extract pattern initialization parameters
+          heights = []
+          widths = []
+          positions = []
+          
+          # Find height assignments
+          height_pattern = r'base_height\s*=\s*([\d.]+)|bump[12]\s*height\s*=\s*([\d.]+)'
+          height_match = re.search(height_pattern, code)
+          if height_match:
+              heights = [float(g) for g in height_match.groups() if g]
+          
+          # Find width/interval parameters
+          width_pattern = r'(left_width|right_width)\s*=\s*int\(([\d.]+)\s*\*\s*n\)'
+          width_match = re.findall(width_pattern, code)
+          widths = [float(g[1]) for g in width_match if g[1]]
+          
+          # Find position parameters
+          pos_pattern = r'int\(([\d.]+)\s*\*\s*n\)'
+          positions = [float(g) for g in re.findall(pos_pattern, code) if not g.startswith('0.')]
+          
+          # Analyze symmetry
+          is_symmetric = abs(widths[0] - widths[-1]) < 0.05 if len(widths) >= 2 else True
+          symmetric_heights = all(abs(heights[i] - heights[-1-i]) < 0.01 for i in range(len(heights)//2)) if len(heights) >= 2 else True
+          
+          # Generate mutation proposals
+          mutations = []
+          if is_symmetric:
+              mutations.append({
+                  "type": "asymmetric_heights",
+                  "proposal": f"Change heights from symmetric to asymmetric: try [h-0.08, h+0.05, h-0.03]",
+                  "rationale": "Breaking symmetry can reduce ||f★f||_∞"
+              })
+          if len(widths) >= 1 and abs(widths[0] - widths[1]) < 0.02 if len(widths) >= 2 else False:
+              mutations.append({
+                  "type": "non_uniform_spacing",
+                  "proposal": f"Make spacing non-uniform: try [{w-0.02, w+0.03, w-0.01}]",
+                  "rationale": "Clustering features can improve L2/∞ ratio"
+              })
+          
+          # Add multi-scale proposal
+          mutations.append({
+              "type": "multi_scale_features",
+              "proposal": "Add nested bump on top of largest existing bump",
+              "rationale": "Captures finer convolution structure"
+          })
+          
+          # Add tapering proposal
+          mutations.append({
+              "type": "boundary_tapering",
+              "proposal": "Add linear ramp from base_height to 0 over last 5% of domain",
+              "rationale": "Reduces edge artifacts in convolution"
+          })
+          
+          return {
+              "pattern_analysis": {
+                  "num_heights": len(heights),
+                  "num_widths": len(widths),
+                  "is_symmetric": is_symmetric,
+                  "heights": heights,
+                  "widths": widths,
+                  "positions": positions
+              },
+              "mutation_proposals": mutations,
+              "note": "Use these proposals to generate concrete mutations via edit_solution, then rank with probe_solution"
+          }
+new_skills:
+  - name: structured-mutation-protocol
+    description: Systematic mutation based on mathematical insights for C₂ maximization.
+    body: |
+      # Structured Mutation Protocol for C₂ Maximization
+
+      ## Core Principle
+
+      Don't make random edits. Use analyze_patterns to understand current structure, then apply MATH-MOTIVATED mutations.
+
+      ## Step 1: Call analyze_patterns
+
+      This will parse your EVOLVE-BLOCK and return:
+      - Current heights, widths, positions
+      - Symmetry properties
+      - Concrete mutation proposals (asymmetric heights, non-uniform spacing, multi-scale, tapering)
+
+      ## Step 2: Pick ONE mutation type to explore
+
+      Focus on the most promising proposal:
+      - If symmetric → try asymmetric heights (Type A)
+      - If uniform spacing → try non-uniform (Type B)
+      - Always consider multi-scale (Type C)
+      - Always consider tapering (Type D)
+
+      ## Step 3: Generate ONE concrete implementation
+
+      Target ONE specific change:
+      - Asymmetric: change one height by +0.05, another by -0.03
+      - Non-uniform: change one interval fraction from 0.20 to 0.23
+      - Multi-scale: add small bump (height 0.15) inside largest existing bump
+      - Tapering: add ramp in last 5%: f[-5%:] *= linear_decay(0.8, 0.0)
+
+      ## Step 4: Probe → Evaluate
+
+      1. Call probe_solution to check improvement
+      2. If probe > current best, call evaluate_solution
+      3. If evaluate improves, refine slightly; if not, try next mutation
+
+      ## Step 5: If stuck
+
+      Call analyze_patterns again with different parameters, or try mutation types in different order.
+
+      Remember: Structured mutations beat random changes.
+new_middlewares:
+  - name: enforce_analyze_first
+    hook: before_tool
+    description: |
+      Middleware to ensure analyze_patterns is called before mutation attempts.
+    implementation_py: |
+      def before_tool(hook_input):
+          tool_name = hook_input.get("tool_name", "")
+          iteration = hook_input.get("iteration", 0)
+          if tool_name == "edit_solution" and iteration == 1:
+              return "CALL analyze_patterns FIRST before making edits! It will give you structured mutation proposals. Don't guess - use the tool."
+          if tool_name == "edit_solution" and iteration > 1:
+              return "Have you called analyze_patterns recently? Use its proposals for targeted mutations."
+          return None
+  - name: probe_budget_alert
+    hook: before_model
+    description: |
+      Remind solver to use probe budget wisely before spending full evaluations.
+    implementation_py: |
+      def before_model(hook_input):
+          probes_left = hook_input.get("probes_left", 30)
+          evals_left = hook_input.get("evals_left", 30)
+          if probes_left > 0 and evals_left > 5:
+              return f"Probe budget: {probes_left} probes remaining, Eval budget: {evals_left} evaluations. Use probes to filter variants before full evaluation!"
+          return None

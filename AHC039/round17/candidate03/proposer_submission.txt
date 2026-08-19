@@ -1,0 +1,260 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are a C++ polygon optimizer for axis-aligned fish capture. Goal: maximize (mackerels - sardines + 1).
+  The input has N=5000 mackerels and N=5000 sardines on [0,100000]^2. Output a valid axis-aligned polygon.
+
+  CRITICAL FAILURE DIAGNOSIS: The previous harness (grid-based with 200x200 cells and corridor expansion)
+  scores 2.48436 — the seed score — meaning NO improvement was found across 8 candidate harnesses.
+  This indicates the grid abstraction is too coarse (cell_size=500 misses fine-grained fish patterns)
+  and the corridor strategy fails to find improving polygons. The grid-based approach cannot
+  navigate local variations in fish density.
+
+  NEW STRATEGY: Direct point-based sweep-line enumeration of candidate rectangles and L-shapes.
+  The polygon can be up to 1000 vertices with perimeter 400,000. Use multiple passes:
+  1. QUICK PASS: Generate 10-20 candidate bounding boxes from random coordinate samples, then refine
+  2. DEEP PASS: For top candidates, enumerate all axis-aligned rectangles aligned to mackerel/sardine
+     coordinates (O(mn) in worst case but with pruning), then expand to L-shapes and T-shapes
+  3. HILL CLIMB: For each candidate, perform local edge refinement by testing small coordinate shifts
+
+  SEARCH ALGORITHM DETAILS:
+  - Parse fish coordinates into sorted lists by x and y
+  - Candidate 1: Enumerate small bounding boxes (≤20 vertices) by trying combinations of 20 random
+    x-coordinates and 20 random y-coordinates
+  - Candidate 2: Use coordinate compression on fish points to identify promising grid lines, then
+    enumerate rectangles from these grid lines
+  - Candidate 3: Try L-shaped polygons formed by combining two overlapping rectangles
+  - For each candidate polygon, compute score by checking which fish points are inside (point-in-polygon test)
+  - Keep best polygon from all candidates
+
+  TIME MANAGEMENT: Distribute time across 10-15 candidate polygons, spending 0.05-0.1s each.
+  If time is tight, focus on the first 5-10 candidates with best bounds.
+
+  VALIDATION: Ensure 4 ≤ vertices ≤ 1000, integer coordinates in [0,100000], no self-intersection.
+
+  TOOLS:
+  - edit_solution: Replace EVOLVE-BLOCK with C++ implementing the point-based sweep-line enumeration
+  - evaluate_solution: Run C++ program and get score
+  - finish: Submit best solution found
+tool_descriptions:
+  edit_solution: |
+    Replace EVOLVE-BLOCK with C++ implementing point-based sweep-line enumeration:
+    1. Parse fish coordinates (N=5000 each) into sorted lists by x and y
+    2. Quick pass: generate 10-20 candidate rectangles from random coordinate samples
+    3. Deep pass: use coordinate compression on fish points to enumerate more candidates
+    4. Try L-shapes and T-shapes by combining rectangles
+    5. For each candidate, compute score using point-in-polygon test
+    6. Return best polygon (4-1000 vertices, perimeter ≤400,000, integer coords)
+    7. Ensure <2.0s execution time
+  evaluate_solution: |
+    Run the C++ program. Returns score = max(0, mackerels_inside - sardines_inside + 1),
+    validity flag, and evaluations remaining (budget=30). Each run has ~2.0s search window.
+  probe_solution: |
+    Approximate evaluation using coordinate grid sampling (not usable for this task as
+    full evaluation is required to correctly count fish inside arbitrary polygons).
+  finish: |
+    Submit when you have a working polygon enumeration strategy that consistently
+    beats the seed score of 2.48436.
+sampling:
+  temperature: 0.8
+  top_p: 0.85
+  top_k: 15
+  max_tokens: 8192
+agent:
+  max_iterations: 60
+middleware:
+  budget_reminder_from_left: 3
+  long_tool_output_max_chars: 12000
+new_tools:
+  - name: enumerate_rectangles
+    description: |
+      Enumerate axis-aligned rectangles from fish coordinates. Uses coordinate compression
+      on fish x and y positions to generate candidate rectangles, then tries L-shapes.
+      Returns list of candidate polygons with their bounding box coordinates.
+    input_schema:
+      type: object
+      properties:
+        max_candidates:
+          type: integer
+          default: 50
+    implementation_py: |
+      def run(ctx, args):
+          import random
+          max_candidates = args.get("max_candidates", 50)
+          
+          program = ctx.get_program()
+          fish_data = []
+          for line in program.split('\n'):
+              line = line.strip()
+              if 'mackerel' in line.lower() or 'sardine' in line.lower():
+                  if '[' in line and ']' in line:
+                      try:
+                          coords = line.split('[')[1].split(']')[0].split(',')
+                          if len(coords) >= 2:
+                              x, y = int(coords[0]), int(coords[1])
+                              fish_type = 1 if 'mackerel' in line.lower() else -1
+                              fish_data.append((x, y, fish_type))
+                      except:
+                          continue
+          
+          if not fish_data:
+              return {"error": "No fish data found"}
+          
+          x_coords = sorted(set(p[0] for p in fish_data))
+          y_coords = sorted(set(p[1] for p in fish_data))
+          
+          # Add boundary points
+          x_coords = sorted(set(x_coords + [0, 100000]))
+          y_coords = sorted(set(y_coords + [0, 100000]))
+          
+          candidates = []
+          
+          # Enumerate rectangles from coordinate grid
+          for xi in range(len(x_coords)-1):
+              for yi in range(len(y_coords)-1):
+                  x1, x2 = x_coords[xi], x_coords[xi+1]
+                  y1, y2 = y_coords[yi], y_coords[yi+1]
+                  if x2 - x1 > 10000 or y2 - y1 > 10000:  # Skip too large
+                      continue
+                  candidates.append({"type": "rect", "x1": x1, "y1": y1, "x2": x2, "y2": y2})
+                  
+                  if len(candidates) >= max_candidates:
+                      break
+              if len(candidates) >= max_candidates:
+                  break
+          
+          # Add L-shaped candidates (combine adjacent rectangles)
+          for i in range(len(candidates)-1):
+              c1, c2 = candidates[i], candidates[i+1]
+              if len(candidates) >= max_candidates:
+                  break
+              if c1["type"] == "rect" and c2["type"] == "rect":
+                  if c1["x1"] <= c2["x2"] and c2["x1"] <= c1["x2"]:
+                      new_x1 = min(c1["x1"], c2["x1"])
+                      new_x2 = max(c1["x2"], c2["x2"])
+                      new_y1 = min(c1["y1"], c2["y1"])
+                      new_y2 = max(c1["y2"], c2["y2"])
+                      candidates.append({"type": "L", "x1": new_x1, "y1": new_y1, "x2": new_x2, "y2": new_y2})
+                      if len(candidates) >= max_candidates:
+                          break
+              if len(candidates) >= max_candidates:
+                  break
+          
+          return {"candidates": candidates[:max_candidates]}
+  - name: score_polygon
+    description: |
+      Score a candidate polygon by counting mackerels and sardines inside.
+      Uses point-in-polygon test and returns (mackerels, sardines, score).
+      Handles both rectangular and L-shaped polygons.
+    input_schema:
+      type: object
+      properties:
+        polygon:
+          type: object
+          properties:
+            vertices:
+              type: array
+              items:
+                type: object
+                properties:
+                  x:
+                    type: integer
+                  y:
+                    type: integer
+        simplify:
+          type: boolean
+          default: false
+    implementation_py: |
+      def run(ctx, args):
+          import math
+          
+          polygon = args.get("polygon", {"vertices": []})
+          simplify = args.get("simplify", False)
+          vertices = polygon.get("vertices", [])
+          
+          if len(vertices) < 4:
+              return {"error": "Invalid polygon"}
+          
+          program = ctx.get_program()
+          fish_data = []
+          for line in program.split('\n'):
+              line = line.strip()
+              if 'mackerel' in line.lower() or 'sardine' in line.lower():
+                  if '[' in line and ']' in line:
+                      try:
+                          coords = line.split('[')[1].split(']')[0].split(',')
+                          if len(coords) >= 2:
+                              x, y = int(coords[0]), int(coords[1])
+                              fish_type = 1 if 'mackerel' in line.lower() else -1
+                              fish_data.append((x, y, fish_type))
+                      except:
+                          continue
+          
+          def point_in_polygon(point, poly):
+              x, y = point
+              inside = False
+              n = len(poly)
+              for i in range(n):
+                  x1, y1 = poly[i]
+                  x2, y2 = poly[(i+1) % n]
+                  if ((y1 > y) != (y2 > y)) and (x < (x2 - x1) * (y - y1) / (y2 - y1) + x1):
+                      inside = not inside
+              return inside, point != poly[i]
+          
+          mackerels = 0
+          sardines = 0
+          for x, y, ftype in fish_data:
+              inside, _ = point_in_polygon((x, y), vertices)
+              if inside:
+                  if ftype == 1:
+                      mackerels += 1
+                  else:
+                      sardines += 1
+          
+          score = max(0, mackerels - sardines + 1)
+          return {"mackerels": mackerels, "sardines": sardines, "score": score}
+new_skills:
+  - name: direct-enumeration-strategy
+    description: |
+      Direct point-based enumeration instead of coarse grid. Try random rectangles,
+      coordinate-aligned rectangles, and L-shapes from fish coordinates.
+    body: |
+      # Direct Enumeration Strategy for Axis-Aligned Polygon Optimization
+
+      ## Why Grid-Based Fails
+      The previous grid-based approach (200x200 cells) scores 2.48436 — exactly the seed score.
+      This means no improvement was found. The grid is too coarse (500px cells) and misses
+      local fish density variations. Sardine awareness via coarse grid doesn't help.
+
+      ## New Approach: Point-Based Enumeration
+      Instead of abstracting fish into grid cells, work directly with fish coordinates.
+
+      ### Phase 1: Coordinate Extraction
+      - Parse all mackerel and sardine coordinates from input
+      - Collect unique x and y coordinates from fish positions
+      - Add boundary points (0 and 100000)
+
+      ### Phase 2: Candidate Generation
+      2a. Random Rectangles (Quick Pass)
+          - Generate 10-20 random axis-aligned rectangles
+          - Use random x, y coordinates in [0, 100000]
+          - Keep rectangles with reasonable size (100-1000 px sides)
+
+      2b. Coordinate-Aligned Rectangles (Deep Pass)
+          - Enumerate rectangles aligned to fish coordinate grid
+          - Use sorted unique x and y from fish to create candidate lines
+          - Try all combinations of adjacent grid cells as rectangles
+
+      2c. L-Shapes
+          - Combine two overlapping rectangles
+          - L-shapes can capture fish in non-rectangular patterns
+
+      ### Phase 3: Scoring
+      - For each candidate polygon, count fish inside using point-in-polygon test
+      - Score = max(0, mackerels - sardines + 1)
+
+      ### Phase 4: Selection
+      - Keep best polygon from all candidates
+      - Ensure validity: 4-1000 vertices, perimeter ≤400,000, integer coords
+
+      ### Phase 5: Output
+      - Output the best valid polygon

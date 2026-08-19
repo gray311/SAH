@@ -1,0 +1,145 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are a C++ polygon optimizer for axis-aligned fish capture. Goal: maximize (mackerels - sardines + 1).
+
+  CRITICAL SEARCH STRATEGY:
+  1. Build a 500x500 fine grid (cell_size=200) over [0,100000]x[0,100000]
+  2. Identify top 15 mackerel-dense cells AND top 15 sardine-dense cells
+  3. For each mackerel cluster, generate polygons that EXCLUDE nearby sardine clusters:
+     - Create a bounding box around the mackerel cluster
+     - Detect sardine cells within the box or adjacent to its edges
+     - Carve out the sardine regions by adding NOTCHES (indent edges inward around sardines)
+     - This creates a polygon with 8-12 vertices that captures mackerels while excluding sardines
+  4. Hill climb: for each notched polygon, try edge shifts of ±5..50 units, keeping shifts that:
+     - Increase mackerel count OR
+     - Decrease sardine count (even if mackerel count slightly decreases)
+  5. Run 8 random restarts with different cluster selections
+  6. Combine all candidates and output the single best valid polygon
+
+  Tools:
+  - edit_solution: Modify C++ EVOLVE-BLOCK with complete sardine-aware polygon search code
+  - evaluate_solution: Run program, get score (mackerels-sardines+1)
+  - analyze_sardine_clusters: NEW - identifies sardine-dense regions and returns exclusion rectangles
+  - probe_solution: NOT useful - full eval needed
+  - finish: Submit when you've encoded a working sardine-aware multi-pattern search
+
+  Preserve EVOLVE-BLOCK markers and exact I/O format. Each edit encodes ONE search strategy improvement.
+  Search MUST use full 2.0s time budget. Stop only when all patterns exhausted or timeout.
+
+new_tools:
+  - name: analyze_sardine_clusters
+    description: |
+      Compute top 15 sardine-dense regions from a 500x500 grid. Returns each region's bounding box,
+      sardine count, and mackerel contamination (mackerels inside). Used to carve sardines out of
+      mackerel polygon candidates by adding notch-shaped indentations.
+    input_schema:
+      type: object
+      properties: {}
+    implementation_py: |
+      def run(ctx, args):
+          cell_size = 200
+          grid_size = 500
+          grid = [[{'m': 0, 's': 0} for _ in range(grid_size)] for _ in range(grid_size)]
+          
+          # Parse fish positions from program (simple extraction)
+          program_text = ctx.get_program()
+          fish_list = []
+          for line in program_text.split('\n'):
+              line = line.strip()
+              if not line or 'fish[' not in line:
+                  continue
+              try:
+                  parts = line.split(',')
+                  if len(parts) >= 2:
+                      x, y, ftype = int(parts[0].replace('fish[', '').strip()), int(parts[1].strip()), 1 if 'mackerel' in line.lower() else -1
+                      cx, cy = x // cell_size, y // cell_size
+                      if 0 <= cx < grid_size and 0 <= cy < grid_size:
+                          grid[cy][cx]['m' if ftype == 1 else 's'] += 1
+                          fish_list.append((x, y, ftype))
+              except:
+                  continue
+          
+          # Compute scores and find top 15 sardine clusters
+          sardine_cells = []
+          for cy in range(grid_size):
+              for cx in range(grid_size):
+                  if grid[cy][cx]['s'] > 0:
+                      sardine_cells.append((cy * grid_size + cx, grid[cy][cx]['s'], 
+                                            grid[cy][cx]['m'], 
+                                            grid[cy][cx]['m'] - grid[cy][cx]['s']))
+          
+          sardine_cells.sort(key=lambda t: t[1], reverse=True)
+          top_15 = sardine_cells[:15]
+          
+          return {"sardine_clusters": top_15, "num_clusters": len(top_15)}
+skill_description: |
+  Optimize C++ polygon construction using sardine-aware search. Build fine 500x500 grid, identify mackerel clusters and nearby sardine clusters, then carve sardines out with notch-shaped indents. Hill climb edge shifts that maximize (mackerels - sardines).
+skill_body: |
+  # Sardine-Aware Polygon Optimization
+
+  ## Strategy: 1. Fine Grid → 2. Cluster Detection → 3. Notch Carving → 4. Hill Climb
+
+  ### Phase 1: Fine-Grained Spatial Analysis
+  - Build 500x500 grid (cell_size=200) over [0,100000]x[0,100000]
+  - For each cell, count mackerels (M) and sardines (S)
+  - Identify top 15 mackerel-dense cells AND top 15 sardine-dense cells separately
+
+  ### Phase 2: Sardine-Aware Polygon Generation
+  For each top mackerel cluster:
+  
+  **Step A: Base Bounding Box**
+  - Compute minX, maxX, minY, maxY of all mackerels in cluster
+  - Create initial rectangle (4 vertices)
+
+  **Step B: Detect Nearby Sardines**
+  - For each sardine cell in top 15, check if it overlaps or is adjacent to the bounding box
+  - Mark sardine regions that need exclusion
+
+  **Step C: Carve Out Sardines with Notches**
+  For each sardine to exclude:
+  - If sardine is on an edge: indent that edge inward by 50-150 units around the sardine's position
+  - This creates a "notch" - the polygon goes around the sardine
+  - A sardine notch adds 2 vertices per notch (in and out)
+  - Output polygon with 8-16 vertices (4 base + 2 per notch)
+
+  **Step D: Score the Notched Polygon**
+  - Count mackerels inside the notched polygon
+  - Count sardines inside (should be much lower)
+  - Compute score = M - S + 1
+
+  ### Phase 3: Sophisticated Hill Climbing
+  For each notched polygon candidate:
+  - For each edge (8-16 edges):
+    - Try shifting edge inward by ±5, ±10, ±20, ±30, ±40, ±50 units
+    - After each shift, recompute score using grid query
+    - Keep shifts that: increase M OR decrease S (mackerel sacrifice is OK if sardine reduction is large)
+    - Priority: reduce sardines > increase mackerels
+  - Repeat up to 2 refinement rounds
+  - Track best polygon
+
+  ### Phase 4: Multiple Random Restarts
+  - Run Phases 1-3 with 8 different random seeds (perturb cluster selection)
+  - Each seed uses different mackerel clusters and different notch parameters
+  - Track the best polygon across all runs
+  - Output that single best polygon
+
+  ## C++ Implementation Notes
+  - Use 500x500 grid for O(1) rectangle queries (much finer than 200x200)
+  - Pre-compute all grid cell scores in O(N) at startup
+  - Sardine exclusion: for each sardine, find which edge(s) to notch and by how much
+  - Notch creation: replace a straight edge with an L-shaped indentation
+  - Total time per evaluation: < 1.5s with efficient grid operations and pruning
+
+new_skills: []
+new_middlewares: []
+remove_tools: []
+sampling:
+  temperature: 0.9
+  top_p: 0.9
+  top_k: 30
+  max_tokens: 12288
+agent:
+  max_iterations: 50
+middleware:
+  budget_reminder_from_left: 3
+  long_tool_output_max_chars: 15000

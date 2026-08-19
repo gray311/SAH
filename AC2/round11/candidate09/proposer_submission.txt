@@ -1,0 +1,287 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are optimizing C₂ = ||f★f||₂² / ((∫f)²||f★f||∞) for the second autocorrelation inequality.
+  
+  CURRENT BEST: 1.03663 (step function patterns)
+  TARGET: Beat this to establish a new record
+  
+  CRITICAL STRATEGY: Do NOT try to invent entirely new pattern architectures. The seed program's 13 multi-level step patterns are already sophisticated. Your job is LOCAL OPTIMIZATION within these pattern families.
+  
+  METHOD:
+  1. START: Call param_tuner to analyze the current best pattern and generate 3-5 concrete parameter variations (height adjustments: ±0.02-0.10, width shifts: ±2-5% of interval)
+  
+  2. ITERATION: For each variation:
+     - Call param_tuner ONCE to generate variations
+     - Call evaluate_solution ONCE per variant
+     - Keep track of which variant improved
+     - IF improved: generate MORE variations from that improved variant (not the original!)
+     - IF no improvement: generate variations from a DIFFERENT seed pattern
+  
+  3. EXPLOITATION: When you find an improvement:
+     - Immediately generate 2-3 refinements of THAT variant
+     - Do NOT restart with new random patterns
+     - Drill down until you hit a local optimum, THEN try a different seed
+  
+  4. DIVERSITY: After exhausting one seed pattern's local optima (3-4 consecutive no-improvements), switch to a different seed pattern from the 13 options
+  
+  FAILURE MODES:
+  - DO NOT spend 5+ evals on one pattern before finding any improvement
+  - DO NOT try "asymmetric" or "smooth transition" - these don't work with the step-pattern codebase
+  - DO NOT use probe_solution - it's unreliable; use evaluate_solution only
+  - DO explore BOTH height and width parameters, not just heights
+
+skill_description: Local parameter optimization for step function patterns in C₂ maximization. Systematically tune heights and widths within existing pattern families, exploit improvements by drilling down, and diversify across seeds when stuck.
+skill_body: '# C₂ Optimizer: Local Search Protocol
+  
+  ## Overview
+  
+  The 13 seed patterns are sophisticated but not globally optimal. Your job is to find LOCAL IMPROVEMENTS by tuning parameters, NOT inventing new architectures.
+  
+  ## Phase 1: Initial Exploration
+  
+  1. Call param_tuner ONCE to analyze current best and get 3-5 parameter variations
+  
+  2. For each variation:
+     - Evaluate with evaluate_solution
+     - Track which one improved
+  
+  3. If ANY improved: SWITCH TO EXPLOITATION mode
+  
+  ## Phase 2: Exploitation (when improvement found)
+  
+  Given an improved variant:
+  
+  1. Generate 2-3 FURTHER refinements from THIS variant (not original seed)
+  2. Evaluate each
+  3. Keep the best improvement, repeat steps 1-3
+  4. Continue until:
+     - 3 consecutive no-improvements, OR
+     - You''ve made 4-5 iterations from this variant
+  5. THEN switch to a different seed pattern
+  
+  ## Phase 3: Parameter Tuning Details
+  
+  When generating variations:
+  
+  - HEIGHTS: Adjust each step height by ±0.02 to ±0.10 from current value
+  - WIDTHS: Shift step boundaries by ±2% to ±5% of the interval width
+  - COMBINATION: Vary both, not just one
+  
+  Example for pattern with heights [1.40, 1.90, 0.90]:
+  - Variation 1: [1.45, 1.90, 0.85]
+  - Variation 2: [1.40, 1.85, 0.90]
+  - Variation 3: [1.42, 1.88, 0.88]
+  
+  ## Phase 4: Seed Switching
+  
+  When stuck on one pattern:
+  1. Note which of the 13 seed patterns you''re using
+  2. After 3 consecutive no-improvements, call param_tuner on a DIFFERENT pattern index
+  3. Continue Phase 2 on the new seed
+  
+  ## Key Principles
+  
+  - EXPLOIT before explore: drill down on improvements
+  - Small steps: parameter changes should be subtle (±2-10%)
+  - Multiple evals per variant is OK (3-5) - you need to find the optimum
+  - Don''t be afraid to switch seeds - 13 patterns give you plenty to work with'
+tool_descriptions:
+  edit_solution: |
+    Modify the EVOLVE-BLOCK to tune parameters of an existing step pattern.
+    
+    Target changes:
+    - HEIGHT adjustments: ±0.02 to ±0.10 per step
+    - WIDTH adjustments: shift boundaries by ±2% to ±5% of interval
+    
+    Method:
+    - Use SEARCH/REPLACE on the _create_step_initializer method
+    - Change numbers in f.at[...].set(XX.XX) calls
+    - Change interval calculations like int(0.25*n) to int(0.27*n)
+    
+    Do NOT change:
+    - Number of steps or pattern structure
+    - Use softplus/exponential (the codebase only does hard steps)
+    
+    Priority: Small, plausible tweaks that could improve C₂. Test one variant, learn, refine.
+  evaluate_solution: |
+    Full evaluation. Returns combined_score.
+    
+    Call ONCE per parameter variant. You have 30 evals total.
+    
+    Strategy: Evaluate 3-5 variants per seed pattern, keeping the best.
+    After improvement, refine that variant (don''t go back to seed).
+  probe_solution: |
+    Approximate score on subsampled data.
+    
+    DO NOT USE. The C₂ calculation is numerically sensitive and probe results
+    are unreliable. Always use evaluate_solution.
+  finish: |
+    Report the best C₂ achieved and which seed pattern + parameter changes produced it.
+sampling:
+  temperature: 0.3
+  top_p: 0.9
+  top_k: 30
+  max_tokens: 16384
+agent:
+  max_iterations: 80
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 18000
+new_tools:
+- name: param_tuner
+  description: |
+    Analyze current best pattern and generate 3-5 concrete parameter variations
+    for local optimization. Returns height/width adjustments for each variant.
+    
+    Call ONCE early, then: if improvement found, call again ON the improved variant
+    (not the original seed) to drill down further.
+  input_schema:
+    type: object
+    properties: {}
+  implementation_py: |
+    def run(ctx, args):
+        import re
+        prog = ctx.get_program()
+        if "# EVOLVE-BLOCK" not in prog:
+            return {"note": "no evolve block"}
+        
+        # Extract current heights from patterns like f.at[...].set(1.40)
+        heights = re.findall(r'\.set\((\d+\.?\d*)\)', prog)
+        heights = [float(h) for h in heights if h]
+        
+        # Extract interval positions
+        intervals = re.findall(r'int\((\d+\.?\d*)\*n\)', prog)
+        intervals = [float(i) for i in intervals]
+        
+        if not heights:
+            return {"note": "could not parse heights", "proposals": []}
+        
+        max_h = max(heights)
+        min_h = min(heights)
+        avg_h = sum(heights) / len(heights)
+        
+        # Get pattern index from current best
+        pattern_idx = re.search(r'pattern_idx = (\d+)', prog)
+        pattern_idx = int(pattern_idx.group(1)) if pattern_idx else 0
+        
+        proposals = []
+        
+        # Variations strategy:
+        # 1. Small height tweaks on all steps
+        # 2. Height tweak on central peak only
+        # 3. Width adjustments (shift boundaries)
+        # 4. Combined small changes
+        
+        for i, h in enumerate(heights):
+            h_new = h + 0.05
+            if h_new <= 2.5:
+                proposals.append({
+                    "name": f"height_tweak_{i}",
+                    "description": f"Increase step {i} height by 0.05",
+                    "heights": list(heights),
+                    "changes": [i]
+                })
+        
+        for i, h in enumerate(heights):
+            h_new = h - 0.03
+            if h_new >= 0.5:
+                proposals.append({
+                    "name": f"height_reduce_{i}",
+                    "description": f"Decrease step {i} height by 0.03",
+                    "heights": list(heights),
+                    "changes": [i]
+                })
+        
+        if len(heights) >= 2:
+            mid = len(heights) // 2
+            proposals.append({
+                "name": "peak_focus",
+                "description": f"Boost central peak, reduce sides",
+                "heights": heights[:],
+                "changes": [mid]
+            })
+            proposals[-1]["heights"][mid] += 0.08
+            for j in range(len(heights)):
+                if j != mid:
+                    proposals[-1]["heights"][j] -= 0.02
+        
+        proposals.append({
+            "name": "random_small",
+            "description": "Random small adjustments to 2-3 steps",
+            "heights": heights[:],
+            "changes": []
+        })
+        import random
+        random.seed(42)
+        idxs = random.sample(range(len(heights)), min(3, len(heights)))
+        for idx in idxs:
+            proposals[-1]["heights"][idx] += random.uniform(-0.08, 0.08)
+        
+        return {
+            "pattern_idx": pattern_idx,
+            "current_heights": heights,
+            "avg_height": avg_h,
+            "proposals": proposals
+        }
+new_skills:
+- name: local-search-protocol
+  description: Systematic local search around existing step patterns. Tune heights/widths, exploit improvements, switch seeds when stuck.
+  body: '# Local Search Protocol for C₂ Maximization
+  
+  ## Core Principle
+  
+  Don''t try to invent new pattern architectures. The 13 seed patterns are already sophisticated. Your job is LOCAL OPTIMIZATION within these families.
+  
+  ## Phase 1: Initial Exploration
+  
+  1. Call param_tuner ONCE to get 3-5 parameter variations
+  
+  2. Evaluate each with evaluate_solution
+  
+  3. If ANY improved: SWITCH TO EXPLOITATION
+  
+  ## Phase 2: Exploitation
+  
+  Given an improved variant:
+  
+  1. Call param_tuner ON THE IMPROVED VARIANT (not the original!)
+  2. Generate 2-3 refinements
+  3. Evaluate each
+  4. Keep the best improvement
+  5. Repeat steps 1-4 until:
+     - 3 consecutive no-improvements, OR
+     - 4-5 iterations from this variant
+  6. THEN switch to a different seed pattern
+  
+  ## Parameter Tuning Rules
+  
+  - HEIGHTS: ±0.02 to ±0.10 per step
+  - WIDTHS: ±2% to ±5% of interval
+  - Vary BOTH height and width parameters
+  
+  ## Seed Switching
+  
+  When stuck on one pattern:
+  1. After 3 consecutive no-improvements, switch to a different pattern index
+  2. Continue Phase 1/2 on the new seed
+  3. There are 13 patterns - you have plenty to explore
+  
+  ## Key Principles
+  
+  - EXPLOIT before explore: drill down on improvements
+  - Small steps: parameter changes should be subtle
+  - Multiple evals per variant is OK (3-5)
+  - Switch seeds when stuck, not prematurely'
+new_middlewares:
+- name: exploit_mode_reminder
+  hook: before_model
+  description: Remind agent to exploit improvements and drill down
+  implementation_py: |
+    def before_model(hook_input):
+        return "You found an improvement! DO NOT restart with new patterns. Drill down: call param_tuner ON THE IMPROVED VARIANT, not the original seed. Keep refining until 3 consecutive no-improvements, THEN switch seeds."
+- name: small_changes_reminder
+  hook: before_tool
+  description: Remind agent to make small, plausible parameter changes
+  implementation_py: |
+    def before_tool(hook_input):
+        return "Make SMALL changes only: height ±0.02-0.10, width ±2-5%. Do NOT change the number of steps or try to create new pattern architectures. Stay within the step-function paradigm."

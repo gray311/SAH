@@ -1,0 +1,202 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are an expert in harmonic analysis and numerical optimization. Your task: improve a Python script that finds a step function h: [0,2]→[0,1] minimizing max_k ∫ h(x)(1-h(x+k))dx.
+
+  Target: Beat C5 ≤ 0.38092303510845016 (your score = 0.38092303510845016 / c5_bound; >1 means new record).
+
+  Key insight: The seed uses 800 intervals and gradient descent. To find better constructions, try:
+  1. Vary the discretization (100-2000 intervals) to find better representations
+  2. Use structured step functions: uniform blocks, triangular patterns, sine-based initializations
+  3. Try multi-restart optimization with diverse seeds
+  4. Always ensure ∫h(x)dx=1 exactly (otherwise invalid)
+
+  STRATEGY: Use probe_solution to cheaply rank candidate designs (many fast tests, few full evals). When probe scores are similar, use full evaluation. Focus on structural changes: number of intervals, function shape patterns, initialization diversity.
+
+  Use edit_solution for targeted changes: modify interval counts, restructure _get_best_initialization, adjust penalty_strength. Then probe_solution, evaluate_solution only on promising candidates.
+
+  Call finish when you beat the seed (score > 0.999641) or exhaust budget.
+
+skill_description: |
+  Optimize step function constructions for Erdős minimum overlap problem. Use structural search: vary discretization, try block/sine/triangle patterns, multi-restart strategies. Rank candidates cheaply with probe_solution, evaluate promising ones fully. Always maintain ∫h=1 constraint.
+skill_body: |
+  # Erdős C5 Optimization Harness
+
+  Objective: Minimize max_k ∫ h(x)(1-h(x+k))dx for step function h: [0,2]→[0,1] with ∫h=1.
+  Score = 0.38092303510845016 / c5_bound; beat 0.999641 to improve.
+
+  ## Search Strategy
+
+  The seed uses 800 intervals + Adam. To improve:
+  1. Try FEWER intervals (100-400) with stronger penalties - coarser step functions may suffice
+  2. Try MORE intervals (1000-2000) with adaptive learning rates - finer resolution captures better shapes
+  3. Modify _get_best_initialization: the 12 patterns work, but try new shapes:
+     - Alternating blocks: h(x)=a for x in [0,a], 1-a for x in [a,2-a], a for x in [2-a,2]
+     - Concentrated mass: put most h(x) near 1, rest near 0
+     - Symmetric patterns around x=1
+  4. Adjust penalty_strength: too high (1370) may over-penalize, too low lets ∫h≠1
+
+  ## Tools Workflow
+
+  1. edit_solution: Change ONE thing at a time - interval count, penalty, or initialization pattern
+  2. probe_solution: Fast check if ∫h≈1 and rough c5 score. If c5 > 0.4, likely not worth full eval
+  3. evaluate_solution: Only for promising variants (probe c5 < 0.38 or structured improvement)
+
+  ## Concrete Ideas to Try
+
+  - Experiment 1: num_intervals=300, penalty_strength=2000 (coarser + stronger constraint)
+  - Experiment 2: Add a new initialization pattern: uniform block function [0,0.5],[0.5,1.5],[1.5,2]
+  - Experiment 3: Multi-start with 10 restarts, each with different random seeds
+  - Experiment 4: Try learning rate=0.01 instead of 0.0053
+  - Experiment 5: Reduce dx calculation impact by padding more conservatively
+
+  ## Validation Checklist
+
+  Before each edit: Does ∫h=1 approximately? Is the edit a targeted diff? Is the change substantive?
+  After probe: Is c5 < 0.4? If not, skip full eval.
+  Success metric: combined_score > 0.999641 (c5 < 0.3809).
+
+tool_descriptions:
+  edit_solution: |
+    Change the EVOLVE-BLOCK code. Preferred: targeted SEARCH/REPLACE diffs modifying one parameter or function. Full rewrites acceptable for structural changes. Preserve imports and entry function. After editing, probe then evaluate.
+  evaluate_solution: |
+    Run the program, returns combined_score (0.38092303510845016/c5_bound, higher better), validity, error, best_so_far, evals_left. Budget: 30 total. Use feedback to guide next edit.
+  probe_solution: |
+    Cheap approximate evaluation on subsampled data (~10s runtime, separate budget of 30 probes). Returns approximate c5_bound - use to quickly filter bad candidates before spending full evals. Score is approximate and NOT comparable to evaluate_solution - use only for ranking your own variants.
+  finish: |
+    End the session when you beat the seed (score > 0.999641) or cannot improve. Best program is submitted automatically.
+sampling:
+  temperature: 1.2
+  top_p: 0.9
+  top_k: 30
+  max_tokens: 12288
+agent:
+  max_iterations: 50
+middleware:
+  budget_reminder_from_left: 2
+  long_tool_output_max_chars: 10000
+new_tools:
+  - name: analyze_structure
+    description: |
+      Analyze the seed program's structure to extract key parameters (num_intervals, penalty_strength, initialization patterns) and suggest targeted modifications. Call once early to understand what knobs to turn. Returns a summary of current settings and recommended experiments.
+    input_schema: {type: object, properties: {}}
+    implementation_py: |
+      def run(ctx, args):
+          code = ctx.get_program()
+          search_str = "# EVOLVE-BLOCK-START"
+          if search_str not in code:
+              return {"error": "No EVOLVE-BLOCK found"}
+          
+          start = code.find(search_str)
+          end = code.find("# EVOLVE-BLOCK-END", start)
+          if end == -1:
+              return {"error": "Missing END marker"}
+          
+          evolve_block = code[start+20:end]
+          
+          analysis = {
+              "num_intervals": None,
+              "base_learning_rate": None,
+              "num_steps": None,
+              "penalty_strength": None,
+              "num_restarts": None,
+              "suggested_changes": [],
+              "analysis_note": "Extracted parameters and suggest experiments"
+          }
+          
+          import re
+          
+          # Extract parameters
+          m = re.search(r'num_intervals:\s*(\d+)', evolve_block)
+          if m:
+              analysis["num_intervals"] = int(m.group(1))
+          
+          m = re.search(r'base_learning_rate:\s*([\d.]+)', evolve_block)
+          if m:
+              analysis["base_learning_rate"] = float(m.group(1))
+          
+          m = re.search(r'num_steps:\s*(\d+)', evolve_block)
+          if m:
+              analysis["num_steps"] = int(m.group(1))
+          
+          m = re.search(r'penalty_strength:\s*([\d.]+)', evolve_block)
+          if m:
+              analysis["penalty_strength"] = float(m.group(1))
+          
+          m = re.search(r'num_restarts:\s*(\d+)', evolve_block)
+          if m:
+              analysis["num_restarts"] = int(m.group(1))
+          
+          # Generate suggestions based on structure
+          num_int = analysis["num_intervals"]
+          penalty = analysis["penalty_strength"]
+          
+          if num_int < 200:
+              analysis["suggested_changes"].append("Increase num_intervals to 300-500 for finer resolution")
+          elif num_int > 1000:
+              analysis["suggested_changes"].append("Reduce num_intervals to 300-500 - coarser steps may suffice")
+          
+          if penalty < 500:
+              analysis["suggested_changes"].append("Increase penalty_strength to 1000-2000 for tighter constraint enforcement")
+          elif penalty > 2000:
+              analysis["suggested_changes"].append("Reduce penalty_strength to 500-1000 to avoid over-penalization")
+          
+          analysis["suggested_changes"].append("Try alternative initialization: uniform block function with 3-5 blocks")
+          analysis["suggested_changes"].append("Add multi-restart with 5-10 diverse initializations")
+          analysis["suggested_changes"].append("Experiment with learning_rate=0.008-0.012 instead of 0.0053")
+          
+          return analysis
+new_skills:
+  - name: step-function-constructions
+    description: |
+      Build step function candidates for Erdős C5 problem. Use structured patterns: uniform blocks, triangular functions, sine-based initializations. Always normalize to ∫h=1. Test multiple restarts with diverse seeds. Prefer coarser discretizations (100-400 intervals) with stronger penalties over fine-grained gradient descent.
+    body: |
+      # Step Function Construction Guide for Erdős C5
+
+      ## Goal
+      Build step functions h: [0,2]→[0,1] that minimize max_k ∫ h(x)(1-h(x+k))dx.
+      Target: c5_bound < 0.38092303510845016 (score > 0.999641).
+
+      ## Construction Patterns
+
+      ### 1. Uniform Block Functions
+      Create h(x) as piecewise constant:
+      - 2-block: h(x)=0.5 for x in [0,2], 0 otherwise → ∫h=1 ✓
+      - 3-block: h(x)=a in [0,a], 1-a in [a,2-a], a in [2-a,2] where a=1/3
+        This concentrates mass in the center
+      - Alternating: h(x) alternates between high/low values across intervals
+
+      ### 2. Sine-Based Initialization
+      h(x) = sigmoid(k*sin(π*x) + c) for various k, c
+      - Controls asymmetry via phase shift c
+      - Controls steepness via k
+      - Try k in [1,5], c in [-1,1]
+
+      ### 3. Concentrated Mass Patterns
+      Put most of h's mass in one region:
+      - h(x) ≈ 1 for x in [0.2, 0.8], ≈ 0 elsewhere
+      - h(x) ≈ 1 for x in [0.1, 0.1+L] where L chosen to get ∫h=1
+
+      ### 4. Multi-Restart Strategy
+      Run 5-10 optimizations with different seeds:
+      - Pattern A: Random normal initialization
+      - Pattern B: Uniform in [-2,2]
+      - Pattern C: Sin/cos mix
+      - Pattern D: Block function
+      - Pattern E: Triangular function
+
+      ## Optimization Tips
+
+      - Start with coarse discretization (100-300 intervals) for faster exploration
+      - Use penalty_strength=500-2000 to enforce ∫h=1
+      - Use learning_rate=0.005-0.012
+      - Monitor c5_bound during optimization (not just final loss)
+      - If stuck, change initialization pattern or interval count
+
+      ## Validation
+
+      Always check: ∫h(x)dx = 1 (within tolerance), h(x) in [0,1], no NaNs.
+      Use probe_solution to quickly check feasibility before full evaluation.
+
+      ## Key Insight
+
+      The optimal function likely has a simple structure (few steps, symmetric or nearly symmetric). Avoid overly complex patterns. Coarse-to-fine strategy: test 100 intervals first, then 300, then 500 if needed.

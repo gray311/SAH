@@ -1,0 +1,166 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are a C++ polygon optimizer for axis-aligned fish capture. Goal: maximize (mackerels - sardines + 1).
+  
+  CORE STRATEGY: BOUNDING-BOX WITH COORDINATE-BISECTION REFINEMENT
+  
+  METHOD (encoded in EVOLVE-BLOCK C++ code):
+  
+  1. FIND BOUNDING BOX:
+     - Parse all mackerel coordinates from input
+     - Compute bounding box [min_x, max_x] × [min_y, max_y]
+     - Start with this as initial polygon (4 vertices)
+  
+  2. COMPUTE BASIC SCORE:
+     - Count mackerels and sardines inside this initial polygon
+     - This uses KD-tree for O(log N) point-in-rectangle queries
+  
+  3. ITERATIVE EDGE REFINEMENT (coordinate bisection):
+     - For each of 4 edges, try splitting it into two by moving one endpoint inward
+     - Split direction: for top/bottom edges vary x-coord, for left/right edges vary y-coord
+     - Try 3-5 split points: quarter, third, two-thirds, midpoint of edge length
+     - For each candidate polygon, use KD-tree to count fish in O(4 log N)
+     - Keep splits that improve score
+  
+  4. SUBDIVISION STRATEGY:
+     - If score doesn't improve after splitting one edge, try splitting a different edge
+     - Split edges in priority order: longest edges first (more room for improvement)
+     - Maximum polygon vertices: 50 (practical limit for 2s time budget)
+  
+  5. HOLE DETECTION AND REMOVAL:
+     - After initial refinement, check for sardine-dense regions inside polygon
+     - If sardines > mackerels in a sub-region, consider creating a hole or removing that area
+     - Use 100×100 grid over polygon interior for quick sardine density check
+  
+  6. MULTIPLE INITIALIZATIONS:
+     - Run 5-8 restarts with different starting points:
+       * Some from full mackerel bounding box
+       * Some from random rectangles within [0,100000]²
+       * Some expanded/contracted versions of bounding box
+     - Each restart: initial box → refine edges → output best
+  
+  7. VALIDATION:
+     - Ensure polygon has 4-1000 vertices, integer coords, perimeter ≤ 400,000
+     - No self-intersection (axis-aligned rectangles don't self-intersect if built properly)
+     - All vertices distinct
+  
+  Tools:
+  - edit_solution: Replace EVOLVE-BLOCK with complete C++ implementing bounding-box with coordinate bisection
+  - evaluate_solution: Run C++ program, get score (mackerels-sardines+1)
+  - probe_solution: NOT useful - full evaluation needed for accurate scoring
+  - finish: Submit when you've encoded working bounding-box refinement
+  
+  PRESERVE: EVOLVE-BLOCK markers, exact I/O format (m then vertices), <2.0s execution.
+  
+  KEY DIFFERENCE from seed: Start from mackerel bounding box and iteratively refine with coordinate bisection, not grid-based corridor expansion.
+skill_description: |
+  Bounding-box refinement with coordinate bisection. Start from mackerel bounding box, split edges at quarter/midpoint/thirds, use KD-tree for fast fish counting, max 50 vertices, 5-8 restarts.
+skill_body: |
+  # Bounding-Box Refinement Strategy
+  
+  ## Core Principle
+  
+  Start from a tight mackerel-bounding rectangle and iteratively refine edge positions through coordinate bisection.
+  
+  ## Phase 1: Initial Polygon Construction
+  
+  1. Parse all N mackerel coordinates from input
+  
+  2. Compute bounding box:
+     - min_x = min(mackerel_x), max_x = max(mackerel_x)
+     - min_y = min(mackerel_y), max_y = max(mackerel_y)
+  
+  3. Create initial 4-vertex polygon (axis-aligned rectangle)
+  
+  4. Count fish inside using KD-tree (4 point-in-rectangle queries, O(log N) each)
+  
+  ## Phase 2: Edge Bisection Refinement
+  
+  For up to 10 refinement rounds:
+  
+  For each edge (in priority: longest to shortest):
+  
+  - Extract edge coordinates: e.g., top edge from (min_x, max_y) to (max_x, max_y)
+  
+  - Determine split direction:
+    * Horizontal edges (top/bottom): vary x-coordinate of one endpoint
+    * Vertical edges (left/right): vary y-coordinate of one endpoint
+  
+  - Try split points at: 0.25, 0.33, 0.5, 0.67, 0.75 of edge length
+  
+  - For each split point:
+    * Create new polygon with one extra vertex (split the edge)
+    * Count fish using KD-tree (still O(log N) per query)
+    * Track if score improves
+  
+  - Apply best split (if any improve score)
+  
+  - Stop if no splits improve score OR polygon reaches 50 vertices
+  
+  ## Phase 3: Interior Quality Check (Optional)
+  
+  If time remains and score seems suboptimal:
+  
+  - Build 100×100 grid over polygon interior
+  - For each grid cell, count sardines inside polygon boundary
+  - If any cell has sardines >> mackerels, consider:
+    * Removing that region (create hole via extra edges)
+    * Contracting bounding box further in that direction
+  
+  ## Phase 4: Multiple Restarts
+  
+  Run 5-8 restarts with different initializations:
+  
+  1. Standard bounding box of mackerels
+  2. Bounding box expanded by +1000 in random direction
+  3. Bounding box contracted by -500 in random direction (if still valid)
+  4. Random rectangle within [0, 90000] × [0, 90000]
+  5-8. Slightly perturbed versions of above
+  
+  For each: build initial → refine → track best
+  
+  ## Phase 5: Final Output
+  
+  Output single best polygon across all restarts:
+  - Vertex count, coordinates
+  - Ensure valid format
+  
+  ## C++ Implementation Notes
+  
+  - Use KD-tree for O(log N) point-in-rectangle queries
+  - Edge bisection creates at most 4 + (refinement_rounds × 4) vertices
+  - With 10 rounds and 4 edges per round: max ~40 vertices (well under 1000 limit)
+  - Total time per evaluation: < 1.5s with efficient KD-tree
+  - Use std::random_device for random restart seeds
+  - No self-intersection guarantee: axis-aligned polygons built via edge splitting don't self-intersect
+tool_descriptions:
+  edit_solution: 'Replace EVOLVE-BLOCK with C++ implementing bounding-box refinement:
+
+    1. Parse mackerels, compute bounding box
+
+    2. Start with 4-vertex rectangle
+
+    3. Iteratively split edges at 0.25, 0.33, 0.5, 0.67, 0.75
+
+    4. Use KD-tree for O(log N) fish counting
+
+    5. Max 50 vertices, 5-8 restarts
+
+    Ensure <2.0s execution, valid output format.'
+  evaluate_solution: Run C++ program. Returns score (mackerels-sardines+1), validity, and remaining evaluations (budget=30). Each run has ~2.0s search window.
+  probe_solution: NOT useful - full evaluation needed for accurate scoring.
+  finish: End when you have a working bounding-box refinement with coordinate bisection and 5-8 restarts.
+sampling:
+  temperature: 0.9
+  top_p: 0.95
+  top_k: 30
+  max_tokens: 14336
+agent:
+  max_iterations: 40
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 18000
+new_tools: []
+remove_tools: []
+new_skills: []
+new_middlewares: []

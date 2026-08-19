@@ -1,0 +1,160 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are solving the Erdős minimum overlap problem: minimize max_k ∫ h(x)(1-h(x+k)) dx
+  for a step function h: [0,2] → [0,1] with ∫h(x)dx = 1.
+  
+  Current best bound: C5 ≤ 0.38092303510845016
+  Goal: Find h achieving c5_bound < 0.380923 to get combined_score > 1.0.
+  
+  CRITICAL INSIGHT: The seed program's optimizer gets stuck because it starts from RANDOM noise
+  and simple patterns. The OPTIMUM solution requires a carefully constructed function.
+  
+  STRATEGY: Use construct_structured_init to get mathematically principled initializations,
+  then use probe_solution to quickly screen variants, then evaluate the best.
+  
+  NEW APPROACH: When you have a promising solution (c5_bound near 0.38), try to IMPROVE IT
+  by calling refine_local_search. This tool performs targeted local search on the EVOLVE-BLOCK
+  to find small improvements that the seed optimizer missed.
+  
+  Process:
+  1. Call construct_structured_init to get 4 initializations
+  2. For each, use probe_solution to screen
+  3. Edit to create variants (adjust peak positions, widths)
+  4. Use probe to rank, evaluate top 2-3
+  5. When close to 0.38 but not quite there, call refine_local_search for fine-grained improvement
+  6. Document the pattern that worked
+  
+  Remember: The optimizer can only IMPROVE its starting point. Start from GOOD constructions.
+skill_description: |
+  Erdős constructive search: use construct_structured_init for principled starts,
+  probe for fast screening, refine_local_search for fine-grained improvement of promising solutions.
+skill_body: |
+  # Erdős Minimum Overlap - Constructive Search Strategy
+  
+  ## Problem
+  Minimize max_k ∫ h(x)(1-h(x+k)) dx subject to ∫h=1, h∈[0,1].
+  
+  ## Why Current Harness Fails
+  The seed optimizer starts from RANDOM noise and simple patterns. Even with good hyperparameters,
+  it can only find LOCAL MINIMA of these bad starting points. The OPTIMUM h(x) is a carefully
+  constructed function, not a random guess.
+  
+  ## Strategy: Constructive Search
+  
+  ### Phase 1: Start from GOOD Constructions
+  Call construct_structured_init to get 4 mathematically principled functions:
+  - bimodal_tight: Two narrow peaks at (0.25, 0.75) with Gaussian-like shape
+  - triangular_3step: Three-level pattern for broader spread
+  - periodic_2: Alternating pattern that balances mass
+  - golomb_5: Peak positions from optimal spacing (Golomb ruler principle)
+  
+  ### Phase 2: Rapid Screening with Probes
+  For each construction and variant:
+  1. Call probe_solution (fast, ~10s, 30-probe budget)
+  2. Discard if probe score < 0.38 or constraint violated
+  3. Rank remaining by probe score
+  
+  ### Phase 3: Fine-Grained Refinement
+  When you have a solution with c5_bound ≈ 0.3809:
+  - Call refine_local_search to perform targeted local optimization
+  - This tool makes small, focused edits to improve the current best
+  - Use it when you're "close but not quite there"
+  
+  ### Phase 4: If Stalled, Reconstruct
+  If best score stalls at ≈ 0.381 for 10+ iterations:
+  - Call construct_structured_init again with different seeds
+  - Try entirely new construction patterns
+  
+  ## Success Criteria
+  - combined_score > 1.0 (c5_bound < 0.380923)
+  - Document which construction + refinement strategy worked
+  
+  ## Key Lesson
+  The seed's hyperparameters are already reasonable. The problem is POOR INITIALIZATIONS.
+  Focus on CONSTRUCTION, not tuning.
+tool_descriptions:
+  edit_solution: Modify EVOLVE-BLOCK to create new initializations (change peak positions, widths, patterns) or adjust hyperparameters.
+  evaluate_solution: Full evaluation, returns combined_score. Consumes budget.
+  probe_solution: Fast approximate evaluation (~10s, separate budget of 30 probes). Use to screen variants before full eval.
+  refine_local_search: Perform targeted local search on the current best program. Makes small, focused edits (peak position tweaks, width adjustments, pattern refinements) to improve solutions that are already promising but not optimal. Call when c5_bound ≈ 0.3809.
+  finish: Submit when combined_score > 1.0 or after exhausting strategies.
+sampling:
+  temperature: 1.1
+  top_p: 0.95
+  top_k: 30
+  max_tokens: 14000
+agent:
+  max_iterations: 70
+middleware:
+  budget_reminder_from_left: 3
+  long_tool_output_max_chars: 8000
+new_tools:
+  - name: refine_local_search
+    description: |
+      Perform targeted local search on the current best program. Makes small, focused
+      edits (peak position tweaks, width adjustments, pattern refinements) to improve
+      solutions that are already promising but not optimal. Call when c5_bound ≈ 0.3809.
+    input_schema:
+      type: object
+      properties: {}
+    implementation_py: |
+      def run(ctx, args):
+          best = ctx.get_best_program()
+          if not best:
+              return {"note": "no best program yet, call evaluate_solution first"}
+          
+          current_score = ctx.best_score()
+          
+          try:
+              # Attempt to refine peak positions in the EVOLVE-BLOCK
+              import re
+              
+              # Try shifting peak positions by small amounts
+              deltas = [-0.05, -0.03, -0.02, 0.02, 0.03, 0.05]
+              
+              for delta in deltas:
+                  # Look for common peak position patterns
+                  if "0.25" in best:
+                      new_best = re.sub(r'(0\.25)([,\s])', lambda m: m.group(1) + str(delta) + m.group(2), best)
+                      if new_best != best:
+                          ctx.stage_edit(new_best)
+                          probe = ctx.probe(subsample=2000)
+                          if probe and probe.get("c5_bound", 999) < current_score:
+                              return {"improvement_found": True, "delta": delta, "probe_score": probe}
+                  if "0.75" in best:
+                      new_best = re.sub(r'(0\.75)([,\s])', lambda m: m.group(1) + str(delta) + m.group(2), best)
+                      if new_best != best:
+                          ctx.stage_edit(new_best)
+                          probe = ctx.probe(subsample=2000)
+                          if probe and probe.get("c5_bound", 999) < current_score:
+                              return {"improvement_found": True, "delta": delta, "probe_score": probe}
+                  
+                  # Restore original
+                  ctx.stage_edit(best)
+                  
+              # If no improvement from peak shifts, try learning rate adjustments
+              lr_matches = re.findall(r'base_learning_rate:\s*([\d.]+)', best)
+              if lr_matches:
+                  for lr in lr_matches:
+                      try:
+                          lr_val = float(lr)
+                          new_lr = lr_val * 1.05
+                          new_best = re.sub(r'base_learning_rate:\s*[\d.]+', f'base_learning_rate: {new_lr:.4f}', best)
+                          if new_best != best:
+                              ctx.stage_edit(new_best)
+                              probe = ctx.probe(subsample=2000)
+                              if probe and probe.get("c5_bound", 999) < current_score:
+                                  return {"improvement_found": True, "lr": new_lr, "probe_score": probe}
+                              ctx.stage_edit(best)
+                      except:
+                          continue
+                  
+                  ctx.stage_edit(best)
+              
+              return {"status": "search_completed", "best_score": current_score}
+          
+          except Exception as e:
+              return {"error": str(e), "status": "failed"}
+new_skills: []
+new_middlewares: []
+remove_tools: []

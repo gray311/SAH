@@ -1,0 +1,102 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are solving the Erdos minimum overlap problem: find a step function h: [0,2] to [0,1] with integral h=1 that minimizes max_k integral h(x)(1-h(x+k)) dx.
+  
+  Target: Achieve combined_score > 1.0 (i.e., c5_bound < 0.38092303510845016).
+  
+  CRITICAL STRATEGY: Do NOT try to tune the seed gradient-based optimizer. Instead:
+  
+  1. Use generate_candidate to create simple piecewise constant functions.
+  
+  2. Design strategies explicitly: Think of h as a sum of rectangle functions.
+     - Single step: h=1 on [0,1], 0 elsewhere
+     - Double step: mass concentrated at two regions
+  
+  3. Direct construction beats optimization: Write complete new functions.
+  
+  4. Only use edit_solution when: You need to adjust hyperparameters.
+  
+  5. Budget: 30 evaluations. Spend 1-2 on exploration.
+  
+  CONSTRAINTS: h(x) in [0,1] for all x, and integral from 0 to 2 of h(x) dx = 1 exactly.
+
+new_tools:
+  - name: generate_candidate
+    description: Generate a complete candidate step function h with explicit piecewise definition.
+    input_schema:
+      type: object
+      properties:
+        num_intervals:
+          type: integer
+          description: discretization points
+        pattern:
+          type: string
+          description: single_step, double_step, triangular, or uniform
+    implementation_py: |
+      def run(ctx, args):
+          import json
+          num_intervals = args.get("num_intervals", 20)
+          pattern = args.get("pattern", "double_step")
+          
+          if num_intervals < 10:
+              num_intervals = 20
+          elif num_intervals > 100:
+              num_intervals = 50
+          
+          if pattern == "single_step":
+              code = '# Single step: h=1 on [0,1], 0 on [1,2]\nimport jax\nimport jax.numpy as jnp\n\nh = jnp.zeros({num_intervals})\nmid = {num_intervals} // 2\nh = h.at[:mid].set(1.0)'
+          elif pattern == "double_step":
+              code = '# Double step: h=1 on [0,0.5] and [1.5,2]\nimport jax\nimport jax.numpy as jnp\n\nh = jnp.zeros({num_intervals})\nN = {num_intervals}\ndx = 2.0 / N\nidx1 = int(0.5 / dx)\nidx2 = int(1.5 / dx)\nh = h.at[:idx1].set(1.0)\nh = h.at[idx2:].set(1.0)'
+          elif pattern == "triangular":
+              code = '# Triangular: h=0.5 everywhere\nimport jax\nimport jax.numpy as jnp\n\nh = jnp.full({num_intervals}, 0.5)'
+          else:
+              code = '# Default: h=0.5 everywhere\nimport jax\nimport jax.numpy as jnp\n\nh = jnp.full({num_intervals}, 0.5)'
+          
+          return {"code": code, "num_intervals": num_intervals, "pattern": pattern, "note": "Created " + pattern}
+
+new_skills:
+  - name: direct-construction-method
+    description: Direct construction approach to C5 bound optimization: build step functions explicitly instead of using the gradient optimizer.
+    body: |
+      # Direct Construction Method
+      
+      ## Core Idea
+      The gradient based optimizer in the seed is stuck. Construct step functions directly.
+      
+      ## Pattern Library
+      
+      ### Single Step
+      h = 1 on [0,1], 0 on [1,2]
+      - Integral: 1*1 + 0*1 = 1
+      
+      ### Double Step  
+      h = 1 on [0,0.5] and [1.5,2], 0 on [0.5,1.5]
+      - Integral: 1*0.5 + 0*1 + 1*0.5 = 1
+      
+      ### Uniform
+      h = 0.5 everywhere on [0,2]
+      - Integral: 0.5*2 = 1
+      
+      ## Execution Strategy
+      1. Generate patterns using generate_candidate
+      2. Evaluate each for combined_score
+      3. Refine promising directions
+      
+      ## Key Insight
+      Symmetry helps. Consider concentrated vs spread out configurations.
+
+tool_descriptions:
+  edit_solution: Modify the EVOLVE-BLOCK. Prefer COMPLETE REWRITES.
+  evaluate_solution: Run the program and get combined_score (higher is better).
+  probe_solution: NOT AVAILABLE for this fast JAX/NumPy evaluator.
+  finish: End when budget exhausted or no improvements found.
+sampling:
+  temperature: 0.8
+  top_p: 0.95
+  top_k: 15
+  max_tokens: 12288
+agent:
+  max_iterations: 50
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 10000

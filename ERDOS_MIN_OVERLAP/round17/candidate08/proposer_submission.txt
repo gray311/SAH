@@ -1,0 +1,235 @@
+schema: h2spec/1.0
+system_prompt: |
+  Erdos minimum overlap problem: find h: [0,2]->[0,1] minimizing max_k integral h(x)(1-h(x+k))dx.
+
+  Constraint: integral(h) = 1 exactly.
+
+  Current best: C5 <= 0.38092303510845016.
+
+  STRATEGY: Edit the seed optimizer's initialization patterns to explore NEW structural families.
+
+  The seed has 15 patterns (Golomb, Bipartite, Tri-modal, etc.) but they cluster. Add patterns from:
+  - Wavelet-like: alternating high-low bands at dyadic scales
+  - Fourier modes: sum of cosines with different frequencies
+  - Piecewise linear: ramps and plateaus
+  - Multi-scale bumps: nested Gaussian structures
+
+  Workflow:
+  1. EDIT EVOLVE-BLOCK: ADD 1-2 new initialization patterns
+  2. Ensure: h in [0,1], integral = 1 (use sum(h)*dx = 1 normalization)
+  3. CALL evaluate_solution (full 59000-step training)
+  4. If no improvement after 3 attempts, MODIFY existing patterns or ADD MORE
+  5. Use create_structural_init to screen diverse candidates (c5_bound < 0.385 threshold)
+
+skill_description: |
+  Edit seed initialization patterns to explore structural diversity: wavelet bands, Fourier modes, piecewise linear, multi-scale bumps. Train each candidate for 59000 steps.
+
+skill_body: |
+  # Structural Initialization for Erdos Problem
+
+  ## Problem
+  Seed has 15 patterns but they cluster around similar structures. Need MORE structural diversity.
+
+  ## Solution: ADD New Initialization Families
+
+  ### Pattern 1: Wavelet-like (dyadic bands)
+  for scale in [4, 3, 5]:
+      h = np.zeros(N)
+      step = 2.0 / scale
+      for i in range(int(N // (2*scale))):
+          band_start = int(i * 2 * step * N)
+          band_end = band_start + int(step * N)
+          h[band_start:band_end] = 4.0
+
+  ### Pattern 2: Fourier modes
+  total = np.zeros(N)
+  for freq, amp in [(1, 0.8), (3, 0.5), (5, 0.3)]:
+      total += amp * np.cos(2 * np.pi * freq * np.arange(N) / 2.0)
+  h = jax.nn.sigmoid(total)
+  h = h / (np.sum(h) * dx)
+
+  ### Pattern 3: Piecewise linear
+  h = np.zeros(N)
+  h[:int(0.3*N)] = 3.0
+  h[int(0.3*N):int(0.6*N)] = np.linspace(3.0, 0.5, int(0.3*N))
+  h[int(0.6*N):] = 0.5
+  h = h / (np.sum(h) * dx)
+  h = np.clip(h, 0.01, 1.0)
+
+  ### Pattern 4: Multi-scale bumps
+  h = np.zeros(N)
+  for center, width in [(0.4, 0.05), (1.0, 0.15), (1.6, 0.03)]:
+      pos = int(center * N)
+      for k in range(-int(N*width), int(N*width)+1):
+          h[pos+k] += 6.0 * np.exp(-((k) / (N*width))**2)
+  h = h / (np.sum(h) * dx)
+
+  ## Workflow
+
+  1. ADD 1-2 new patterns to seed's _get_best_initialization method
+  2. Each pattern: ensure h in [0,1] and integral=1
+  3. CALL evaluate_solution (59000 steps each)
+  4. If no improvement, ADD MORE patterns or MODIFY structure
+
+  ## Key Points
+
+  - Seed training is robust (59000 steps) - focus on INITIALIZATION diversity
+  - Each new pattern is a fresh starting point
+  - Use create_structural_init to generate diverse screened candidates
+
+tool_descriptions:
+  edit_solution: |
+    Modify EVOLVE-BLOCK to ADD new initialization patterns to _get_best_initialization. Target 5-8 diverse patterns. Ensure integral normalization.
+
+  evaluate_solution: |
+    Full 59000-step training. Returns combined_score. combined_score > 1.0 is new record (c5_bound < 0.380923).
+
+  probe_solution: |
+    Fast approximate c5 via FFT (500 intervals). Use to screen candidates before full eval.
+
+  finish: |
+    Submit when combined_score > 1.0 (c5_bound < 0.38092303510845016).
+
+sampling:
+  temperature: 0.8
+  top_p: 0.95
+  top_k: 30
+  max_tokens: 15000
+
+agent:
+  max_iterations: 25
+
+middleware:
+  budget_reminder_from_left: 2
+  long_tool_output_max_chars: 10000
+
+new_tools:
+  - name: create_structural_init
+    description: |
+      Generate 4 diverse structural initializations: wavelet bands, Fourier modes, piecewise linear ramps, multi-scale bumps. Each integral-normalized and in [0,1]. Returns c5_bound estimate via FFT.
+    input_schema:
+      type: object
+      properties:
+        scale_variety:
+          type: boolean
+          default: true
+    implementation_py: |
+      def run(ctx, args):
+          import numpy as np
+          N = 800
+          domain = 2.0
+          dx = domain / N
+          cand = []
+
+          # Wavelet bands at different scales
+          for scale in [4, 3]:
+              h = np.zeros(N)
+              step = 2.0 / scale
+              for i in range(int(N // (2*scale))):
+                  band_start = int(i * 2 * step * N)
+                  band_end = band_start + int(step * N)
+                  h[band_start:band_end] = 4.0
+              h = np.clip(h, 0.01, 5.0)
+              h = np.exp(h) / (np.sum(np.exp(h)) + 1e-10)
+              h = h / (np.sum(h) * dx)
+              h = np.clip(h, 0.01, 1.0)
+              j = 1.0 - h
+              h_pad = np.pad(h, (0, N))
+              j_pad = np.pad(j, (0, N))
+              corr = np.fft.ifft(np.fft.fft(h_pad) * np.conj(np.fft.fft(j_pad))).real
+              c5 = float(np.max(corr * dx))
+              cand.append({"h": h.tolist(), "integral": float(np.sum(h)*dx), "c5_bound": c5, "pattern": f"wavelet_scale_{scale}"})
+
+          # Fourier modes
+          h = np.zeros(N)
+          for freq, amp in [(1, 0.8), (3, 0.5), (5, 0.3)]:
+              h += amp * np.cos(2 * np.pi * freq * np.arange(N) / 2.0)
+          h = np.clip(h, -3.0, 5.0)
+          h = np.exp(h) / (np.sum(np.exp(h)) + 1e-10)
+          h = h / (np.sum(h) * dx)
+          h = np.clip(h, 0.01, 1.0)
+          j = 1.0 - h
+          h_pad = np.pad(h, (0, N))
+          j_pad = np.pad(j, (0, N))
+          corr = np.fft.ifft(np.fft.fft(h_pad) * np.conj(np.fft.fft(j_pad))).real
+          c5 = float(np.max(corr * dx))
+          cand.append({"h": h.tolist(), "integral": float(np.sum(h)*dx), "c5_bound": c5, "pattern": "fourier_modes"})
+
+          # Piecewise linear
+          h = np.zeros(N)
+          h[:int(0.3*N)] = 3.0
+          h[int(0.3*N):int(0.6*N)] = np.linspace(3.0, 0.5, int(0.3*N))
+          h[int(0.6*N):] = 0.5
+          h = np.clip(h, 0.01, 5.0)
+          h = np.exp(h) / (np.sum(np.exp(h)) + 1e-10)
+          h = h / (np.sum(h) * dx)
+          h = np.clip(h, 0.01, 1.0)
+          j = 1.0 - h
+          h_pad = np.pad(h, (0, N))
+          j_pad = np.pad(j, (0, N))
+          corr = np.fft.ifft(np.fft.fft(h_pad) * np.conj(np.fft.fft(j_pad))).real
+          c5 = float(np.max(corr * dx))
+          cand.append({"h": h.tolist(), "integral": float(np.sum(h)*dx), "c5_bound": c5, "pattern": "piecewise_linear"})
+
+          # Multi-scale bumps
+          h = np.zeros(N)
+          for center, width in [(0.4, 0.05), (1.0, 0.15), (1.6, 0.03)]:
+              pos = int(center * N)
+              bw = int(N * width)
+              for k in range(-bw, bw+1):
+                  h[pos+k] += 6.0 * np.exp(-((k) / bw)**2)
+          h = np.clip(h, 0.01, 5.0)
+          h = np.exp(h) / (np.sum(np.exp(h)) + 1e-10)
+          h = h / (np.sum(h) * dx)
+          h = np.clip(h, 0.01, 1.0)
+          j = 1.0 - h
+          h_pad = np.pad(h, (0, N))
+          j_pad = np.pad(j, (0, N))
+          corr = np.fft.ifft(np.fft.fft(h_pad) * np.conj(np.fft.fft(j_pad))).real
+          c5 = float(np.max(corr * dx))
+          cand.append({"h": h.tolist(), "integral": float(np.sum(h)*dx), "c5_bound": c5, "pattern": "multi_scale_bumps"})
+
+          return {"candidates": cand, "num_candidates": len(cand)}
+
+new_skills:
+  - name: structural-initialization
+    description: |
+      Add wavelet bands, Fourier modes, piecewise linear, and multi-scale bump patterns to seed optimizer. Train each for 59000 steps.
+    body: |
+      # Structural Initialization - Erdos Problem
+
+      ## Core Idea
+
+      The seed has 15 patterns but clusters. ADD new structural families:
+
+      ### Wavelet-like (dyadic bands)
+      Alternating high-low bands at scales 4, 3, 5, etc.
+      - Creates orthogonal-like support regions
+
+      ### Fourier modes
+      h(x) = sigmoid(sum freq*cos(2pi*k*x) * amplitude)
+      - Captures oscillatory patterns
+
+      ### Piecewise linear
+      Linear ramps between breakpoints
+      - Simple, interpretable structures
+
+      ### Multi-scale bumps
+      Nested Gaussians at different centers/scales
+      - Overlapping peaks create complex patterns
+
+      ## Workflow
+
+      1. EDIT _get_best_initialization() in EVOLVE-BLOCK
+      2. ADD 1-2 new patterns from above families
+      3. Normalize: h = sigmoid(latent), then h /= (sum(h)*dx)
+      4. Ensure h in [0,1] (use clip if needed)
+      5. CALL evaluate_solution (59000 steps)
+      6. If no improvement, ADD MORE patterns
+
+      ## Why This Works
+
+      - Diverse structures = better exploration of search space
+      - Each pattern is fresh, orthogonal starting point
+      - Seed training (59000 steps) is robust - trust it
+      - Focus on INITIALIZATION diversity, not training tweaks

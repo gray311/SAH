@@ -1,0 +1,251 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are an expert mathematician and software developer specializing in the Erdős minimum overlap problem.
+  Your task: Find a step function h: [0, 2] -> [0, 1] with integral=1 that minimizes max_k ∫ h(x)(1-h(x+k))dx.
+  
+  Current best: C5 ≤ 0.38092303510845016
+  Goal: Beat this bound (lower C5 means better score).
+  
+  CRITICAL INSIGHTS:
+  - The optimal h likely has a step-like structure with specific jump points
+  - Gradient descent often gets stuck; try discrete structural changes
+  - Key strategy: Try predefined mathematical patterns (symmetric, periodic, threshold-based)
+  - Use probe_solution extensively to screen many variants before full evaluation
+  
+  Tool usage strategy:
+  1. START: Call analyze_structure ONCE to understand the domain discretization
+  2. EDIT: Try 3-5 different structural patterns (see skill_body)
+  3. PROBE: For each new edit, immediately probe to screen
+  4. EVALUATE: Only call evaluate on variants with probe score > 0.5 * best_so_far
+  5. ITERATE: When probe fails, try a fundamentally different pattern family
+  
+  Budget: 30 full evaluations. Use probes liberally to maximize information.
+  
+  Entry function must be preserved. Only edit the EVOLVE-BLOCK region.
+skill_description: |
+  Expert-level optimization for Erdős C5 bound minimization. Uses structural pattern search, probe-based screening, and mathematical insights to find step functions beating the current best bound. Emphasizes discrete structural changes over gradient descent alone.
+skill_body: |
+  # Erdős C5 Optimization Strategy
+  
+  ## Core Principle
+  The optimal step function has a specific piecewise-constant structure. Don't rely solely on gradient descent. Instead, systematically try different structural patterns.
+  
+  ## Pattern Families to Explore (in order of priority):
+  
+  ### 1. Symmetric Threshold Patterns
+  - Single threshold: h(x) = 1 if x ∈ [a, b], else 0, where (b-a)=1
+  - Double threshold: Two rectangular pulses with specific spacing
+  
+  ### 2. Periodic/Quasi-Periodic Patterns
+  - Try sin/cos-based latent functions with careful amplitude scaling
+  - Test frequencies: fundamental 1, 2, 3, and combinations
+  
+  ### 3. Multi-Region Step Functions
+  - Divide [0,2] into 2-6 regions with different constant values
+  - Use linear programming mindset: optimize region boundaries and heights
+  
+  ### 4. Asymmetric Patterns
+  - Concentrate mass in specific subintervals
+  - Try h(x) concentrated on [0,1] vs [1,2] vs asymmetric splits
+  
+  ### 5. Hybrid: Gradient + Structural Restart
+  - Run gradient descent but reset to a structural pattern when improvement stalls
+  
+  ## Execution Protocol:
+  
+  ### Round 1: Baseline Analysis
+  1. Call analyze_structure once
+  2. Record the base C5 from seed
+  
+  ### Rounds 2-15: Pattern Exploration
+  For each round:
+  1. Pick ONE pattern family
+  2. EDIT: Implement that pattern with concrete parameters
+  3. PROBE: Immediately score the probe
+  4. If probe < 0.4 * base: discard, try new pattern
+  5. If probe >= 0.5 * base: EVALUATE (spend budget)
+  6. Update best if successful
+  
+  ### Rounds 16-30: Fine-tuning & Aggressive Search
+  1. Take best pattern from previous rounds
+  2. Try parameter perturbations (boundary shifts, amplitude tweaks)
+  3. Use analyze_structure_results to guide boundary placement
+  4. Continue probe-first screening
+  
+  ## Pattern Implementation Hints:
+  
+  For threshold patterns:
+  - N_intervals = 800, dx = 0.0025
+  - Single pulse: set h=1 on [a, a+1], 0 elsewhere
+  - Double pulse: two pulses of width w1, w2 with gap
+  
+  For threshold h(x):
+  - Use h = jnp.where(condition, 1.0, 0.0)
+  - Ensure integral = sum(h) * dx = 1.0
+  
+  ## Common Pitfalls:
+  - Don't spend all 30 evals on one pattern; diversify
+  - Probe scores ≈ 0.6-0.8 of real scores typically
+  - Integral constraint is critical: missing it gives validity=0
+  - If validity=0: check integral constraint first, then try simpler pattern
+  
+  ## When to Stop:
+  - After 25+ rounds with no improvement: try a completely different approach
+  - If probe consistently fails: the pattern class is unproductive
+  - Call finish when budget low or clear progress made
+tool_descriptions:
+  edit_solution: |
+    Modify the EVOLVE-BLOCK code region. Preferred: targeted SEARCH/REPLACE diffs matching current code exactly. Format:
+    
+    <<<<<<< SEARCH
+    exact lines to replace
+    =======
+    new implementation
+    >>>>>>> REPLACE
+    
+    Alternative: full rewrite of EVOLVE-BLOCK as complete code block.
+    
+    Preserve the dataclass Hyperparameters, class structure, and any fixed imports. Only change the optimization logic inside the EVOLVE-BLOCK.
+  evaluate_solution: |
+    Run the program and return combined_score (higher=better = lower C5), validity (1=valid, 0=invalid), any error message, best_so_far score, and evals_left (max 30).
+    Use carefully: each call consumes budget. Probe first, then evaluate only promising variants.
+  probe_solution: |
+    CHEAP approximate evaluation on first ~2000 discretization points. Returns approximate combined_score. 
+    DO NOT use for final scoring — use ONLY to rank variants and screen out bad ones before spending a full eval.
+    Typical probe score ≈ 0.6-0.8 × real score.
+  finish: |
+    End the session. Submit best-scoring program automatically. Call when budget exhausted or clear progress made.
+sampling:
+  temperature: 0.9
+  top_p: 0.95
+  top_k: 30
+  max_tokens: 12288
+agent:
+  max_iterations: 50
+middleware:
+  budget_reminder_from_left: 2
+  long_tool_output_max_chars: 10000
+new_tools:
+  - name: analyze_structure
+    description: |
+      Analyze the discretization structure and return parameters for informed pattern search. Provides num_intervals, dx, domain_width, and suggests threshold ranges and pattern diversity settings. Call once at start to understand the search space geometry.
+    input_schema: {type: object, properties: {}}
+    implementation_py: |
+      def run(ctx, args):
+          # Read the current code to infer discretization
+          program = ctx.get_program()
+          
+          # Extract num_intervals from code or use default
+          num_intervals = 800  # Seed default
+          domain_width = 2.0
+          
+          try:
+              # Try to extract from code
+              for line in program.split('\n'):
+                  if 'num_intervals' in line:
+                      import re
+                      match = re.search(r'num_intervals:\s*(\d+)', line)
+                      if match:
+                          num_intervals = int(match.group(1))
+                          break
+          except:
+              pass
+          
+          dx = domain_width / num_intervals
+          
+          # Return structure-aware parameters
+          return {
+              "num_intervals": num_intervals,
+              "dx": float(dx),
+              "domain_width": domain_width,
+              "threshold_suggested": [i * dx for i in range(100, num_intervals, 50)],
+              "pattern_diversity": "high",
+              "convergence_hint": "Use multiple restarts with different structural patterns",
+              "recommended_search": [
+                  "symmetric_threshold",
+                  "asymmetric_split",
+                  "double_pulse",
+                  "periodic_sin",
+                  "region_based"
+              ]
+          }
+  - name: generate_pattern_variants
+    description: |
+      Generate multiple candidate patterns from a structural seed. Returns list of pattern names and parameter suggestions for systematic exploration. Use when stuck in local optimum.
+    input_schema: {type: object, properties: {}}
+    implementation_py: |
+      def run(ctx, args):
+          # Generate diverse pattern suggestions based on task knowledge
+          patterns = [
+              {"name": "symmetric_single_pulse", "desc": "h=1 on [a, a+1], 0 elsewhere", "params": {"a_suggested": [0., 0.2, 0.5, 0.8, 1.0]}},
+              {"name": "asymmetric_two_pulses", "desc": "Two pulses with asymmetric placement", "params": {"width1": "0.6", "width2": "0.4", "gap": "0.0-1.0"}},
+              {"name": "sin_cos_blend", "desc": "Sinusoidal with cosine modulation", "params": {"freq1": 1.0, "freq2": 2.0, "amp_scale": "0.5-2.0"}},
+              {"name": "region_tripartite", "desc": "Three regions with different heights", "params": {"regions": "0-0.67, 0.67-1.33, 1.33-2.0", "heights": "low, medium, high"}},
+              {"name": "boundary_sharpening", "desc": "Refine existing gradient solution into sharp steps", "params": {"threshold": "sigmoid(10*val)"}},
+          ]
+          return {
+              "patterns": patterns,
+              "strategy": "Systematically test each pattern family, probe all, evaluate best",
+              "budget_efficient": True
+          }
+new_skills:
+  - name: structural-pattern-search
+    description: |
+      Method for finding Erdős C5 minimizers via discrete structural search. Prioritize piecewise-constant patterns over gradient descent. Use probe-first screening.
+    body: |
+      # Structural Pattern Search for Erdős C5
+  
+      ## Overview
+      The optimal step function has piecewise-constant structure. This skill guides systematic exploration of such patterns.
+  
+      ## Phase 1: Structural Understanding
+      1. Call analyze_structure ONCE to get discretization geometry
+      2. Note: dx = 2.0 / num_intervals ≈ 0.0025 for 800 intervals
+      3. Thresholds are in [0, 2] space
+  
+      ## Phase 2: Pattern Generation
+      For each pattern family:
+      1. Define the structural formula explicitly
+      2. Parameterize with 1-3 key variables
+      3. Use probe to screen before full eval
+  
+      ## Phase 3: Systematic Search Order
+      Priority (based on theoretical likelihood):
+      1. Symmetric threshold (single pulse, centered)
+      2. Asymmetric thresholds (mass in left/right halves)
+      3. Double/three-pulse configurations
+      4. Sin/cos based smooth-to-step conversions
+      5. Gradient solution thresholding
+  
+      ## Phase 4: Probe-Gated Evaluation
+      - Probe every variant immediately after editing
+      - Only full eval if probe > 0.4 × base_score
+      - This saves ~20 evals for screening
+  
+      ## Phase 5: Parameter Perturbation
+      When a pattern shows promise:
+      1. Vary one parameter at a time
+      2. Use golden-section search over key parameter
+      3. Keep modifications structural (not tiny gradient steps)
+  
+      ## Key Constraints Checklist
+      [ ] Integral(h) × dx = 1.0 (critical!)
+      [ ] h values in [0, 1]
+      [ ] Program doesn't error on eval
+      [ ] Score improvement tracked vs seed
+  
+      ## Stop Conditions
+      - 25 iterations with no progress: abandon pattern class
+      - Best probe < 0.3 × base: switch strategy
+      - Clear improvement: fine-tune or finish
+new_middlewares:
+  - name: probe_before_eval
+    hook: before_model
+    description: |
+      Remind solver to probe before each full evaluation. Prevents wasting eval budget on unpromising variants.
+    implementation_py: |
+      def before_model(hook_input):
+          if hook_input.get("action") == "evaluate":
+              return "PROBE FIRST: Run probe_solution to screen the variant before spending a full evaluation. Only eval if probe > 0.4 × base_score."
+          return None
+remove_tools: []

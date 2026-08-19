@@ -1,0 +1,273 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are a C++ polygon optimizer for axis-aligned fish capture. Goal: maximize (mackerels - sardines + 1).
+
+  CRITICAL SEARCH STRATEGY (two-phase):
+  
+  PHASE 1 - Quick Geometric Anchors (must run first, <0.1s):
+  1. Compute bounding box of ALL mackerels (minX, maxX, minY, maxY)
+  2. Compute bounding box of all mackerels MINUS any sardines on/near edges
+  3. Find top 5 "2x2 blocks" of mackerels (consecutive mackerels forming 2x2 region)
+  4. Compute centroid of all mackerels
+  
+  PHASE 2 - Pattern Generation (only if Phase 1 finds good anchors):
+  For each Phase 1 anchor, generate:
+  - Tight bounding box of anchor
+  - "Holed" bounding box: if any sardine within 200 units, cut hole with 4-vertex indent
+  - Corner-heavy L-shape: capture corner farthest from nearest sardine
+  
+  PHASE 3 - Hill Climbing:
+  - For each candidate, shift each edge ±1..15 units, keep best
+  - Try up to 2 refinement rounds
+  
+  PHASE 4 - Multiple Restarts:
+  - Run Phases 1-3 with 3 different random seeds
+  - Output single best valid polygon
+  
+  Tools:
+  - analyze_mackerel_layout: Run Phase 1, returns geometric anchors
+  - edit_solution: Modify C++ EVOLVE-BLOCK with complete two-phase search code
+  - evaluate_solution: Run program, get score
+  - finish: Submit when you have working code
+  
+  TIME BUDGET: Use full 2.0s. Phase 1 must be O(N) and complete in <0.1s.
+skill_description: |
+  Two-phase polygon optimization: Quick geometric anchor extraction (bounding boxes, 2x2 blocks, centroid) followed by pattern generation and hill climbing for each anchor.
+skill_body: |
+  # Two-Phase Polygon Optimization for Mackerel-Sardine Capture
+  
+  ## Phase 1: Quick Geometric Anchors (O(N), <0.1s)
+  
+  Compute these anchors from all mackerel positions:
+  
+  1. **Global Bounding Box**: minX, maxX, minY, maxY of all mackerels
+  2. **2x2 Block Detection**: Find all 2x2 groups of consecutive mackerels (e.g., mackerels at (x,y), (x+1,y), (x,y+1), (x+1,y+1)). Compute bounding box for each 2x2 block. Keep top 5 by mackerel count.
+  3. **Centroid**: Average of all mackerel positions
+  4. **Edge-Filtered Box**: For each edge of global bounding box, check if any sardine is within 200 units. If so, shrink that edge inward by 50 units.
+  
+  ## Phase 2: Pattern Generation per Anchor
+  
+  For each anchor from Phase 1:
+  
+  **Pattern A: Tight Bounding Box**
+  - Use anchor's bounding box
+  - Output 4 vertices
+  
+  **Pattern B: Holed Bounding Box**
+  - Start with Pattern A
+  - For each sardine within 200 units of any edge:
+    - Create an indent by adding 2 vertices that push edge inward 50 units toward the sardine
+  - Output 6-8 vertices
+  
+  **Pattern C: Corner-Heavy L-Shape**
+  - Identify which corner of the bounding box is farthest from nearest sardine
+  - Create L-shape: keep that corner, cut opposite side with 2 indents
+  - Output 6 vertices
+  
+  ## Phase 3: Hill Climbing Refinement
+  
+  For each candidate polygon:
+  - For each edge (4-8 edges):
+    - Try shifting inward by ±1, ±2, ..., ±15 units
+    - Use grid query to estimate score change
+    - Keep shifts that improve score
+  - Repeat up to 2 rounds
+  
+  ## Phase 4: Multiple Random Restarts
+  
+  - Run Phases 1-3 with 3 different random seeds (perturb block detection, random indent positions)
+  - Track best polygon across all runs
+  - Output single best polygon
+  
+  ## Implementation Notes
+  
+  - Use cell grid (cell_size=200) for O(1) rectangle/sardine queries
+  - Phase 1 must complete in <0.1s before Phase 2 begins
+  - Total time per evaluation: <1.8s to leave safety margin
+tool_descriptions:
+  edit_solution: |
+    Modify the C++ EVOLVE-BLOCK with complete two-phase search code.
+    
+    MUST include:
+    1. Phase 1: Compute global bounding box, 2x2 blocks (top 5), centroid, edge-filtered box
+    2. Phase 2: For each anchor, generate tight box, holed box, L-shape
+    3. Phase 3: Hill climb edges ±1..15, 2 refinement rounds
+    4. Phase 4: 3 random restarts, output best
+    
+    Preserve EVOLVE-BLOCK markers and exact I/O format. Code must run in <2s.
+  evaluate_solution: |
+    Run the C++ program. Returns combined_score (mackerels-sardines+1), validity,
+    and remaining evaluations (budget=30). Each run spends up to 2.0s on the two-phase search.
+  probe_solution: |
+    Approximate evaluation using 20% subsample. Useful for quick ranking during hill climb.
+    Do NOT use for final score validation.
+  finish: |
+    End when you have submitted working two-phase code with anchor extraction and hill climbing.
+sampling:
+  temperature: 1.0
+  top_p: 0.95
+  top_k: 30
+  max_tokens: 12288
+agent:
+  max_iterations: 40
+middleware:
+  budget_reminder_from_left: 2
+  long_tool_output_max_chars: 15000
+new_tools:
+- name: analyze_mackerel_layout
+  description: |
+    Quick Phase 1 geometric analysis: computes global mackerel bounding box, top 5 2x2 blocks,
+    centroid, and edge-filtered bounding box. Returns anchors for Phase 2 pattern generation.
+    Runs in O(N) time, completes in <0.1s.
+  input_schema:
+    type: object
+    properties: {}
+  implementation_py: |
+    def run(ctx, args):
+        # Parse fish positions from program
+        lines = ctx.get_program().split('\n')
+        fish_data = []
+        for line in lines:
+            line = line.strip()
+            if not line or 'fish[' not in line:
+                continue
+            # Extract coordinates
+            try:
+                coords = line.split('fish[')[1].split(']')[0].split(',')
+                x, y = int(coords[0].strip()), int(coords[1].strip())
+                fish_type = 1 if 'mackerel' in line else -1
+                fish_data.append((x, y, fish_type))
+            except:
+                continue
+        
+        # Filter mackerels only
+        mackerels = [(x, y) for x, y, t in fish_data if t == 1]
+        
+        if not mackerels:
+            return {"error": "No mackerels found", "global_bbox": None}
+        
+        # 1. Global bounding box
+        xs = [m[0] for m in mackerels]
+        ys = [m[1] for m in mackerels]
+        global_bbox = {
+            "min_x": min(xs), "max_x": max(xs),
+            "min_y": min(ys), "max_y": max(ys)
+        }
+        
+        # 2. 2x2 block detection (find consecutive mackerels)
+        # Sort by x, then y
+        mackerels_sorted = sorted(mackerels, key=lambda p: (p[0] // 10, p[1] // 10))
+        two_x2_blocks = []
+        for i in range(len(mackerels_sorted) - 3):
+            x1, y1 = mackerels_sorted[i]
+            if i + 3 < len(mackerels_sorted):
+                x4, y4 = mackerels_sorted[i + 3]
+                # Check if forms roughly 2x2 block
+                if abs(x4 - x1) <= 2 and abs(y4 - y1) <= 2:
+                    block = {"center": (x1 + x4) // 2, "size": 1, "mackerels": 4}
+                    two_x2_blocks.append(block)
+        
+        # Keep top 5 by some heuristic (e.g., proximity to centroid)
+        centroid_x = sum(m[0] for m in mackerels) / len(mackerels)
+        centroid_y = sum(m[1] for m in mackerels) / len(mackerels)
+        two_x2_blocks.sort(key=lambda b: (b["center"][0] - centroid_x)**2 + **(b["center"][1] - centroid_y)2)
+        top_2x2 = two_x2_blocks[:5]
+        
+        # 3. Centroid
+        centroid = {"x": sum(m[0] for m in mackerels) / len(mackerels),
+                   "y": sum(m[1] for m in mackerels) / len(mackerels)}
+        
+        # 4. Edge-filtered bounding box (check sardines near edges)
+        sardines = [(x, y) for x, y, t in fish_data if t == -1]
+        edge_filtered = global_bbox.copy()
+        
+        # Check each edge for nearby sardines
+        for sx, sy in sardines:
+            if abs(sx - global_bbox["min_x"]) <= 200:
+                edge_filtered["min_x"] = max(global_bbox["min_x"], sx + 50)
+            if abs(sx - global_bbox["max_x"]) <= 200:
+                edge_filtered["max_x"] = min(global_bbox["max_x"], sx - 50)
+            if abs(sy - global_bbox["min_y"]) <= 200:
+                edge_filtered["min_y"] = max(global_bbox["min_y"], sy + 50)
+            if abs(sy - global_bbox["max_y"]) <= 200:
+                edge_filtered["max_y"] = min(global_bbox["max_y"], sy - 50)
+        
+        return {
+            "global_bbox": global_bbox,
+            "top_2x2_blocks": top_2x2,
+            "centroid": centroid,
+            "edge_filtered_bbox": edge_filtered,
+            "num_mackerels": len(mackerels)
+        }
+new_skills:
+- name: two-phase-search-strategy
+  description: |
+    Use two-phase search: Phase 1 extracts geometric anchors (bounding boxes, 2x2 blocks, centroid),
+    Phase 2 generates multiple polygon patterns per anchor, Phase 3 hill climbs, Phase 4 combines best.
+  body: |
+    # Two-Phase Search Strategy for Mackerel-Sardine Polygon Optimization
+    
+    ## Why Two Phases?
+    
+    Phase 1 is a quick O(N) analysis that identifies WHERE to focus the expensive Phase 2 search.
+    Without Phase 1, we waste time searching empty regions.
+    
+    ## Phase 1: Anchor Extraction (Must run first)
+    
+    Compute these four anchors from all mackerel positions:
+    1. **Global Bounding Box**: minX, maxX, minY, maxY of all mackerels
+    2. **Top 5 2x2 Blocks**: Find 2x2 groups of consecutive mackerels - these are high-density regions
+    3. **Centroid**: Average position of all mackerels
+    4. **Edge-Filtered Box**: Shrink global box where sardines are within 200 units
+    
+    These anchors take <0.1s to compute and guide all subsequent search.
+    
+    ## Phase 2: Pattern Generation per Anchor
+    
+    For EACH anchor from Phase 1, generate THREE patterns:
+    
+    **Pattern A: Tight Bounding Box**
+    - Simple rectangle from anchor's bounding box
+    - Fast to evaluate, good baseline
+    
+    **Pattern B: Holed Bounding Box**
+    - Start with Pattern A
+    - For each sardine within 200 units of edges, create an indent
+    - Adds 2-4 vertices per sardine, outputs 6-10 vertices
+    
+    **Pattern C: Corner-Heavy L-Shape**
+    - Find corner farthest from nearest sardine
+    - Cut off opposite side with 2 indents
+    - Outputs 6 vertices, captures dense corner region
+    
+    ## Phase 3: Hill Climbing Refinement
+    
+    For each candidate polygon from Phase 2:
+    - For each edge (4-10 edges):
+      - Try shifting inward by ±1, ±2, ..., ±15 units
+      - Use grid query to estimate score
+      - Keep improvements
+    - Repeat up to 2 refinement rounds
+    
+    ## Phase 4: Multiple Random Restarts
+    
+    - Run Phases 1-3 with 3 different random seeds
+    - Perturb block detection, random indent positions
+    - Output SINGLE best polygon across all runs
+    
+    ## Time Budget Management
+    
+    - Phase 1: <0.1s (must complete before Phase 2)
+    - Phase 2: <0.5s (generate ~15 candidates)
+    - Phase 3: <0.8s (hill climb top 5 candidates)
+    - Phase 4: <0.4s (combine and select best)
+    - Total: <2.0s with safety margin
+new_middlewares:
+- name: force_phase1_first
+  hook: before_model
+  description: |
+    Remind solver to complete Phase 1 anchor extraction before starting Phase 2 pattern generation.
+    Prevents wasted search on regions without mackerel anchors.
+  implementation_py: |
+    def before_model(hook_input):
+        return "IMPORTANT: Complete Phase 1 (global bbox, 2x2 blocks, centroid, edge-filtered box) before starting Phase 2 pattern generation. Do not skip Phase 1."

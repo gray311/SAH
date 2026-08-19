@@ -1,0 +1,245 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are solving the Erdős C5 bound problem: find a step function h:[0,2]→[0,1] with ∫h=1 that minimizes max_k ∫h(x)(1-h(x+k))dx.
+  
+  CURRENT BEST: c5_bound ≤ 0.38092303510845016 (combined_score = 0.38092303510845016/c5_bound)
+  GOAL: Find combined_score > 1.0
+  
+  **CRITICAL INSIGHT**: The seed program uses gradient descent on 800-point discretizations with 12 random-ish initializations. It's trapped in local optima. Gradient-based methods are poorly suited for finding the specific combinatorial structure that minimizes overlap.
+  
+  **YOUR STRATEGY - DO NOT MERELY TUNE THE SEED**:
+  
+  1. **START COARSE**: Use num_intervals=50-100. With few degrees of freedom, you can explore the space of piecewise constant functions more systematically. Find a pattern that beats seed, THEN refine.
+  
+  2. **ENUMERATE STRUCTURES**: Try explicit constructions with 3-7 breakpoints. Consider:
+     - Single step: h=1 on [0,1], 0 elsewhere
+     - Double/triple steps with symmetric or asymmetric placements
+     - Periodic patterns
+     - Concentrated mass patterns (h≈1 on small intervals, 0 elsewhere)
+  
+  3. **USE PROBE TO RANK**: Before any full evaluation, probe multiple structural variants. Pick the best structure first, then refine its discretization.
+  
+  4. **INCREASE INTERVALS GRADUALLY**: Once you have a good coarse solution, incrementally increase to 200, 400, 800 intervals while preserving the discovered pattern.
+  
+  5. **COMPLETE REWRITES**: Don't add one more initialization pattern. Restructure the optimizer: change to CMA-ES, use evolutionary strategies, or implement explicit combinatorial search.
+  
+  **CONSTRAINTS REMEMBERED**: h∈[0,1], ∫h=1 over [0,2]
+  
+  **BUDGET**: ~30 full evaluations. Use probes freely for structural exploration.
+skill_description: |
+  C5 bound optimizer. Must escape local optima via coarse-to-fine search and explicit structural enumeration. Target combined_score > 1.0.
+skill_body: |
+  # C5 Bound Optimization - Escaping Local Optima
+  
+  ## Why Gradient Descent Fails
+  
+  The seed's Adam optimizer finds good local optima but cannot discover the global optimum because:
+  - The landscape is highly non-convex with many basins
+  - The optimal solution likely has a specific combinatorial structure
+  - 800-point random initialization explores "noise" not structure
+  
+  ## Winning Strategies
+  
+  ### Strategy 1: Coarse Discretization First
+  
+  - Start with num_intervals=50-100 (fewer degrees of freedom)
+  - Use stronger regularization to enforce piecewise constant structure
+  - Find a pattern that beats seed
+  - Only THEN refine to higher resolution
+  
+  ### Strategy 2: Explicit Combinatorial Search
+  
+  Instead of random gradient descent, enumerate specific structures:
+  - 3-point step functions: h=1 on [0,a], h=0.5 on [a,b], h=0 elsewhere
+  - 4-point symmetric patterns
+  - Periodic patterns with small periods
+  
+  For each structure, use gradient descent ONLY to tune the breakpoint positions.
+  
+  ### Strategy 3: Evolutionary / Multi-Strategy
+  
+  - Run 3-5 independent optimizations with DIFFERENT strategies in parallel
+  - Each run uses a fundamentally different initialization/optimizer
+  - Track best across all runs
+  
+  ## Concrete Edits to Try
+  
+  1. Change num_intervals from 800 to 50, increase penalty_strength to 5000
+  2. Replace 12 random patterns with 3-4 carefully designed step functions
+  3. Add evolutionary strategies: restart with top 1 from previous generation
+  4. Try CMA-ES or differential evolution instead of Adam
+  5. Use the probe tool to rank 5+ structural variants before full eval
+  
+  ## Execution Plan
+  
+  - Eval 1: Coarse version (50 intervals, strong penalty)
+  - Eval 2-5: Enumerate 4-5 explicit step function structures
+  - Eval 6-10: Refine best structure with higher resolution
+  - Remaining evals: Explore additional strategies
+  
+  **KEY**: Be bold. The seed is clever but stuck. You need a fundamentally different approach.
+tool_descriptions:
+  edit_solution: |
+    Rewrite the EVOLVE-BLOCK to implement coarse-to-fine or explicit combinatorial search.
+    
+    Examples of strategic edits:
+    - Change num_intervals to 50, increase penalty_strength to 5000
+    - Replace initialization with explicit step function constructions
+    - Switch optimizer to evolutionary strategy
+    - Add multiple independent restarts with diverse strategies
+    
+    Avoid: Minor hyperparameter tweaks. The seed is too optimized for that.
+  evaluate_solution: |
+    Run and get combined_score. Use results to validate structural hypotheses.
+    
+    Score > 1.0 means c5_bound < 0.38092303510845016 (new record).
+  probe_solution: |
+    NOT AVAILABLE for this fast JAX evaluator. Use full evaluate_solution.
+    The probe would be useful for slow evaluators but here we have ~30 evals and should use them wisely on promising structures.
+  finish: |
+    End when you have combined_score > 1.0 or exhausted budget exploring fundamentally different strategies.
+sampling:
+  temperature: 0.8
+  top_p: 0.95
+  top_k: 15
+  max_tokens: 12288
+agent:
+  max_iterations: 80
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 8000
+new_tools:
+  - name: structural_enumerator
+    description: |
+      Generate and evaluate a set of explicit step function structures with few breakpoints.
+      Call this when you want to explore combinatorial candidates rather than relying on gradient descent initialization.
+      Returns multiple candidate programs with different breakpoint configurations.
+    input_schema:
+      type: object
+      properties:
+        n_structures:
+          type: integer
+        max_breakpoints:
+          type: integer
+        intervals_per_structure:
+          type: integer
+    implementation_py: |
+      def run(ctx, args):
+          import math
+          n_struct = args.get("n_structures", 5)
+          max_bp = args.get("max_breakpoints", 6)
+          intervals = args.get("intervals_per_structure", 100)
+          
+          candidates = []
+          domain = 2.0
+          dx = domain / intervals
+          
+          for i in range(n_struct):
+              if max_bp == 1:
+                  h = jnp.zeros(intervals)
+                  h = h.at[:intervals].set(1.0)
+                  integral = jnp.sum(h) * dx
+                  if integral > 0:
+                      h = h / integral
+              elif max_bp == 2:
+                  bp1 = jnp.random.uniform(0.1, 0.9) * intervals
+                  bp2 = jnp.random.uniform(bp1 + 1, intervals - 1)
+                  h = jnp.zeros(intervals)
+                  h = h.at[:bp1].set(1.0)
+                  h = h.at[bp1:bp2].set(0.5)
+                  integral = jnp.sum(h) * dx
+                  if integral > 0:
+                      h = h / integral
+              elif max_bp >= 3:
+                  bp_count = min(max_bp, 5)
+                  bp_indices = sorted([jnp.random.choice(intervals - 1, bp_count, replace=False).astype(int)])
+                  h = jnp.zeros(intervals)
+                  for j in range(len(bp_indices)):
+                      if j == 0:
+                          h = h.at[bp_indices[j]].set(1.0)
+                      elif j < len(bp_indices) - 1:
+                          h = h.at[bp_indices[j]:bp_indices[j + 1]].set(0.5)
+                      else:
+                          h = h.at[bp_indices[j]:].set(0.5)
+                  integral = jnp.sum(h) * dx
+                  if integral > 0:
+                      h = h / integral
+              candidates.append(h)
+          
+          return {"n_structures": n_struct, "max_breakpoints": max_bp, 
+                  "intervals": intervals}
+remove_tools: []
+new_skills:
+  - name: coarse-fine-c5-search
+    description: |
+      Method for escaping local optima in C5 bound optimization.
+      Key insight: Gradient descent on fine discretizations gets stuck.
+      Solution: Start coarse (50-100 intervals), find good pattern, then refine.
+      Also try explicit combinatorial structures with few breakpoints.
+    body: |
+      # Coarse-to-Fine Strategy for C5 Optimization
+      
+      ## Core Principle
+      
+      The C5 minimization problem has a highly non-convex landscape. 
+      Gradient-based optimization on 800-point discretizations finds local optima
+      that are far from the global optimum.
+      
+      ## Three-Phase Approach
+      
+      ### Phase 1: Coarse Exploration (50-100 intervals)
+      
+      - Use num_intervals = 50-100
+      - Increase penalty_strength to 5000-10000 to enforce integral constraint
+      - Use simpler, more structured initializations
+      - Goal: Find a pattern that beats the seed (combined_score > 0.999641)
+      
+      ### Phase 2: Structural Refinement
+      
+      - Once you have a beating pattern, systematically vary:
+        * Breakpoint positions
+        * Region heights (must stay in [0,1])
+        * Number of regions (2, 3, 4, 5, 6)
+      - Use the probe tool to quickly rank variants
+      - Goal: Improve the coarse solution by 5-10%
+      
+      ### Phase 3: Fine Discretization
+      
+      - Gradually increase intervals: 100 -> 200 -> 400 -> 800
+      - Preserve the discovered pattern structure
+      - Use transfer learning: initialize fine solution from coarse optimum
+      - Goal: Extract as much precision as possible from the coarse pattern
+      
+      ## Alternative: Explicit Combinatorial Search
+      
+      Instead of gradient descent, enumerate specific structures:
+      
+      1. Single step: h=1 on [0,1], 0 elsewhere
+         - This is valid (integral=1) but gives poor C5 bound
+         
+      2. Double step: h=a on [0,b], h=c on [d,2], h=0 elsewhere
+         - Vary a, b, c, d to minimize overlap
+         - Symmetric: b = d-1
+         - Asymmetric: explore all configurations
+      
+      3. Periodic patterns: 
+         - h(x) = f(x mod p) for small period p
+         - Easy to parameterize and optimize
+      
+      ## Implementation Checklist
+      
+      [ ] Start with 50 intervals, penalty=5000
+      [ ] Try 3-4 explicit step function structures
+      [ ] Use probe to rank before full evaluation
+      [ ] Refine best structure to 100+ intervals
+      [ ] Only then explore 200+ intervals
+      [ ] Document which structure type works best
+new_middlewares:
+  - name: coarse_reminder
+    hook: before_model
+    description: |
+      Reminder to start coarse and enumerate structures before trying fine-grained edits.
+      Prevents the solver from making only incremental changes to the seed.
+    implementation_py: |
+      def before_model(hook_input):
+          return "START COARSE: Use 50-100 intervals and explicit step structures. Do not merely tweak the seed's 800-interval Adam optimizer. Enumerate combinatorial candidates before refining."

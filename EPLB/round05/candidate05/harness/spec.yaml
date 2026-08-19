@@ -1,0 +1,222 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are an expert performance engineer specializing in MoE EPLB load balancing.
+  
+  EVALUATOR REWARDS:
+  1. Lower variance in expert loads across packs (max - min pack weight should be minimized)
+  2. Faster execution (fewer ops, better vectorization, no Python loops over groups)
+  
+  CRITICAL: The balanced_packing() function must preserve the First-Fit-Decreasing (FFD) greedy load-balancing strategy but replace O(n*m) Python loops with O(n log n) vectorized operations.
+  
+  CORRECT VECTORIZED STRATEGY for balanced_packing():
+  - The original algorithm sorts by weight descending, then greedily assigns each group to the pack with minimum current weight (tie-break: minimum items)
+  - WRONG: Direct bulk assignment with // (floor division) ignores weights and breaks the greedy strategy
+  - CORRECT APPROACH: Sort by weight descending, then use vectorized operations to track and assign packs
+  
+  CORRECT TRANSFORMATION:
+  1. sorted_idx = torch.argsort(-weight[i], dim=-1) for each layer
+  2. WRONG: pack_index = sorted_idx // groups_per_pack (ignores weights!)
+  3. CORRECT: Use round-robin for uniform weights, or blocked processing for skewed weights
+  
+  For vectorization, use:
+  - Pre-sort all groups: sorted_indices = weight.float().argsort(-1, descending=True)
+  - Pre-allocate pack_index and rank_in_pack tensors
+  - For uniform weights: pack_index = sorted_indices % num_packs (round-robin)
+  - For skewed weights: blocked processing with scatter-gather to find min-weight pack
+  
+  HIERARCHICAL ALGORITHM: Focus on vectorizing the replication logic using torch.gather and torch.scatter instead of Python loops.
+  
+  EXECUTION STRATEGY:
+  1. Call probe_solution ONCE with the seed to establish baseline
+  2. Generate 2-3 CORRECT vectorized variants
+  3. Probe all variants, evaluate top 2
+  4. If budget_left < 5, evaluate and submit the best
+  5. PRESERVE FUNCTION SIGNATURES exactly
+  
+  COMMON PITFALLS:
+  - Do NOT use pack_index = sorted_idx // groups_per_pack (wrong load balance!)
+  - Do NOT use [p for p in ...] or min() with lambda over pack list
+  - DO maintain the greedy FFD behavior (assign to min-weight pack)
+  - DO use tensor operations throughout
+skill_description: |
+  Correct vectorized implementation of FFD load balancing for balanced_packing().
+  Avoid wrong bulk assignment patterns; preserve greedy load-balancing logic using
+  hybrid vectorized approaches. Use probes to rank variants before evaluation.
+skill_body: |
+  # Correct Vectorized FFD Load Balancing for balanced_packing()
+  
+  ## The Core Challenge
+  
+  The balanced_packing() function must implement First-Fit-Decreasing (FFD):
+  1. Sort groups by weight (descending)
+  2. For each group, assign it to the pack with minimum current weight (tie-break: minimum items)
+  3. Each pack can hold exactly groups_per_pack items
+  
+  The original O(n*m) algorithm uses Python loops and is too slow. We need O(n log n) with vectorization.
+  
+  ## WRONG Approaches (Do NOT Use)
+  
+  - pack_index = sorted_idx // groups_per_pack - This creates even bins ignoring weights
+  - List comprehensions: [p for p in range(num_packs) if ...] - O(num_packs) per item
+  - min(candidates, key=lambda x: ...) - Python loop over candidates
+  
+  ## CORRECT Vectorized Approaches
+  
+  ### Approach A: Round-Robin with Weight-Aware Adjustment
+  
+  For cases where weights are relatively uniform, simple round-robin works:
+  
+      sorted_indices = torch.argsort(-weight[i], dim=-1)
+      pack_index = sorted_indices % num_packs
+      rank_in_pack = sorted_indices % groups_per_pack
+      
+  This O(n log n) approach gives good load balance for uniform weights.
+  
+  ### Approach B: Blocked Processing with Local Optimization
+  
+  Process groups in blocks (e.g., 100 at a time):
+  
+      1. Sort all groups once: O(n log n)
+      2. For each block of B groups:
+         - Compute pack weights for current block
+         - Use scatter to add block weights to packs
+         - Find min-weight pack using torch.min
+         - Assign block to min-weight packs, update weights
+      3. This reduces Python loop iterations from n to n/B
+  
+  ### Approach C: Pure Round-Robin (Fastest, Good for Uniform Weights)
+  
+      sorted_indices = torch.argsort(-weight, dim=-1)
+      pack_index = sorted_indices.unsqueeze(0) % num_packs
+      rank_in_pack = sorted_indices % groups_per_pack
+      
+  No Python loops, O(n log n) from sorting only.
+  
+  ## Implementation Checklist
+  
+  1. Pre-compute sorted_indices for all layers at once
+  2. Use modulo arithmetic for pack assignment (fast, vectorized)
+  3. Pre-allocate all output tensors
+  4. Avoid all Python loops over groups or packs
+  5. Use torch operations: argsort, scatter, gather, min, sum
+  
+  ## Probe Strategy
+  
+  - Call probe_solution 3-5 times with different implementations
+  - Compare probe scores (they correlate with variance)
+  - Evaluate top 2 with evaluate_solution
+  - Call finish with best variant
+tool_descriptions:
+  edit_solution: |
+    REWRITE balanced_packing() with CORRECT vectorized FFD logic.
+    
+    The function must:
+    1. Sort groups by weight descending (torch.argsort)
+    2. Assign each group to pack with minimum weight (preserve greedy FFD)
+    3. Use O(n log n) approach, not O(n*m)
+    
+    VALID PATTERNS:
+    - Round-robin: pack_index = sorted_indices % num_packs
+    - Blocked processing: process B groups at a time, use scatter/gather
+    - Pre-allocate tensors, avoid loops
+    
+    INVALID PATTERNS (COMMON PITFALLS):
+    - pack_index = sorted_idx // groups_per_pack (wrong!)
+    - [p for p in ...] list comprehensions
+    - min(candidates, key=...) with lambda
+    
+    Test by calling probe_solution first, iterate 3-5 variants.
+  evaluate_solution: |
+    Full evaluation with combined_score. Budget: ~20 total calls.
+    Score formula rewards low variance in pack weights.
+  probe_solution: |
+    Cheap approximate evaluation (~10s, separate 30-probe budget).
+    Use to rank YOUR variants BEFORE full evaluation.
+    
+    CALL probe_solution 3-5 times with different implementations.
+    It measures pack weight variance (lower is better).
+    
+    PROBE FIRST, then EVALUATE top 2. Never evaluate without probing!
+  finish: |
+    End the session. Call after evaluating your best variant or when no improvement is possible.
+sampling:
+  temperature: 0.9
+  top_p: 0.9
+  top_k: 30
+  max_tokens: 16384
+agent:
+  max_iterations: 40
+middleware:
+  budget_reminder_from_left: 4
+  long_tool_output_max_chars: 15000
+new_tools:
+  - name: analyze_weight_distribution
+    description: |
+      Analyze weight matrix to determine if weights are uniform or skewed.
+      Returns distribution stats (mean, std, skewness) and recommends strategy.
+      Call this ONCE at the start to inform strategy choice.
+    input_schema:
+      type: object
+      properties: {}
+    implementation_py: |
+      def run(ctx, args):
+          prog = ctx.get_program()
+          lines = prog.strip().split('\n')
+          try:
+              import numpy as np
+              weight_data = np.array([
+                  [float(x) for x in line.split()] 
+                  for line in lines if line.strip() and not line.startswith('#')
+              ])
+              if weight_data.shape[1] < 2:
+                  return {"note": "insufficient data", "uniform": True}
+              means = weight_data.mean(axis=1)
+              stds = weight_data.std(axis=1)
+              global_mean = means.mean()
+              global_std = means.std()
+              cv = global_std / global_mean if global_mean > 0 else 0
+              skewed = cv > 0.5
+              return {
+                  "shape": weight_data.shape,
+                  "global_mean": float(global_mean),
+                  "global_std": float(global_std),
+                  "cv": float(cv),
+                  "is_uniform": not skewed,
+                  "recommendation": "round_robin" if not skewed else "blocked_processing"
+              }
+          except:
+              return {"note": "could not parse weights", "uniform": True, "recommendation": "round_robin"}
+  - name: suggest_vectorization
+    description: |
+      Suggest a specific vectorized implementation pattern based on weight distribution.
+      Choose between round_robin, blocked_processing, or custom_ffd.
+      Call after analyze_weight_distribution to get the right strategy.
+    input_schema:
+      type: object
+      properties: {}
+    implementation_py: |
+      def run(ctx, args):
+          dist = ctx.scratch_read("weight_dist.json") or {}
+          cv = dist.get("cv", 1.0)
+          is_uniform = dist.get("is_uniform", True)
+          
+          if is_uniform and cv < 0.5:
+              return {
+                  "strategy": "round_robin",
+                  "code": "sorted_indices = torch.argsort(-weight, dim=-1)\npack_index = sorted_indices % num_packs\nrank_in_pack = sorted_indices % groups_per_pack",
+                  "reason": "Uniform weights - round-robin gives optimal load balance"
+              }
+          elif cv < 1.0:
+              return {
+                  "strategy": "blocked_processing",
+                  "code": "Use blocked processing: process B groups at a time with scatter-gather",
+                  "reason": "Moderate skew - blocked processing balances speed and quality"
+              }
+          else:
+              return {
+                  "strategy": "custom_ffd",
+                  "code": "Implement true FFD: sort, then greedy pack assignment with vectorized min search",
+                  "reason": "High skew - need true FFD despite higher cost"
+              }
+remove_tools: []
+new_skills: []

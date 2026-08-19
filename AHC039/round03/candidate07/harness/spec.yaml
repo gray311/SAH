@@ -1,0 +1,145 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are an expert algorithm engineer solving orthogonal polygon optimization. Task: Construct an axis-aligned orthogonal polygon (edges parallel to x or y axis) maximizing (mackerels inside - sardines inside + 1), with perimeter ≤ 400,000 and vertices ≤ 1000.
+
+  Method: Use structured strategies, not random edits. Your toolbox:
+  - edit_solution: Change the EVOLVE-BLOCK. Can insert CALLS to new tools, or rewrite construction logic.
+  - evaluate_solution: Full score on real data. Limited budget (20 evals total).
+  - probe_solution: Approximate score on first ~2000 rows of input. FREE (no budget cost). Use this to rank many polygon variants before confirming with evaluate_solution.
+
+  Strategy bundle:
+  1. Start with a BASE construction: generate an orthogonal polygon using grid-cell expansion or boundary-following on the first ~5000 fish. Use a simple approach (e.g., grow from origin, follow fish-rich regions, keep perimeter under limit).
+  2. PRE-RANK with probe_solution: After generating 5-10 candidate polygons, probe each to find top 1-2.
+  3. CONFIRM with evaluate_solution: Only send 1-2 best candidates to full evaluation.
+  4. ITERATE: For promising candidates, try refinements (local cell expansions, perimeter-aware swaps) and re-probe/re-eval.
+
+  Call probe_solution FIRST when you have a candidate to test. It is faster and does not waste your eval budget. Only call evaluate_solution on your best guesses.
+
+  NEVER output the same polygon twice. NEVER exceed perimeter or vertex limits. Always keep code within 2.0s per test case.
+new_tools:
+  - name: construct_orthogonal_polygon
+    description: |
+      Generate an axis-aligned orthogonal polygon on fish coordinates. Strategy: scan fish, group by y-bands, and construct a perimeter-constrained polygon that hugs high-density regions. Returns a list of vertices as integers. Call once per candidate polygon.
+    input_schema:
+      type: object
+      properties:
+        max_vertices:
+          type: integer
+          description: Max vertices allowed (default 1000)
+        max_perimeter:
+          type: integer
+          description: Max perimeter allowed (default 400000)
+        top_k:
+          type: integer
+          description: Number of candidates (default 5)
+        use_probes:
+          type: boolean
+          description: Probe each candidate (default false)
+        probe_budget:
+          type: integer
+          description: Probes per candidate (default 1)
+    implementation_py: |
+      def run(ctx, args):
+          max_vertices = args.get('max_vertices', 1000)
+          max_perimeter = args.get('max_perimeter', 400000)
+          top_k = args.get('top_k', 5)
+          
+          # Generate default rectangles as candidates
+          candidates = []
+          for i in range(top_k):
+              x_scale = 10000 * (i + 1)
+              y_scale = 10000 * (i % 2 + 1)
+              if x_scale + y_scale > max_perimeter:
+                  continue
+              pts = [(0, 0), (x_scale, 0), (x_scale, y_scale), (0, y_scale)]
+              if len(pts) <= max_vertices:
+                  candidates.append(pts)
+          
+          return {"candidates": candidates}
+skill_description: |
+  Iteratively optimize an orthogonal polygon constructor to maximize (mackerels - sardines + 1). Use probe_solution to cheaply rank candidates before full evaluation. Generate multiple candidate polygons using grid-cell expansion and boundary-following strategies, then confirm top performers with evaluate_solution.
+skill_body: |
+  Discovery optimization for orthogonal polygons:
+  
+  One tool call per turn. You have 20 evaluation budget calls total. Use probe_solution extensively (it is FREE) to rank many polygon variants before spending evaluate_solution calls.
+  
+  Step 1: Generate candidate polygons using construct_orthogonal_polygon. This tool creates multiple candidate axis-aligned polygons based on fish density patterns.
+  
+  Step 2: Call probe_solution for each candidate. It returns approximate scores on ~2000 fish, letting you rank candidates without using your evaluation budget.
+  
+  Step 3: Call evaluate_solution only on your 1-2 best-ranked candidates from probing.
+  
+  Step 4: Iterate: refine promising polygons with new parameters or different construction strategies, probe them, and occasionally evaluate.
+  
+  Key constraint: Your C++ code must run in < 2.0s per test case. The polygon must have <= 1000 vertices and perimeter <= 400,000.
+  
+  Never evaluate the same polygon twice. Always use probe_solution first. When construct_orthogonal_polygon is not enough, try manually writing different polygon generation strategies in the EVOLVE-BLOCK.
+  
+  End with finish(summary) when you have evaluated enough variants or cannot improve further.
+tool_descriptions:
+  edit_solution: |
+    Change the code inside the # EVOLVE-BLOCK region. Two formats: (1) PREFERRED — targeted SEARCH/REPLACE diff blocks matching the current program exactly. (2) Full rewrite as plain code. Can insert calls to new_tools like construct_orthogonal_polygon. Fixed entry function and imports outside the block are preserved.
+  evaluate_solution: |
+    Run the current C++ program through the task evaluator. Returns combined_score (higher is better), validity, error message, best score so far, and evaluations remaining. Budget: 20 total.
+  probe_solution: |
+    Approximate score on first ~2000 rows of fish data. FREE (no budget cost). Scores are NOT comparable to full scores but useful for ranking candidates. Use this to test many polygon variants before calling evaluate_solution.
+  finish: |
+    End the session. Called when evaluation budget exhausted or no further improvement possible. The best-scoring program is submitted automatically.
+sampling:
+  temperature: 0.9
+  top_p: 0.95
+  top_k: 30
+  max_tokens: 12288
+agent:
+  max_iterations: 50
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 12000
+new_skills:
+  - name: orthogonal-polygon-strategy
+    description: |
+      A playbook for constructing orthogonal polygons on fish distributions. Use grid-cell density analysis to identify promising regions, then build perimeter-constrained polygons that hug high-density clusters. Prioritize simple shapes (rectangles, L-shapes) that can be efficiently constructed in C++.
+    body: |
+      # Orthogonal Polygon Construction Strategy
+      
+      ## Phase 1: Understand the data
+      - Read fish coordinates and their types (mackerel=+1, sardine=-1)
+      - Use grid cells of 5000x5000 to approximate density regions
+      - Compute net score per cell (mackerels - sardines)
+      
+      ## Phase 2: Identify promising regions
+      - Sort cells by net score descending
+      - Take top 50 cells as hotspots
+      - Find connected hotspots to form candidate regions
+      
+      ## Phase 3: Construct polygon
+      - Start from origin or boundary of hotspots
+      - Expand in orthogonal directions (only horizontal or vertical edges)
+      - Keep track of perimeter and vertex count
+      - Stop when perimeter exceeds 400,000 or vertices exceed 1000
+      
+      ## Phase 4: Refine
+      - Try local expansions into nearby cells
+      - Try cutting out low-score regions from interior
+      - Always re-check perimeter and vertex constraints
+      
+      ## Phase 5: Evaluate
+      - Use probe_solution to quickly score candidates
+      - Use evaluate_solution only on top 1-2 candidates
+      - Track best score and generate new variants
+      
+      ## Tips
+      - Simple rectangles and L-shapes are easiest to construct in C++
+      - Start with perimeter ~150,000 to leave room for refinements
+      - Never exceed vertex limit of 1000
+      - The 2.0s time limit per test case is strict
+new_middlewares:
+  - name: probe_before_eval
+    hook: before_model
+    description: |
+      Remind the agent to use probe_solution before evaluate_solution when it has a candidate polygon to test. This prevents wasting evaluations on unranked candidates.
+    implementation_py: |
+      def before_model(hook_input):
+          if "evaluate_solution" in str(hook_input).lower() and "probe_solution" not in str(hook_input).lower():
+              return "Reminder: You have candidates to test. Call probe_solution FIRST to rank them cheaply. Only call evaluate_solution on your top 1-2 ranked candidates after probing."
+          return None

@@ -1,0 +1,177 @@
+schema: h2spec/1.0
+system_prompt: |
+  Erdos minimum overlap (C5): Find h: [0,2]->[0,1] with integral(h)=1 minimizing max_k integral h(x)(1-h(x+k))dx.
+
+  Current best: C5 <= 0.38092303510845016 (combined_score=1.0).
+
+  GOAL: Find h achieving c5_bound < 0.38092303510845016 (combined_score > 1.0).
+
+  CRITICAL STRATEGY: The seed optimizer has 15 initialization patterns. Most successful candidates come from MUTATING these patterns:
+  1. START with num_restarts=1, num_steps=30000 to quickly test individual patterns
+  2. USE pattern_mutation_generator to create SPECIFIC variants: Golomb (4-5 marks), Tri-modal (3 peaks), Bipartite
+  3. For each variant, normalize integral=1 BEFORE evaluation
+  4. Use probe_solution to filter (keep c5_bound < 0.375)
+  5. Only evaluate candidates with combined_score > 0.9995 after full training
+
+  PATTERN INSIGHTS:
+  - Golomb ruler (equally spaced marks): marks at 0, 0.4, 0.8, 1.2, 1.6 minimize overlap
+  - Tri-modal (3 narrow peaks at 0.4, 1.0, 1.6) with proper width
+  - Bipartite (step at 0.5): [0, 0.5) high, [0.5, 2] low
+
+  BEST APPROACH: Call pattern_mutation_generator ONCE to get 3-4 pattern variants with integral-checked candidates, then evaluate each with num_restarts=1, num_steps=30000.
+skill_description: |
+  Pattern mutation strategy for Erdos C5. The seed has 15 initialization patterns. Mutation generates variants: Golomb (4-5 marks), Tri-modal (3 peaks), Bipartite. Each variant is integral-normalized (sum*h*dx=1) before evaluation. Use probe to filter c5_bound < 0.375, then full eval.
+skill_body: |
+  # Pattern Mutation Strategy for Erdos C5 Problem
+
+  ## Core Idea
+  The seed optimizer's 15 initialization patterns are promising. We mutate them to narrow peaks, adjust spacing, add/remove marks.
+
+  ## Step 1: Generate Pattern Variants
+  1. CALL pattern_mutation_generator() ONCE - get 3-4 integral-normalized variants
+  2. Variants include: Golomb-4, Golomb-5, Tri-modal-3, Bipartite
+  3. Each has integral check: sum(h)*dx ~ 1.0 (if not, skip)
+  4. Check c5_bound in output (analytical, no training)
+
+  ## Step 2: Filter by Probe
+  - KEEP if c5_bound < 0.375 (tight margin from current best 0.3809)
+  - SKIP if c5_bound >= 0.38 (likely won't beat seed after training)
+
+  ## Step 3: Quick Training
+  For each kept variant:
+  - Set num_restarts=1, num_steps=30000
+  - This quickly trains the variant and checks if training improves it
+  - Call probe_solution to check c5_bound before full eval
+
+  ## Step 4: Full Evaluation
+  If probe shows c5_bound < 0.381 (combined_score > 0.9998):
+  - Call evaluate_solution with num_restarts=1, num_steps=30000
+  - Report combined_score
+
+  ## Step 5: Iterate
+  If no improvement, mutate patterns differently:
+  - Golomb: try 4 marks vs 5 marks
+  - Tri-modal: try different peak centers [0.3,1.0,1.7] vs [0.4,1.0,1.6]
+  - Bipartite: try a=0.45 vs a=0.55 vs a=0.65
+
+  ## Why This Works
+  - Pattern mutations are BETTER than random Gaussian
+  - Integral normalization ensures constraint satisfaction
+  - Quick training (30k steps) filters promising variants
+  - Only waste full evals on near-winners
+tool_descriptions:
+  edit_solution: |
+    Edit hyperparameters. Start with num_restarts=1, num_steps=30000 for quick pattern testing. Then tune: num_intervals=800, base_learning_rate=0.006, penalty_strength=60.0.
+  evaluate_solution: |
+    Full training. Use only after probe confirms c5_bound < 0.381. Returns combined_score = 0.38092303510845016 / c5_bound. >1.0 means improvement.
+  probe_solution: |
+    Fast approximate eval (500 intervals). Use to filter candidates with c5_bound < 0.375 before full eval.
+sampling:
+  temperature: 0.8
+  top_p: 0.9
+  top_k: 15
+  max_tokens: 12000
+agent:
+  max_iterations: 50
+middleware:
+  budget_reminder_from_left: 3
+  long_tool_output_max_chars: 8000
+new_tools:
+  - name: pattern_mutation_generator
+    description: |
+      Generate 3-4 pattern variants from seed's 15 patterns: Golomb-4 (marks at 0,0.4,0.8,1.2), Golomb-5 (0,0.4,0.8,1.2,1.6), Tri-modal-3 (peaks at 0.4,1.0,1.6), Bipartite (high on [0,0.5)). Each returns h (already integral-normalized), c5_bound (analytical, max correlation), and integral (should be ~1.0). Skip variants with integral != 1.0.
+    input_schema:
+      type: object
+      properties:
+        num_variants:
+          type: number
+          default: 4
+    implementation_py: |
+      def run(ctx, args):
+          import numpy as np
+          N = 800
+          domain = 2.0
+          dx = domain / N
+
+          def sigmoid_normalize(latent):
+              h = 1.0 / (1.0 + np.exp(-latent))
+              integral = np.sum(h) * dx
+              if integral > 0 and integral < 2.0:
+                  h = h / integral
+              h = np.clip(h, 0.001, 0.999)
+              integral = np.sum(h) * dx
+              return h
+
+          # Golomb-4 pattern (4 marks)
+          golomb4_latent = np.zeros(N)
+          marks = np.array([0.0, 0.4, 0.8, 1.2])
+          for m in marks:
+              idx = np.round(m * N).astype(int)
+              golomb4_latent[idx] = 5.0
+          golomb4_latent -= 2.0
+          golomb4_h = sigmoid_normalize(golomb4_latent)
+          j = 1.0 - golomb4_h
+          h_pad = np.pad(golomb4_h, (0, N))
+          j_pad = np.pad(j, (0, N))
+          corr = np.fft.fft(h_pad) * np.fft.fft(j_pad).real
+          golomb4_c5 = np.max(corr) * dx
+
+          # Golomb-5 pattern (5 marks)
+          golomb5_latent = np.zeros(N)
+          marks = np.array([0.0, 0.4, 0.8, 1.2, 1.6])
+          for m in marks:
+              idx = np.round(m * N).astype(int)
+              golomb5_latent[idx] = 5.0
+          golomb5_latent -= 2.0
+          golomb5_h = sigmoid_normalize(golomb5_latent)
+          j = 1.0 - golomb5_h
+          h_pad = np.pad(golomb5_h, (0, N))
+          j_pad = np.pad(j, (0, N))
+          corr = np.fft.fft(h_pad) * np.fft.fft(j_pad).real
+          golomb5_c5 = np.max(corr) * dx
+
+          # Tri-modal-3 pattern
+          tri_latent = np.zeros(N)
+          peaks = [0.4, 1.0, 1.6]
+          for p in peaks:
+              idx = np.round(p * N).astype(int)
+              tri_latent[idx-5:idx+6] = 4.0
+          tri_latent -= 2.0
+          tri_h = sigmoid_normalize(tri_latent)
+          j = 1.0 - tri_h
+          h_pad = np.pad(tri_h, (0, N))
+          j_pad = np.pad(j, (0, N))
+          corr = np.fft.fft(h_pad) * np.fft.fft(j_pad).real
+          tri_c5 = np.max(corr) * dx
+
+          # Bipartite pattern
+          bip_latent = np.zeros(N)
+          split_idx = int(0.5 * N)
+          bip_latent[:split_idx] = 4.0
+          bip_latent[split_idx:] = -2.0
+          bip_h = sigmoid_normalize(bip_latent)
+          j = 1.0 - bip_h
+          h_pad = np.pad(bip_h, (0, N))
+          j_pad = np.pad(j, (0, N))
+          corr = np.fft.fft(h_pad) * np.fft.fft(j_pad).real
+          bip_c5 = np.max(corr) * dx
+
+          candidates = [
+              {"h": golomb4_h.tolist(), "integral": float(np.sum(golomb4_h)*dx), "c5_bound": float(golomb4_c5), "pattern": "golomb4"},
+              {"h": golomb5_h.tolist(), "integral": float(np.sum(golomb5_h)*dx), "c5_bound": float(golomb5_c5), "pattern": "golomb5"},
+              {"h": tri_h.tolist(), "integral": float(np.sum(tri_h)*dx), "c5_bound": float(tri_c5), "pattern": "tri_modal"},
+              {"h": bip_h.tolist(), "integral": float(np.sum(bip_h)*dx), "c5_bound": float(bip_c5), "pattern": "bipartite"}
+          ]
+          return {"candidates": candidates, "num_candidates": 4}
+new_skills:
+  - name: pattern-mutation-guide
+    description: |
+      Use pattern_mutation_generator to create integral-normalized candidates. Filter c5_bound < 0.375, then train with num_restarts=1, num_steps=30000.
+    body: |
+      # Pattern Mutation Guide
+
+      1. CALL pattern_mutation_generator() to get 4 integral-normalized variants
+      2. FILTER: keep only candidates with integral ~ 1.0 (skip others), c5_bound < 0.375
+      3. For each kept candidate, train with num_restarts=1, num_steps=30000
+      4. USE probe to check c5_bound after training
+      5. FULL EVAL if combined_score > 0.9995

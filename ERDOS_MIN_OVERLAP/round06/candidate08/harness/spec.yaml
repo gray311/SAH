@@ -1,0 +1,156 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are an expert in harmonic analysis and mathematical optimization. Your task is to find a step function h: [0,2]→[0,1] with ∫h=1 that minimizes C₅ = max_k ∫ h(x)(1-h(x+k))dx.
+
+  **TARGET**: Achieve combined_score > 1.0, meaning c5_bound < 0.38092303510845016.
+
+  **KEY INSIGHT**: The seed's gradient-based optimizer with 12 random initializations is stuck. You must try DIFFERENT approaches:
+
+  1. **Direct Construction**: Manually build piecewise constant functions with few breakpoints
+     - Single block: h=1 on [0,1], h=0 elsewhere
+     - Two blocks: h=1 on [0,a] and [b,2], h=0 elsewhere (adjust for ∫h=1)
+     - Three blocks: h=c1 on [0,a], c2 on [a,b], c3 on [b,2]
+     - Test many (a,b) pairs systematically
+
+  2. **Structured Patterns**: 
+     - Periodic step functions
+     - Symmetric constructions around x=1
+     - Concentrated mass patterns
+
+  3. **Coarse-to-Fine**: Start with 50-100 intervals, find good patterns, refine
+
+  **USE CONSTRUCT_CANDIDATE**: Call this tool to build explicit candidate functions. Specify:
+  - pattern_type: "single_block", "two_block", "three_block", "periodic", "symmetric"
+  - Parameters like block positions, heights, periods
+
+  **CONSTRAINTS**: h∈[0,1], ∫₀² h(x)dx = 1 exactly.
+
+  **BUDGET**: ~30 evaluations. Each construct_candidate call followed by evaluate is ONE evaluation.
+
+  **STRATEGY**: 
+  - Phase 1: Generate 10-20 diverse constructions via construct_candidate
+  - Phase 2: Evaluate the best ones
+  - Phase 3: Refine promising constructions with slight parameter changes
+
+  **SUCCESS**: Find any c5_bound < 0.38092303510845016.
+new_tools:
+  - name: construct_candidate
+    description: |
+      Build an explicit candidate step function h: [0,2]→[0,1] with ∫h=1.
+      Call this to directly construct solutions rather than relying on gradient descent.
+      
+      Supports these pattern types:
+      - single_block: h=1 on [0,1], h=0 elsewhere (standard)
+      - two_block: h=1 on [0,a] and [b,2], h=0 elsewhere (∫h = a + (2-b) = 1)
+      - three_block: h=c1 on [0,a], c2 on [a,b], c3 on [b,2] (adjust heights for ∫h=1)
+      - periodic: sin-based periodic patterns
+      - symmetric: symmetric constructions around x=1
+      
+      Parameters passed as a dict matching the pattern type.
+    input_schema: {type: object, properties: {pattern_type: {type: string}, params: {type: object}}}
+    implementation_py: |
+      def run(ctx, args):
+          import jax.numpy as jnp
+          N = ctx.hypers().num_intervals
+          domain = jnp.linspace(0, 2, N+1)
+          h_values = jnp.zeros(N)
+          
+          pattern_type = args.get("pattern_type", "single_block")
+          params = args.get("params", {})
+          
+          if pattern_type == "single_block":
+              # h=1 on [0,1], h=0 on [1,2]
+              # ∫h = 1*1 + 0*1 = 1 ✓
+              h_values = jnp.ones(int(N * 0.5))
+              c5 = ctx.evaluate()
+              return {"pattern": pattern_type, "c5_bound": c5, "status": "done"}
+              
+          elif pattern_type == "two_block":
+              # h=1 on [0,a] and [b,2], h=0 elsewhere
+              # ∫h = a + (2-b) = 1 => b = a + 1
+              a = params.get("a", 0.3)
+              b = a + 1.0
+              num_a = int(N * a / 2)
+              num_b = int(N * (2 - b) / 2)
+              h_values = jnp.zeros(N)
+              h_values = h_values.at[:num_a].set(1.0)
+              h_values = h_values.at[num_a+num_b:num_a+num_b+num_b].set(1.0)
+              c5 = ctx.evaluate()
+              return {"pattern": pattern_type, "a": a, "c5_bound": c5, "status": "done"}
+              
+          elif pattern_type == "three_block":
+              # h=c1 on [0,a], c2 on [a,b], c3 on [b,2]
+              # ∫h = c1*a + c2*(b-a) + c3*(2-b) = 1
+              a = params.get("a", 0.3)
+              b = params.get("b", 0.7)
+              c1 = params.get("c1", 1.0)
+              c2 = params.get("c2", 0.5)
+              c3 = params.get("c3", 0.0)
+              num_a = int(N * a / 2)
+              num_b = int(N * (b - a) / 2)
+              h_values = jnp.zeros(N)
+              h_values = h_values.at[:num_a].set(c1)
+              h_values = h_values.at[num_a:num_a+num_b].set(c2)
+              h_values = h_values.at[num_a+num_b:].set(c3)
+              # Auto-adjust c3 to satisfy ∫h=1
+              integral = c1*a + c2*(b-a) + c3*(2-b)
+              if integral != 1.0:
+                  scale = 1.0 / integral
+                  h_values = h_values * scale
+                  c5 = ctx.evaluate()
+                  return {"pattern": pattern_type, "a": a, "b": b, "c3": float(c3*scale), "c5_bound": c5, "status": "done"}
+              c5 = ctx.evaluate()
+              return {"pattern": pattern_type, "c5_bound": c5, "status": "done"}
+              
+          elif pattern_type == "periodic":
+              # Periodic step function with period p
+              p = params.get("period", 0.4)
+              periods = 2.0 / p
+              h_values = jnp.zeros(N)
+              for i in range(int(periods)):
+                  start = int(N * (i * p / 2))
+                  width = int(N * p / 2)
+                  h_values = h_values.at[start:start+width].set(1.0)
+              c5 = ctx.evaluate()
+              return {"pattern": pattern_type, "period": p, "c5_bound": c5, "status": "done"}
+              
+          elif pattern_type == "symmetric":
+              # Symmetric around x=1: h(x) = h(2-x)
+              # h=1 on [1-c, 1+c], h=0 elsewhere (for some c)
+              c = params.get("c", 0.25)
+              h_values = jnp.zeros(N)
+              left_end = int(N * (1 - c) / 2)
+              right_start = int(N * (1 + c) / 2)
+              h_values = h_values.at[left_end:right_start].set(1.0)
+              # Need to satisfy ∫h = 1, so width = 1
+              width = int(N * 2 * c / 2)
+              h_values = h_values[:width].set(1.0)
+              h_values = h_values[-width:].set(1.0)
+              c5 = ctx.evaluate()
+              return {"pattern": pattern_type, "c": c, "c5_bound": c5, "status": "done"}
+              
+          else:
+              return {"error": f"Unknown pattern_type: {pattern_type}", "status": "failed"}
+remove_tools: [probe_solution]
+tool_descriptions:
+  edit_solution: |
+    Modify EVOLVE-BLOCK. For strategic changes, **complete rewrites preferred**.
+    
+    When rewriting: replace the entire ErdosOptimizer with a direct construction approach,
+    or keep optimizer but add construct_candidate calls before optimization.
+  evaluate_solution: |
+    Run program and get combined_score. ~30 evaluations available.
+  finish: |
+    End when budget exhausted or no improvements found.
+sampling:
+  temperature: 0.8
+  top_p: 0.95
+  top_k: 15
+  max_tokens: 12288
+agent:
+  max_iterations: 45
+middleware:
+  budget_reminder_from_left: 3
+  long_tool_output_max_chars: 8000
+new_skills: []
+new_middlewares: []

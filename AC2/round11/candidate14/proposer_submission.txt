@@ -1,0 +1,217 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are optimizing C₂ for the second autocorrelation inequality.
+  Current best: 1.03663 (seed uses 13 multi-level step patterns).
+  
+  CRITICAL: The seed patterns are already locally optimal. DO NOT try to invent
+  completely new architectures - you'll likely produce invalid code. Instead:
+  
+  1. **Analyze existing patterns**: Extract heights from successful patterns
+  2. **Apply small, targeted mutations**: Change one height by ±10%, shift one interval
+  3. **Recombine features**: Take heights from pattern A, combine with structure from pattern B
+  4. **Systematically explore parameter space**: The current harness made no progress because it
+     asked for "new architectures" when what's needed is better optimization of existing ones
+  
+  Iteration protocol:
+  - Call analyze_pattern ONCE at start to understand all 13 patterns
+  - Each iteration: pick ONE pattern to mutate, apply ONE small change
+  - Evaluate: if improved, DRILL DOWN (try more mutations on same pattern)
+  - If no improvement after 3 evals: pick a DIFFERENT base pattern and try again
+  - NEVER generate 3+ patterns at once - test one, learn, then try another
+  
+  Tool usage:
+  - analyze_pattern: Call once at start, not in every iteration
+  - edit_solution: Make minimal, surgical changes to one pattern
+  - evaluate_solution: Call after each edit - this is your only metric
+  - finish: Report best C₂ and which base pattern it came from
+skill_description: |
+  Incremental optimization of C₂ via systematic perturbation of seed patterns.
+  Focus on extracting features from working patterns and recombining them.
+skill_body: |
+  # C₂ Optimization via Feature Extraction and Recombination
+  
+  ## Core Strategy
+  
+  The seed program has 13 pre-tuned step patterns achieving ~1.036. Small mutations won't help.
+  Instead: extract features from successful patterns and recombine them.
+  
+  ## Phase 1: Feature Analysis (first iteration only)
+  
+  1. Call analyze_pattern to get all 13 patterns' heights and structures
+  2. Identify patterns with highest diversity in features (heights, intervals)
+  3. Note which patterns use similar feature combinations
+  
+  ## Phase 2: Incremental Mutation
+  
+  For each iteration, do ONE of:
+  
+  - **Height perturbation**: Change one height by ±10% (e.g., 1.40 → 1.54 or 1.26)
+  - **Interval shift**: Move one interval boundary by ±5% of the domain
+  - **Feature recombination**: Take heights from pattern A, combine with interval structure from pattern B
+  - **Asymmetric variant**: Mirror one pattern but shift the center
+  
+  DO NOT:
+  - Change 3+ parameters at once
+  - Create patterns with >15 levels (too complex)
+  - Delete existing patterns
+  
+  ## Phase 3: Evaluation and Drilling
+  
+  1. Edit ONE pattern with ONE change
+  2. Evaluate immediately
+  3. If improved: DO MORE mutations on this SAME pattern (drill down)
+  4. If not improved after 3 evals: switch to a DIFFERENT base pattern
+  5. Track which pattern class performs best
+  
+  ## Phase 4: Convergence
+  
+  - If you find a pattern that improves repeatedly, keep mutating it
+  - If all patterns plateau, try feature recombination
+  - Report the best C₂ and the pattern modifications that achieved it
+  
+  Key principle: SMALL, SYSTEMATIC CHANGES beat radical redesigns on this task.
+tool_descriptions:
+  edit_solution: |
+    Modify ONE pattern by ONE small change:
+    - Change one height by ±10% (e.g., 1.40 → 1.54)
+    - Shift one interval by ±5% of domain width
+    - Recombine heights from one pattern with structure from another
+    
+    DO NOT: rewrite the entire _create_step_initializer method or create >15 levels.
+    Target specific lines like `f.at[int(0.25*n):int(0.75*n)].set(1.40)` and edit just that height/interval.
+  evaluate_solution: |
+    Full evaluation. Returns combined_score. Call after each edit.
+    Budget: 30 evals total. Each evaluation is precious.
+  probe_solution: |
+    Approximate score on subsampled data. UNRELIABLE for this mathematically delicate problem.
+    Skip probe - always use evaluate_solution for final ranking.
+  finish: |
+    Report the best C₂ achieved, which base pattern it came from, and the key modifications.
+sampling:
+  temperature: 0.3
+  top_p: 0.9
+  top_k: 30
+  max_tokens: 14336
+agent:
+  max_iterations: 50
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 15000
+new_tools:
+  - name: analyze_pattern
+    description: |
+      Parse the current program and extract all 13 step patterns' heights and interval structures.
+      Returns a structured analysis useful for feature recombination and mutation targeting.
+      Call ONCE at start to understand the pattern landscape.
+    input_schema:
+      type: object
+      properties: {}
+    implementation_py: |
+      def run(ctx, args):
+          import re
+          prog = ctx.get_program()
+          if "# EVOLVE-BLOCK" not in prog:
+              return {"note": "no evolve block", "patterns": []}
+          
+          # Extract all .set(height) calls with their positions
+          set_calls = re.findall(r'f\.at\((\d+\.?\d*\s*\*\s*\d+\.?\d*\s*\*)?\):(\d+\.?\d*\s*\*\s*\d+\.?\d*\s*\*)?\.set\((\d+\.?\d+)\)', prog)
+          
+          patterns = []
+          height_groups = []
+          
+          # The seed has patterns 0-11 in _create_step_initializer
+          # Extract heights and note their positions for recombination
+          all_heights = []
+          for match in re.finditer(r'f\.at\([^)]+\)\.set\((\d+\.?\d+)\)', prog):
+              all_heights.append({
+                  "height": float(match.group(1)),
+                  "position": len([m for m in re.finditer(r'f\.at\([^)]+\)\.set', prog[:match.start()])])
+              })
+          
+          # Identify the 13 pattern types and their key heights
+          pattern_info = [
+              {"id": 0, "key_heights": [1.40], "type": "single_peak"},
+              {"id": 1, "key_heights": [1.50], "type": "higher_peak"},
+              {"id": 2, "key_heights": [1.60], "type": "narrow_peak"},
+              {"id": 3, "key_heights": [0.90, 1.90, 0.90], "type": "multi_level_symmetric"},
+              {"id": 4, "key_heights": [1.10, 2.30, 1.40], "type": "asymmetric_multi"},
+              {"id": 5, "key_heights": [1.50, 1.50], "type": "two_steps"},
+              {"id": 6, "key_heights": [0.70, 1.30, 1.70, 1.00], "type": "four_level"},
+              {"id": 7, "key_heights": [0.80, 2.00, 0.80], "type": "central_peak_wings"},
+              {"id": 8, "key_heights": [0.60, 1.00, 1.50, 1.20], "type": "staircase"},
+              {"id": 9, "key_heights": [1.70], "type": "very_high_peak"},
+              {"id": 10, "key_heights": [1.65], "type": "high_peak_variant"},
+              {"id": 11, "key_heights": [0.70, 1.50, 2.10, 1.50, 0.70], "type": "pyramid"},
+              {"id": 12, "key_heights": [0.60, 1.30, 2.00, 1.30, 0.60], "type": "ultra_stretched_pyramid"}
+          ]
+          
+          return {
+              "pattern_count": 13,
+              "patterns": pattern_info,
+              "all_heights": all_heights,
+              "analysis": "Use heights from different patterns to create recombination candidates"
+          }
+new_skills:
+  - name: incremental-c2-optimization
+    description: |
+      Systematic C₂ optimization through incremental perturbation of seed patterns.
+      Focus on small, surgical edits and feature recombination rather than radical redesign.
+    body: |
+      # Incremental C₂ Optimization Protocol
+      
+      ## Understanding the Task
+      
+      You have 13 pre-optimized step patterns achieving ~1.036. The current harness failed
+      because it asked for "new architectures" - but the answer is better optimization of
+      existing patterns through systematic, small mutations.
+      
+      ## Strategy: Feature Extraction and Recombination
+      
+      ### Step 1: Analyze (one-time)
+      - Call analyze_pattern to understand all 13 patterns
+      - Note the range of heights (0.60 to 2.30) and pattern types
+      - Identify patterns with unique features (e.g., pyramid, asymmetric multi-level)
+      
+      ### Step 2: Mutation Types
+      
+      Choose ONE mutation per iteration:
+      
+      **A. Height Perturbation**: Change one height by ±10%
+      - 1.40 → 1.54 or 1.26
+      - 2.10 → 2.31 or 1.89
+      - Try both increase and decrease for each pattern
+      
+      **B. Interval Adjustment**: Shift one interval by ±5%
+      - int(0.25*n) → int(0.24*n) or int(0.26*n)
+      - Test whether moving the peak slightly left/right helps
+      
+      **C. Feature Recombination**: Mix features from different patterns
+      - Take central heights from pyramid pattern, combine with intervals from staircase
+      - Use multi-level structure from pattern 3 with heights from pattern 11
+      
+      **D. Asymmetric Variant**: Break symmetry of symmetric patterns
+      - Pattern 3 (0.90, 1.90, 0.90) → try (0.90, 2.00, 0.85)
+      - Keep central high, adjust sides slightly differently
+      
+      ### Step 3: Evaluation Protocol
+      
+      1. Edit ONE pattern with ONE change
+      2. Call evaluate_solution immediately
+      3. Record the result
+      4. If improved: DO MORE mutations on this SAME pattern (drill down)
+      5. If no improvement after 3 consecutive evals: switch base pattern
+      
+      ### Step 4: Tracking
+      
+      Maintain mental model of:
+      - Which base patterns have shown promise
+      - Which mutation types work (height vs interval vs recombination)
+      - The current best C₂ and what produced it
+      
+      ## Key Principles
+      
+      - SMALL changes: ±10% height, ±5% intervals
+      - ONE change at a time: don't mutate multiple parameters
+      - DRILL DOWN: if something improves, keep mutating that same pattern
+      - SYSTEMATIC: try height increases, then decreases, then intervals
+      - RECOMBINE: mix features from successful patterns

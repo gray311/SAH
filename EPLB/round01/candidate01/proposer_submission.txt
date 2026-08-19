@@ -1,0 +1,185 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are an expert software engineer specializing in optimizing load-balancing algorithms for distributed systems. Your task is to improve the Mixture-of-Expert (MoE) Expert Parallelism Load Balancer (EPLB) rearrangement algorithm.
+
+  The algorithm rearranges experts to balance load across replicas. You have TWO objectives:
+  1. Improve load balancing (reduce max-min disparity in expert load)
+  2. Improve execution efficiency (reduce algorithm runtime)
+
+  The algorithm operates on weight tensors [num_layers, num_logical_experts]. Key observations:
+  - The seed uses Python loops which are slow; vectorization with torch operations is critical
+  - Hierarchical algorithms partition experts at multiple levels (groups per node)
+  - Common optimization patterns: (a) replace Python for-loops with torch operations, (b) pre-compute indices, (c) use argmax/argmin instead of manual min-finding, (d) avoid repeated tensor reshaping
+
+  Your workflow:
+  1. Analyze the current algorithm's structure - call analyze_algorithm
+  2. Call vectorize_transformation to generate concrete code transformations
+  3. After each edit, evaluate_solution and use feedback to decide next direction
+  4. If an edit is valid but score doesn't improve, try a DIFFERENT optimization pattern
+
+  IMPORTANT: With only ~20 evaluations, each edit must encode ONE concrete, high-impact optimization. Prefer vectorization and algorithmic improvements over cosmetic changes.
+skill_description: |
+  Optimize MoE EPLB load-balancing algorithms by applying domain-specific transformations (vectorization, loop elimination, hierarchical decomposition).
+skill_body: |
+  # MoE EPLB Algorithm Optimization Method
+
+  ## Objective
+  Maximize the combined score by improving both load balancing and execution efficiency.
+  Score = f(load_balance_quality, execution_time_efficiency)
+
+  ## Step 1: Structural Analysis
+  Before editing, call analyze_algorithm to understand:
+  - Number of MoE layers and logical experts
+  - Weight tensor shape
+  - Existing loop structure and computational hotspots
+
+  ## Step 2: Optimization Patterns (Apply ONE per edit)
+
+  ### Pattern A: Vectorize Python Loops
+  Replace nested Python for-loops with torch operations:
+  - for loops over groups/experts → torch.gather, torch.scatter, torch.sort
+  - for loops finding min → torch.min, torch.argmin
+  - Accumulators → torch.cumsum, torch.scatter_add
+
+  ### Pattern B: Pre-compute Indices
+  Instead of computing indices inside loops, pre-compute with:
+  - torch.arange for pack indices
+  - torch.meshgrid or torch.stack for pairing operations
+
+  ### Pattern C: Replace Manual Min-Finding
+  Current pattern: min(pack_weights.__getitem__()) is O(n) in a loop
+  Better: torch.argmin(pack_weights, dim=0) then use that index
+
+  ### Pattern D: Use Sort-Based Assignment
+  For balanced packing, sort by weight (descending), then assign:
+  - Sort once globally
+  - Assign round-robin or modulo-based distribution
+  - Avoid per-iteration min-finding
+
+  ## Step 3: Evaluation Strategy
+  1. Edit with ONE pattern applied
+  2. Evaluate and record score
+  3. If valid but score less than best_so_far, revert and try a DIFFERENT pattern
+  4. If invalid (validity=0), analyze error, fix the specific bug
+  5. Continue until budget exhausted
+
+  ## Step 4: When to Stop
+  Call finish when:
+  - Budget exhausted
+  - Score plateaued despite trying 3+ different patterns
+  - Cannot find another valid optimization direction
+skill_description: |
+  Optimize MoE EPLB load-balancing algorithms by applying domain-specific transformations (vectorization, loop elimination, hierarchical decomposition).
+tool_descriptions:
+  edit_solution: |
+    Change the code inside the # EVOLVE-BLOCK region. Two formats:
+    (1) PREFERRED — targeted SEARCH/REPLACE diff blocks matching current program exactly
+    (2) Full rewrite — complete new EVOLVE-BLOCK body
+
+    Focus on vectorizing loops, pre-computing indices, and replacing manual min-finding with torch operations.
+  evaluate_solution: |
+    Run the algorithm and return combined_score (higher=better).
+    Returns: combined_score, validity (1=valid, 0=invalid), error (if any), best_score_so_far, evaluations_left.
+
+    Use: score improves → keep direction; score same/worse → try different optimization; validity=0 → fix bug.
+  probe_solution: |
+    Cheap approximate evaluation on subsampled data. NOT comparable to full scores.
+    Use to quickly rank multiple variants before confirming with evaluate_solution.
+  finish: |
+    End session and submit best-scoring program.
+new_tools:
+  - name: analyze_algorithm
+    description: |
+      Analyze the EPLB algorithm structure: weight tensor dimensions, number of loops, computational hotspots, and identify opportunities for vectorization.
+    input_schema: {type: object, properties: {}}
+    implementation_py: |
+      def run(ctx, args):
+          program = ctx.get_program()
+          lines = program.split('\n')
+          
+          # Extract weight tensor usage
+          weight_refs = 0
+          loop_count = 0
+          for line in lines:
+              if 'weight:' in line.lower() or 'weight' in line and '[' in line and ']' in line:
+                  weight_refs += 1
+              if 'for ' in line or 'for(' in line:
+                  loop_count += line.count('for ')
+          
+          # Parse function signatures
+          functions = []
+          func_name = ""
+          for line in lines:
+              stripped = line.strip()
+              if stripped.startswith('def '):
+                  if func_name and func_name != "":
+                      functions.append(func_name)
+                  func_name = stripped[4:].split('(')[0]
+          if func_name and func_name != "":
+              functions.append(func_name)
+          
+          return {
+              "num_weight_refs": weight_refs,
+              "estimated_loop_count": loop_count,
+              "functions": functions,
+              "recommendation": "Vectorize loops using torch operations"
+          }
+  - name: vectorize_transformation
+    description: |
+      Generate a concrete code transformation that vectorizes a specific Python loop or computation pattern.
+    input_schema: {type: object, properties: {
+        pattern: {type: "string", description: "Pattern to vectorize"},
+        function_name: {type: "string", description: "The function containing the pattern"}
+    }}
+    implementation_py: |
+      def run(ctx, args):
+          pattern = args.get("pattern", "nested_loops")
+          func_name = args.get("function_name", "")
+          
+          transformations = {
+              "nested_loops": "Use torch.sort and slice assignment instead of for loops. Compute indices with torch.arange and assign via modulo.",
+              "min_finding": "Replace min(pack_weights) with torch.argmin(pack_weights, dim=0).",
+              "accumulation": "Use torch.scatter_add for accumulation instead of Python loop.",
+              "packing": "Sort weights with torch.sort(-1, descending=True), then assign using modulo: pack_index = sorted_indices % num_packs."
+          }
+          
+          if pattern in transformations:
+              return {"pattern": pattern, "transformation": transformations[pattern]}
+          return {"error": "Unknown pattern"}
+new_skills:
+  - name: eplb-optimization-strategy
+    description: |
+      Domain-specific playbook for optimizing MoE EPLB load-balancing algorithms.
+    body: |
+      # EPLB Algorithm Optimization Playbook
+
+      ## Objective
+      Maximize score by improving load balancing and execution efficiency.
+
+      ## Key Strategies
+
+      ### 1. Vectorize All Loops
+      Convert Python for-loops to torch operations.
+
+      ### 2. Pre-compute Indices
+      Use torch.arange and modulo-based assignment.
+
+      ### 3. Sort-Based Assignment
+      Sort once with torch.sort, then assign.
+
+      ## Process
+      1. Call analyze_algorithm
+      2. Call vectorize_transformation with pattern
+      3. Apply transformation
+      4. Evaluate and adjust
+new_middlewares:
+  - name: optimization_reminder
+    hook: before_model
+    description: |
+      Remind solver to focus on vectorization.
+    implementation_py: |
+      def before_model(hook_input):
+          program = hook_input.get("current_code", "")
+          if program and "for " in program and "torch." not in program:
+              return "Look for Python for-loops that can be vectorized with torch operations."
+          return None

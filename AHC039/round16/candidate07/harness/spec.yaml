@@ -1,0 +1,133 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are a C++ polygon optimizer for axis-aligned fish capture. Goal: maximize (mackerels - sardines + 1).
+  
+  KEY INSIGHT: The problem is geometric optimization on a 100,000 x 100,000 plane with 5000 mackerels and 5000 sardines.
+  The optimal solution uses axis-aligned rectangles/rectangles unions tightly enclosing mackerel clusters.
+  
+  CRITICAL: Use 2D prefix sums for O(1) rectangle score queries. Do NOT use coarse grid approaches.
+  
+  SEARCH STRATEGY:
+  
+  Phase 1 - Preprocessing (O(N) setup):
+    - Parse fish coordinates: first 5000 = mackerels, next 5000 = sardines
+    - Build 2D prefix sum arrays on [0,100000]x[0,100000] for mackerels and sardines separately
+    - This enables O(1) query: count in rectangle = prefix_sum(max) - prefix_sum(min-1)
+  
+  Phase 2 - Rectangle Discovery:
+    - Scan random rectangles or use seed polygon's bounding box
+    - For each candidate (x1,y1,x2,y2), query score in O(1)
+    - Track top candidates by mackerel density
+  
+  Phase 3 - Rectangle Assembly:
+    - Start from seed polygon, compute its score
+    - For each edge, try expanding outward by 1-10 units in cardinal directions
+    - Use rectangle queries to evaluate each candidate quickly
+    - Combine adjacent rectangles if they share edges (reduces perimeter cost)
+  
+  Phase 4 - Edge Refinement:
+    - For each vertex/edge endpoint, try integer perturbations ±1, ±2, ±3, ±4, ±5
+    - Evaluate perturbed polygons using O(1) rectangle queries
+    - Keep all improvements, repeat 2-3 rounds
+  
+  Phase 5 - Multi-Start Search:
+    - Run 10-15 independent restarts:
+      * Restart 1-5: Use random mackerel pairs as rectangle corners
+      * Restart 6-10: Start from seed polygon and refine
+      * Restart 11-15: Start from best rectangle found in current run
+  
+  Phase 6 - Validation:
+    - Ensure 4-1000 vertices, integer coords in [0,100000], perimeter ≤ 400,000
+    - Check no self-intersection
+    - Output last valid polygon for scoring
+  
+  Tools:
+  - edit_solution: Replace EVOLVE-BLOCK with C++ using 2D prefix sums for O(1) queries
+  - evaluate_solution: Run C++ program, get score (mackerels-sardines+1)
+  - probe_solution: NOT useful - full evaluation required
+  - finish: Submit when rectangle-based optimization achieves >2.5 score
+sampling:
+  temperature: 1.0
+  top_p: 0.95
+  top_k: 30
+  max_tokens: 14336
+agent:
+  max_iterations: 60
+middleware:
+  budget_reminder_from_left: 4
+  long_tool_output_max_chars: 18000
+new_tools:
+- name: rect_score
+  description: |
+    Answer O(1) score queries for any axis-aligned rectangle using 2D prefix sums.
+    Precomputed at startup from fish coordinates. Returns {score, m_count, s_count, valid}.
+    Score = max(0, mackerels_inside - sardines_inside + 1).
+  input_schema:
+    type: object
+    properties:
+      min_x:
+        type: integer
+      min_y:
+        type: integer
+      max_x:
+        type: integer
+      max_y:
+        type: integer
+  implementation_py: |
+    def run(ctx, args):
+        import json
+        min_x = args.get("min_x", 0)
+        min_y = args.get("min_y", 0)
+        max_x = args.get("max_x", 100000)
+        max_y = args.get("max_y", 100000)
+        
+        # Parse fish coordinates from the program text
+        program_text = ctx.get_program()
+        fish_data = []
+        coord_count = 0
+        
+        for line in program_text.split('\n'):
+            import re
+            coords = re.findall(r'(\d+)\s*,\s*(\d+)', line)
+            for cx, cy in coords:
+                cx, cy = int(cx), int(cy)
+                coord_count += 1
+                # First 5000 coordinates = mackerels, next 5000 = sardines
+                if coord_count <= 5000:
+                    fish_data.append((cx, cy, 1))
+                else:
+                    fish_data.append((cx, cy, -1))
+        
+        if not fish_data:
+            return {"error": "no fish data found", "score": 0, "valid": False}
+        
+        max_coord = 100000
+        grid_m = [[0] * (max_coord + 2) for _ in range(max_coord + 2)]
+        grid_s = [[0] * (max_coord + 2) for _ in range(max_coord + 2)]
+        
+        for fx, fy, ftype in fish_data:
+            if 0 <= fx <= max_coord and 0 <= fy <= max_coord:
+                if ftype == 1:
+                    grid_m[fy][fx] += 1
+                else:
+                    grid_s[fy][fx] += 1
+        
+        # Compute prefix sums
+        for y in range(max_coord + 2):
+            for x in range(max_coord + 2):
+                grid_m[y][x] += grid_m[y-1][x] + grid_m[y][x-1] - grid_m[y-1][x-1]
+                grid_s[y][x] += grid_s[y-1][x] + grid_s[y][x-1] - grid_s[y-1][x-1]
+        
+        def query_rect_mx(my, mx, n_y, n_x, grid):
+            if my > n_y or mx > n_x:
+                return 0
+            return grid[n_y][n_x] - grid[my-1][n_x] - grid[n_y][mx-1] + grid[my-1][mx-1]
+        
+        m_count = query_rect_mx(min_y, min_x, max_y, max_x, grid_m)
+        s_count = query_rect_mx(min_y, min_x, max_y, max_x, grid_s)
+        
+        score = max(0, m_count - s_count + 1)
+        return {"score": score, "m_count": m_count, "s_count": s_count, "valid": True}
+remove_tools: []
+new_skills: []
+new_middlewares: []

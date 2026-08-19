@@ -1,0 +1,148 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are optimizing for the Erdős minimum overlap constant C5.
+  
+  OBJECTIVE: Maximize combined_score = 0.38092303510845016 / c5_bound
+  by finding a step function h: [0,2] -> [0,1] with integral 1 that minimizes max_k integral h(x)(1-h(x+k))dx.
+  
+  CURRENT STATUS: The seed program's gradient-based optimizer is stuck at combined_score approximately 1.0.
+  You must find combined_score > 1.0 (c5_bound < 0.380923).
+  
+  STRATEGY: Abandon gradient descent. Try discrete construction approaches:
+  1. Fixed step functions with few breakpoints
+  2. Symmetric multi-bump constructions
+  3. Coarse discretization (50-100 intervals) then refine
+  4. L1-constrained direct optimization
+  
+  USE probe_solution to test many variants cheaply.
+  COMPLETE REWRITES ARE ESSENTIAL.
+skill_description: |
+  C5 bound optimization via discrete construction.
+  Abandon gradient descent; try explicit piecewise constant functions.
+  Use probe to rank variants cheaply. Target combined_score > 1.0.
+skill_body: |
+  # C5 Optimization: Discrete Construction
+  
+  ## Problem
+  Minimize: max_k integral_0^2 h(x)(1-h(x+k))dx
+  Constraints: h in [0,1], integral_0^2 h(x)dx = 1
+  
+  ## Why Gradient Descent Fails
+  The seed's Adam optimizer gets trapped in local optima on this non-convex problem.
+  
+  ## Discrete Construction Approaches
+  
+  1. **Single block**: h=1 on [0,1], 0 elsewhere
+  2. **Uniform**: h=0.5 everywhere  
+  3. **Two symmetric bumps**: centered at x=1
+  4. **Three equal blocks**: equal width regions
+  5. **Concentrated**: narrow peak at center
+  6. **Oscillatory**: alternating regions
+  
+  ## Workflow
+  1. Generate 5-10 candidates using different constructions
+  2. Call probe_solution on each (~30 probes)
+  3. Rank by probe score
+  4. Evaluate top 1-2 with evaluate_solution
+  5. If combined_score > 1.0, success!
+  
+  ## Constraints
+  - integral of h must equal exactly 1
+  - h must stay in [0,1]
+tool_descriptions:
+  edit_solution: |
+    Replace the entire EVOLVE-BLOCK with a complete implementation of ONE strategy.
+    Provide full working code defining Hyperparameters and ErdosOptimizer.
+    Do not edit incrementally.
+  evaluate_solution: |
+    Run and get combined_score. Budget ~30 evaluations.
+    Score > 1.0 is a record!
+  probe_solution: |
+    CHEAP evaluation on subsampled data (~10s vs minutes).
+    Budget 30 probes. Scores approximate but good for ranking.
+    Call probe_solution on every candidate before evaluate_solution.
+  finish: |
+    Submit when combined_score > 1.0 or budget exhausted.
+sampling:
+  temperature: 0.7
+  top_p: 0.95
+  top_k: 15
+  max_tokens: 12288
+agent:
+  max_iterations: 40
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 8000
+new_tools:
+  - name: construct_step
+    description: |
+      Generate diverse piecewise constant candidates for C5 optimization.
+      Returns: single block, uniform, two bumps, three blocks, center concentrated.
+    input_schema: {type: object, properties: {}}
+    implementation_py: |
+      def run(ctx, args):
+          import jax.numpy as jnp
+          N = ctx.hypers.num_intervals
+          dx = ctx.domain_width / N
+          candidates = []
+          h1 = jnp.zeros(N)
+          h1[:int(1.0/dx)] = 1.0
+          candidates.append(("single_block", h1))
+          h2 = jnp.ones(N) * 0.5
+          candidates.append(("uniform", h2))
+          h3 = jnp.zeros(N)
+          center = N // 2
+          bw = int(0.4 * 2.0 / dx)
+          h3[center-bw:center+bw] = 0.5
+          candidates.append(("two_bumps", h3))
+          h4 = jnp.zeros(N)
+          bs = N // 3
+          h4[:bs] = 1/3
+          h4[bs:2*bs] = 1/3
+          h4[2*bs:] = 1/3
+          candidates.append(("three_blocks", h4))
+          h5 = jnp.zeros(N)
+          bw = int(0.25 * 2.0 / dx)
+          h5[N//2 - bw:N//2 + bw] = 1.0 / (2*bw*dx)
+          candidates.append(("center_concentrated", h5))
+          return {"candidates": [(name, h) for name, h in candidates], "count": len(candidates)}
+new_skills:
+  - name: discrete-strategy
+    description: |
+      Abandon gradient descent for C5. Use explicit piecewise constant constructions.
+      Generate candidates, probe to rank, evaluate top few.
+    body: |
+      # Discrete Strategy for C5 Optimization
+      
+      ## Core Idea
+      Gradient-based methods fail on this non-convex problem.
+      Manually construct candidate step functions and evaluate.
+      
+      ## Candidate Library
+      1. Single block: h=1 on [0,1]
+      2. Uniform: h=0.5 everywhere
+      3. Two symmetric bumps at x=1
+      4. Three equal blocks
+      5. Concentrated narrow peak
+      6. Oscillatory patterns
+      
+      ## Workflow
+      1. Generate 5-10 candidates
+      2. Probe all candidates (~30 probes)
+      3. Evaluate top 1-2
+      4. Success if combined_score > 1.0
+      
+      ## Constraints
+      - integral(h) = 1 exactly
+      - h in [0,1]
+new_middlewares:
+  - name: probe_reminder
+    hook: before_tool
+    description: |
+      Remind agent to use probe_solution before evaluate_solution.
+      Prevents wasting evaluations on unpromising candidates.
+    implementation_py: |
+      def before_tool(hook_input):
+          if hook_input.get("tool_name") == "evaluate_solution":
+              return "Reminder: Probe first! Only evaluate top candidates. Probe budget: 30, Eval budget: ~30."
+          return None

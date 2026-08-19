@@ -1,0 +1,244 @@
+schema: h2spec/1.0
+system_prompt: |
+  Erdos minimum overlap problem (C5): Find h: [0,2]->[0,1] minimizing max_k integral h(x)(1-h(x+k))dx.
+  
+  CONSTRAINT: integral(h) = 1 exactly. h values in [0,1].
+  
+  Current best: C5 <= 0.38092303510845016 (combined_score = 1.0).
+  
+  GOAL: Find h achieving c5_bound < 0.38092303510845016 (combined_score > 1.0).
+  
+  STRATEGY:
+  
+  1. Generate structured step functions using step_function_generator with different patterns:
+     - bipartite: single threshold at various positions
+     - multi_peak: 2-4 narrow peaks with equal mass
+     - golomb: sparse marks at positions minimizing overlap
+  
+  2. Ensure integral(h) = 1 by normalizing the step heights
+  
+  3. Call probe_solution on generated candidates to filter c5_bound < 0.378
+  
+  4. Evaluate top candidates fully
+  
+  5. If no improvement, try varying the number of intervals (100-2000)
+  
+  KEY INSIGHT: The seed's random latent initialization doesn't produce good step functions.
+  Try discrete combinatorial structures instead.
+skill_description: |
+  Generate structured step functions (bipartite, multi-peak, Golomb) with integral=1.
+  Use probe to screen, evaluate best candidates.
+skill_body: |
+  # Erdos C5 - Structured Step Function Search
+  
+  ## Phase 1: Generate Structured Candidates
+  
+  1. CALL step_function_generator with pattern="bipartite"
+     - Creates h(x) = 1 for x < threshold, 0 otherwise
+     - Normalize so integral = 1 (threshold = 0.5)
+     - Try different threshold positions: 0.25, 0.3, 0.4, 0.45, 0.5, 0.55, 0.6, 0.7
+  
+  2. CALL step_function_generator with pattern="multi_peak"
+     - Creates 2-4 narrow peaks (width 0.05-0.1)
+     - Space peaks to minimize overlap
+     - Ensure equal mass per peak so total integral = 1
+  
+  3. CALL step_function_generator with pattern="golomb"
+     - Creates sparse marks at positions like [0, 0.4, 0.8, 1.2, 1.6]
+     - Optimized for minimum pairwise overlap
+  
+  ## Phase 2: Probe and Evaluate
+  
+  4. CALL probe_solution on each candidate
+     - Keep those with c5_bound < 0.378
+  
+  5. CALL evaluate_solution on best 2-3 candidates
+     - If combined_score > 1.0, finish
+  
+  ## Phase 3: Variations
+  
+  If no improvement:
+  - Try different num_intervals (100, 200, 500, 1000, 2000)
+  - Try different peak widths and numbers
+  - Try asymmetric patterns (more mass at one end)
+  
+  ## Key Rules
+  - Generate STRUCTURED step functions, not random latents
+  - Always normalize so integral(h) = 1
+  - Use probe to screen before full evaluation
+  - Try multiple patterns before giving up
+tool_descriptions:
+  edit_solution: |
+    Generate a structured step function by calling step_function_generator with a pattern.
+    For bipartite: set threshold to optimize overlap.
+    For multi_peak: specify number of peaks and their positions.
+    For golomb: specify mark positions.
+    
+    The generated h will automatically have integral=1 and values in [0,1].
+    
+    Then edit the EVOLVE-BLOCK to replace the seed's random initialization with this h.
+  evaluate_solution: |
+    Full evaluation. Returns combined_score = 0.38092303510845016 / c5_bound.
+    Higher is better. combined_score > 1.0 means c5_bound < 0.38092303510845016.
+  probe_solution: |
+    Fast approximate evaluation (500 intervals). Use to screen candidates.
+    Keep candidates with c5_bound < 0.378.
+  finish: |
+    Submit when combined_score > 1.0 (c5_bound < 0.38092303510845016).
+sampling:
+  temperature: 0.8
+  top_p: 0.95
+  top_k: 30
+  max_tokens: 12000
+agent:
+  max_iterations: 60
+middleware:
+  budget_reminder_from_left: 6
+  long_tool_output_max_chars: 8000
+new_tools:
+  - name: step_function_generator
+    description: |
+      Generate a structured step function with integral(h) = 1 and h in [0,1].
+      
+      Patterns:
+      - "bipartite": h(x) = 1 for x < threshold, 0 otherwise. threshold = 0.5 ensures integral=1 over [0,2].
+      - "multi_peak": k narrow peaks of equal width and height, positioned to minimize overlap. Total mass = 1.
+      - "golomb": sparse marks at positions [0, 0.4, 0.8, 1.2, 1.6] or similar Golomb ruler-like positions.
+      
+      The function returns h as a numpy array that can be edited into the EVOLVE-BLOCK.
+    input_schema:
+      type: object
+      properties:
+        pattern:
+          type: string
+          enum: ["bipartite", "multi_peak", "golomb"]
+        num_peaks:
+          type: integer
+          default: 3
+        threshold:
+          type: number
+          default: 0.5
+    implementation_py: |
+      def run(ctx, args):
+          import numpy as np
+          import json
+          
+          pattern = args.get("pattern", "bipartite")
+          threshold = args.get("threshold", 0.5)
+          num_peaks = args.get("num_peaks", 3)
+          
+          N = 800  # Use same num_intervals as seed
+          domain = 2.0
+          x = np.linspace(0, domain, N)
+          
+          if pattern == "bipartite":
+              # h(x) = 1 for x < threshold, 0 otherwise
+              h = np.zeros(N)
+              h[x < threshold] = 1.0
+              
+          elif pattern == "multi_peak":
+              # Create num_peaks narrow peaks with equal mass
+              peak_width = 0.08
+              peak_height = 1.0
+              h = np.zeros(N)
+              positions = np.linspace(0.2, 1.8, num_peaks)
+              for pos in positions:
+                  h[np.abs(x - pos) < peak_width/2] = peak_height
+              
+          elif pattern == "golomb":
+              # Golomb ruler-like: marks at [0, 0.4, 0.8, 1.2, 1.6]
+              marks = np.array([0.0, 0.4, 0.8, 1.2, 1.6])
+              peak_width = 0.06
+              h = np.zeros(N)
+              for mark in marks:
+                  h[np.abs(x - mark) < peak_width/2] = 1.0
+          
+          # Normalize to ensure integral = 1
+          # integral(h) = sum(h) * dx = 1
+          dx = domain / N
+          current_integral = np.sum(h) * dx
+          if current_integral > 0:
+              h = h / current_integral
+          
+          # Ensure h in [0, 1]
+          h = np.clip(h, 0, 1)
+          
+          # Pad to match seed program's expectations (pad with 0 at the end)
+          h_padded = np.pad(h, (0, N))
+          
+          return {
+              "pattern": pattern,
+              "h_values": h.tolist(),
+              "num_intervals": N,
+              "integral_check": float(np.sum(h) * dx),
+              "note": f"Generated {pattern} step function with integral={np.sum(h) * dx:.6f}"
+          }
+new_skills:
+  - name: structured-step-functions
+    description: |
+      Generate structured step functions (bipartite, multi-peak, Golomb) instead of random latents.
+      Normalize to integral=1. Use probe to screen.
+    body: |
+      # Structured Step Function Strategy for Erdos C5
+      
+      ## Why Random Latents Fail
+      
+      The seed program uses random latent vectors passed through sigmoid.
+      This produces smooth, non-structured functions that don't minimize overlap.
+      
+      ## Better Approach: Combinatorial Step Functions
+      
+      Step functions with specific structures may achieve lower C5:
+      
+      ### 1. Bipartite Functions
+      h(x) = 1 for x < 0.5, 0 otherwise
+      - Simple, symmetric
+      - Integral = 1 by construction
+      - May not be optimal but good baseline
+      
+      ### 2. Multi-Peak Functions
+      Create 2-4 narrow peaks positioned to minimize overlap
+      - Equal mass per peak ensures integral = 1
+      - Peak positions matter: space them to reduce h(x)(1-h(x+k))
+      
+      ### 3. Golomb Ruler-like
+      Sparse marks at positions like [0, 0.4, 0.8, 1.2, 1.6]
+      - These positions are known to minimize pairwise distances
+      - May reduce overlap for small k values
+      
+      ## Workflow
+      
+      1. Generate candidates with step_function_generator for each pattern
+      2. Call probe_solution on each
+      3. Keep candidates with c5_bound < 0.378
+      4. Evaluate best candidates fully
+      5. If no improvement, vary parameters (num_peaks, peak_width, threshold)
+      
+      ## Key Insight
+      
+      Combinatorial structures may outperform random initialization for this problem.
+      Focus on step functions, not smooth sigmoid outputs.
+new_middlewares:
+  - name: structure_reminder
+    hook: before_model
+    description: |
+      Remind solver to use structured step functions instead of random patterns.
+    implementation_py: |
+      def before_model(hook_input):
+          history = hook_input.get("history", [])
+          
+          if not history:
+              return "FIRST: Call step_function_generator with pattern='bipartite' to create a simple threshold function. Don't start with random latents."
+          
+          # Check if we've only tried random/init patterns
+          has_structured = any("step_function_generator" in str(turn.get("tools_used", [])) for turn in history)
+          
+          if not has_structured:
+              return "Reminder: You haven't called step_function_generator yet. Try generating structured step functions (bipartite, multi_peak, or golomb) before tuning hyperparameters."
+          
+          # If we've only called it once, encourage trying more patterns
+          count = sum(1 for turn in history if "step_function_generator" in str(turn.get("tools_used", [])))
+          if count == 1:
+              return "You've called step_function_generator once. Try other patterns: 'multi_peak' with 2-4 peaks, or 'golomb' for sparse marks."
+          
+          return None

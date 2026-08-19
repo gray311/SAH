@@ -1,0 +1,114 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are solving the Erdos minimum overlap problem: minimize max_k integral h(x)(1-h(x+k)) dx
+  for a step function h: [0,2] -> [0,1] with integral(h)=1.
+  
+  Current best bound: C5 <= 0.38092303510845016
+  
+  KEY INSIGHT: The seed program already has 12 diverse initialization patterns and a multi-restart optimizer.
+  The bottleneck is NOT initialization diversity - it's HYPERPARAMETER TUNING.
+  
+  STRATEGY: Systematically search for better optimizer hyperparameters using probes to screen many candidates.
+  
+  Steps:
+  
+  1. EDIT the seed to try DIFFERENT combinations of:
+     - penalty_strength: try 10, 20, 30, 40, 50, 61, 80, 100 (current is 61.0)
+     - base_learning_rate: try 0.001, 0.003, 0.005, 0.007, 0.01 (current is 0.007)
+     - num_intervals: try 200, 400, 600, 800, 1200 (current is 800) - more intervals = finer discretization
+     - num_steps: try 10000, 20000, 50000, 100000 (current is 59000) - more steps = better convergence
+     - num_restarts: keep at 3 (it's a good diversity source)
+  
+  2. For each hyperparameter combination, EDIT the seed to ONLY change those hyperparameters
+  
+  3. Use probe_solution to quickly check c5_bound (full training is wasteful for screening)
+  
+  4. Call evaluate_solution ONLY on the top 3 candidates from probe screening that have c5_bound < 0.375
+  
+  5. Focus on FINE-TUNING the optimizer, not changing the search strategy
+  
+  6. Key insight: The FFT evaluator is FAST (probes run in seconds). Use all 30 probes to screen 10+ hyperparameter combinations before spending any full evaluations.
+skill_description: Systematically search for better optimizer hyperparameters using probe screening.
+skill_body: |
+  # Hyperparameter Search Strategy for Erdos Optimizer
+  
+  ## Problem
+  The seed optimizer already has good initialization diversity (12 patterns) and multi-restart strategy.
+  Improvements come from better optimizer settings, not changing the search strategy.
+  
+  ## Workflow
+  
+  ### Phase 1: Probe-Based Hyperparameter Screening
+  
+  Create EDIT versions of the seed with different hyperparameters:
+  
+  - **penalty_strength**: Critical! Try values from 5 to 200
+    - Too low (5-10): constraint violation
+    - Too high (100+): slow convergence, over-penalized
+    - Optimal likely in 20-80 range
+  
+  - **num_intervals**: Finer discretization = more accurate c5_bound
+    - Try 200, 400, 600, 800, 1200, 1600
+    - More intervals = better but slower
+  
+  - **num_steps**: More optimization steps = better convergence
+    - Try 10000, 20000, 50000, 100000, 200000
+    - Diminishing returns after 100k steps
+  
+  - **base_learning_rate**: Try 0.001, 0.003, 0.005, 0.007, 0.01, 0.02
+  
+  ### Phase 2: Probe Screening
+  
+  For each hyperparameter combination:
+  1. EDIT the seed to only change those hyperparameters
+  2. Call probe_solution immediately (don't run full training)
+  3. Check: c5_bound from probe < 0.375
+  
+  ### Phase 3: Full Evaluation
+  
+  Call evaluate_solution on top 3-5 candidates from Phase 2.
+  
+  ## Success Criteria
+  - combined_score > 1.0 (c5_bound < 0.380923)
+  - Most promising: c5_bound < 0.35
+  
+  ## Tip
+  The penalty_strength is the most important hyperparameter. Start by trying values 20, 40, 61, 80, 100 with num_steps=59000 and num_intervals=800.
+tool_descriptions:
+  edit_solution: 'Modify the EVOLVE-BLOCK to change hyperparameters (num_intervals, base_learning_rate, num_steps, penalty_strength, num_restarts).
+    Keep the core optimizer logic intact - only change the Hyperparameters class values.
+    Example: change penalty_strength from 61.0 to 40.0 by editing just that line.'
+  evaluate_solution: Run full evaluation on a candidate program, returns combined_score.
+  probe_solution: 'Quick approximate evaluation (500 intervals, uses 1 optimizer step or 10 steps for speed).
+    Returns estimate of c5_bound and constraint satisfaction.
+    Use this to screen MANY hyperparameter combinations before full evaluation.'
+  finish: Submit when combined_score > 1.0.
+sampling:
+  temperature: 1.0
+  top_p: 0.9
+  top_k: 15
+  max_tokens: 12000
+agent:
+  max_iterations: 40
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 8000
+new_tools: []
+new_skills: []
+new_middlewares:
+  - name: hyperparam_reminder
+    hook: before_model
+    description: Remind agent to use probes for hyperparameter screening
+    implementation_py: |
+      def before_model(hook_input):
+          state = hook_input.get("state", {})
+          probes_left = state.get("probes_left", 0)
+          evals_left = state.get("evals_left", 0)
+          if probes_left > 8 and evals_left > 1:
+              return (
+                  "You have many probes remaining. Use them to screen hyperparameter combinations.\n"
+                  "Create EDIT versions with different penalty_strength, num_intervals, num_steps.\n"
+                  "Call probe_solution on each to find c5_bound < 0.375 before spending full evaluations.\n"
+                  "Only call evaluate_solution on the top 3-5 probe-passing candidates.\n"
+              )
+          return None

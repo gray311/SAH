@@ -1,0 +1,188 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are an expert algorithm engineer solving the "Ahc039: Efficient Fishing" NP-hard problem.
+  
+  TASK: Construct an axis-aligned polygon (vertices on integer grid) that maximizes (mackerels_inside - sardines_inside).
+  Scoring: max(0, a - b + 1) where a=mackerels, b=sardines. Polygon must be simple, edges parallel to axes, perimeter <= 4e5, vertices <= 1000.
+  
+  YOUR STRATEGY (follow exactly):
+  1. READ INPUT: Get fish coordinates. Separate mackerels (type 1) and sardines (type -1).
+  2. BUILD KD-TREE: Organize ALL fish by x-coordinate, then y-coordinate for efficient rectangular queries.
+  3. COMPUTE DENSITY MAP: Divide the 0-100000 grid into 50x50 cells (each 2000x2000). For each cell, compute net score = (#mackerel - #sardine).
+  4. FIND HIGH-VALUE REGIONS: Identify cells with positive net score. These are "profit zones".
+  5. CONSTRUCT POLYGON: Build an axis-aligned polygon that UNIONs the profit zones. Start with the largest connected profit zone, expand to adjacent profitable cells.
+  6. BOUNDED SEARCH: Within the 2s time limit, try multiple polygon constructions (rectangles, L-shapes, unions of rectangles) and pick the best.
+  7. VALIDATE: Ensure polygon is simple (no self-intersection) and within constraints.
+  
+  TIME LIMIT: 2.0s with 0.1s safety margin. Your entire search must complete within 1.9s.
+  Use KD-tree for O(log N) rectangular queries. Pre-compute density once, then search polygon shapes.
+  
+  OUTPUT FORMAT: Print number of vertices, then each vertex (x y) on separate lines.
+skill_description: |
+  Solve the "Efficient Fishing" task by constructing an axis-aligned polygon that maximizes (mackerels - sardines) inside it. Use KD-tree for spatial queries and density-based region selection.
+skill_body: |
+  # Ahc039: Efficient Fishing Solver
+
+  ## Overview
+  You have N mackerels (type 1) and N sardines (type -1). Build an axis-aligned polygon maximizing (mackerels_inside - sardines_inside).
+
+  ## Step-by-step algorithm
+  1. PARSE INPUT: Read N, then 2N lines of (x,y). First N are mackerels, next N are sardines.
+  2. BUILD KD-TREE: Create a KD-tree of ALL fish positions for O(log N) rectangular queries.
+  3. DENSITY GRID: Create a 2D grid (e.g., 200x200 or 50x50 cells). For each cell, query the KD-tree for fish inside, compute net = mackerel_count - sardine_count.
+  4. FIND PROFIT REGIONS: Identify grid cells with positive net score. Group adjacent profitable cells into connected components.
+  5. CONSTRUCT POLYGON: For each connected profit component, construct a minimal bounding polygon (rectangle or union of rectangles). Merge overlapping polygons.
+  6. OPTIMIZE SHAPE: Try variations: expand to nearby profitable cells, try different rectangle unions, ensure no self-intersection.
+  7. VALIDATE CONSTRAINTS: Vertex count <= 1000, perimeter <= 400000, integer coordinates in [0,100000], no self-intersection.
+  8. OUTPUT: Print vertex count, then each vertex (x y).
+
+  ## KD-tree usage
+  - Build tree on x-coordinate, alternate to y for balancing.
+  - Query rectangle [min_x, max_x] x [min_y, max_y] in O(log N + k) where k = fish inside.
+  - Use for rapid density computation.
+
+  ## Polygon construction tips
+  - Start with the largest connected profit component.
+  - For a component, compute bounding box [x_min, x_max] x [y_min, y_max].
+  - Optionally extend to adjacent profitable cells.
+  - Ensure vertices are distinct and polygon is simple.
+  - Edge length sum must not exceed 400000.
+
+  ## Time management
+  - You have ~1.9s before timeout.
+  - Build KD-tree once (~0.2s).
+  - Grid density computation (~0.3s for 200x200 grid).
+  - Polygon construction and validation (~0.4s).
+  - Leave ~0.9s for optimization/search variations.
+
+  ## Common pitfalls
+  - Self-intersecting polygon: ensure vertices form a simple cycle.
+  - Perimeter too large: use minimal bounding boxes.
+  - Missing profitable cells: scan all grid cells, not just those with fish.
+  - Coordinate range: all vertices must be in [0, 100000].
+  - Vertex count: keep polygon simple, merge collinear vertices.
+tool_descriptions:
+  edit_solution: 'Change the EVOLVE-BLOCK C++ code. Use targeted SEARCH/REPLACE diffs for small changes, or full rewrites for major algorithm changes. Preserve the fixed entry point and imports outside the EVOLVE-BLOCK.'
+  evaluate_solution: 'Run the C++ program and return combined_score (higher is better), validity, errors, best score so far, and evaluations remaining. Budget is 30 evaluations.'
+  probe_solution: 'Run the CURRENT program on a 2000-row subsample. Fast (no budget cost) but approximate score. Use to rank variants before full evaluation.'
+  finish: 'End the session when budget exhausted or no improvement possible. Best program auto-submitted.'
+sampling:
+  temperature: 0.5
+  top_p: 0.85
+  top_k: 15
+  max_tokens: 12288
+agent:
+  max_iterations: 50
+middleware:
+  budget_reminder_from_left: 2
+  long_tool_output_max_chars: 12000
+new_tools:
+  - name: fish_density_map
+    description: |
+      Compute fish density for a rectangular region and return net score. Queries KD-tree to count mackerels (type 1) and sardines (type -1) inside [min_x, max_x] x [min_y, max_y]. Returns dict with mackerel_count, sardine_count, net_score (mackerel_count - sardine_count).
+    input_schema:
+      type: object
+      properties:
+        min_x:
+          type: integer
+        max_x:
+          type: integer
+        min_y:
+          type: integer
+        max_y:
+          type: integer
+        grid_cell_size:
+          type: integer
+          default: 2000
+    implementation_py: |
+      def run(ctx, args):
+          min_x = args.get('min_x', 0)
+          max_x = args.get('max_x', 100000)
+          min_y = args.get('min_y', 0)
+          max_y = args.get('max_y', 100000)
+          cell_size = args.get('grid_cell_size', 2000)
+          
+          # Query for all fish in the rectangle using KD-tree
+          indices = []
+          query_kdtree_rectangle(fish_kdtree_root, min_x, max_x, min_y, max_y, indices)
+          
+          mackerels = 0
+          sardines = 0
+          for idx in indices:
+              fish = all_fish_structs[idx]
+              if fish.type == 1:
+                  mackerels += 1
+              elif fish.type == -1:
+                  sardines += 1
+          
+          return {
+              'min_x': min_x, 'max_x': max_x,
+              'min_y': min_y, 'max_y': max_y,
+              'mackerel_count': mackerels,
+              'sardine_count': sardines,
+              'net_score': mackerels - sardines
+          }
+new_skills:
+  - name: efficient-fishing-playbook
+    description: |
+      Playbook for Ahc039: Build KD-tree, compute density grid, find profit regions, construct polygon. Use density-based search instead of random mutations.
+    body: |
+      # Efficient Fishing Playbook
+
+      ## Goal
+      Maximize (mackerels - sardines) inside an axis-aligned polygon.
+
+      ## Step 1: Input Analysis
+      - Read N, then 2N coordinates.
+      - First N lines: mackerels (type 1).
+      - Next N lines: sardines (type -1).
+
+      ## Step 2: Build Spatial Index
+      - Construct a KD-tree on all fish positions.
+      - Use x-axis for first split, y-axis for second, alternating.
+      - This enables O(log N) rectangle queries.
+
+      ## Step 3: Density Grid Computation
+      - Divide the coordinate space into grid cells (e.g., 200x200, each 2000x2000 pixels).
+      - For each cell [x0,x1]x[y0,y1]:
+        - Query KD-tree for fish inside the rectangle.
+        - Count mackerels and sardines.
+        - Compute net_score = mackerel_count - sardine_count.
+      - Store results in a 2D grid.
+
+      ## Step 4: Find Profit Regions
+      - Identify all cells with net_score > 0.
+      - Use flood-fill or connected components to group adjacent profitable cells.
+      - Larger connected components are better candidates.
+
+      ## Step 5: Polygon Construction
+      - For each connected profit component:
+        - Compute bounding box [x_min, x_max] x [y_min, y_max].
+        - Optionally extend to include adjacent profitable cells.
+        - Create a polygon from the bounding box vertices.
+      - Merge overlapping polygons by taking union of regions.
+
+      ## Step 6: Optimization
+      - Try multiple constructions: single rectangle, union of rectangles, L-shapes.
+      - Evaluate each candidate (can use probe_solution for ranking).
+      - Select the polygon with highest estimated score.
+
+      ## Step 7: Validation
+      - Ensure vertex count <= 1000.
+      - Ensure perimeter <= 400,000.
+      - Ensure no self-intersections (simple polygon).
+      - Ensure all vertices are integers in [0, 100000].
+      - Ensure polygon edges are axis-aligned.
+
+      ## Step 8: Output
+      - Print number of vertices.
+      - Print each vertex (x y) on a separate line.
+      - Vertices can be in clockwise or counterclockwise order.
+new_middlewares:
+  - name: density_reminder
+    hook: before_model
+    description: |
+      Remind the agent to use density-based search rather than random mutations. Encourage KD-tree usage and grid-based exploration.
+    implementation_py: |
+      def before_model(hook_input):
+          return "Remember: Use KD-tree for O(log N) spatial queries. Build a density grid (e.g., 200x200 cells) to find profitable regions (net_score > 0). Construct polygon from connected profit components. Do NOT use random mutations - use density-guided search."

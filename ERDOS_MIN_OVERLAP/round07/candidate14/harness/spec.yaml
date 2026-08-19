@@ -1,0 +1,174 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are an expert in mathematical optimization for the Erdős minimum overlap problem.
+
+  **OBJECTIVE**: Maximize combined_score = 0.38092303510845016 / c5_bound
+
+  You MUST find c5_bound < 0.38092303510845016 to beat the current record.
+
+  **CONSTRAINTS**: h(x) ∈ [0,1], ∫₀² h(x) dx = 1
+
+  **KEY INSIGHT**: The seed's Adam optimizer gets trapped in local optima. You need COMPLETE REWRITES with fundamentally different construction strategies:
+
+  1. **Piecewise constant with few breakpoints**: Try h=1 on [0,1], h=0 elsewhere (but adjust to satisfy ∫h=1)
+  2. **Symmetric constructions**: Double-humped, uniform with gaps
+  3. **Coarse discretization first**: Try num_intervals=50-100, find patterns, then refine to 800
+
+  **EDITING STRATEGY**: 
+  - COMPLETE REWRITES are essential. Don't patch small parts.
+  - When rewriting Hyperparameters, change num_intervals AND potentially base_learning_rate
+  - Consider replacing the entire _get_best_initialization with a simple deterministic construction
+  - Use the probe_solution tool to rank variants before full evaluation
+
+  **BUDGET**: ~30 evaluations. Each counts. Don't waste on broken code.
+new_tools:
+  - name: generate_candidate
+    description: |
+      Generate a candidate step function h and compute its c5_bound directly.
+      Input: type of construction ('single_step', 'double_step', 'uniform_gap', 'symmetric_triple').
+      Returns a dict with 'h_values' (array of 800 floats in [0,1]), 'integral' (sum), 'c5_bound' (float).
+      This bypasses the optimizer entirely for quick candidate testing.
+    input_schema: 
+      type: object
+      properties:
+        construction_type:
+          type: string
+          enum: ['single_step', 'double_step', 'uniform_gap', 'symmetric_triple', 'concentrated']
+        num_intervals:
+          type: integer
+          default: 800
+    implementation_py: |
+      def run(ctx, args):
+          import numpy as np
+          N = args.get('num_intervals', 800)
+          x = np.linspace(0, 2, N+1)[:-1]
+          dt = 2.0 / N
+          h = np.zeros(N)
+          c5 = 0.0
+          
+          ct = str(args.get('construction_type', 'single_step')).lower()
+          
+          if ct == 'single_step':
+              # h=1 on [0,0.5], but we need integral=1, so scale
+              h[:N//2] = 1.0
+              integral = h.sum() * dt
+              if integral > 0:
+                  h = h / integral
+              
+              # Compute c5 bound via FFT
+              h_padded = np.pad(h, (0, N))
+              corr = np.fft.ifft(np.fft.fft(h_padded) * np.fft.ifft(np.fft.fft(h_padded)).conj()).real
+              c5 = np.max(corr) * dt
+              
+          elif ct == 'double_step':
+              # Two equal peaks
+              h[:N//4] = 0.5
+              h[3*N//4:] = 0.5
+              integral = h.sum() * dt
+              if integral > 0:
+                  h = h / integral
+              h_padded = np.pad(h, (0, N))
+              corr = np.fft.ifft(np.fft.fft(h_padded) * np.fft.ifft(np.fft.fft(h_padded)).conj()).real
+              c5 = np.max(corr) * dt
+              
+          elif ct == 'uniform_gap':
+              # Uniform with a gap
+              h[:N//3] = 1.0
+              integral = h.sum() * dt
+              if integral > 0:
+                  h = h / integral
+              h_padded = np.pad(h, (0, N))
+              corr = np.fft.ifft(np.fft.fft(h_padded) * np.fft.ifft(np.fft.fft(h_padded)).conj()).real
+              c5 = np.max(corr) * dt
+              
+          elif ct == 'symmetric_triple':
+              # Three equal symmetric peaks
+              h[:N//6] = 1.0
+              h[N//2-2*N//6:] = 1.0
+              h[3*N//6:N//2+2*N//6] = 1.0
+              integral = h.sum() * dt
+              if integral > 0:
+                  h = h / integral
+              h_padded = np.pad(h, (0, N))
+              corr = np.fft.ifft(np.fft.fft(h_padded) * np.fft.ifft(np.fft.fft(h_padded)).conj()).real
+              c5 = np.max(corr) * dt
+              
+          elif ct == 'concentrated':
+              # Very concentrated mass
+              h[:N//10] = 1.0
+              integral = h.sum() * dt
+              if integral > 0:
+                  h = h / integral
+              h_padded = np.pad(h, (0, N))
+              corr = np.fft.ifft(np.fft.fft(h_padded) * np.fft.ifft(np.fft.fft(h_padded)).conj()).real
+              c5 = np.max(corr) * dt
+          
+          combined = {'construction': ct, 'N': N, 'h_values': h, 'integral': float(h.sum()*dt), 'c5_bound': float(c5)}
+          return combined
+sampling:
+  temperature: 0.3
+  top_p: 0.95
+  top_k: 10
+  max_tokens: 8192
+agent:
+  max_iterations: 80
+middleware:
+  budget_reminder_from_left: 3
+  long_tool_output_max_chars: 8000
+remove_tools: []
+new_skills:
+  - name: constructive-strategies
+    description: |
+      Concrete mathematical construction methods for the Erdős C₅ problem.
+      Use these to generate starting candidates instead of relying solely on gradient descent.
+    body: |
+      # Constructive Strategies for Erdős C₅
+
+      Goal: Find h:[0,2]→[0,1] with ∫h=1 that minimizes max_k ∫h(x)(1-h(x+k))dx
+
+      ## Strategy 1: Single Peak with Scaling
+
+      - Set h=1 on [0, L], h=0 elsewhere
+      - Choose L=1 to get ∫h=1 automatically
+      - This gives a baseline, but may not be optimal
+
+      ## Strategy 2: Two Equal Peaks
+
+      - Set h=0.5 on [0, 0.5] and [1.5, 2], h=0 elsewhere
+      - This spreads mass and might reduce overlap
+
+      ## Strategy 3: Uniform with Strategic Gap
+
+      - Set h=1 on [0, 0.5], h=0 on [0.5, 1.5], then something on [1.5, 2]
+      - The gap might reduce correlations at certain lags
+
+      ## Strategy 4: Triple Symmetric Peaks
+
+      - Three equal peaks spread across [0,2]
+      - Symmetry might help reduce the maximum overlap
+
+      ## Strategy 5: Concentrated Mass
+
+      - Very concentrated h might have higher self-overlap
+      - Try concentrated h on one region to understand the tradeoff
+
+      ## Implementation Pattern
+
+      When editing EVOLVE-BLOCK:
+      1. Try num_intervals=50,100,200,500,800 sequentially
+      2. Use generate_candidate to test constructions quickly
+      3. For promising candidates, convert to a fixed initialization
+      4. Only then run the Adam optimizer to fine-tune
+
+      ## Key Metric
+
+      Track: combined_score = 0.38092303510845016 / c5_bound
+      Target: combined_score > 1.0 (i.e., c5_bound < 0.38092303510845016)
+new_middlewares:
+  - name: probe_reminder
+    hook: before_tool
+    description: |
+      Remind the solver to use generate_candidate and probe before full evaluation.
+    implementation_py: |
+      def before_tool(hook_input):
+          return "Before evaluating, try generate_candidate with at least 3 different construction types to quickly filter promising candidates. Use probe_solution to rank variants if available."

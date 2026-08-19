@@ -1,0 +1,316 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are a C++ polygon optimizer for axis-aligned fish capture. Goal: maximize (mackerels - sardines + 1).
+  
+  CRITICAL STRATEGY: Direct cluster-wrapping with sardine avoidance.
+  
+  SEARCH METHOD (encodes in EVOLVE-BLOCK C++ code):
+  
+  1. FISH POSITION ANALYSIS:
+     - Parse input to get all mackerel and sardine coordinates
+     - Build spatial hash map for O(1) point lookups
+     - For each mackerel, check if nearby cells contain sardines
+  
+  2. CLUSTER IDENTIFICATION:
+     - Use coordinate-based clustering: group mackerels by proximity (e.g., same x or y coordinate ±100)
+     - For each cluster, compute: count_m, count_s, bounding_box
+     - Prioritize clusters with high mackerel density and low sardine density
+  
+  3. RECTANGLE CONSTRUCTION:
+     - For each cluster, create an axis-aligned rectangle covering all mackerels in the cluster
+     - Ensure rectangle has 4 vertices, integer coordinates, no self-intersection
+     - Expand rectangle slightly if it captures more mackerels without adding sardines
+  
+  4. UNION BUILDING:
+     - Combine top 3-5 clusters into a single polygon by taking their union
+     - The union of axis-aligned rectangles can form a complex polygon
+     - Output vertices in order (clockwise or counterclockwise)
+  
+  5. ITERATIVE IMPROVEMENT:
+     - For each cluster rectangle, try:
+       * Expanding x-range by ±50, ±100 units
+       * Expanding y-range by ±50, ±100 units
+       * Keep changes that improve (mackerels - sardines)
+     - Repeat 2-3 rounds of refinement
+  
+  6. VALIDATION:
+     - Ensure polygon has 4-1000 vertices
+     - Ensure perimeter ≤ 400,000
+     - Ensure all coordinates in [0, 100000]
+     - No self-intersection (axis-aligned rectangles don't self-intersect if properly constructed)
+  
+  Tools:
+  - edit_solution: Replace EVOLVE-BLOCK with complete C++ implementation
+  - evaluate_solution: Run C++ program, get score
+  - finish: Submit when you have a working cluster-wrapping solution
+  
+  KEY DIFFERENCE from seed: Direct cluster identification and rectangle wrapping, avoiding grid-based corridor expansion that fails to improve.
+skill_description: Direct cluster-wrapping. Identify mackerel-dense clusters by coordinate proximity, build rectangles around clusters avoiding sardines, combine top clusters, iterate with ±50..100 expansions.
+skill_body: |
+  # Direct Cluster-Wrapping Strategy
+  
+  ## Phase 1: Fish Position Analysis
+  - Parse input to extract all mackerel and sardine coordinates
+  - Build spatial hash map: map (x, y) to fish type for O(1) lookups
+  - Organize fish by x-coordinate and y-coordinate for clustering
+  
+  ## Phase 2: Cluster Identification
+  - Cluster mackerels by proximity:
+    * Group mackerels with same x-coordinate (within ±100)
+    * Group mackerels with same y-coordinate (within ±100)
+    * Merge overlapping groups
+  - For each cluster:
+    * Count mackerels (m_count)
+    * Count sardines inside cluster bounding box (s_count)
+    * Compute score = m_count - s_count
+    * Track bounding box: (min_x, min_y, max_x, max_y)
+  - Select top clusters by score (prioritize clusters with m_count > s_count)
+  
+  ## Phase 3: Rectangle Construction
+  - For each top cluster:
+    * Create axis-aligned rectangle covering all mackerels in cluster
+    * Rectangle vertices: (min_x, min_y), (max_x, min_y), (max_x, max_y), (min_x, max_y)
+    * Expand rectangle if it captures more mackerels without adding sardines:
+      * Try expanding each side by ±50, ±100 units
+      * Keep expansion if (new_mackerels - new_sardines) > 0
+  - Ensure rectangle is valid: 4 vertices, integer coordinates, within bounds
+  
+  ## Phase 4: Cluster Union
+  - Combine top 3-5 rectangles into a single polygon:
+    * Use union operation: if rectangles overlap, merge them
+    * Output vertices in order (clockwise or counterclockwise)
+    * Ensure total vertices ≤ 1000 and perimeter ≤ 400,000
+  
+  ## Phase 5: Iterative Improvement
+  - For each rectangle:
+    * Round 1: Try expanding each side by ±50 units
+    * Round 2: Try expanding each side by ±100 units
+    * Round 3: Fine-tune with ±25 units
+    * Keep changes that improve score
+  - Output best rectangle/union
+  
+  ## C++ Implementation Notes
+  - Use spatial hash map for O(1) point queries
+  - Cluster mackerels by x and y coordinates
+  - For each cluster, compute bounding box and sardine count
+  - Expand rectangles iteratively
+  - Total time per evaluation: < 2.0s
+  - Output valid polygon format: m then vertices
+tool_descriptions:
+  edit_solution: 'Replace EVOLVE-BLOCK with C++ implementing direct cluster-wrapping:
+  
+  1. Parse fish positions into spatial hash map
+  
+  2. Cluster mackerels by x and y proximity (±100)
+  
+  3. For each cluster, compute bounding box and sardine count
+  
+  4. Create rectangles for top clusters, expand with ±50..100
+  
+  5. Union top rectangles, validate output
+  
+  6. Output best polygon, <2.0s execution.'
+  evaluate_solution: Run C++ program. Returns score (mackerels-sardines+1), validity, and remaining evaluations (budget=30). Each run has ~2.0s search window.
+  probe_solution: NOT useful - full evaluation needed for accurate scoring.
+  finish: End when you have submitted a working cluster-wrapping solution with iterative rectangle expansion.
+sampling:
+  temperature: 1.2
+  top_p: 0.95
+  top_k: 25
+  max_tokens: 14336
+agent:
+  max_iterations: 45
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 15000
+new_tools:
+- name: find_cluster
+  description: 'Find a mackerel cluster by grouping fish with similar coordinates, compute its bounding box and sardine count.'
+  input_schema:
+    type: object
+    properties:
+      cluster_type:
+        type: string
+        enum:
+        - x_based
+        - y_based
+      width:
+        type: integer
+        default: 100
+      height:
+        type: integer
+        default: 100
+  implementation_py: |
+    def run(ctx, args):
+        cluster_type = args.get("cluster_type", "x_based")
+        width = args.get("width", 100)
+        height = args.get("height", 100)
+        
+        # Parse program to extract fish positions
+        program_text = ctx.get_program()
+        mackerels = []
+        sardines = set()
+        
+        for line in program_text.split('\n'):
+            line = line.strip()
+            if line.startswith('mackerels['):
+                try:
+                    content = line.replace('mackerels[', '').replace(']', '').replace('"', '')
+                    coords = [int(x.strip()) for x in content.split(',')]
+                    if len(coords) >= 2:
+                        mackerels.append((coords[0], coords[1]))
+                except:
+                    continue
+            elif line.startswith('sardines['):
+                try:
+                    content = line.replace('sardines[', '').replace(']', '').replace('"', '')
+                    coords = [int(x.strip()) for x in content.split(',')]
+                    if len(coords) >= 2:
+                        sardines.add((coords[0], coords[1]))
+                except:
+                    continue
+        
+        if not mackerels:
+            return {"error": "no mackerels found", "cluster": None}
+        
+        # Find cluster
+        best_cluster = None
+        best_score = float("-inf")
+        
+        if cluster_type == "x_based":
+            # Group by x-coordinate
+            x_groups = {}
+            for mx, my in mackerels:
+                x_key = mx // width * width
+                if x_key not in x_groups:
+                    x_groups[x_key] = {"x_min": mx, "x_max": mx, "y_min": float("inf"), "y_max": float("-inf")}
+                x_groups[x_key]["x_min"] = min(x_groups[x_key]["x_min"], mx)
+                x_groups[x_key]["x_max"] = max(x_groups[x_key]["x_max"], mx)
+                x_groups[x_key]["y_min"] = min(x_groups[x_key]["y_min"], my)
+                x_groups[x_key]["y_max"] = max(x_groups[x_key]["y_max"], my)
+                x_groups[x_key]["count"] = x_groups[x_key].get("count", 0) + 1
+            
+            for x_key, group in x_groups.items():
+                s_count = 0
+                for mx in range(group["x_min"], group["x_max"] + 1, width):
+                    for my in range(group["y_min"], group["y_max"] + 1, height):
+                        if (mx, my) in sardines:
+                            s_count += 1
+                
+                score = group["count"] - s_count
+                if score > best_score:
+                    best_score = score
+                    best_cluster = {
+                        "x_min": group["x_min"], "x_max": group["x_max"],
+                        "y_min": group["y_min"], "y_max": group["y_max"],
+                        "count": group["count"], "sardines": s_count
+                    }
+        else:
+            # Group by y-coordinate
+            y_groups = {}
+            for mx, my in mackerels:
+                y_key = my // height * height
+                if y_key not in y_groups:
+                    y_groups[y_key] = {"y_min": my, "y_max": my, "x_min": float("inf"), "x_max": float("-inf")}
+                y_groups[y_key]["y_min"] = min(y_groups[y_key]["y_min"], my)
+                y_groups[y_key]["y_max"] = max(y_groups[y_key]["y_max"], my)
+                y_groups[y_key]["x_min"] = min(y_groups[y_key]["x_min"], mx)
+                y_groups[y_key]["x_max"] = max(y_groups[y_key]["x_max"], mx)
+                y_groups[y_key]["count"] = y_groups[y_key].get("count", 0) + 1
+            
+            for y_key, group in y_groups.items():
+                s_count = 0
+                for mx in range(group["x_min"], group["x_max"] + 1, width):
+                    for my in range(group["y_min"], group["y_max"] + 1, height):
+                        if (mx, my) in sardines:
+                            s_count += 1
+                
+                score = group["count"] - s_count
+                if score > best_score:
+                    best_score = score
+                    best_cluster = {
+                        "x_min": group["x_min"], "x_max": group["x_max"],
+                        "y_min": group["y_min"], "y_max": group["y_max"],
+                        "count": group["count"], "sardines": s_count
+                    }
+        
+        if best_cluster:
+            return {
+                "cluster": best_cluster,
+                "score": best_score,
+                "vertices": [
+                    (best_cluster["x_min"], best_cluster["y_min"]),
+                    (best_cluster["x_max"], best_cluster["y_min"]),
+                    (best_cluster["x_max"], best_cluster["y_max"]),
+                    (best_cluster["x_min"], best_cluster["y_max"])
+                ]
+            }
+        else:
+            return {"error": "no valid cluster found", "cluster": None}
+new_skills:
+- name: cluster-wrapping-guide
+  description: Identify mackerel-dense clusters by coordinate proximity, build rectangles avoiding sardines, combine top clusters.
+  body: |
+    # Cluster-Wrapping Guide for Polygon Optimization
+    
+    ## Core Idea
+    
+    Directly identify clusters of mackerels by their x or y coordinates, then wrap them with rectangles
+    that avoid sardine-heavy regions.
+    
+    ## Step-by-Step Method
+    
+    ### Step 1: Parse Fish Positions
+    
+    - Extract all mackerel and sardine coordinates from input
+    - Build spatial hash map for O(1) lookups
+    - Organize fish by x and y coordinates
+    
+    ### Step 2: Cluster Identification
+    
+    - Group mackerels by x-coordinate (within ±100 units)
+    - Group mackerels by y-coordinate (within ±100 units)
+    - For each group, compute:
+      * Bounding box: (min_x, min_y, max_x, max_y)
+      * Mackerel count
+      * Sardine count (points inside bounding box)
+      * Score = mackerel_count - sardine_count
+    
+    ### Step 3: Select Top Clusters
+    
+    - Sort clusters by score descending
+    - Select top 3-5 clusters with positive score
+    - Prefer clusters with high mackerel density
+    
+    ### Step 4: Rectangle Construction
+    
+    - For each selected cluster, create axis-aligned rectangle
+    - Rectangle vertices: (min_x, min_y), (max_x, min_y), (max_x, max_y), (min_x, max_y)
+    - Ensure integer coordinates within [0, 100000]
+    
+    ### Step 5: Iterative Expansion
+    
+    - For each rectangle, try expanding sides by ±50, ±100 units
+    - For each expansion, count new mackerels and sardines
+    - Keep expansion if (new_mackerels - new_sardines) > 0
+    - Repeat 2-3 refinement rounds
+    
+    ### Step 6: Combine and Output
+    
+    - Union top rectangles into single polygon
+    - Output vertices in order (4-1000 vertices)
+    - Ensure perimeter ≤ 400,000
+    
+    ## Key Success Factors
+    
+    - Focus on clusters with high mackerel density
+    - Avoid expanding into sardine-heavy regions
+    - Use iterative expansion to fine-tune rectangles
+    - Combine multiple rectangles for larger coverage
+new_middlewares:
+- name: cluster_expansion_reminder
+  hook: before_model
+  description: generated middleware cluster_expansion_reminder
+  implementation_py: |
+    def before_model(hook_input):
+        return "Use direct cluster-wrapping: identify mackerel clusters by x/y proximity, build rectangles, expand with ±50..100 avoiding sardines, combine top clusters."

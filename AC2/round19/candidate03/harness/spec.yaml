@@ -1,0 +1,252 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are optimizing the C2 constant for the second autocorrelation inequality:
+  C2 = ||f*f||_2^2 / ((∫f)^2 ||f*f||_∞)
+  
+  Target: Beat 0.8962799441554086 (current record using step functions).
+  
+  CRITICAL INSIGHT: Step functions WIN because they create sharp peaks in convolution.
+  Smooth functions (Gaussian, B-spline, oscillatory) SMOOTH out these peaks and UNDERPERFORM.
+  
+  STRATEGY - STEP-PATTERN SEARCH WITHIN EXISTING GRID:
+  
+  PHASE 1 (iterations 1-20): STEP PATTERN DIVERSIFICATION
+  1. Analyze current best step pattern's structure (levels, positions, heights)
+  2. Generate NEW step patterns by VARIING:
+     - Number of levels (5-12 levels)
+     - Level heights (asymmetric: high middle, low sides; or low-middle-high)
+     - Support width (narrow vs wide)
+     - Shift patterns (asymmetric placement)
+  3. For each new pattern: probe ALL, evaluate TOP 2
+  4. If beat record: switch to Phase 2. Otherwise: generate MORE step variations
+  
+  PHASE 2 (iterations 21-30): TARGETED STEP REFINEMENT
+  1. Take best step pattern from Phase 1
+  2. Try local mutations: adjust ONE level height by ±10%, shift ONE boundary by ±5%, add/remove ONE level
+  3. Probe all variants, evaluate top 1
+  4. If no improvement: go back to Phase 1 with NEW structural changes
+  
+  RULES:
+  - NEVER try Gaussian/B-spline/oscillatory - they smooth convolution peaks and fail
+  - Always use probe_solution to rank 8-15 step variants before full evals (30 probe budget)
+  - If iteration 12+: try completely NEW step architectures (different number of levels)
+  - Ensure f >= 0 using jax.nn.relu or jax.numpy.maximum
+
+skill_description: |
+  Step-pattern search within fixed grid. Generate diverse multi-level step functions, use probes to rank before full eval. NEVER try smooth functions - step functions win by creating sharp convolution peaks.
+
+skill_body: |
+  # C2 Maximizer: Step Pattern Search Protocol
+  
+  ## Core Principle
+  Step functions create sharp peaks in f*f convolution, maximizing C2. Smooth functions smear these peaks and UNDERPERFORM. STICK TO STEPS.
+  
+  ## Phase 1: Step Pattern Diversification (iterations 1-20)
+  
+  Step 1: Analyze Current Best
+  - Examine the best step pattern: How many levels? What are heights? Where are transitions?
+  - Note: The seed has 5 patterns with 2-5 levels. Try MORE levels (7-12) or ASYMMETRIC structures.
+  
+  Step 2: Generate Step Variations
+  - Create 5-7 NEW step patterns by varying:
+    * Number of levels: Try 7, 9, 11 levels (more granularity than seed's 2-5)
+    * Asymmetry: High-low-high vs low-high-low vs all levels ascending
+    * Support: Narrow (50% width) vs wide (80% width)
+    * Heights: Try extreme values (0.3-3.0 range), e.g., [0.5, 1.0, 2.5, 1.0, 0.5]
+  - Pattern templates:
+    * Pyramid: [low, medium, HIGH, medium, low, ...]
+    * Mountain: [low, low, HIGH, HIGH, low, low]
+    * Asymmetric: [very_low, medium, HIGH, medium, medium, low]
+  
+  Step 3: Probe-Based Filtering
+  - Call probe_solution on ALL 5-7 candidates (5-7 probes used)
+  - Call evaluate_solution on TOP 2 by probe score
+  - If probe score < 1.0: skip full eval, try next pattern
+  
+  Step 4: Iterate
+  - Continue until iteration 20 or one beats record
+  - Generate completely new step architectures if stuck
+  
+  ## Phase 2: Targeted Refinement (iterations 21-30)
+  
+  Only if a step pattern beat the record:
+  1. Take the best step pattern
+  2. Try LOCAL mutations:
+     - Adjust ONE level height by ±15%
+     - Shift ONE boundary by ±2 grid positions
+     - Add/remove ONE level
+  3. Probe all 3 variants, evaluate top 1
+  4. If no improvement after 5 iterations: go back to Phase 1 with NEW architectures
+  
+  ## Key Rules
+  - STICK TO STEP FUNCTIONS - they maximize C2 by creating sharp convolution peaks
+  - Use 30 probes to explore 12-20+ step variants before full evaluations
+  - If iteration 10+: try NEW step architectures (different level counts)
+  - Always ensure f >= 0 using jax.nn.relu or jnp.maximum
+
+tool_descriptions:
+  edit_solution: |
+    Edit the EVOLVE-BLOCK to create STEP functions. Use jax.numpy.at for efficient assignment.
+    Examples:
+    - Single level: f = f.at[int(0.2*n):int(0.8*n)].set(1.5)
+    - Multi-level: Loop over level positions and heights: for i in range(num_levels): f = f.at[start:end].set(heights[i])
+    - Ensure non-negativity: f = jnp.maximum(f, 0) or use jax.nn.relu
+    - Use patterns: Pyramid (low-high-low), Mountain (low-low-high-low-low), Asymmetric (varied heights)
+  evaluate_solution: |
+    Full evaluation. Budget: 30 total. Call ONLY after probe_solution ranking. Evaluate top 1-2 variants by probe score. If probe < 1.0, skip.
+  probe_solution: |
+    Approximate score on 10% subsample. FAST. Use to rank 10-20+ step variants before full eval. You have 30 probes - spend them to explore diverse step patterns, not to confirm one candidate.
+  finish: |
+    Report best combined_score, the winning step pattern (number of levels, heights, positions), and why it beat the record.
+
+sampling:
+  temperature: 0.7
+  top_p: 0.95
+  top_k: 30
+  max_tokens: 14000
+
+agent:
+  max_iterations: 40
+
+middleware:
+  budget_reminder_from_left: 3
+  long_tool_output_max_chars: 8000
+
+new_tools:
+  - name: generate_step_patterns
+    description: |
+      Generate 7 diverse step-function patterns with different level counts, heights, and asymmetries.
+      Call this at start of Phase 1 or when stuck. Patterns include pyramid, mountain, asymmetric, and varied structures.
+    input_schema:
+      type: object
+      properties: {}
+    implementation_py: |
+      def run(ctx, args):
+          import random
+          random.seed(42 + ctx.iteration if hasattr(ctx, 'iteration') else 42)
+          n = ctx.get_best_program()  # dummy, we'll generate patterns directly
+          patterns = []
+          
+          # Pattern 1: Pyramid (low-high-low)
+          patterns.append({
+              'name': 'pyramid',
+              'levels': 7,
+              'heights': [0.4, 0.7, 1.5, 3.0, 1.5, 0.7, 0.4],
+              'positions': [0.0, 0.14, 0.29, 0.43, 0.57, 0.71, 0.86, 1.0],
+              'rationale': 'Symmetric pyramid concentrates energy at center'
+          })
+          
+          # Pattern 2: Mountain (flat base, high peak)
+          patterns.append({
+              'name': 'mountain',
+              'levels': 5,
+              'heights': [0.5, 0.5, 2.8, 2.8, 0.5],
+              'positions': [0.0, 0.20, 0.40, 0.60, 0.80, 1.0],
+              'rationale': 'Wide base with high peak creates strong convolution peak'
+          })
+          
+          # Pattern 3: Asymmetric (shifted high)
+          patterns.append({
+              'name': 'asymmetric_shifted',
+              'levels': 6,
+              'heights': [0.3, 0.8, 2.2, 1.8, 0.9, 0.3],
+              'positions': [0.0, 0.10, 0.25, 0.40, 0.60, 0.80, 1.0],
+              'rationale': 'Asymmetric placement tests non-symmetric optima'
+          })
+          
+          # Pattern 4: Multi-peak (two high regions)
+          patterns.append({
+              'name': 'dual_peak',
+              'levels': 8,
+              'heights': [0.4, 0.4, 2.5, 2.5, 2.5, 2.5, 0.4, 0.4],
+              'positions': [0.0, 0.12, 0.25, 0.38, 0.50, 0.62, 0.75, 0.88, 1.0],
+              'rationale': 'Two high regions create two convolution peaks, may improve L2'
+          })
+          
+          # Pattern 5: Staircase (ascending)
+          patterns.append({
+              'name': 'staircase',
+              'levels': 7,
+              'heights': [0.3, 0.6, 0.9, 1.5, 2.5, 3.0, 2.5],
+              'positions': [0.0, 0.14, 0.29, 0.43, 0.57, 0.71, 0.86, 1.0],
+              'rationale': 'Ascending then descending tests monotonicity benefits'
+          })
+          
+          # Pattern 6: Flat-top (plateau)
+          patterns.append({
+              'name': 'flat_top',
+              'levels': 5,
+              'heights': [0.5, 0.5, 2.0, 2.0, 0.5],
+              'positions': [0.0, 0.20, 0.40, 0.60, 0.80, 1.0],
+              'rationale': 'Flat top creates uniform convolution in central region'
+          })
+          
+          # Pattern 7: High-narrow spike
+          patterns.append({
+              'name': 'spike',
+              'levels': 4,
+              'heights': [0.4, 2.8, 2.8, 0.4],
+              'positions': [0.0, 0.30, 0.50, 0.70, 1.0],
+              'rationale': 'Very narrow high peak maximizes sup norm contribution'
+          })
+          
+          return {
+              'patterns': patterns,
+              'note': 'Each pattern has levels, heights, and positions arrays. Edit the EVOLVE-BLOCK to implement one pattern. Use jnp.at for efficient updates.'
+          }
+
+new_skills:
+  - name: step-pattern-optimization
+    description: |
+      Optimize step functions by exploring level counts, heights, and asymmetries. Use probes to rapidly test 10+ variants. Smooth functions fail - stay with steps.
+    body: |
+      # Step Pattern Optimization Protocol
+      
+      ## Core Principle
+      Step functions maximize C2 by creating sharp convolution peaks. Smooth functions UNDERPERFORM.
+      
+      ## When to Generate New Patterns (trigger conditions)
+      1. At start of search (iteration 0)
+      2. After 3 failed evaluations on same pattern family
+      3. After iteration 10 without improvement
+      4. When probe scores plateau across 5+ variants
+      
+      ## Pattern Engineering Checklist
+      1. **Level count**: Try 4-12 levels (more granularity than seed's 2-5)
+      2. **Height range**: Use heights from 0.3 to 3.0 (extreme values)
+      3. **Asymmetry**: Test symmetric (pyramid) vs asymmetric (shifted)
+      4. **Support width**: Narrow (50%) vs wide (80%) vs full (100%)
+      5. **Shape**: Pyramid, mountain, staircase, dual-peak, flat-top
+      
+      ## Execution Flow
+      1. Call generate_step_patterns to get 7 diverse patterns
+      2. Implement ONE pattern in EVOLVE-BLOCK (use jnp.at for efficiency)
+      3. Call probe_solution to get approximate score
+      4. If probe < 1.0: try next pattern (don't waste full eval)
+      5. If probe >= 1.0: call evaluate_solution on top 2 patterns
+      6. If one beats record: switch to Phase 2 (refinement). Otherwise: generate MORE patterns
+      
+      ## Key Rules
+      - STICK TO STEP FUNCTIONS - they are proven to beat smooth functions
+      - Use 30 probes to explore 15-25 step patterns before full evaluations
+      - NEVER try Gaussian/B-spline/oscillatory - they smooth convolution peaks
+
+new_middlewares:
+  - name: enforce_step_only
+    hook: before_model
+    description: |
+      Enforce step-only strategy. If agent tries to generate smooth functions, remind them step functions win.
+    implementation_py: |
+      def before_model(hook_input):
+          iteration = hook_input.get("iteration", 0)
+          text = hook_input.get("text", "")
+          
+          # Check if agent is trying smooth functions
+          if any(word in text.lower() for word in ['gaussian', 'b-spline', 'spline', 'oscillatory', 'smooth', 'gauss']):
+              return "STOP: Smooth functions UNDERPERFORM. Step functions create sharp convolution peaks and beat the record. Generate step patterns instead."
+          
+          # Remind about probe usage
+          if iteration > 5 and "probe_solution" not in text:
+              return "Reminder: Call probe_solution to rank multiple step patterns before full evaluation. Use all 30 probes efficiently."
+          
+          return None

@@ -1,0 +1,153 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are an expert in harmonic analysis and mathematical optimization. Your task is to find a step function h: [0,2]→[0,1] that minimizes the maximum overlap integral, achieving combined_score > 1.0.
+
+  **KEY INSIGHT**: This is a combinatorial construction problem. The seed's gradient-based optimizer gets trapped in local optima because it tries to fine-tune continuous latents. You need to CONSTRUCT explicit piecewise-constant functions with few breakpoints.
+
+  **PROVEN STRATEGY**: Try simple geometric patterns FIRST:
+  - Single interval: h=1 on [0,1], h=0 elsewhere (integral=1)
+  - Two intervals: h=a on [0,x], h=b on [x,2] where ax+b(2-x)=1
+  - Three intervals: alternating blocks
+  - Step functions: h=1 on multiple disjoint intervals
+
+  **DIVERSITY**: Each evaluation should try a DIFFERENT explicit construction strategy, not just re-run gradient descent from different seeds.
+
+  **BUDGET**: ~30 evaluations. Spend the first 10-15 on explicit constructions with few breakpoints. Only use optimization if constructions fail.
+
+  **CONSTRAINTS**: h∈[0,1], ∫h=1 over [0,2]
+skill_description: |
+  Erdős C₅ bound optimizer. Focus on explicit piecewise-constant constructions with few breakpoints. Avoid gradient descent traps. Target combined_score > 1.0 via direct mathematical construction.
+skill_body: |
+  # C₅ Bound Optimization via Direct Construction
+
+  ## Why Gradient Descent Fails
+
+  The seed program uses gradient descent from sigmoid-initialized latents. All 12 initialization patterns converge to the same local optimum (~0.999641). This is a **construction problem**, not an optimization problem.
+
+  ## Winning Strategy: Explicit Piecewise-Constant Functions
+
+  The best solutions are simple step functions with 2-5 breakpoints. Construct them directly:
+
+  ### Pattern Class A: Single Block
+  h(x) = 1 for x ∈ [0,1], h(x) = 0 elsewhere
+  - Integral = 1 ✓
+  - Very simple overlap structure
+
+  ### Pattern Class B: Two Blocks
+  h(x) = a for x ∈ [0,x₁], h(x) = b for x ∈ [x₁,2]
+  - Constraint: a·x₁ + b·(2-x₁) = 1
+  - Try symmetric cases: x₁=1, a=b=0.5
+
+  ### Pattern Class C: Alternating Blocks
+  h(x) alternates between 1 and 0 on intervals
+  - E.g., [0,0.5]:1, [0.5,1.5]:0, [1.5,2]:1
+  - Integral = 0.5+0.5 = 1 ✓
+
+  ### Pattern Class D: Concentrated Mass
+  h(x) = k on [0,1/k], h(x) = 0 elsewhere
+  - Integral = k·(1/k) = 1 ✓
+  - As k increases, h becomes more concentrated
+
+  ## Execution Plan
+
+  1. **Start with explicit constructions** (not gradient descent):
+     - Test single block: h=1 on [0,1]
+     - Test symmetric two-block: h=0.5 on [0,1]
+     - Test alternating blocks with varying ratios
+
+  2. **Use pattern_prober** to check constraint satisfaction cheaply
+  3. **Refine winning patterns** by adding breakpoints
+  4. **Only use gradient descent** if explicit construction fails to beat seed
+
+  ## Tool Usage
+
+  - **pattern_prober**: Test if your proposed piecewise function satisfies constraints before full evaluation
+  - **edit_solution**: Replace the entire optimizer with explicit construction code
+  - **evaluate_solution**: Full score only after construction is valid
+
+  ## Constraints Checklist
+
+  - h(x) ∈ [0,1] for all x
+  - ∫₀² h(x)dx = 1 (exactly, not approximately)
+  - Use few breakpoints (2-5) for simplicity
+new_tools:
+  - name: pattern_prober
+    description: |
+      Quick feasibility check for piecewise-constant functions. Takes interval breakpoints and values, verifies constraints (h∈[0,1], integral=1), and returns approximate c5_bound. Use this BEFORE full evaluation to filter invalid constructions.
+    input_schema:
+      type: object
+      properties:
+        breakpoints:
+          type: array
+          items:
+            type: number
+        values:
+          type: array
+          items:
+            type: number
+    implementation_py: |
+      def run(ctx, args):
+          import jax.numpy as jnp
+          breakpoints = sorted(args.get("breakpoints", []))
+          values = args.get("values", [])
+          
+          # Ensure we have values for all intervals
+          if len(values) != len(breakpoints) + 1:
+              return {"valid": False, "error": "values must have len(breakpoints)+1"}
+          
+          # Check h ∈ [0,1]
+          if not all(0 <= v <= 1 for v in values):
+              return {"valid": False, "error": "values must be in [0,1]"}
+          
+          # Compute integral approx
+          domain_width = 2.0
+          prev_x = 0
+          total_integral = 0
+          for i, b in enumerate(breakpoints):
+              width = b - prev_x
+              if width <= 0:
+                  return {"valid": False, "error": f"negative or zero interval at {prev_x}"}
+              total_integral += values[i] * width
+              prev_x = b
+          last_width = domain_width - prev_x
+          total_integral += values[-1] * last_width
+          
+          # Check integral constraint
+          if abs(total_integral - 1.0) > 1e-6:
+              return {"valid": False, "error": f"integral {total_integral:.6f} != 1.0", "integral": total_integral}
+          
+          # Compute approximate c5_bound using FFT
+          N = 800
+          dx = domain_width / N
+          x_grid = jnp.linspace(0, domain_width, N)
+          h_interp = jnp.zeros(N)
+          
+          for i, b in enumerate(breakpoints):
+              mask = (x_grid >= b - 1e-9) & (x_grid < b)
+              if i < len(values):
+                  h_interp = h_interp + values[i] * mask
+          
+          # Add last interval
+          mask_last = x_grid >= breakpoints[-1] if breakpoints else True
+          h_interp = h_interp + values[-1] * mask_last
+          
+          # Compute c5
+          j = 1.0 - h_interp
+          h_padded = jnp.pad(h_interp, (0, N))
+          j_padded = jnp.pad(j, (0, N))
+          corr_fft = jnp.fft.fft(h_padded) * jnp.conj(jnp.fft.fft(j_padded))
+          correlation = jnp.fft.ifft(corr_fft).real
+          c5_bound = float(jnp.max(correlation * dx))
+          
+          return {"valid": True, "integral": total_integral, "c5_bound": c5_bound}
+remove_tools: []
+sampling:
+  temperature: 1.5
+  top_p: 0.99
+  top_k: 30
+  max_tokens: 16384
+agent:
+  max_iterations: 80
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 15000

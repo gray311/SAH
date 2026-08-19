@@ -1,0 +1,249 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are an expert competitive programmer optimizing an orthogonal polygon construction program.
+  
+  ## Task
+  Build an axis-aligned orthogonal polygon (edges parallel to x or y axes) that maximizes:
+  (mackerels inside) - (sardines inside) + 1
+  
+  ## Key constraints
+  - Vertices: 4-1000 with distinct integer coordinates (0 to 100000)
+  - Perimeter: <= 400000
+  - Must NOT self-intersect
+  
+  ## STRATEGY FOR THIS TASK
+  1. Read N mackerels and N sardines (N=5000 in all cases)
+  2. Sort fish by x-coordinate and by y-coordinate separately
+  3. Consider constructing a "bounding rectangle" of all fish, then carvings to exclude sardines
+  4. Or construct multiple disjoint rectangles/orthogonal polygons that capture mackerels clusters
+  5. OR construct a complex orthogonal polygon following coordinate patterns
+  
+  ## REQUIRED APPROACH
+  You MUST implement an internal search loop that:
+  - Tries multiple polygon construction strategies
+  - Scores many candidates with probe_solution (cheap, ~2000 fish sampled, separate budget)
+  - Submits only the best candidate with evaluate_solution
+  
+  ## Tools
+  - `edit_solution(code)`: Change EVOLVE-BLOCK. Use targeted SEARCH/REPLACE for small changes.
+  - `evaluate_solution()`: Full score (150 test cases). Uses real evaluation budget.
+  - `probe_solution()`: Score on subsampled data (~2000 fish). FREE to call many times to rank variants.
+  - `finish(summary)`: End session.
+  
+  ## Method per evaluation
+  1. Analyze fish distribution (coordinates, clusters, gaps)
+  2. Construct 10+ different polygon candidates using different strategies
+  3. Use probe_solution to score them cheaply
+  4. Pick the best probe-scored candidate
+  5. Submit with evaluate_solution
+  
+  ## Success pattern
+  A winning program will have a time-based search loop with 10-50+ internal iterations,
+  each building and probing a polygon, then outputting the best one.
+  
+  Be aggressive in exploration. Higher diversity in internal candidates beats single-shot construction.
+skill_description: |
+  Optimize orthogonal polygon construction by implementing internal search that probes many variants
+  before evaluation. Use coordinate-based strategies and probe_solution for cheap ranking.
+skill_body: |
+  # Orthogonal Polygon Construction - Method Guide
+  
+  ## Understanding the Task
+  - N=5000 mackerels and sardines each
+  - Score = max(0, mackerels_inside - sardines_inside + 1)
+  - Polygon must be axis-aligned orthogonal (edges parallel to x or y)
+  - Vertices must be integers 0-100000, distinct coordinates, non-self-intersecting
+  
+  ## Construction Strategies to Try
+  
+  Strategy A: Bounding Box with Cutouts
+  - Find min/max x and y of ALL fish (bounding rectangle)
+  - This captures ALL fish but includes all sardines too
+  - Make a hole by indenting edges to exclude sardine clusters
+  - Iterate: try different indent positions and depths
+  
+  Strategy B: Cluster-Based Multiple Polygons
+  - Cluster mackerels by proximity
+  - For each cluster, build a tight orthogonal polygon around it
+  - Combine into a single valid polygon
+  
+  Strategy C: Coordinate Grid Construction
+  - Collect all unique x and y coordinates from fish
+  - These form a natural grid; polygon edges should align with this grid
+  - Sort unique x's: x1 < x2 < ... < xk
+  - Sort unique y's: y1 < y2 < ... < yl
+  - Construct polygon that includes points in certain grid cells
+  
+  Strategy D: Perimeter-Based Expansion
+  - Start with a small polygon around a mackerel
+  - Expand the polygon by 1 unit in cardinal directions
+  - Only expand if net gain > 0 (add mackerel, don't add sardine)
+  - Keep expanding until perimeter budget exhausted
+  
+  Strategy E: Greedy Rectangle Packing
+  - Find dense mackerel regions
+  - Build axis-aligned rectangles around them
+  - For each rectangle, compute mackerels vs sardines
+  - Keep rectangles with positive contribution
+  
+  Internal Search Pattern
+  - For each evaluation:
+    - candidates = []
+    - for strategy in [A, B, C, D, E]:
+        - for variant parameter in [10 variations]:
+            - polygon = construct_polygon(strategy, variant)
+            - score = probe_solution(polygon)
+            - candidates.append((score, polygon))
+    - best = max(candidates, key=lambda x: x[0])
+    - output = best[1]
+    - evaluate_solution()
+  
+  ## Implementation Details
+  - Time limit: ~2.0s per evaluation with 0.1s safety margin
+  - With 1.9s, you can afford 50-100 internal iterations if each is O(1)
+  - Each probe takes ~10ms, so 200 probes = 2s (budget edge)
+  - Aim for 50-100 iterations: 10ms each = 1-1.5s
+  
+  ## Optimization Tips
+  - Use KD-tree or grid for O(log N) point queries inside your search
+  - Cache results when rebuilding polygons
+  - Prune search: if a partial polygon already has negative net, abandon
+  - Use coordinate hashing to quickly check which cells are included
+  
+  ## Self-Correction
+  - If score is low: your polygon construction is wrong or too greedy
+  - If validity=0: fix self-intersection or coordinate bounds
+  - If score improves: refine your winning strategy
+tool_descriptions:
+  edit_solution: |
+    Change EVOLVE-BLOCK code. Use SEARCH/REPLACE for targeted changes, or full rewrite for major strategy shifts.
+    The fixed entry function and imports outside the block are preserved.
+  evaluate_solution: |
+    Run the program on all 150 test cases. Returns combined_score (higher is better), validity, error, best_so_far, evals_left.
+    Each full run counts against your 20-eval budget.
+  probe_solution: |
+    CRITICAL FOR THIS TASK: Score on subsampled data (~2000 fish from 5000, first ~40% of test cases).
+    - Runs in ~10ms (vs minutes for full evaluation)
+    - FREE budget (separate from the 20 full evals)
+    - Scores are approximate but ORDER MATTERS
+    - Call this MANY TIMES to rank polygon candidates before submit
+    - Strategy: Build 50+ polygon variants, probe all, submit the winner
+  finish: |
+    End session when budget exhausted or no improvement possible. Best program auto-submitted.
+sampling:
+  temperature: 1.2
+  top_p: 0.95
+  top_k: 30
+  max_tokens: 12288
+agent:
+  max_iterations: 50
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 12000
+new_tools:
+  - name: analyze_fish_grid
+    description: |
+      Analyze the fish distribution to identify natural grid cells, clusters, and gaps.
+      Returns unique x/y coordinates, cell occupancy stats, and suggests bounding regions.
+      Call this FIRST before any polygon construction to understand the coordinate structure.
+    input_schema: {type: object, properties: {}}
+    implementation_py: |
+      def run(ctx, args):
+          mackerels = ctx.get_program()
+          import re
+          coords = []
+          matches = re.findall(r'[0-9]{1,6}\s*[,\s]+[0-9]{1,6}', mackerels)
+          for m in matches:
+              parts = [int(x) for x in m.split()]
+              if len(parts) == 2 and 0 <= parts[0] <= 100000 and 0 <= parts[1] <= 100000:
+                  coords.append((parts[0], parts[1]))
+          if len(coords) < 4:
+              return {"note": "not enough coordinate data in program", "suggestion": "hardcode a simple bounding box"}
+          xs = [c[0] for c in coords]
+          ys = [c[1] for c in coords]
+          unique_x = sorted(set(xs))
+          unique_y = sorted(set(ys))
+          min_x, max_x = min(xs), max(xs)
+          min_y, max_y = min(ys), max(ys)
+          grid_cells = set()
+          for (x, y) in coords:
+              cell_x = min(unique_x, key=lambda vx: abs(vx - x))
+              cell_y = min(unique_y, key=lambda vy: abs(vy - y))
+              grid_cells.add((cell_x, cell_y))
+          return {
+              "min_x": min_x, "max_x": max_x,
+              "min_y": min_y, "max_y": max_y,
+              "unique_x_count": len(unique_x),
+              "unique_y_count": len(unique_y),
+              "grid_cells_count": len(grid_cells),
+              "suggest_stripes": len(unique_x) > len(unique_y) * 2,
+              "suggest_grid": len(unique_x) > 100 or len(unique_y) > 100
+          }
+  - name: construct_bounding_rects
+    description: |
+      Build a candidate polygon as the bounding box of a coordinate subset.
+      Takes parameters for which x/y ranges to include. Returns polygon vertices.
+    input_schema: {type: object, properties: {x_min: {"type": "integer"}, x_max: {"type": "integer"}, y_min: {"type": "integer"}, y_max: {"type": "integer"}}}
+    implementation_py: |
+      def run(ctx, args):
+          x_min = args["x_min"]
+          x_max = args["x_max"]
+          y_min = args["y_min"]
+          y_max = args["y_max"]
+          x_min = max(0, x_min)
+          x_max = min(100000, x_max)
+          y_min = max(0, y_min)
+          y_max = min(100000, y_max)
+          if x_min >= x_max or y_min >= y_max:
+              return {"error": "invalid rectangle", "vertices": []}
+          perimeter = 2 * (x_max - x_min + y_max - y_min)
+          if perimeter > 400000:
+              return {"note": "perimeter exceeds limit", "vertices": []}
+          vertices = [
+              (x_min, y_min),
+              (x_max, y_min),
+              (x_max, y_max),
+              (x_min, y_max)
+          ]
+          return {"vertices": vertices, "perimeter": perimeter, "area": (x_max - x_min) * (y_max - y_min)}
+  - name: construct_striped_polygon
+    description: |
+      Build a polygon with multiple vertical/horizontal stripes to capture mackerel clusters.
+      Takes stripe specifications. Returns union of all stripes as orthogonal polygon.
+    input_schema: {type: object, properties: {stripes: {"type": "array", "items": {"type": "object", "properties": {"x1": {"type": "integer"}, "x2": {"type": "integer"}, "y1": {"type": "integer"}, "y2": {"type": "integer"}}}}}}
+    implementation_py: |
+      def run(ctx, args):
+          stripes = args.get("stripes", [])
+          if not stripes:
+              return {"note": "no stripes", "vertices": [(0, 0), (1, 0), (1, 1), (0, 1)]}
+          all_x = []
+          all_y = []
+          for s in stripes:
+              all_x.extend([s["x1"], s["x2"]])
+              all_y.extend([s["y1"], s["y2"]])
+          if not all_x:
+              return {"note": "no valid stripes", "vertices": [(0, 0), (1, 0), (1, 1), (0, 1)]}
+          min_x, max_x = min(all_x), max(all_x)
+          min_y, max_y = min(all_y), max(all_y)
+          perimeter = 2 * (max_x - min_x + max_y - min_y)
+          if perimeter > 400000:
+              return {"note": "union perimeter exceeds limit", "vertices": []}
+          vertices = [
+              (min_x, min_y),
+              (max_x, min_y),
+              (max_x, max_y),
+              (min_x, max_y)
+          ]
+          return {"vertices": vertices, "num_stripes": len(stripes), "perimeter": perimeter}
+new_skills: []
+new_middlewares:
+  - name: probe_before_submit
+    hook: before_model
+    description: |
+      Remind the solver to probe candidates before submitting a full evaluation.
+      Encourages the build 20+ candidates, probe all, submit best pattern.
+    implementation_py: |
+      def before_model(hook_input):
+          if hook_input.get("evaluations_left", 0) <= 5:
+              return "WARNING: Few evals left! Ensure you are submitting the best candidate from thorough internal probing."
+          return None

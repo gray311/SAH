@@ -1,0 +1,288 @@
+schema: h2spec/1.0
+system_prompt: |
+  Erdos C5 Problem: Find h: [0,2]->[0,1] minimizing max_k integral h(x)(1-h(x+k))dx.
+  
+  Current best: C5 <= 0.38092303510845016 (combined_score = 1.0).
+  
+  GOAL: Find h achieving c5_bound < 0.38092303510845016 (combined_score > 1.0).
+  
+  KEY INSIGHT: The seed optimizer uses complex multi-pattern initialization with 14 different patterns. 
+  This complexity traps the search in local minima.
+  
+  STRATEGY: 
+  1. Use SIMPLIFIED initializations that are structurally different from the seed
+  2. Try BIPARTITE functions (single threshold at various positions)
+  3. Try TRIMODAL functions (3 distinct peaks)
+  4. Try SYMMETRIC functions around x=1
+  5. Use PROBE on simple candidates first, then evaluate only the best
+  
+  CONSTRAINT: integral(h) = 1 exactly. Use penalty_strength=100 to enforce this.
+  
+  DO NOT rely on correlation analysis - it doesn't help here. Instead, explore diverse functional forms.
+skill_description: |
+  Use SIMPLE initializations: bipartite (single threshold), trimodal (3 peaks), or symmetric functions. 
+  Call probe_solution to screen candidates before full evaluation. Focus on structurally different h(x).
+skill_body: |
+  # Erdos C5 - Simplified Strategy
+  
+  ## Phase 1: Generate Diverse Simple Functions
+  
+  1. Generate BIPARTITE functions: h(x) = sigmoid(p*(x-a)) for different a values
+     - This creates a single step function
+     - Try a=0.5, 0.75, 1.0, 1.25, 1.5
+     - Adjust to ensure integral(h) ≈ 1
+  
+  2. Generate TRIMODAL functions: 3 Gaussian-like peaks
+     - Place peaks at different configurations
+     - E.g., peaks at (0.3, 1.0, 1.7), (0.4, 0.8, 1.6), etc.
+     - Scale heights to satisfy integral constraint
+  
+  3. Generate SYMMETRIC functions: h(x) = h(2-x)
+     - Mirror symmetry might reduce overlap at certain k values
+     - Try triangular, trapezoidal, or multi-peak symmetric shapes
+  
+  ## Phase 2: Screening
+  
+  1. Call PROBE_SOLUTION on each candidate
+  2. Keep only those with c5_bound < 0.382
+  3. Evaluate the top 2-3 candidates
+  
+  ## Phase 3: Refinement
+  
+  If simple functions don't work:
+  - Try LOCALIZED modifications: modify h in specific regions
+  - Try STEPPED functions: piecewise constant with 3-5 steps
+  - Adjust penalty_strength to 80-120 to enforce integral constraint
+  
+  ## Key Rules
+  - Focus on STRUCTURALLY DIFFERENT functions from the seed
+  - Use PROBE before full evaluation
+  - Enforce integral(h) = 1 with strong penalty
+  - Never copy the seed's multi-pattern approach
+tool_descriptions:
+  edit_solution: |
+    Modify the optimizer to use SIMPLE initializations.
+    
+    For bipartite: Create h with a single threshold at position a.
+    Use sigmoid activation with latent centered at a.
+    
+    For trimodal: Create 3 peaks at positions [p1, p2, p3].
+    Use Gaussian-like latent profiles.
+    
+    For symmetric: Create h where h(x) ≈ h(2-x).
+    Use symmetric latent profiles around x=1.
+    
+    Set penalty_strength=100 to enforce integral(h)=1.
+  evaluate_solution: |
+    Full optimization with 50,000 steps. 
+    Combined_score = 0.38092303510845016 / c5_bound.
+    Use probe_solution first to filter candidates.
+  probe_solution: |
+    Fast approximate evaluation (500 intervals). 
+    Use to screen many candidates before full evaluation.
+    Budget: separate from eval budget (~30 probes).
+  finish: |
+    Submit when combined_score > 1.0 (c5_bound < 0.38092303510845016).
+sampling:
+  temperature: 1.0
+  top_p: 0.8
+  top_k: 30
+  max_tokens: 16000
+agent:
+  max_iterations: 75
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 12000
+new_tools:
+  - name: generate_simple_init
+    description: |
+      Generate a SIMPLE initialization for h(x): bipartite, trimodal, or symmetric.
+      These are structurally different from the complex multi-pattern seed.
+      
+      Use this to create diverse starting points that bypass the seed's local minima.
+      
+      Args: type (bipartite|trimodal|symmetric), params (position/configuration).
+    input_schema:
+      type: object
+      properties:
+        type:
+          type: string
+          enum: [bipartite, trimodal, symmetric]
+        params:
+          type: object
+          properties: {}
+    implementation_py: |
+      def run(ctx, args):
+          import jax
+          import jax.numpy as jnp
+          from dataclasses import dataclass
+          
+          @dataclass
+          class SimpleInit:
+              type: str
+              params: dict
+          
+          sinit = SimpleInit(type=args.get("type", "bipartite"), 
+                            params=args.get("params", {}))
+          
+          N = ctx.hypers().num_intervals
+          domain = 2.0
+          x = jnp.linspace(0, domain, N)
+          
+          if sinit.type == "bipartite":
+              a = sinit.params.get("a", 1.0)
+              latent = jnp.where(x < a, 5.0, -5.0)
+          elif sinit.type == "trimodal":
+              centers = sinit.params.get("centers", [0.3, 1.0, 1.7])
+              latent = jnp.zeros(N)
+              for c in centers:
+                  w = sinit.params.get("width", 0.15)
+                  latent = latent.at[jnp.abs(x - c) < w].set(4.0)
+              latent = latent - 1.5
+          elif sinit.type == "symmetric":
+              w = sinit.params.get("width", 0.4)
+              latent = jnp.zeros(N)
+              for c in [0.5, 1.0, 1.5]:
+                  latent = latent.at[jnp.abs(x - c) < w].set(3.5)
+              latent = latent - 1.0
+          else:
+              return {"error": f"Unknown type: {sinit.type}"}
+          
+          # Sigmoid to [0,1]
+          h = jax.nn.sigmoid(latent)
+          
+          # Check integral constraint
+          h_padded = jnp.pad(h, (0, N))
+          h_int = jnp.sum(h_padded[:N]) * (domain / N)
+          
+          return {"type": sinit.type, "integral": float(h_int), "h_preview": float(h[:10].mean())}
+  - name: probe_simple
+    description: |
+      Quick probe of simple functional forms. 
+      Use this to rapidly screen bipartite, trimodal, and symmetric candidates.
+      
+      Call this ONCE for each simple function type before full evaluation.
+    input_schema:
+      type: object
+      properties:
+        func_type:
+          type: string
+          enum: [bipartite, trimodal, symmetric]
+        params:
+          type: object
+          properties: {}
+    implementation_py: |
+      def run(ctx, args):
+          import jax
+          import jax.numpy as jnp
+          from dataclasses import dataclass
+          
+          @dataclass
+          class ProbeConfig:
+              func_type: str
+              params: dict
+          
+          config = ProbeConfig(func_type=args.get("func_type", "bipartite"),
+                              params=args.get("params", {}))
+          
+          N = ctx.hypers().num_intervals
+          domain = 2.0
+          dx = domain / N
+          x = jnp.linspace(0, domain, N)
+          
+          # Create simple h
+          if config.func_type == "bipartite":
+              a = config.params.get("a", 1.0)
+              h = jax.nn.sigmoid(jnp.where(x < a, 5.0, -5.0))
+          elif config.func_type == "trimodal":
+              centers = config.params.get("centers", [0.3, 1.0, 1.7])
+              h = jnp.ones(N) * 0.5
+              for c in centers:
+                  w = config.params.get("width", 0.15)
+                  h = h.at[jnp.abs(x - c) < w].set(0.95)
+              h = 0.5 * h + 0.2
+          elif config.func_type == "symmetric":
+              w = config.params.get("width", 0.4)
+              h = jnp.ones(N) * 0.3
+              for c in [0.5, 1.0, 1.5]:
+                  h = h.at[jnp.abs(x - c) < w].set(0.85)
+              h = 0.3 * h + 0.25
+          else:
+              return {"error": f"Unknown type: {config.func_type}"}
+          
+          # Compute C5 bound
+          h_padded = jnp.pad(h, (0, N))
+          j_padded = jnp.pad(1.0 - h, (0, N))
+          corr_fft = jnp.fft.fft(h_padded) * jnp.conj(jnp.fft.fft(j_padded))
+          correlation = jnp.fft.ifft(corr_fft).real
+          c5_bound = jnp.max(correlation * dx)
+          
+          # Normalize to combined_score
+          target = 0.38092303510845016
+          combined_score = target / c5_bound
+          
+          return {"c5_bound": float(c5_bound), "combined_score": float(combined_score),
+                  "integral": float(jnp.sum(h) * dx)}
+new_skills:
+  - name: simple-search-strategy
+    description: Use simple functional forms (bipartite, trimodal, symmetric) to escape seed's local minima.
+    body: |
+      # Simple Search Strategy for Erdos C5
+      
+      ## Why This Works
+      
+      The seed optimizer uses 14 complex initialization patterns that all share similar structures.
+      This traps the search in local minima. We need STRUCTURALLY DIFFERENT functions.
+      
+      ## Three Simple Forms to Try
+      
+      ### 1. Bipartite (Single Threshold)
+      h(x) = sigmoid(k*(x - a))
+      - Simple step function
+      - Try different threshold positions: a = 0.5, 0.75, 1.0, 1.25, 1.5
+      - Adjust scaling to ensure integral(h) ≈ 1
+      
+      ### 2. Trimodal (Three Peaks)
+      h(x) = sum of 3 Gaussian-like peaks
+      - Place peaks at different configurations
+      - E.g., [0.3, 1.0, 1.7], [0.25, 0.9, 1.6], [0.4, 1.0, 1.6]
+      - Vary peak heights and widths
+      
+      ### 3. Symmetric Functions
+      h(x) ≈ h(2-x)
+      - Mirror symmetry might reduce overlap
+      - Try triangular, trapezoidal, or multi-peak symmetric shapes
+      
+      ## Workflow
+      
+      1. Generate 2-3 candidates from EACH simple form (6-9 total)
+      2. Call PROBE_SIMPLE on each
+      3. Keep top 3 with combined_score > 1.0 (c5_bound < 0.382)
+      4. Call FULL EVALUATION on top 2
+      5. If no improvement, try LOCALIZED modifications
+      
+      ## Key Rules
+      
+      - START WITH SIMPLE forms, not complex multi-pattern
+      - USE PROBE to screen before full eval
+      - ENSURE integral(h) ≈ 1 (use penalty_strength=100)
+      - FOCUS on STRUCTURAL diversity, not hyperparameter tuning
+tool_descriptions:
+  edit_solution: |
+    Modify optimizer to use SIMPLIFIED initializations.
+    
+    For bipartite: Set latent = sigmoid(k*(x - a)) with single threshold a.
+    
+    For trimodal: Set latent as sum of 3 localized peaks.
+    
+    For symmetric: Set latent symmetric around x=1.
+    
+    Set penalty_strength=100 to enforce integral(h)=1.
+  evaluate_solution: |
+    Full 50000-step optimization. 
+    Combined_score = 0.38092303510845016 / c5_bound.
+    Use probe_simple first to filter.
+  probe_solution: |
+    Fast approximate evaluation. Use for screening.
+  finish: |
+    Submit when combined_score > 1.0.

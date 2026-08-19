@@ -1,0 +1,104 @@
+---
+name: discovery-optimization
+description: "Two-phase fish-capture optimizer: (1) spatial analysis finds mackerel clusters and generates 8-12 candidates (bounding boxes, L-shapes, staircases), (2) local refinement with edge perturbations and sardine-exclusion notches. Uses KD-tree for fast scoring. Target score ~5000 per test case."
+---
+
+Two-Phase Fish Capture Optimizer Implementation Guide
+
+PHASE 1: Spatial Analysis and Candidate Generation (0.8s budget)
+
+Step 1: Build Spatial Index
+Use existing KD-tree or create grid index (100x100 cells for 10^5 coordinate range).
+Pre-process all fish positions into the index at startup.
+
+Step 2: Find Mackerel Clusters
+Use BFS on grid to find connected components of mackerels.
+Target clusters with at least 50 mackerels.
+Collect cluster centers and bounding boxes.
+
+Step 3: Generate Candidates (8-12 total)
+Type A - Bounding boxes (4-6 candidates):
+  For each mackerel cluster, compute bbox and expand by 500 units.
+  
+Type B - L-shapes (3-4 candidates):
+  Create L-shaped polygons capturing corner regions of clusters.
+  
+Type C - Stepped polygons (2-3 candidates):
+  Create staircase patterns around dense mackerel regions.
+
+Step 4: Score All Candidates
+Use grid index for O(1) mackerel count and O(sardines_in_bbox) for sardines.
+Track best score.
+
+PHASE 2: Local Refinement (1.2s budget)
+
+Step 1: Edge Perturbation
+For each of top-3 candidates, for each edge:
+  Move one endpoint by ±1 to ±3 units along the edge direction.
+  Keep axis-aligned constraint.
+  Score each variant.
+  Accept improvements.
+
+Step 2: Sardine Notching
+For sardines within 2 units of polygon boundary:
+  Create 1-2 unit indentation toward the sardine.
+  This excludes the sardine while keeping most mackerels.
+
+Step 3: Hill Climbing
+Accept improvements immediately.
+Accept small decreases (≤2 points) with 3% probability.
+Restart from Phase 1 candidates every 0.4 seconds.
+
+Step 4: Stop Conditions
+Stop when remaining time < 0.4s OR no improvement for 0.2s.
+
+C++ IMPLEMENTATION PATTERNS
+
+Grid-based counting:
+  int CELL_SIZE = 1000;
+  int grid[100][100][2] = {0};  // [x][y][type]
+  // Fill grid from fish positions
+  // Count: sum grid[x][y][1] for mackerels in range
+
+Cluster bbox generation:
+  Find min/max x,y of cluster, expand by 'expand' amount
+  Ensure coordinates in [0, 100000]
+  Return 4-vertex rectangle
+
+Edge perturbation:
+  For vertical edge (x constant): change x by dx
+  For horizontal edge (y constant): change y by dy
+  Validate new polygon before scoring
+
+Sardine notch:
+  Find edge closest to sardine
+  Create 2-vertex indentation pointing away from sardine
+  Ensure polygon remains simple (non-self-intersecting)
+
+Complete main loop structure:
+  - Build spatial index (0.1s)
+  - Generate candidates (0.7s)
+  - Score and select top-3
+  - Refine each candidate (1.0s total)
+  - Output best (0.2s buffer)
+
+Performance tips:
+  - Use fast I/O: std::ios::sync_with_stdio(false); cin.tie(nullptr);
+  - Pre-allocate all vectors
+  - Avoid dynamic allocation in search loop
+  - Cache fish positions globally
+  - Use integer arithmetic only
+
+Time budget (strict):
+  0.1s: Input parsing and index building
+  0.7s: Phase 1 - generate 8-12 candidates
+  1.0s: Phase 2 - refine top 3 candidates
+  0.2s: Final output and safety margin
+
+Validation checklist before output:
+  - Polygon has 4-1000 vertices
+  - All vertices have distinct coordinates
+  - All edges are axis-aligned
+  - Total perimeter ≤ 400,000
+  - All coordinates in [0, 100000]
+  - Non-self-intersecting

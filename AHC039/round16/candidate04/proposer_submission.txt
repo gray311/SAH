@@ -1,0 +1,290 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are a C++ polygon optimizer for the fish capture task. Goal: maximize (mackerels - sardines + 1).
+  
+  CRITICAL STRATEGY: Cluster-based polygon construction with precision expansion.
+  
+  SEARCH METHOD:
+  
+  1. SPATIAL ANALYSIS:
+     - Parse fish coordinates from input (first N mackerels, next N sardines)
+     - Build hash map of all fish positions with types
+     - Identify mackerel clusters using local density (cells with multiple mackerels)
+     - Compute bounding boxes for each cluster
+  
+  2. CLUSTER-CENTRIC POLYGON BUILDING:
+     - Start from highest-density mackerel cluster
+     - Expand outward in 4 cardinal directions, adding vertices only at fish positions
+     - Use greedy expansion: extend until hitting sardine-rich region or perimeter limit
+     - Prioritize clusters with high mackerel-to-sardine ratio
+  
+  3. MULTI-CLUSTER POLYGONS:
+     - Identify 3-5 separate mackerel clusters
+     - Build separate polygons for each (4-lobed structure if feasible)
+     - Ensure total perimeter <= 400,000
+  
+  4. EDGE REFINEMENT:
+     - For each polygon edge, try moving parallel to axis by ±1, ±2, ±3, ±4, ±5, ±10
+     - Count affected fish by coordinate intersection (O(1) with hash maps)
+     - Keep move that improves score
+  
+  5. MULTIPLE RESTARTS:
+     - Run 10-15 restarts with different starting clusters
+     - Each restart: pick random mackerel cluster, build polygon, refine
+     - Output best polygon
+  
+  6. VALIDATION:
+     - Output valid axis-aligned polygon (4-1000 vertices, integer coords, no self-intersection)
+     - Ensure perimeter <= 400,000, all coords in [0,100000]
+  
+  Tools:
+  - analyze_clusters: Get mackerel clusters and their density metrics
+  - edit_solution: Replace EVOLVE-BLOCK with complete C++ implementing above
+  - evaluate_solution: Run C++, get score
+  - finish: Submit when you have working solution
+  
+  Preserve EVOLVE-BLOCK markers and exact I/O format.
+skill_description: Cluster-based polygon construction. Parse fish coords, identify mackerel clusters via hash map, build axis-aligned polygons around clusters, refine edges by coordinate-based fish counting, multiple restarts.
+skill_body: |
+  # Cluster-Based Polygon Construction
+  
+  ## Phase 1: Spatial Analysis
+  - Parse all fish coordinates from input
+  - Build hash map: position -> fish type (1 for mackerel, -1 for sardine)
+  - Identify mackerel clusters by finding positions with multiple mackerels nearby
+  - For each cluster, compute: center, bounding box, mackerel count, radius
+  
+  ## Phase 2: Cluster-Centric Expansion
+  From each mackerel cluster:
+  - Start with cluster bounding box as initial polygon
+  - Extend in 4 cardinal directions (N,S,E,W)
+  - At each step, check if extending captures more mackerels and/or avoids sardines
+  - Stop when: perimeter > 400,000, or extending captures sardines with M-S ratio drops
+  - Use coordinate-based counting: for new region, count fish at positions inside
+  
+  ## Phase 3: Multi-Cluster Strategy
+  - Identify 3-5 separate high-density mackerel clusters
+  - Build separate small polygons for each (4-lobed structure)
+  - Total perimeter must stay under 400,000
+  
+  ## Phase 4: Edge Refinement
+  For each edge of candidate polygon:
+  - Try parallel shifts: ±1, ±2, ±3, ±4, ±5, ±10 units
+  - For each shift, compute delta in mackerels captured (hash map lookup)
+  - Compute delta in sardines captured
+  - Keep shift that maximizes net change in (mackerels - sardines)
+  - Repeat 2-3 refinement rounds
+  
+  ## Phase 5: Multiple Restarts
+  - Run 10-15 restarts
+  - Each restart: randomly pick starting cluster (or random mackerel position)
+  - Build polygon from that seed, refine, track best
+  
+  ## C++ Implementation Notes
+  - Use std::unordered_map<Point, int> for O(1) fish lookup
+  - For coordinate shifts: count affected fish by checking positions in shifted region
+  - Build polygon vertices as integer coordinates
+  - Validate: 4 <= vertices <= 1000, perimeter <= 400000, coords in [0,100000]
+  - Output format: m followed by m lines of "x y"
+new_tools:
+- name: analyze_clusters
+  description: |
+    Analyze fish positions from the input, identify mackerel clusters by local density.
+    Returns cluster centers, bounding boxes, mackerel counts, and overall fish distribution stats.
+    Call this early to guide polygon construction from high-density regions.
+  input_schema:
+    type: object
+    properties: {}
+  implementation_py: |
+    def run(ctx, args):
+        import json
+        from collections import defaultdict
+        
+        # Parse fish positions from the C++ program's input section
+        program_text = ctx.get_program()
+        fish_by_pos = defaultdict(int)
+        fish_types = {}  # pos -> type
+        
+        # Find the input data in the program (it contains all fish coordinates)
+        # The program reads from stdin, so we need to extract from global data
+        # Look for patterns like mackerels[...], sardines[...] or raw coordinates
+        
+        # Alternative: the program structure shows fish coordinates in arrays
+        # Extract all coordinate pairs
+        import re
+        coords = re.findall(r'\[\s*(\d+)\s*,\s*(\d+)\s*\]', program_text)
+        
+        mackerels = []
+        sardines = []
+        
+        for i, (x, y) in enumerate(coords):
+            if i < 5000:  # First 5000 are mackerels (N=5000)
+                mackerels.append((int(x), int(y)))
+            else:  # Next 5000 are sardines
+                sardines.append((int(x), int(y)))
+        
+        # Build hash map for O(1) lookup
+        all_fish = {}
+        for x, y in mackerels:
+            key = (x, y)
+            all_fish[key] = 1  # mackerel
+        for x, y in sardines:
+            key = (x, y)
+            all_fish[key] = -1  # sardine
+        
+        # Find mackerel clusters using local density
+        # A cluster is a group of mackerels within distance 500
+        clusters = []
+        visited = set()
+        
+        for i, (mx, my) in enumerate(mackerels):
+            if (mx, my) in visited:
+                continue
+            
+            cluster = []
+            queue = [(mx, my)]
+            while queue:
+                cx, cy = queue.pop(0)
+                if (cx, cy) in visited:
+                    continue
+                visited.add((cx, cy))
+                cluster.append((cx, cy))
+                
+                # Add nearby mackerels
+                for j, (nx, ny) in enumerate(mackerels):
+                    if (nx, ny) in visited:
+                        continue
+                    dist = abs(nx - cx) + abs(ny - cy)  # Manhattan
+                    if dist <= 800:  # Cluster radius
+                        queue.append((nx, ny))
+            
+            if len(cluster) >= 2:  # Only meaningful clusters
+                # Compute cluster center and bounding box
+                min_x = min(p[0] for p in cluster)
+                max_x = max(p[0] for p in cluster)
+                min_y = min(p[1] for p in cluster)
+                max_y = max(p[1] for p in cluster)
+                center_x = (min_x + max_x) // 2
+                center_y = (min_y + max_y) // 2
+                
+                # Count sardines in cluster bounding box
+                sardine_count = 0
+                for sx, sy in sardines:
+                    if min_x <= sx <= max_x and min_y <= sy <= max_y:
+                        sardine_count += 1
+                
+                clusters.append({
+                    "center": (center_x, center_y),
+                    "min_x": min_x, "max_x": max_x,
+                    "min_y": min_y, "max_y": max_y,
+                    "mackerel_count": len(cluster),
+                    "sardine_count": sardine_count,
+                    "density": len(cluster) / max((max_x - min_x + 1) * (max_y - min_y + 1), 1)
+                })
+        
+        # Sort clusters by mackerel density
+        clusters.sort(key=lambda c: c["mackerel_count"] / max((c["max_x"] - c["min_x"] + 1) * (c["max_y"] - c["min_y"] + 1), 1), reverse=True)
+        
+        # Return top clusters
+        return {
+            "num_mackerels": len(mackerels),
+            "num_sardines": len(sardines),
+            "top_clusters": clusters[:10],
+            "all_clusters": clusters
+        }
+sampling:
+  temperature: 1.2
+  top_p: 0.95
+  top_k: 25
+  max_tokens: 14336
+agent:
+  max_iterations: 60
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 15000
+new_skills:
+- name: cluster-based-polygon-guide
+  description: Build polygons around identified mackerel clusters using coordinate-based expansion and refinement.
+  body: |
+    # Cluster-Based Polygon Construction Guide
+    
+    ## Core Strategy
+    
+    Instead of grid-based approximation, work directly with fish coordinates at the actual positions.
+    This enables precise polygon edges that capture individual fish.
+    
+    ## Phase 1: Cluster Identification
+    
+    - Parse all fish positions from input
+    
+    - Use hash map for O(1) position lookup
+    
+    - Find mackerel clusters using local density (mackerels within 800 units)
+    
+    - For each cluster, compute bounding box and sardine count inside
+    
+    - Rank clusters by mackerel density (mackerels per area)
+    
+    ## Phase 2: Cluster-Centric Expansion
+    
+    From each high-density cluster:
+    
+    1. Start with cluster bounding box as initial polygon
+    
+    2. Extend in 4 cardinal directions (N, S, E, W):
+       - Move one coordinate unit at a time
+       - At each step, check if extending captures more mackerels or avoids sardines
+       - Use hash map to count fish in the extended region
+    
+    3. Stop conditions:
+       - Perimeter reaches 400,000
+       - No improvement in M-S score
+       - Hitting sardine-rich region (S > M + 3)
+    
+    ## Phase 3: Multi-Cluster Polygons
+    
+    - Select top 3-5 clusters with highest density
+    
+    - Build separate small polygons for each
+    
+    - Ensure total perimeter stays under 400,000
+    
+    - Consider 4-lobed polygon if clusters are spatially separated
+    
+    ## Phase 4: Edge Refinement
+    
+    For each polygon edge:
+    
+    1. Try parallel shifts: ±1, ±2, ±3, ±4, ±5, ±10 units
+    
+    2. For each shift:
+       - Compute which fish positions cross the edge
+       - Count mackerels and sardines affected (hash map lookup)
+       - Calculate net score change
+    
+    3. Keep shift with best improvement
+    
+    4. Repeat 2-3 refinement rounds
+    
+    ## Phase 5: Multiple Restarts
+    
+    - Run 10-15 restarts
+    
+    - Each restart: pick random starting cluster or random mackerel position
+    
+    - Build polygon from seed, refine, track best
+    
+    ## Phase 6: Validation
+    
+    - Output valid axis-aligned polygon
+    
+    - Ensure: 4 <= vertices <= 1000, integer coords in [0,100000], perimeter <= 400000
+    
+    - Output format: m followed by m lines of "x y"
+new_middlewares:
+- name: cluster_reminder
+  hook: before_model
+  description: Remind solver to use cluster analysis before polygon construction
+  implementation_py: |
+    def before_model(hook_input):
+        return "Use analyze_clusters to find mackerel clusters, then build polygons around highest-density clusters with coordinate-based expansion and refinement."

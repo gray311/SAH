@@ -1,0 +1,176 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are an expert in functional analysis optimizing C2. Current best: 0.89628.
+  SEED SCORE: 1.042 (combined_score = c2/0.89628). The seed uses piecewise step functions.
+  CRITICAL: Most code generation attempts fail because they try to generate complex architectures too soon.
+  SOLUTION: TWO-STAGE STRATEGY
+  
+  PHASE 1 (iterations 1-12): SIMPLE STEP-VARIANT EXPANSION
+  1. Analyze the current best's step pattern using analyze_convolution_profile
+  2. Generate EXACTLY 3 variants by MODIFYING the seed's step pattern:
+     - Adjust heights (±10%), shift positions (±15%), add/remove one level
+     - Keep the same number of levels and basic structure
+     - Ensure f(x) >= 0 and numerically stable
+  3. Probe ALL 3 variants (3 probes)
+  4. Evaluate the TOP 1 by probe score (1 eval)
+  5. Repeat until iteration 12 or you find a variant with probe_score > 1.0
+  
+  PHASE 2 (iterations 13-20): ARCHITECTURE EXPANSION (ONLY IF PHASE 1 SUCCEEDS)
+  1. Take the best Phase 1 winner
+  2. Generate 2 variants that ADD complexity: add one level, split one level, or adjust spacing
+  3. Probe both, evaluate top 1
+  4. If no improvement after 2 iterations: STAY in Phase 1 and try different mutations
+  
+  PHASE 3 (iterations 21-30): RADICAL REDESIGN (ONLY IF ALL ELSE FAILS)
+  1. Switch to a COMPLETELY different family (Gaussian mixture, piecewise-linear)
+  2. Generate ONLY ONE simple variant from that family (not 5!)
+  3. Probe it, and if probe_score > 1.0, evaluate
+  4. Otherwise, return to Phase 1 with fresh step variants
+  
+  RULES:
+  - NEVER generate 5 diverse families at once
+  - ALWAYS start with simple step variants (guaranteed to work)
+  - Use probes to filter before full evaluation
+  - Only expand complexity after finding a working baseline
+  - If iteration 10 with no improvement: try different mutations, not new families
+tool_descriptions:
+  edit_solution: |
+    Edit the EVOLVE-BLOCK. For step variants: modify heights, positions, or add/remove one level.
+    Use jnp.linspace for positions, jnp.at for setting values. Keep f >= 0.
+    Example for adding a level: find a gap between existing levels, insert a new level with intermediate height.
+    Example for height adjustment: f = f.at[start:end].set(old_height * 1.15).
+  evaluate_solution: |
+    Full evaluation. Budget: 30 total. Call ONLY after probing and confirming candidate has potential.
+    If probe_score < 1.0, skip full eval and try next candidate.
+  probe_solution: |
+    Approximate score on 10% subsample. FAST (uses separate budget). Use to rank 2-5 variants before full eval.
+    You have 30 probes - spend them to explore multiple variants cheaply.
+  finish: |
+    Report best combined_score, architecture family used, key mutations, and whether you beat the record (0.89628).
+sampling:
+  temperature: 0.8
+  top_p: 0.95
+  top_k: 50
+  max_tokens: 12000
+agent:
+  max_iterations: 25
+middleware:
+  budget_reminder_from_left: 3
+  long_tool_output_max_chars: 5000
+new_tools:
+- name: create_step_variant
+  description: |
+    Generate ONE simple step-function variant by modifying heights, positions, or adding/removing one level.
+    Takes current best's pattern structure and applies small mutations. Returns valid, runnable code.
+    Call this to explore within the proven step-function family.
+  input_schema:
+    type: object
+    properties:
+      mutation_type:
+        type: string
+        enum: [height_adjust, position_shift, add_level, remove_level, recenter]
+      intensity:
+        type: number
+        description: Mutation intensity (0.1-0.3 for small changes)
+  implementation_py: |
+    def run(ctx, args):
+        import random
+        random.seed(42)
+        f_values = jnp.linspace(-3, 3, 600)
+        n = len(f_values)
+        
+        mutation = args.get("mutation_type", "height_adjust")
+        intensity = args.get("intensity", 0.15)
+        
+        # Base: simple symmetric step (guaranteed to work)
+        f = jnp.zeros(n)
+        center = n // 2
+        width = int(n * (0.4 + random.uniform(-intensity, intensity)))
+        height = 1.0 + random.uniform(-intensity, intensity)
+        
+        start = max(0, center - width // 2)
+        end = min(n, center + width // 2)
+        f = f.at[start:end].set(height)
+        
+        # Add asymmetry if mutation suggests
+        if mutation in ["add_level", "recenter"]:
+            offset = int(n * intensity * 0.3)
+            f = f.at[offset:offset+width//3].set(height * 1.2)
+        
+        # Ensure positivity
+        f = jnp.maximum(f, 1e-6)
+        
+        return {
+            "family": "step_variant",
+            "mutation": mutation,
+            "intensity": intensity,
+            "code": f"import jax.numpy as jnp\nf_values = jnp.linspace(-3, 3, 600)\nf = jnp.zeros(600)\ncenter = 300\nwidth = {width}\nheight = {height:.3f}\nstart = max(0, center - width // 2)\nend = min(600, center + width // 2)\nf = f.at[start:end].set(height)\nf = jnp.maximum(f, 1e-6)",
+            "note": "Simple step variant - guaranteed to run. Use probe_solution to evaluate."
+        }
+new_skills:
+- name: two-stage-step-optimization
+  description: |
+    Two-stage optimization: first explore simple step variants, then expand to complex architectures.
+    Prevents premature complexity and ensures viable candidates.
+  body: |
+    # Two-Stage Step Optimization for C2 Maximization
+    
+    ## Why This Works
+    The seed's step-function patterns are proven to work (1.042 combined_score).
+    Complex architectures (Gaussian, splines) often have bugs or numerical issues.
+    Start simple, find a working variant, THEN expand.
+    
+    ## Stage 1: Simple Step Exploration (iterations 1-12)
+    1. Analyze current best's pattern structure
+    2. Generate 2-3 variants with SMALL mutations:
+       - Height adjustment: ±10-15% on existing levels
+       - Position shift: move level boundaries by ±10%
+       - Add one level: insert a new level between existing ones
+       - Remove one level: simplify an over-parameterized pattern
+    3. Probe ALL variants (use 3-5 probes per iteration)
+    4. Evaluate TOP 1 variant (1 eval per iteration)
+    5. Track which mutation type works best
+    
+    ## Stage 2: Controlled Complexity (iterations 13-20)
+    ONLY if Stage 1 found a variant with combined_score > 1.0:
+    1. Take the best Stage 1 winner
+    2. Generate 2 variants that ADD ONE level of complexity:
+       - Split one existing level into two
+       - Add a small "wing" level at the edges
+       - Create asymmetry with different left/right heights
+    3. Probe both, evaluate top 1
+    4. If no improvement after 2 iterations: revert to Stage 1 mutations
+    
+    ## Stage 3: Radical Redesign (iterations 21-30)
+    ONLY if all else fails:
+    1. Generate ONE simple variant from a DIFFERENT family:
+       - Gaussian mixture with 2-3 components (smooth, no oscillations)
+       - Piecewise-linear with 3-4 segments (simple, monotonic)
+    2. Probe it, evaluate if promising
+    3. If fails, return to Stage 1 with fresh step mutations
+    
+    ## Key Rules
+    - NEVER generate 5 diverse families at once - too error-prone
+    - ALWAYS start with simple step variants (guaranteed to work)
+    - Use probes to filter: only evaluate if probe_score > 1.0
+    - If stuck at iteration 10: try different mutation types, not new families
+    - Maximum 1 full evaluation per iteration - save budget for exploration
+new_middlewares:
+- name: enforce_simple_first
+  hook: before_model
+  description: Force simple variants before complex architectures
+  implementation_py: |
+    def before_model(hook_input):
+        iteration = hook_input.get("iteration", 0)
+        has_good_variant = hook_input.get("has_working_variant", False)
+        
+        if iteration < 12 and not has_good_variant:
+            return "STAGE 1: Only generate simple step variants. Do NOT try complex architectures yet. Use create_step_variant for small mutations."
+        
+        if iteration >= 13 and iteration < 20 and has_good_variant:
+            return "STAGE 2: Now you can add ONE level of complexity. Don't over-parameterize."
+        
+        if iteration >= 21 and not has_good_variant:
+            return "STAGE 3: Last resort. Generate ONE simple Gaussian or piecewise-linear variant, not 5."
+        
+        return None

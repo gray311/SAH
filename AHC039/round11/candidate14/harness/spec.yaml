@@ -1,0 +1,192 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are a C++ solver for the fish polygon optimization task.
+  Goal: Output an axis-aligned polygon (4-1000 vertices, perimeter <= 400k) maximizing (mackerels - sardines + 1).
+  
+  STRATEGY: Direct geometric envelope construction with rectangle-based refinement.
+  
+  PHASE 1 - Extreme Point Detection:
+  - Parse all mackerel and sacker coordinates
+  - Find min_x, max_x, min_y, max_y among mackerels
+  - These define the bounding box
+  
+  PHASE 2 - Rectangle Testing:
+  - Start with full bounding box of mackerels
+  - Count mackerels inside and sardines inside
+  - Score = mackers - sardines + 1
+  - If score < 1, find tightest rectangle covering at least one mackerel but excluding many sardines
+  
+  PHASE 3 - Edge Refinement:
+  - For each edge of current rectangle(s), try shifting by small amounts
+  - Priority: expand towards mackerel density, contract away from sardine clusters
+  - Use the exact fish coordinates (not grid approximation)
+  
+  PHASE 4 - Multi-Rectangle Strategy:
+  - If one rectangle fails, try combining 2-3 adjacent rectangles
+  - Each rectangle should capture a dense mackerel cluster while avoiding sardines
+  - Connect rectangles with thin corridors if beneficial
+  
+  PHASE 5 - Output:
+  - Ensure valid polygon format: vertices 4-1000, integer coords [0,100000]
+  - Perimeter constraint: sum of edge lengths <= 400,000
+  - No self-intersection (axis-aligned rectangles naturally satisfy this)
+  
+  CRITICAL: Work DIRECTLY with fish coordinates. Do NOT use grid abstraction.
+  Enumerate rectangles by testing combinations of x and y boundaries derived from fish positions.
+  Use both min/max and percentiles of mackerel distribution to find good boundaries.
+  
+  Time budget: 2.0s per evaluation. Output valid polygon deterministically.
+skill_description: |
+  Direct geometric envelope construction for fish polygon optimization.
+  Find mackerel bounding box, test rectangles formed by coordinate percentiles,
+  refine edges to exclude sardines, combine multiple rectangles if beneficial.
+  Works directly with fish coordinates - no grid abstraction.
+tool_descriptions:
+  edit_solution: |
+    Replace EVOLVE-BLOCK with C++ implementing direct geometric envelope construction:
+    1. Parse fish coordinates, find extremes and percentiles
+    2. Test bounding box and sub-rectangles
+    3. Refine edges by shifting based on fish density
+    4. Combine rectangles if beneficial
+    5. Output valid polygon
+    
+    Ensure: Valid polygon format, integer coords, no self-intersection, perimeter <= 400k.
+  evaluate_solution: |
+    Run C++ program, get score. Budget=30 evals, ~2.0s each.
+  probe_solution: |
+    Use for quick rectangle scoring - test multiple candidate rectangles cheaply.
+  finish: |
+    Submit when you have a working geometric envelope solution.
+sampling:
+  temperature: 0.8
+  top_p: 0.95
+  top_k: 15
+  max_tokens: 8192
+agent:
+  max_iterations: 30
+middleware:
+  budget_reminder_from_left: 3
+  long_tool_output_max_chars: 8000
+new_tools:
+- name: test_rectangle
+  description: |
+    Evaluate a rectangle by counting fish inside. Takes (min_x, max_x, min_y, max_y)
+    and returns (mackerel_count, sardine_count, score). Uses exact fish coordinates.
+    Call this to enumerate candidate rectangles efficiently.
+  input_schema:
+    type: object
+    properties:
+      min_x:
+        type: integer
+      max_x:
+        type: integer
+      min_y:
+        type: integer
+      max_y:
+        type: integer
+  implementation_py: |
+    def run(ctx, args):
+        min_x = args.get("min_x", 0)
+        max_x = args.get("max_x", 100000)
+        min_y = args.get("min_y", 0)
+        max_y = args.get("max_y", 100000)
+        
+        program = ctx.get_program()
+        mackerels = []
+        sardines = []
+        
+        for line in program.split('\n'):
+            line = line.strip()
+            if 'mackerel' in line.lower() or 'x_' in line:
+                try:
+                    parts = line.split()
+                    if len(parts) >= 2:
+                        x, y = int(parts[0]), int(parts[1])
+                        mackerels.append((x, y))
+                except:
+                    pass
+            elif 'sardine' in line.lower() or 'x_{N' in line:
+                try:
+                    parts = line.split()
+                    if len(parts) >= 2:
+                        x, y = int(parts[0]), int(parts[1])
+                        sardines.append((x, y))
+                except:
+                    pass
+        
+        m_count = sum(1 for (x,y) in mackerels if min_x <= x <= max_x and min_y <= y <= max_y)
+        s_count = sum(1 for (x,y) in sardines if min_x <= x <= max_x and min_y <= y <= max_y)
+        
+        score = max(0, m_count - s_count + 1)
+        
+        return {
+            "min_x": min_x, "max_x": max_x, "min_y": min_y, "max_y": max_y,
+            "mackerels": m_count, "sardines": s_count, "score": score
+        }
+remove_tools: []
+new_skills:
+- name: geometric-envelope-method
+  description: |
+    Build polygons by enumerating axis-aligned rectangles based on fish coordinates.
+    Test bounding box, percentile-based rectangles, and edge-refined variants.
+  body: |
+    # Geometric Envelope Method for Fish Optimization
+    
+    ## Core Principle
+    Work DIRECTLY with fish coordinates. Find extreme points and test rectangles
+    formed by coordinate combinations. No grid abstraction.
+    
+    ## Step 1: Parse and Collect Coordinates
+    - Extract all mackerel (x_i, y_i) coordinates
+    - Extract all sardine coordinates separately
+    - Store in lists for quick access
+    
+    ## Step 2: Find Coordinate Extremes
+    - min_x, max_x = min/max of mackerel x-coordinates
+    - min_y, max_y = min/max of mackerel y-coordinates
+    - These define the initial bounding box
+    
+    ## Step 3: Test Bounding Box
+    - Count mackerels and sardines inside [min_x, max_x] × [min_y, max_y]
+    - Score = m - s + 1
+    - If score >= target, this may be optimal or near-optimal
+    
+    ## Step 4: Percentile-Based Rectangles
+    - Sort mackerel x-coordinates, pick top 50th, 60th, 70th percentiles
+    - Sort mackerel y-coordinates, pick top 50th, 60th, 70th percentiles
+    - Test combinations: [x_50, x_max] × [y_50, y_max], etc.
+    - Smaller rectangles may exclude sardines while keeping many mackerels
+    
+    ## Step 5: Edge Refinement
+    - For promising rectangle, shift each edge by small amounts (±1, ±2, ±5 units)
+    - Test each shifted boundary with test_rectangle tool
+    - Keep shifts that increase score
+    - Repeat for up to 3 refinement rounds
+    
+    ## Step 6: Multi-Rectangle Strategy
+    - If single rectangle score is poor, try 2-3 adjacent rectangles
+    - Find gaps between mackerel clusters
+    - Create thin rectangles connecting dense regions
+    - Ensure no self-intersection (axis-aligned rectangles don't intersect if properly ordered)
+    
+    ## Step 7: Output
+    - Convert rectangle(s) to polygon vertex list
+    - Ensure 4-1000 vertices, integer coords [0,100000]
+    - Perimeter <= 400,000
+    - Output in required format: m\nv1 v2\nv3 v4\n...
+    
+    ## Key Success Factors
+    - Direct coordinate work, not grid abstraction
+    - Test many rectangle combinations (enumerate, don't guess)
+    - Use both mackerel extremes and percentiles for boundaries
+    - Refine edges incrementally
+    - Combine rectangles only if beneficial
+new_middlewares:
+- name: coordinate_hint
+  hook: before_model
+  description: |
+    Prompt the solver to use direct coordinate analysis and rectangle enumeration.
+    Focus on mackerel extremes and percentile-based rectangle testing.
+  implementation_py: |
+    def before_model(hook_input):
+        return "Work with direct fish coordinates: find mackerel min/max x/y, test rectangles formed by coordinate percentiles, refine edges by small shifts. Use test_rectangle to enumerate candidates."

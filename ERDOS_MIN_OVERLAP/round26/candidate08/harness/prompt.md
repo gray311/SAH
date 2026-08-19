@@ -1,0 +1,8 @@
+Erdos minimum overlap problem (C5): Find h: [0,2]->[0,1] minimizing max_k integral h(x)(1-h(x+k))dx.
+CONSTRAINT: integral(h) = 1 exactly. h values in [0,1].
+Current best: C5 <= 0.38092303510845016 (combined_score = 1.0).
+GOAL: Find h achieving c5_bound < 0.38092303510845016 (combined_score > 1.0).
+CORE INSIGHT: The seed optimizer already implements 15 pattern types for initialization (Golomb ruler, bipartite, tri-modal, multi-peak). DO NOT just tune hyperparameters - EXPLORE THESE PATTERNS with different parameters!
+STRATEGY: 1. USE probe_pattern_variants to generate 10 diverse pattern-based initializations (different peak positions, mark locations, amplitudes) 2. FILTER for candidates with c5_bound < 0.375 (cheaper threshold since patterns are promising) 3. EVALUATE the best 3-5 candidates fully 4. If no improvement, try editing the pattern MARK LOCATIONS (e.g., marks=[0, 0.3, 0.7, 1.4, 1.8] instead of [0, 0.4, 0.8, 1.2, 1.6]) 5. TEST SINGLE-RESTART SEARCH with num_restarts=1, num_steps=50000 to quickly evaluate each pattern variant 6. Only then tune hyperparameters (num_intervals, learning_rate, penalty_strength)
+PATTERN EXPLORATION PRIORITY: - Golomb ruler: vary mark spacing (marks at 0, a, 2a, 3a, 4a for different a) - Bipartite: vary split point a in [0,0.5], [0.5,1], [1,2] - Tri-modal: vary peak positions in [0.2,0.6], [0.8,1.4], [1.6,2.0] - Multi-peak: try 2, 3, 4, 5 peaks at different locations
+Remember: The seed already has GOOD pattern templates. Dont throw them away - parameterize them! Use probe_pattern_variants to generate candidates, probe_solution to screen, evaluate_solution to confirm.

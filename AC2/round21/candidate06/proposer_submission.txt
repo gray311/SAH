@@ -1,0 +1,96 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are optimizing C2 for the second autocorrelation inequality.
+  Current best: 0.8962799441554086 (AlphaEvolve step functions).
+  
+  CRITICAL: Step functions are good but not optimal. The seed explores 12 patterns, but these are LIMITED variations.
+  TO BEAT THE RECORD, you MUST explore NEW FUNCTION FAMILIES: piecewise linear, spline-based, Gaussian mixtures.
+  
+  STRATEGY - FAMILY EXPLORATION (30 iterations, budget 30 evals):
+  
+  PHASE 1 (iterations 1-12): EXPLORE NEW FAMILIES
+  1. Choose ONE family: Piecewise linear, Gaussian mixture, or spline
+  2. Generate prototype and call probe_family (new tool - fast family probe)
+  3. If probe >= 1.0: evaluate. If beats record: switch to Phase 2.
+  4. If < 1.0 after 2 tries: try next family
+  
+  PHASE 2 (iterations 13-24): REFINEMENT
+  Generate 3 variants per family, probe all, evaluate best.
+  
+  PHASE 3 (iterations 25-30): HYBRID PUSH
+  Try hybrids: step+Gaussian tails. Probe 2, evaluate best, submit.
+  
+  RULES: DO NOT refine step patterns - explore new families. PROBE FIRST.
+skill_description: Family exploration. Test piecewise linear, Gaussian mixtures, splines. Avoid re-running seed step patterns.
+skill_body: |
+  # Family Exploration Protocol
+  
+  ## Phase 1: Prototype New Families (iterations 1-12)
+  Select ONE family: Gaussian mixture (3 Gaussians), piecewise linear (5-7 knots), or spline. 
+  Call probe_family for fast prototype test. If probe >= 1.0, call evaluate_solution.
+  
+  ## Phase 2: Refine (iterations 13-24)
+  Generate 3 variants: perturb 20% parameters, adjust scale, symmetric vs asymmetric.
+  Probe all 3, evaluate best.
+  
+  ## Phase 3: Hybrids (iterations 25-30)
+  Try step+Gaussian tails. Probe 2, evaluate best, submit if c2 > record.
+  
+  ## Key Rules
+  - EXPLORE NEW FAMILIES, do not re-run seed step patterns
+  - PROBE FIRST: use probe_family before full eval
+  - Use 30 evals wisely: 1-2 per family
+sampling:
+  temperature: 1.1
+  top_p: 0.98
+  top_k: 30
+  max_tokens: 16384
+agent:
+  max_iterations: 30
+middleware:
+  budget_reminder_from_left: 3
+  long_tool_output_max_chars: 15000
+new_tools:
+- name: probe_family
+  description: Fast probe of new function family prototype (piecewise linear, Gaussian mixture, spline). Tests on 10% subsample. Returns approx C2. Call ONCE per family before full eval.
+  input_schema:
+    type: object
+    properties:
+      family_type:
+        type: string
+        description: piecewise_linear, gaussian_mixture, spline, or hybrid
+      prototype_seed:
+        type: integer
+        description: Random seed
+  implementation_py: |
+    def run(ctx, args):
+        family = args.get('family_type', 'gaussian_mixture')
+        seed = args.get('prototype_seed', 42)
+        current_best = ctx.best_score() or 0.896
+        result = ctx.probe(subsample=1000)
+        approx_c2 = result.get('c2', 0.89)
+        return {'family': family, 'approx_c2': approx_c2, 'probe_result': result.get('combined_score', 1.0), 'recommendation': 'promising' if approx_c2 > current_best else 'retry'}
+new_skills:
+- name: family-exploration-protocol
+  description: Prototype and refine new function families. Avoid re-running seed step patterns.
+  body: |
+    # Family Exploration Protocol
+    
+    ## Phase 1: Prototype (iterations 1-12)
+    Select ONE family: Gaussian mixture, piecewise linear, or spline. Call probe_family. If probe >= 1.0, evaluate.
+    
+    ## Phase 2: Refine (iterations 13-24)
+    Generate 3 variants per family. Probe all, evaluate best.
+    
+    ## Phase 3: Hybrids (iterations 25-30)
+    Try step+Gaussian tails. Probe 2, evaluate best, submit.
+    
+    ## Key Rules
+    - EXPLORE NEW FAMILIES
+    - PROBE FIRST
+    - Use 30 evals wisely
+tool_descriptions:
+  edit_solution: 'Edit EVOLVE-BLOCK to construct NEW function family. Options: Gaussian mixture f(x) = sum w_i exp(-(x-c_i)^2/2s_i^2), piecewise linear between knots. Ensure f(x) >= 0.'
+  evaluate_solution: 'Full evaluation. Budget: 30. Call ONLY after probe_solution or probe_family ranking. Evaluate top 1 variant.'
+  probe_solution: 'Approximate score on 10% subsample. FAST. Use to filter 3-4 variants. Phase 1: probe 1 per family. Phase 2: probe 3 variants. Phase 3: probe 2 hybrids.'
+  finish: Report best combined_score, winning family type, key parameters, and why it outperforms step functions.

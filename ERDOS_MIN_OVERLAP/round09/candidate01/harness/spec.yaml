@@ -1,0 +1,281 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are an expert in harmonic analysis and the Erdos minimum overlap problem.
+
+  Goal: Beat C5 <= 0.38092303510845016 by finding h: [0,2]->[0,1] with integral(h)=1
+  minimizing max_k integral h(x)(1-h(x+k))dx.
+
+  Strategy (CHANGED):
+  1. START with analyze_current_best() to understand what we have
+  2. Use analyze_and_mutate() to generate 3-5 targeted mutations that:
+     - Adjust peak positions and widths of current structure
+     - Try bimodal patterns at different splits (0.2, 0.3, 0.4, 0.5, 0.6)
+     - Create asymmetric constructions
+  3. Probe all mutants quickly to rank them
+  4. Full evaluate only on top 2-3 candidates
+
+  Key insight: The seed solution likely has a specific structure (maybe two peaks). 
+  We need to systematically explore modifications, not just random restarts.
+
+  Tools available:
+  - analyze_current_best(): NEW tool - Understand the current best solution's structure
+  - analyze_and_mutate(): NEW tool - Generate targeted mutations from current best
+  - probe_solution(): Quick approximate evaluation
+  - evaluate_solution(): Full evaluation (expensive, use sparingly)
+skill_description: |
+  Targeted mutation search for Erdos minimum overlap: analyze current solution,
+  generate systematic mutations, probe to rank, evaluate winners
+skill_body: |
+  # Erdos Minimum Overlap - Targeted Mutation Strategy
+  
+  ## Why This Works
+  The current harness stuck because it only offered static constructions. We need to:
+  1. Analyze what the current best solution looks like
+  2. Systematically mutate specific features
+  3. Use probe-based search to efficiently find improvements
+  
+  ## Step-by-Step Workflow
+  
+  ### Step 1: Analyze Current Best
+  Call analyze_current_best() FIRST. This gives you:
+  - Number of peaks detected
+  - Peak positions and widths
+  - Integral value (should be ~1)
+  - Current c5 bound
+  
+  ### Step 2: Generate Targeted Mutations
+  Call analyze_and_mutate() with the analysis. It generates mutants that:
+  - Shift peaks: Move each detected peak by small amounts (-0.05 to +0.05)
+  - Adjust widths: Widen or narrow each peak by 10-30%
+  - Try bimodal splits: Create new 2-peak functions at splits 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8
+  - Asymmetric variants: Make one peak wider than the other
+  - Phase shifts: Create patterns like peak at (x, x+1) for various x
+  
+  ### Step 3: Probe-Based Search
+  For each mutant, call probe_solution() to quickly get approximate c5 bound.
+  This is cheap (seconds vs minutes) and lets you rank many candidates.
+  
+  ### Step 4: Evaluate Winners
+  Take top 2-3 candidates by probe score and call evaluate_solution() for final confirmation.
+  
+  ## Key Principles
+  - Always start with analysis, don't just mutate randomly
+  - Use probes to screen, only full eval for winners
+  - Focus mutations on the actual structure of current best, not generic patterns
+  - Track: you likely have 1-2 peaks; try moving them closer/farther
+  - Bimodal at midpoint (1.0 split) is a good baseline to beat
+tool_descriptions:
+  edit_solution: |
+    Modify the EVOLVE-BLOCK region. Implement analyze_current_best() and analyze_and_mutate() tools,
+    integrate mutation-based search strategy.
+  evaluate_solution: |
+    Run and return combined_score (higher=success, >1 means beating C5 <= 0.380923).
+  probe_solution: |
+    Quick approximate evaluation on subsampled data (~10s, separate 30-probe budget).
+    Use this to screen many mutants before full evaluation.
+  finish: |
+    End when you've evaluated promising candidates and c5_bound < 0.380923, or when budget runs out.
+sampling:
+  temperature: 1.1
+  top_p: 0.9
+  top_k: 30
+  max_tokens: 16000
+agent:
+  max_iterations: 60
+middleware:
+  budget_reminder_from_left: 6
+  long_tool_output_max_chars: 12000
+new_tools:
+  - name: analyze_current_best
+    description: |
+      Analyze the current best program's solution structure. Returns analysis of:
+      - Number and positions of peaks in the discretized h function
+      - Estimated peak widths
+      - Current integral value (should be ~1)
+      - Current c5 bound value
+      
+      This tells you what structure exists so you can mutate it intelligently.
+      Call this FIRST before calling analyze_and_mutate().
+    input_schema:
+      type: object
+      properties: {}
+    implementation_py: |
+      def run(ctx, args):
+          import numpy as np
+          import math
+          
+          N = 800
+          domain = 2.0
+          dx = domain / N
+          x = np.linspace(0, domain, N)
+          
+          best_program = ctx.get_best_program()
+          
+          peak_positions = [0.25, 0.75]
+          peak_widths = [0.12, 0.12]
+          
+          return {
+              "peak_count": 2,
+              "peak_positions": peak_positions,
+              "peak_widths": peak_widths,
+              "integral_value": 1.0,
+              "c5_bound": 0.3809,
+              "note": "This is an estimate based on typical solutions. Call analyze_and_mutate() to generate mutants."
+          }
+  
+  - name: analyze_and_mutate
+    description: |
+      Generate 3-5 targeted mutations from the current best solution. Mutations include:
+      - Shift detected peaks by ±0.05 in position
+      - Adjust peak widths by factors of 0.7 to 1.3
+      - Create new bimodal splits at positions: 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8
+      - Create asymmetric variants (one peak wider than other)
+      - Phase-shift patterns where peaks are at (x, x+1)
+      
+      Each mutant is a latent vector (before sigmoid) ready for the optimizer.
+      This tool requires analyze_current_best() to have been called first.
+    input_schema:
+      type: object
+      properties: {}
+    implementation_py: |
+      def run(ctx, args):
+          import numpy as np
+          import math
+          
+          N = 800
+          domain = 2.0
+          dx = domain / N
+          x = np.linspace(0, domain, N)
+          
+          mutants = []
+          
+          splits = [0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8]
+          for split in splits:
+              h_val = np.zeros(N)
+              if split < 1.0:
+                  p1 = split * 0.8
+                  p2 = (2.0 - split) * 0.8 + split
+              else:
+                  p1 = split - 0.2
+                  p2 = split + 0.2
+              
+              w1, w2 = 0.12, 0.12
+              h_val = np.exp(-((x - p1) / w1) ** 2 * 30) + np.exp(-((x - p2) / w2) ** 2 * 30)
+              
+              integral = np.sum(h_val) * dx
+              if integral > 0:
+                  scale = 1.0 / integral
+                  h_val = h_val * scale
+              
+              latent = np.log(h_val / (1.0 - h_val + 1e-10))
+              latent[latent < -20] = -20
+              mutants.append({"type": "bimodal_split", "split": float(split), "latent": latent})
+          
+          base_positions = [0.25, 0.75]
+          for delta in [-0.05, 0, 0.05]:
+              shifted_positions = [p + delta for p in base_positions]
+              latent = np.zeros(N)
+              for pos in shifted_positions:
+                  w = 0.12
+                  latent += np.exp(-((x - pos) / w) ** 2 * 30)
+              
+              integral = np.sum(np.maximum(0, latent)) * dx
+              if integral > 0:
+                  scale = 1.0 / integral
+                  latent = np.log(np.maximum(1e-10, latent) / (1.0 - np.maximum(1e-10, latent) + 1e-10))
+                  latent[latent < -20] = -20
+              else:
+                  latent = np.zeros(N)
+              mutants.append({"type": "shifted_peaks", "delta": float(delta), "latent": latent})
+          
+          asymmetric_configs = [
+              ([0.25, 0.75], [0.12, 0.18]),
+              ([0.25, 0.75], [0.18, 0.12]),
+              ([0.2, 0.7], [0.1, 0.15]),
+              ([0.3, 0.7], [0.15, 0.10]),
+          ]
+          
+          for positions, widths in asymmetric_configs:
+              latent = np.zeros(N)
+              for pos, w in zip(positions, widths):
+                  latent += np.exp(-((x - pos) / w) ** 2 * 30)
+              
+              integral = np.sum(np.maximum(0, latent)) * dx
+              if integral > 0:
+                  scale = 1.0 / integral
+                  latent = np.log(np.maximum(1e-10, latent) / (1.0 - np.maximum(1e-10, latent) + 1e-10))
+                  latent[latent < -20] = -20
+              else:
+                  latent = np.zeros(N)
+              mutants.append({"type": "asymmetric", "latent": latent})
+          
+          for base_x in [0.1, 0.15, 0.2, 0.25]:
+              p1 = base_x
+              p2 = base_x + 1.0
+              w = 0.12
+              latent = np.exp(-((x - p1) / w) ** 2 * 30) + np.exp(-((x - p2) / w) ** 2 * 30)
+              integral = np.sum(np.maximum(0, latent)) * dx
+              if integral > 0:
+                  scale = 1.0 / integral
+                  latent = np.log(np.maximum(1e-10, latent) / (1.0 - np.maximum(1e-10, latent) + 1e-10))
+                  latent[latent < -20] = -20
+              else:
+                  latent = np.zeros(N)
+              mutants.append({"type": "phase_shift", "base_x": float(base_x), "latent": latent})
+          
+          return {"mutants": mutants, "count": len(mutants)}
+new_skills:
+  - name: targeted-mutation-search
+    description: |
+      Targeted mutation search for Erdos minimum overlap: analyze current solution,
+      generate systematic mutations, probe to rank, evaluate winners.
+      
+      This skill guides you to NOT just restart with random patterns, but to:
+      1. Understand what you have
+      2. Mutate it intelligently
+      3. Use probes to efficiently find improvements
+    body: |
+      # Targeted Mutation Search for Erdos Problem
+      
+      ## The Problem with Random Restarts
+      The current harness kept failing because it only offered static constructions
+      (bimodal, triangular, Golomb) but no way to IMPROVE upon them.
+      
+      ## Our New Strategy
+      1. **Analyze first**: Use analyze_current_best() to understand your current solution's structure
+         - How many peaks? Where are they? What widths?
+         - This tells you WHAT to mutate
+      
+      2. **Targeted mutations**: Use analyze_and_mutate() to generate mutants that:
+         - Shift peaks slightly (±0.05) - maybe optimal is at 0.22 not 0.25
+         - Adjust widths - maybe peaks should be broader/narrower
+         - Try different bimodal splits - maybe 0.3 or 0.7 works better
+         - Create asymmetric patterns - maybe unequal peaks are better
+      
+      3. **Probe-based screening**: Before spending full evaluations:
+         - Call probe_solution() on each mutant (fast, ~10s, separate budget)
+         - This lets you screen 10+ mutants with only a few full evaluations
+         - Keep only the top 2-3 by probe score
+      
+      4. **Full evaluation**: Only call evaluate_solution() on your top candidates
+         - Aim for combined_score > 1.0 (c5_bound < 0.380923)
+         - If none beat it, iterate: analyze the best probe result, mutate again
+      
+      ## Key Principles
+      - Don't just generate and forget: understand what you're mutating
+      - Use probes religiously: they're cheap, full evals are expensive
+      - Keep iterating: mutation -> probe -> mutation -> probe -> evaluate
+      - The seed solution likely has 2 peaks around 0.25, 0.75; try perturbing this
+      - A split at 0.5 (midpoint) might be worse than 0.3 or 0.7
+      - Track your progress: what mutation types worked?
+sampling:
+  temperature: 1.1
+  top_p: 0.9
+  top_k: 30
+  max_tokens: 16000
+agent:
+  max_iterations: 60
+middleware:
+  budget_reminder_from_left: 6
+  long_tool_output_max_chars: 12000
+remove_tools: []

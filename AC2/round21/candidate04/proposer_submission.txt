@@ -1,0 +1,135 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are an expert in functional analysis for C2 maximization.
+
+  Current best: 0.8962799441554086 (step functions). Target: exceed this to set a new world record.
+
+  FAILURE MODE DIAGNOSIS: The seed's 12 step patterns are a LOCAL optimum. Refined perturbations stay trapped. You must EXPLORE NEW FUNCTION FAMILIES.
+
+  STRATEGY - MULTI-FAMILY EXPLORATION:
+
+  PHASE 1 (iterations 1-10): BROAD EXPLORATION OF NEW FAMILIES
+  1. Call generate_function_family to propose a COMPLETELY NEW function type (Gaussian mixture, B-spline, hybrid step-smooth)
+  2. Generate 3 variants with structural differences (not just parameter tweaks)
+  3. Probe all 3, evaluate best if probe >= 1.0
+
+  PHASE 2 (iterations 11-20): FAMILY-SPECIFIC OPTIMIZATION
+  - Optimize within family using JAX gradients
+  - Always probe first (5-6 probes before any eval)
+
+  PHASE 3 (iterations 21-30): AGGRESSIVE REFINEMENT
+  - Reinitialize 50% of parameters with family-aware noise
+  - Try merging two good candidates
+  - Submit if c2 > 0.8962799441554086
+
+  TOOL USAGE:
+  - generate_function_family: Call ONCE per iteration to get a new family type
+  - edit_solution: Edit based on the chosen family's structure
+  - probe_solution: Call on ALL 3-5 variants before full eval
+  - evaluate_solution: Call ONLY on top 1-2 by probe score
+
+  RULES:
+  - DO NOT stay trapped in one family. After 3 iterations with no improvement, generate a new family.
+  - Use probes aggressively: 5-6 probes per iteration.
+  - For smooth functions: use scipy.interpolate.Basis or custom basis functions.
+skill_description: Multi-family exploration for C2 maximization. Propose and optimize entirely new function families (Gaussian mixtures, B-splines, hybrid step-smooth) to escape local optima.
+tool_descriptions:
+  edit_solution: |
+    Edit the EVOLVE-BLOCK by implementing a function from a specific family:
+    - Step functions: Use jnp.at[] mutation on intervals
+    - Gaussian mixtures: f(x) = sum(w_i * exp(-((x - mu_i)/sigma_i)^2)) with optimized params
+    - B-splines: Use scipy.interpolate.Basis with optimized knot positions and coefficients
+    - Hybrid: Combine step base with Gaussian tails at boundaries
+    Always ensure f >= 0.
+  evaluate_solution: |
+    Full evaluation. Budget: 30 total. Call ONLY after probe_solution ranking.
+  probe_solution: |
+    Approximate score on 10% subsample. FAST. You have 30 probes. Always probe 3-5 variants before any eval.
+  finish: |
+    Report best combined_score, the winning function's formula, and key insights.
+new_tools:
+- name: generate_function_family
+  description: |
+    Propose a COMPLETELY NEW function family for C2 optimization. Returns family_type and generation strategy.
+
+    FAMILY OPTIONS:
+    - gaussian_mixture: f(x) = sum(w_i * exp(-((x - mu_i)/sigma_i)^2))
+    - b_spline: B-spline with optimized knots and coefficients
+    - hybrid_step_smooth: Step base with Gaussian tails
+    - step_with_wings: Step base with asymmetric exponential decay wings
+
+    Call this EVERY iteration to force family diversification.
+  input_schema:
+    type: object
+    properties: {}
+  implementation_py: |
+    def run(ctx, args):
+        import random
+        random.seed(42)
+        family_choices = [
+            ("gaussian_mixture", "Define f(x) as sum of 3-5 Gaussians with varied sigma, optimize mu and weight"),
+            ("b_spline", "Use B-spline basis with 10-15 knots. Optimize knot positions first, then coefficients."),
+            ("hybrid_step_smooth", "Step base (like seed) but add smooth Gaussian tails on both sides"),
+            ("step_with_wings", "Keep step base but add asymmetric exponential decay wings on edges"),
+            ("multi_gaussian", "Weighted sum of Gaussians. Optimize center separation"),
+            ("piecewise_linear", "Linear pieces with optimized slopes and continuity"),
+        ]
+        chosen = random.choice(family_choices)
+        return {"family_type": chosen[0], "prompt": chosen[1],
+                "strategy": f"Implement {chosen[0]} with 3-5 key parameters",
+                "parameters_to_optimize": 3}
+new_skills:
+- name: family-switching-protocol
+  description: Escape local optima by switching function families. Try Gaussian, B-splines, or hybrids.
+  body: |
+    # Multi-Family Optimization Protocol
+
+    ## Core Principle
+    The seed's step patterns are a LOCAL optimum. Explore new architectures.
+
+    ## Phase 1: Family Exploration (iterations 1-10)
+    1. Call generate_function_family for a new family type
+    2. Generate 3 variants with structural differences
+    3. Probe all 3, evaluate best if probe >= 1.0
+
+    ## Phase 2: Family-Specific Optimization (iterations 11-20)
+    - Optimize within family using JAX gradients
+    - For smooth families: optimize mu, sigma, weights, knots
+    - If no improvement in 3 iterations: switch families
+
+    ## Phase 3: Final Refinement (iterations 21-30)
+    - Blend two good candidates or reinitialize 50% of parameters
+    - Probe 2-3 final variants, evaluate best
+
+    ## Key Rules
+    - ALWAYS call generate_function_family - never stay in same family twice
+    - Use probes: 5-6 per iteration
+    - Structural changes beat parameter tweaks
+sampling:
+  temperature: 1.0
+  top_p: 0.9
+  top_k: 30
+  max_tokens: 16384
+agent:
+  max_iterations: 30
+middleware:
+  budget_reminder_from_left: 2
+  long_tool_output_max_chars: 12000
+new_middlewares:
+- name: enforce_family_diversity
+  hook: after_tool
+  description: Warn if same family used for 2+ consecutive iterations.
+  implementation_py: |
+    def after_tool(hook_input):
+        tool = hook_input.get('tool_name', '')
+        consecutive_same = hook_input.get('consecutive_same_family', 0)
+        family_type = hook_input.get('family_type', 'unknown')
+
+        if tool == 'evaluate_solution' and consecutive_same >= 2:
+            msg = f'WARNING: Same family ({family_type}) for {consecutive_same} iterations. Switch with generate_function_family!'
+            return msg
+
+        if tool == 'generate_function_family':
+            return None
+
+        return None

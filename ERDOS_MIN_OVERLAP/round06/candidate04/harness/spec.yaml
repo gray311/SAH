@@ -1,0 +1,245 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are an expert in mathematical optimization for the Erdős minimum overlap problem.
+  
+  **OBJECTIVE**: Find a step function h: [0,2]→[0,1] with ∫h=1 that minimizes max_k ∫h(x)(1-h(x+k))dx.
+  Target: combined_score = 0.38092303510845016 / c5_bound > 1.0
+  
+  **KEY INSIGHT**: The seed's gradient-based optimizer is trapped in local optima. 
+  Instead of gradient descent, you should use DIRECT CONSTRUCTION: generate candidate
+  piecewise constant functions systematically and evaluate them.
+  
+  **STRATEGY**: 
+  1. Use construct_candidates to generate structured step functions (1-2 evaluations)
+  2. Pick the best candidate and refine with targeted edits
+  3. Try coarse discretization (num_intervals=100-200) then refine
+  
+  **CONSTRAINTS**: h∈[0,1], ∫h=1 over [0,2]
+  
+  **AGENCY**: Complete rewrites of the EVOLVE-BLOCK are encouraged. Generate complete
+  working programs that directly construct candidate solutions.
+skill_description: |
+  C₅ bound optimization harness. Uses direct construction of piecewise constant
+  functions to escape local optima. Focus on structured search over step function
+  space, not gradient descent. Target: combined_score > 1.0.
+skill_body: |
+  # Erdős C₅ Optimization via Direct Construction
+  
+  ## Why Gradient Descent Fails
+  
+  The seed's Adam optimizer starts from random-ish initializations and gets trapped
+  in local optima. For this problem, **direct construction** of candidate step functions
+  is more effective.
+  
+  ## Effective Strategies
+  
+  ### 1. Step Function Constructions
+  
+  Construct h as piecewise constant with few breakpoints:
+  - Single step: h=1 on [0,1], h=0 elsewhere (satisfies ∫h=1)
+  - Double step: split mass at different positions
+  - Symmetric patterns: mirror around x=1
+  
+  ### 2. Pattern-Based Constructions
+  
+  Try these mathematical patterns:
+  - Triangle: increases then decreases
+  - Plateau: flat regions with jumps
+  - Step with ramp: combination of step and linear
+  
+  ### 3. Coarse-to-Fine Refinement
+  
+  1. Start with num_intervals=100, optimize simple patterns
+  2. Find good candidate, then increase to 500, 800, 1000
+  3. Fine-tune hyperparameters (learning rate, penalty)
+  
+  ### 4. Multiple Independent Trials
+  
+  Run 3-5 completely different constructions, each as a separate edit.
+  The best one might break through the local optimum barrier.
+  
+  ## Execution Plan
+  
+  1. **First edit**: Complete rewrite using construct_candidates tool
+     - Generate 5-10 structured candidates
+     - Pick best, submit
+  2. **Second edit**: Refine winning direction
+     - Increase resolution, tune parameters
+  3. **Third edit**: Try orthogonal strategy
+     - Different construction family
+  
+  ## Constraints Checklist
+  
+  - h values in [0,1]
+  - ∫h=1 over [0,2]
+  - c5_bound = max_k ∫h(x)(1-h(x+k))dx
+  - combined_score = 0.38092303510845016 / c5_bound
+tool_descriptions:
+  edit_solution: |
+    Modify the EVOLVE-BLOCK. For strategic changes, **complete rewrites are essential**.
+    
+    The seed program is too focused on gradient descent. Rewrite it to:
+    - Use construct_candidates to generate structured step functions
+    - Implement direct construction patterns (step, symmetric, piecewise)
+    - Coarse discretization first, then refine
+  evaluate_solution: |
+    Run the program. Get combined_score. Target: > 1.0
+    With ~30 evaluations, test 3-5 fundamentally different constructions.
+  probe_solution: NOT AVAILABLE (evaluator is fast JAX/NumPy).
+  finish: |
+    Submit when you have exhausted diverse strategies or found combined_score > 1.0.
+sampling:
+  temperature: 1.5
+  top_p: 0.99
+  top_k: 30
+  max_tokens: 16384
+agent:
+  max_iterations: 60
+middleware:
+  budget_reminder_from_left: 2
+  long_tool_output_max_chars: 15000
+new_tools:
+  - name: construct_candidates
+    description: |
+      Generate a diverse set of structured step function candidates for the Erdős problem.
+      Call this at the start to create initial solutions instead of relying on random gradient init.
+      Returns a list of candidate h functions with different patterns.
+    input_schema:
+      type: object
+      properties:
+        num_candidates:
+          type: integer
+          default: 10
+        num_intervals:
+          type: integer
+          default: 200
+    implementation_py: |
+      def run(ctx, args):
+          import jax
+          import jax.numpy as jnp
+          from dataclasses import dataclass
+          
+          N = args.get("num_intervals", 200)
+          num_cands = args.get("num_candidates", 10)
+          domain_width = 2.0
+          dx = domain_width / N
+          
+          candidates = []
+          
+          # Pattern 1: Single step on [0, 1]
+          h1 = jnp.zeros(N)
+          h1 = jnp.where(jnp.linspace(0, 2, N) <= 1.0, 1.0, h1)
+          candidates.append(("single_step_0_1", h1))
+          
+          # Pattern 2: Single step on [0, 0.5] with height 2
+          h2 = jnp.zeros(N)
+          h2 = jnp.where(jnp.linspace(0, 2, N) <= 0.5, 2.0, h2)
+          candidates.append(("single_step_0_0.5_height2", h2))
+          
+          # Pattern 3: Uniform on [0, 1]
+          h3 = jnp.zeros(N)
+          h3 = jnp.where(jnp.linspace(0, 2, N) <= 1.0, 1.0, h3)
+          candidates.append(("uniform_0_1", h3))
+          
+          # Pattern 4: Double step - 0.5 on [0,0.5] and [1,1.5]
+          h4 = jnp.zeros(N)
+          x = jnp.linspace(0, 2, N)
+          h4 = jnp.where((x <= 0.5) | (x >= 1.0), 0.5, h4)
+          candidates.append(("double_step_split", h4))
+          
+          # Pattern 5: Step at 0.66 with height 1.5
+          h5 = jnp.zeros(N)
+          h5 = jnp.where(x <= 2/3, 1.5, h5)
+          candidates.append(("step_0.66_height1.5", h5))
+          
+          # Pattern 6: Symmetric plateau - 0.5 on [0.25, 1.75]
+          h6 = jnp.zeros(N)
+          h6 = jnp.where((x >= 0.25) & (x <= 1.75), 0.5, h6)
+          candidates.append(("plateau_0.25_1.75", h6))
+          
+          # Pattern 7: Triangle shape - ramps up then down
+          h7 = jnp.zeros(N)
+          h7 = jnp.minimum(x/1.0, 2-x)/1.0
+          h7 = jnp.clip(h7, 0, 1)
+          candidates.append(("triangle", h7))
+          
+          # Pattern 8: Three equal steps on [0,2/3], [2/3,4/3], [4/3,2]
+          h8 = jnp.zeros(N)
+          h8 = jnp.where((x >= 0) & (x < 2/3), 1.5, h8)
+          h8 = jnp.where((x >= 2/3) & (x < 4/3), 1.5, h8)
+          h8 = jnp.where((x >= 4/3) & (x <= 2), 1.5, h8)
+          candidates.append(("three_steps", h8))
+          
+          # Pattern 9: Concentrated mass - spike at x=1
+          h9 = jnp.zeros(N)
+          h9 = jnp.where((x >= 0.5) & (x <= 1.5), 2.0, h9)
+          candidates.append(("spike_0.5_1.5", h9))
+          
+          # Pattern 10: Gentle ramp
+          h10 = jnp.zeros(N)
+          h10 = x / 2.0
+          h10 = jnp.clip(h10, 0, 1)
+          candidates.append(("ramp_0_2", h10))
+          
+          # Select top num_candidates by simple heuristic (max height concentration)
+          best_candidates = []
+          for name, h in candidates[:num_cands]:
+              integral = jnp.sum(h) * dx
+              valid = 0.99 <= float(integral) <= 1.01
+              if valid:
+                  best_candidates.append((name, h))
+              elif len(best_candidates) < num_cands:
+                  # Allow small violations, try to fix
+                  best_candidates.append((name, h))
+          
+          result = []
+          for name, h in best_candidates:
+              result.append({
+                  "name": name,
+                  "h_values": h.tolist(),
+                  "num_intervals": N,
+                  "description": f"Generated candidate: {name}"
+              })
+          
+          return {"candidates": result, "num_generated": len(result)}
+new_skills:
+  - name: step-function-construction
+    description: |
+      Use this when the seed's gradient descent fails. Direct construction of
+      piecewise constant step functions often finds better solutions for the
+      Erdős problem than gradient-based optimization.
+    body: |
+      # Direct Construction for C₅ Problem
+      
+      ## Core Principle
+      
+      Instead of gradient descent, manually construct candidate step functions
+      with known good properties for minimizing max overlap.
+      
+      ## Construction Patterns
+      
+      ### Step Functions
+      - h=1 on [0,1], h=0 elsewhere: simple, satisfies ∫h=1
+      - h=2 on [0,0.5]: concentrated mass at start
+      
+      ### Symmetric Patterns
+      - Plateau: constant value on central interval
+      - Two spikes: mass concentrated in two regions
+      
+      ### Piecewise Linear
+      - Triangle: ramps up then down
+      - Ramp: linear increase or decrease
+      
+      ## Integration Constraint
+      
+      Always verify ∫h=1: adjust heights or widths accordingly.
+      For N intervals over [0,2]: sum(h) * (2/N) = 1
+new_middlewares:
+  - name: remind_construct_first
+    hook: before_model
+    description: |
+      Before generating edits, remind the solver to use structured construction
+      instead of relying on the seed's gradient descent which gets stuck.
+    implementation_py: |
+      def before_model(hook_input):
+          return "Use construct_candidates to generate structured step function candidates first. Don't rely on the seed's gradient descent - it gets stuck in local optima. Generate 5-10 different patterns, pick the best, then refine."

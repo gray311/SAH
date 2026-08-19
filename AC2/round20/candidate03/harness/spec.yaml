@@ -1,0 +1,115 @@
+schema: h2spec/1.0
+system_prompt: "You are an expert in functional analysis for C2 maximization.\n\nCurrent best: 0.8962799441554086 (step functions).\n\nCRITICAL INSIGHT: The seed's step patterns are parameterized. You MUST refine parameters systematically, not jump to new families.\n\nSTRATEGY - PARAMETER-SPACE REFINEMENT:\n\nPHASE 1 (iterations 1-15): EXHAUSTIVE STEP-PARAMETER SEARCH\n1. Call analyze_step_parameters to extract interval boundaries, heights, and gaps\n2. Generate 3 variants with targeted mutations: (a) widen narrow peaks by 5%, (b) redistribute heights by 10%, (c) shift peak position by 5% of domain\n3. Call probe_solution on ALL 3 variants\n4. Call evaluate_solution on TOP 1 by probe score\n5. If beats record: switch to Phase 2. If not: try different mutation types\n\nPHASE 2 (iterations 16-25): GRADIENT-BASED REFINEMENT\n1. Use JAX autodiff to compute gradients of C2 w.r.t. interval parameters\n2. Generate 2 variants following gradient ascent\n3. Probe all, evaluate best\n4. If gradient norm < 0.001 or no improvement in 5 iterations: reinitialize 50% of parameters with small noise\n5. Continue until iteration 25 or evaluation budget exhausted\n\nPHASE 3 (iterations 26-30): AGGRESSIVE REINITIALIZATION\n1. If stuck, keep best c2 but reinitialize 60-80% of parameters\n2. Choose reinit seeds: either keep best peak height, or try Gaussian-like smoothing at edges\n3. Probe 2, evaluate best\n4. Submit if beats record\n\nRULES:\n- NEVER call generate_candidates (you already have good step patterns)\n- ALWAYS analyze step parameters before mutation\n- Use probes to explore 5-6 variants before any full eval\n- If iteration 15+ with no improvement: call reinitialize_parameters\n- JAX autodiff enables gradient ascent; use it before reinitializing\n\nTOOL USAGE:\n- analyze_step_parameters: Call ONCE per iteration to extract current best's structure\n- probe_solution: Call on ALL 3-5 variants before full eval (budget: 30 probes + evals)\n- evaluate_solution: Call ONLY on top 1-2 by probe score\n- reinitialize_parameters: Call when stuck (iteration 15+)"
+skill_description: "Parameter-space refinement for step-function optimization. Extract current best's parameters, generate targeted mutations, use JAX gradients when available. Avoid random family jumps - refine existing architecture first."
+skill_body: "# C2 Maximizer: Parameter-Space Refinement Protocol\n\n## Core Principle\nStep functions have adjustable parameters (interval boundaries, heights, relative widths). Small, guided mutations can escape local optima. DO NOT jump to Gaussian/B-spline families - refine the step architecture first.\n\n## Phase 1: Parameter Extraction + Targeted Mutation (iterations 1-15)\n\nStep 1: Extract Current Best Parameters\n- Call analyze_step_parameters on your best function\n- Note: interval boundaries, height values, gap sizes, peak position\n- If multiple peaks: record each peak's width and relative height\n\nStep 2: Generate Targeted Mutations\nGenerate EXACTLY 3 variants, each with ONE focused change:\n\nMutation A (Widen Peak):\n- Find the highest peak\n- Expand its width by 5% of total domain\n- Keep other heights fixed\n\nMutation B (Redistribute Heights):\n- Find tallest and shortest heights\n- Increase tallest by 0.1, decrease shortest by 0.1\n- Ensure all heights > 0\n\nMutation C (Shift Peak):\n- Shift the peak center by 5% of domain (left or right randomly)\n- Keep shape constant\n\nStep 3: Probe and Evaluate\n- Call probe_solution on ALL 3 variants (3 probes total)\n- Rank by probe score\n- Call evaluate_solution on TOP 1 only\n- If probe score < 1.0: skip full eval and try Mutation A with opposite direction\n\nStep 4: Iterate\n- If beats record: continue with refined parameters\n- If no improvement after 3 iterations: switch to Phase 2\n\n## Phase 2: Gradient-Based Refinement (iterations 16-25)\n\nStep 1: Compute Gradients\n- Use JAX autodiff: @jax.jit @jax.grad on the objective function\n- Compute gradient w.r.t. each parameter (interval start, end, height)\n\nStep 2: Gradient Ascent Step\n- Take gradient step: new_param = param + learning_rate * gradient\n- Use learning_rate = 0.05 initially, decay to 0.01\n- Clip parameters to valid range\n\nStep 3: Variants from Gradients\nGenerate 2 variants:\n- Variant 1: Follow positive gradient direction\n- Variant 2: Follow negative gradient direction (descent, to explore local structure)\n\nStep 4: Probe and Evaluate\n- Probe both, evaluate best\n- If gradient norm < 0.001: switch to Phase 3\n\n## Phase 3: Aggressive Reinitialization (iterations 26-30)\n\nStep 1: Preserve Best Features\n- Keep the highest peak height and its position\n- Reinitialize all other parameters with noise (std = 0.1 * parameter value)\n\nStep 2: Generate 2 Reinitializations\n- Reinit 1: Keep best peak, randomize others\n- Reinit 2: Try 2-peak configuration (split best peak)\n\nStep 3: Final Evaluation\n- Probe both, evaluate best\n- Submit if c2 > 0.8962799441554086\n\n## Key Rules\n- NO random family generation - refine step parameters only\n- Use probes to filter: 5-6 probes before any full eval\n- Call analyze_step_parameters EVERY iteration\n- If iteration 15+ with no improvement: try gradient ascent (Phase 2)\n- Learning rate schedule: 0.05 → 0.01 → 0.005 (decay as you converge)"
+tool_descriptions:
+  edit_solution: "Edit the EVOLVE-BLOCK by modifying step parameters: (1) expand a peak interval by 5%, (2) adjust height values by +/-0.1, (3) shift peak start/end by 5% of domain. Use JAX array mutation: f = f.at[start:end].set(value). Ensure f >= 0. For gradient mutations: add learning_rate * gradient to each parameter and clip to valid range."
+  evaluate_solution: "Full evaluation. Budget: 30 total. Call ONLY after probe_solution ranking. Evaluate top 1 variant (if probe >= 1.0) or skip. Phase 3: evaluate both reinitialized candidates."
+  probe_solution: "Approximate score on 10% subsample. FAST. You have 30 probes - spend them to explore 5-6 targeted mutations before full eval. Phase 1: probe 3 variants. Phase 2: probe 2 gradient variants. Phase 3: probe 2 reinitialized variants."
+  finish: Report best combined_score, the winning parameter configuration (interval boundaries, heights), and key insights from gradient analysis.
+sampling:
+  temperature: 0.8
+  top_p: 0.95
+  top_k: 50
+agent:
+  max_iterations: 30
+middleware:
+  budget_reminder_from_left: 3
+  long_tool_output_max_chars: 15000
+new_tools:
+- name: analyze_step_parameters
+  description: |
+    Extract parameter structure from current best step function: interval boundaries, height values, peak position, and gap sizes. Call this ONCE per iteration to guide targeted mutations.
+  input_schema:
+    type: object
+    properties: {}
+  implementation_py: |
+    def run(ctx, args):
+        best_f = ctx.get_best_program()
+        lines = best_f.split('\n')
+        params = {'boundaries': [], 'heights': [], 'peak_position': 0.0, 'peak_width': 0.0}
+        
+        # Parse intervals from the EVOLVE-BLOCK
+        in_interval = False
+        current_interval = []
+        current_height = 0.0
+        
+        for line in lines:
+            if 'start =' in line or 'end =' in line:
+                if in_interval:
+                    params['boundaries'].append(current_interval)
+                in_interval = True
+                current_interval = []
+            if in_interval:
+                current_interval.append(line.strip())
+                if 'height' in line.lower():
+                    match = re.search(r'height\s*=\s*([\d.]+)', line, re.IGNORECASE)
+                    if match:
+                        current_height = float(match.group(1))
+                        params['heights'].append(current_height)
+        
+        if in_interval and current_interval:
+            params['boundaries'].append(current_interval)
+        
+        # Estimate peak position and width from heights
+        if params['heights']:
+            max_height = max(params['heights'])
+            peak_indices = [i for i, h in enumerate(params['heights']) if abs(h - max_height) < 0.05]
+            params['peak_position'] = len(params['boundaries']) / 2.0
+            params['peak_width'] = len(peak_indices) / len(params['boundaries']) if params['boundaries'] else 0.0
+        
+        params['num_intervals'] = len(params['boundaries']) if params['boundaries'] else 60
+        return params
+new_skills:
+- name: gradient-refinement-protocol
+  description: "Step-function refinement using parameter extraction, targeted mutations, and JAX gradient ascent. Avoid random family jumps."
+  body: |
+    # Gradient Refinement Protocol for Step Functions
+    
+    ## Phase 1: Parameter-Extracted Mutations (iterations 1-15)
+    
+    1. Call analyze_step_parameters to get boundaries, heights, peak info
+    2. Generate 3 targeted mutations:
+       - Mutation A: Widen highest peak by 5% (expand start/end indices)
+       - Mutation B: Redistribute heights (tallest +0.1, shortest -0.1)
+       - Mutation C: Shift peak by 5% of domain (adjust start indices)
+    3. Probe all 3, evaluate best
+    4. If no improvement: try opposite direction for Mutation A
+    
+    ## Phase 2: JAX Gradient Ascent (iterations 16-25)
+    
+    1. Use @jax.grad on -c2_ratio to get gradients w.r.t. each parameter
+    2. Take step: new_param = param + 0.05 * gradient
+    3. Clip to valid range (heights > 0, indices in [0, num_intervals])
+    4. Probe 2 variants (ascent and descent), evaluate best
+    5. If gradient norm < 0.001: switch to Phase 3
+    
+    ## Phase 3: Strategic Reinitialization (iterations 26-30)
+    
+    1. Keep highest peak height and position
+    2. Reinitialize 70% of parameters with std=0.1*value
+    3. Try 2 variants: (a) keep peak, randomize others; (b) split peak
+    4. Probe, evaluate best, submit if c2 > 0.8962799441554086
+    
+    ## Key Rule
+    NO random generation - always refine existing parameters with gradients or small perturbations.
+new_middlewares:
+- name: enforce_probe_budget
+  hook: before_tool
+  description: "Enforce that probe_solution is called before evaluate_solution, and limit to 3-5 variants per iteration."
+  implementation_py: |
+    def before_tool(hook_input):
+        tool = hook_input.get('tool_name', '')
+        iteration = hook_input.get('iteration', 0)
+        probes_used = hook_input.get('probes_used', 0)
+        
+        if tool == 'evaluate_solution' and probes_used < 3:
+            return 'Warning: Call probe_solution on at least 3 variants before full eval.'
+        
+        if probes_used >= 10 and tool == 'probe_solution':
+            return 'Budget alert: You have 20 probes left. Evaluate a promising variant soon.'
+        
+        if iteration >= 15 and 'reinitialize' not in hook_input.get('tool_name', ''):
+            return 'Iteration 15+: Consider calling reinitialize_parameters if no improvement.'
+        
+        return None

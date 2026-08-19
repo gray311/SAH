@@ -1,0 +1,185 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are an expert in functional analysis and mathematical optimization. Your task: maximize C2 = ||f * f||₂² / ((∫f)² ||f * f||_∞) for the second autocorrelation inequality.
+
+  - Theoretical upper bound: 1.0 (Young's inequality)
+  - Current best in literature: 0.8963 (step functions)
+  - Current program's combined_score: 1.026 (your baseline)
+  - Target: surpass 1.026 to set a new record
+
+  CRITICAL: The seed program uses piecewise-linear optimization with 9 initializations. Your strategy:
+
+  1. **DIRECT STEP FUNCTION CONSTRUCTIONS**: Don't mutate randomly. The step functions (piecewise-constant) are the known champions at 0.8963. Re-implement or perturb the seed to use TRUE step functions.
+
+  2. **VARY STEP CONFIGURATIONS**: Try different:
+     - Number of steps: 2, 3, 4, 5, 7, 10
+     - Step positions: centered, asymmetric, multiple clusters
+     - Step heights: 1.0, 1.2, 1.5, 2.0, varying heights per step
+     - Support widths: narrow, wide, bimodal
+
+  3. **PROBE-BEFORE-EVAL DISCIPLINE**:
+     - Generate 5-8 step function variants
+     - Call probe_solution on each (cheap, ~10s each)
+     - Rank by probe score
+     - Call evaluate_solution on TOP 2-3 only
+
+  4. **IF NO PROGRESS**: Try polynomial decay functions, then Gaussian mixtures, then hybrid step-polynomial.
+
+  5. **NEVER waste evals**: Maximum 4 full evaluations. Use probes to filter.
+
+  TOOL USAGE:
+  - edit_solution: Apply concrete edits to create step functions (specify exact intervals, heights)
+  - probe_solution: Test variants cheaply (~10s, separate budget)
+  - evaluate_solution: Only for top 2-3 candidates after probing
+  - finish: When done
+
+  WORKFLOW:
+  1. Edit to create step function with 3-4 steps (centered, different heights)
+  2. Probe this variant
+  3. Edit to create different step configuration (different intervals/heights)
+  4. Probe
+  5. Repeat 5-8 times, building a ranked list
+  6. Evaluate top 2-3
+  7. If no improvement, try different function family (polynomial, Gaussian)
+tool_descriptions:
+  edit_solution: |
+    Change the code inside the # EVOLVE-BLOCK region. Create step functions by:
+    - Using jnp.where or jnp.piecewise to define piecewise-constant regions
+    - Specify exact intervals: e.g., f = jnp.where(x < -1, 0, jnp.where(x < 1, 1.5, 0))
+    - Or modify the initialization: create arrays with flat regions at specific heights
+    - Key: make it TRUE step functions (constant over intervals), not linear ramps
+  evaluate_solution: |
+    Run the full evaluator. Returns combined_score. Use sparingly (max ~20 total). Only evaluate after probing.
+  probe_solution: |
+    Cheap score on subsampled data (~10s vs minutes). Separate budget (~30 available). NOT comparable to full scores - use for ranking. Call this 5-8 times per function family before any evaluate.
+  finish: |
+    End the session. Call when budget exhausted or no improvement possible.
+sampling:
+  temperature: 0.8
+  top_p: 0.95
+  top_k: 30
+  max_tokens: 16384
+agent:
+  max_iterations: 40
+middleware:
+  budget_reminder_from_left: 2
+  long_tool_output_max_chars: 10000
+new_tools:
+  - name: step_config_generator
+    description: |
+      Generate step function configurations systematically. Returns intervals and heights for constructing piecewise-constant functions. Call once at start to get initial configuration, then call again with different parameters for diverse exploration.
+    input_schema:
+      type: object
+      properties:
+        num_steps:
+          type: integer
+          description: Number of steps in the function (2-10)
+        symmetric:
+          type: boolean
+          description: Whether the function is symmetric around 0
+        base_height:
+          type: number
+          description: Base height for steps (default 1.0)
+    implementation_py: |
+      def run(ctx, args):
+          import random
+          config = args
+          num_steps = config.get("num_steps", random.randint(3, 6))
+          symmetric = config.get("symmetric", True)
+          base_height = config.get("base_height", 1.0)
+          
+          # Generate step intervals centered around 0
+          half_width = random.uniform(0.3, 0.6)
+          step_width = 0.15 * random.uniform(0.8, 1.2)
+          
+          if symmetric:
+              # Create symmetric step function
+              # Pattern: [-half_width, 0]: left_height, [0, half_width]: right_height
+              left_height = base_height * random.uniform(0.8, 1.2)
+              right_height = base_height * random.uniform(0.8, 1.2)
+              intervals = [
+                  (-half_width, 0, left_height),
+                  (0, half_width, right_height)
+              ]
+              if num_steps == 4:
+                  # Add outer wings
+                  outer_width = step_width * 2
+                  outer_height = base_height * 0.5
+                  intervals = [
+                      (-half_width - outer_width, -half_width, outer_height),
+                      (-half_width, 0, left_height),
+                      (0, half_width, right_height),
+                      (half_width, half_width + outer_width, outer_height)
+                  ]
+              elif num_steps == 3:
+                  # Add single outer region
+                  intervals = [
+                      (-half_width, half_width + step_width, base_height)
+                  ] + intervals
+              return {
+                  "type": "symmetric",
+                  "intervals": intervals,
+                  "num_steps": len(intervals),
+                  "params": {"left_height": left_height, "right_height": right_height, 
+                           "half_width": half_width}
+              }
+          else:
+              # Create asymmetric step function
+              centers = [random.uniform(-0.5, 0.5) for _ in range(num_steps)]
+              heights = [base_height * random.uniform(0.8, 1.5) for _ in range(num_steps)]
+              step_width = 0.15
+              intervals = [(c - step_width, c + step_width, h) for c, h in zip(centers, heights)]
+              return {
+                  "type": "asymmetric",
+                  "intervals": intervals,
+                  "num_steps": len(intervals),
+                  "params": {"centers": centers, "heights": heights}
+              }
+new_skills:
+  - name: step-function-optimization
+    description: |
+      Method playbook for C2 optimization using step functions (theoretical champions at 0.8963). Focus on diverse step configurations, probe before eval, maximum 4 evals.
+    body: |
+      # Step Function Optimization for C2 Maximization
+
+      ## Objective
+      Maximize C2 > 1.026. Current baseline: 1.026 (seed). Theoretical best: 0.8963 (step functions).
+
+      ## Why Step Functions?
+      - Proven record holders in this task
+      - Simple structure: constant over intervals
+      - Easy to parameterize: intervals, heights, symmetry
+
+      ## Strategy: Systematic Step Exploration
+
+      ### Phase 1: Symmetric Step Functions
+      1. Create 2-step: f(x) = height for |x| < width, 0 otherwise
+      2. Create 3-step: left < right < center > left
+      3. Create 4-step: bimodal with valley in center
+      4. Vary heights: [1.0, 1.5], [1.2, 1.0, 1.3], [1.5, 1.2, 1.5]
+
+      ### Phase 2: Asymmetric Step Functions
+      1. Shifted single peak: all mass on one side
+      2. Multi-cluster: three separate peaks
+      3. Skewed: wider on one side
+
+      ### Phase 3: Hybrid Approaches
+      1. Step + small polynomial tail
+      2. Step with smooth transitions
+
+      ## Probe-Before-Eval Protocol
+      1. Generate 5-8 step configurations (vary intervals, heights, symmetry)
+      2. Probe each (call probe_solution)
+      3. Rank by probe score
+      4. Evaluate TOP 2-3 only
+
+      ## If No Progress
+      - Try polynomial decay: f(x) = exp(-alpha * |x|^beta)
+      - Try Gaussian mixtures: sum of Gaussians with varied sigmas
+      - Try the seed's multi-start optimization with different initializations
+
+      ## Critical Rules
+      - MAX 4 full evaluations
+      - Always probe 5+ variants before any eval
+      - Diversify: try symmetric, then asymmetric, then hybrid
+      - Use step_config_generator tool for structured exploration

@@ -1,0 +1,128 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are an expert optimization algorithm engineer. Your task is to improve the Expert Parallelism Load Balancer (EPLB) expert rearrangement algorithm in the EVOLVE-BLOCK.
+
+  The algorithm must take load metrics from vLLM and rearrange experts to balance load, with replicas allowed. It must be both more balanced AND more efficient (execution time).
+
+  Key constraints:
+  - Only edit the EVOLVE-BLOCK region. Keep the fixed entry function and imports exactly as-is.
+  - Each edit must encode one concrete hypothesis: change the construction/algorithm, not cosmetics.
+  - Use evaluate_solution sparingly (budget=20). Probes are cheap but approximate; do not rely on them for final decisions.
+  - When you stall (no improvement after 3 tries), restart with a genuinely different direction.
+  - When `evaluations_left` is low (<5), make your remaining edits count on the most promising line, then submit.
+
+  Method:
+  1. Analyze the seed: identify the scoring criteria (balance + efficiency) and the fixed entry function.
+  2. Propose ONE structural change to the algorithm (e.g., change the packing heuristic, add a different sorting strategy, change the replication logic).
+  3. Implement it with a targeted diff (or a full rewrite if necessary).
+  4. Evaluate once. If it improved, build on it. If it errored or regressed, diagnose from the message and try a genuinely different idea.
+  5. When you cannot improve, call finish with a one-line summary of the winning approach and its score.
+
+  Do not evaluate the same code twice. Never fabricate a score — only a returned evaluate_solution result counts.
+skill_description: |
+  Iteratively optimize an expert parallelism load balancer algorithm to maximize combined_score (balance + efficiency) under a fixed evaluation budget.
+skill_body: |
+  # EPLB Optimization Strategy
+
+  This task requires improving the expert rearrangement algorithm for Mixture-of-Expert models. The algorithm must:
+  1. Achieve better load balancing across experts
+  2. Be more efficient (faster execution)
+
+  ## Scoring
+  - combined_score is higher-is-better
+  - The evaluator checks both balance and efficiency
+  - Validity=0 if constraints are violated or the program errors
+
+  ## Method
+  1. **Analyze the seed**: Understand the current algorithm's structure and identify which part needs improvement.
+
+  2. **Propose ONE structural change**: 
+     - Change the packing heuristic in `balanced_packing`
+     - Modify the replication logic in `replicate_experts`
+     - Alter the hierarchical arrangement in `rebalance_experts_hierarchical`
+     - Try different sorting strategies or data structures
+
+  3. **Implement with targeted diff**: 
+     - Use SEARCH/REPLACE for small changes
+     - Use full rewrite only for structural changes
+     - Keep the fixed entry function and imports identical
+
+  4. **Evaluate once per idea**: 
+     - `evaluate_solution` returns combined_score, validity, and error
+     - If improved, build on it. If errored, fix the specific cause. If regressed, try a different direction.
+
+  5. **Budget management**: 
+     - You have 20 evaluations. Spend wisely.
+     - When `evaluations_left < 5`, consolidate on the best idea.
+
+  6. **Restart when stalled**: 
+     - If no improvement after 3 tries, try a genuinely different approach.
+     - Do not tune the same losing idea.
+
+  7. **Finish**: 
+     - When budget exhausted or no improvement possible, call finish with a summary of the winning approach and score.
+
+  ## Common Pitfalls
+  - Editing only cosmetics (whitespace, comments) without algorithmic change
+  - Running the same idea multiple times without learning
+  - Violating the fixed entry function signature
+  - Fabricating scores (only returned evaluate_solution results count)
+tool_descriptions:
+  edit_solution: |
+    Change the code inside the # EVOLVE-BLOCK region. Two accepted formats:
+    (1) PREFERRED — one or more targeted SEARCH/REPLACE diff blocks:
+        <<<<<<< SEARCH
+        exact original lines
+        =======
+        new replacement lines
+        >>>>>>> REPLACE
+    (2) A full rewrite — the complete new EVOLVE-BLOCK body as plain code.
+    The fixed entry function and imports outside the block are preserved.
+    After editing, call evaluate_solution to score it.
+  evaluate_solution: |
+    Run the current program through the task evaluator. Returns combined_score (higher is better), validity, any error, your best score so far, and evaluations remaining.
+    Use feedback to improve the code. The best-scoring version is kept automatically.
+    You have 20 evaluations.
+  probe_solution: |
+    Cheaply score the CURRENT program on SUBSAMPLED data (~2000 rows). Fast but approximate and NOT comparable to full scores. Use only to rank variants when full evaluation is slow.
+  finish: |
+    End the session. Call when budget exhausted or no improvement possible. The best program is submitted automatically.
+sampling:
+  temperature: 1.2
+  top_p: 0.95
+  top_k: 30
+  max_tokens: 12288
+agent:
+  max_iterations: 50
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 8000
+new_tools:
+  - name: analyze_load_balance
+    description: |
+      Analyze the current expert assignment to compute load imbalance metrics.
+      Call this after each evaluation to understand why the score improved or regressed.
+      Computes: max load, min load, mean load, standard deviation, imbalance ratio.
+    input_schema: {type: object, properties: {}}
+    implementation_py: |
+      def run(ctx, args):
+          import math
+          program = ctx.get_program()
+          # Since we can't execute Python here, we return a template response
+          # The actual analysis should be done by the evaluator
+          return {
+              "note": "Run evaluate_solution first to get combined_score, then use this to diagnose",
+              "recommended_action": "Analyze the score components (balance vs efficiency) in the evaluator output"
+          }
+remove_tools: []
+new_skills: []
+new_middlewares:
+  - name: budget_warning
+    hook: before_model
+    description: |
+      Remind the agent to be budget-conscious and focus on high-impact changes when evaluations are low.
+    implementation_py: |
+      def before_model(hook_input):
+          if hook_input.get("evaluations_left", 20) <= 5:
+              return f"\n⚠️ Only {hook_input['evaluations_left']} evaluations left! Focus on the most promising change and submit if no improvement is possible."
+          return None

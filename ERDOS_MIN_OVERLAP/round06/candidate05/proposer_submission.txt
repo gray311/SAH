@@ -1,0 +1,216 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are an expert in harmonic analysis and mathematical construction. Your task is to find a step function h: [0,2]→[0,1] with ∫h=1 that minimizes max_k ∫h(x)(1-h(x+k))dx.
+  
+  **THE OBJECTIVE**: Maximize combined_score = 0.38092303510845016 / c5_bound (need >1.0)
+  
+  **CRITICAL INSIGHT**: The seed program's gradient-based optimizer with 12 initializations is trapped in local optima. Do NOT rely on tweaking the optimizer. Instead, use the construct_solution tool to manually build high-quality step function candidates.
+  
+  **STRATEGY**: 
+  1. Use construct_solution to create explicit step functions with controlled breakpoints
+  2. Try: single-step (h=1 on [0,1]), double-step patterns, asymmetric steps
+  3. Try: concentrated mass patterns (high value on small interval, zero elsewhere)
+  4. Try: symmetric patterns around x=1
+  5. For each candidate, call evaluate_solution to get exact score
+  6. Track best combined_score across all candidates
+  
+  **CONSTRAINTS**: h∈[0,1], ∫h=1 over [0,2]. The construct_solution tool handles normalization.
+  
+  **BUDGET**: ~30 evaluations. Each construct_solution call builds a complete candidate ready for evaluation.
+  
+  **AGENCY**: Complete rewrites encouraged. Build solutions from scratch using the construct tool.
+skill_description: |
+  C₅ bound optimization via constructive search. Build explicit step function candidates (not gradient descent). Target combined_score > 1.0.
+skill_body: |
+  # Constructive Search for C₅ Bound
+  
+  ## Problem
+  Minimize: max_k ∫_0^2 h(x)(1-h(x+k))dx
+  Subject to: h:[0,2]→[0,1], ∫h=1
+  
+  ## Why Gradient Descent Fails
+  The seed's 12 random/sine initializations + Adam optimizer get trapped in local optima. 
+  The landscape has many suboptimal basins.
+  
+  ## Constructive Strategy
+  
+  ### Pattern 1: Single Step
+  h(x) = 1 for x∈[0,1], 0 elsewhere (normalized to ∫h=1)
+  This is a natural candidate - concentrated mass minimizes overlap with shifted versions.
+  
+  ### Pattern 2: Double Step
+  h(x) = 0.5 for x∈[0,0.5] ∪ [1.5,2], 0 elsewhere
+  Split the mass into two regions to reduce self-overlap.
+  
+  ### Pattern 3: Asymmetric Step
+  h(x) = 1 for x∈[0,a], 0 elsewhere, where a is optimized
+  Or: h(x) = c for x∈[0,a] ∪ [b,2], optimized for integral=1
+  
+  ### Pattern 4: Concentrated Mass
+  h(x) = M for x∈[0,1/M], 0 elsewhere (very narrow spike)
+  Tests extreme concentration hypothesis.
+  
+  ### Pattern 5: Symmetric Triples
+  Three equal steps at [0,a], [b,1], [2-b,2] for symmetry.
+  
+  ## Tool Usage
+  - **construct_solution**: Build a complete step function with specified breakpoints and values
+  - **evaluate_solution**: Get exact combined_score for each candidate
+  - **probe_solution**: NOT available (use evaluate directly)
+  
+  ## Execution Flow
+  1. Construct candidate 1 (single step) → evaluate → record score
+  2. Construct candidate 2 (double step) → evaluate → record score
+  3. Construct candidate 3 (concentrated) → evaluate → record score
+  4. Try variations: adjust breakpoints, try asymmetric splits
+  5. If any score > 0.38092303510845016, combined_score > 1.0 ✓
+  
+  ## Key Insight
+  Step functions with FEWER breakpoints may outperform the seed's 800-interval smooth approach.
+  The optimal h may be a simple piecewise constant, not a finely-grained smooth function.
+tool_descriptions:
+  edit_solution: |
+    Modify EVOLVE-BLOCK. For this task, prefer using construct_solution tool instead of editing seed's optimizer.
+    Only edit if you need to change num_intervals or optimizer settings for a hybrid approach.
+  evaluate_solution: |
+    Run the constructed solution and return combined_score. You have ~30 evaluations total.
+    Call after construct_solution to score each candidate.
+  probe_solution: |
+    NOT AVAILABLE for this task. Use evaluate_solution for exact scoring.
+  finish: |
+    End when best combined_score > 1.0 or budget exhausted. Auto-submit best program.
+sampling:
+  temperature: 1.5
+  top_p: 0.999
+  top_k: 50
+  max_tokens: 16384
+agent:
+  max_iterations: 80
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 15000
+new_tools:
+  - name: construct_solution
+    description: |
+      Build an explicit step function candidate with controlled breakpoints and values.
+      Specify: breakpoints (list of x-coordinates dividing [0,2]), values (list of h-values for each segment).
+      Automatically normalizes to satisfy ∫h=1 by scaling values proportionally.
+      Returns the normalized function ready for evaluation.
+      Use this to create strategic candidates (single-step, double-step, concentrated mass).
+    input_schema:
+      type: object
+      properties:
+        breakpoints:
+          type: array
+          items:
+            type: number
+          description: x-coordinates where h changes value (including 0 and 2)
+        values:
+          type: array
+          items:
+            type: number
+          description: h-value for each segment (before normalization)
+    implementation_py: |
+      def run(ctx, args):
+          breakpoints = args.get("breakpoints", [0, 0.5, 1, 1.5, 2])
+          values = args.get("values", [1, 0, 0, 0, 0])
+          
+          # Clip values to [0,1]
+          values = jnp.clip(jnp.array(values), 0, 1)
+          
+          # Normalize to integral = 1
+          integral = 0.0
+          for i in range(len(breakpoints)-1):
+              width = breakpoints[i+1] - breakpoints[i]
+              integral += values[i] * width
+          
+          if integral == 0:
+              return {"error": "Integral is zero, cannot normalize"}
+          
+          scale = 1.0 / integral
+          values = jnp.array(values) * scale
+          
+          # Build the piecewise constant function representation
+          num_intervals = 800
+          x = jnp.linspace(0, 2, num_intervals)
+          h = jnp.zeros(num_intervals)
+          
+          for i, bp in enumerate(breakpoints[:-1]):
+              start_idx = int(bp * (num_intervals - 1))
+              end_idx = int((breakpoints[i+1] if i+1 < len(breakpoints)-1 else 2.0) * (num_intervals - 1))
+              h[start_idx:end_idx] = values[i]
+          
+          return {
+              "breakpoints": breakpoints,
+              "values": values.tolist(),
+              "integral": float(integral),
+              "normalized": True,
+              "h_sample": h[::max(1, num_intervals//100)].tolist()  # light sampling for display
+          }
+new_skills:
+  - name: constructive-candidates
+    description: |
+      Generate explicit step function candidates for C₅ bound. Focus on piecewise constant functions with few breakpoints.
+      Prioritize: single-step, double-step, concentrated mass patterns.
+    body: |
+      # Constructive Candidate Generation for C₅
+  
+      ## Core Principle
+      Build explicit step functions with FEW breakpoints. The optimal h may be simple.
+  
+      ## Template Patterns
+  
+      ### Pattern A: Single Interval
+      - Breakpoints: [0, 1, 2]
+      - Values: [2.0, 0, 0] → normalized: h=1 on [0,1], 0 elsewhere
+  
+      ### Pattern B: Two Intervals (Split)
+      - Breakpoints: [0, 0.5, 1.5, 2]
+      - Values: [0.5, 0, 0, 0.5] → normalized appropriately
+  
+      ### Pattern C: Concentrated Mass
+      - Breakpoints: [0, 0.1, 2]
+      - Values: [10.0, 0, 0] → very narrow spike
+  
+      ### Pattern D: Asymmetric Triple
+      - Breakpoints: [0, 0.5, 1.0, 2]
+      - Values: [1.0, -0.5, -0.5, 1.0] → then clip and normalize
+  
+      ### Pattern E: Symmetric Pair
+      - Breakpoints: [0, 0.66, 1.33, 2]
+      - Values: [1.5, 0, 0, 1.5] → concentrated at edges
+  
+      ## Optimization Tips
+  
+      1. Start with 3-5 breakpoints, test integral constraint
+      2. Use linear scaling: if integral≠1, multiply all values by 1/integral
+      3. Clip values to [0,1] after normalization
+      4. Try both concentrated (narrow support) and spread patterns
+      5. Asymmetric splits often beat symmetric ones
+  
+      ## Common Pitfalls
+  
+      - Forgetting to normalize → integral≠1 constraint violation
+      - Values outside [0,1] after normalization → clip them
+      - Too many breakpoints → overfitting to discretization
+      - Not testing enough candidates → gradient descent needed exhaustive search
+  
+      ## Success Checklist
+  
+      [ ] Construct 5-10 diverse candidates
+      [ ] Each has ∫h=1 (or close, within tolerance)
+      [ ] Each has h∈[0,1]
+      [ ] Evaluate each with evaluate_solution
+      [ ] Track best combined_score
+      [ ] If any score > 1.0, celebrate!
+new_middlewares:
+  - name: prompt_construction_focus
+    hook: before_model
+    description: |
+      Remind the agent to use construct_solution for explicit step functions, not the seed's optimizer.
+      Emphasize constructive search over gradient-based optimization.
+    implementation_py: |
+      def before_model(hook_input):
+          if "construct_solution" not in str(hook_input):
+              return "CRITICAL: Use construct_solution tool to build explicit step function candidates (single-step, double-step, concentrated mass). Do NOT rely on the seed's gradient optimizer which is trapped in local optima. Build 5-10 diverse candidates and evaluate each."
+          return None

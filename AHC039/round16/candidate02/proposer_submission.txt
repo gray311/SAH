@@ -1,0 +1,270 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are a C++ polygon optimizer for axis-aligned fish capture (efthash).
+  Goal: maximize (mackerels - sardines + 1) over 150 test cases.
+  
+  CRITICAL INSIGHT: The seed program builds a 200x200 grid and expands corridors, but this creates many tiny, disconnected rectangles that often fail validation or score poorly.
+  
+  NEW STRATEGY: "Smart Rectangle Expansion"
+  
+  1. GRID-BASED CLUSTERING:
+     - Build 200x200 grid over [0,100000]x[0,100000] (cell_size=500)
+     - For each cell, count mackerels (M) and sardines (S), compute score = M - S
+     - Identify top 10 cells with highest positive score
+  
+  2. SMART RECTANGLE FORMATION (INNOVATION):
+     - From each top cell, expand in ALL 4 directions simultaneously
+     - For each direction, expand as far as possible while M >= 0 and avoiding S > M + 2
+     - Find bounding box of all expanded cells
+     - Create ONE large rectangle from the bounding box
+  
+  3. EDGE-MIDPOINT EXPANSION (key innovation):
+     - After forming initial rectangle, try expanding each edge outward by 20-100 units
+     - For each potential expansion, compute delta score efficiently using grid queries
+     - Keep expansions that increase M - S
+  
+  4. MULTI-RESTART WITH VARIATION:
+     - Run 25 restarts with different seeds
+     - Each restart: pick top 10 cells, expand in 4 directions, form bounding box rectangle
+     - Apply edge expansion to the best rectangle found
+  
+  5. VALIDATION:
+     - Output valid polygon (4-1000 vertices, integer coords, perimeter <= 400,000)
+     - Use simple rectangle validation (no self-intersection by definition)
+  
+  6. EFFICIENCY:
+     - Total time per eval: < 1.5s to allow 150 test cases in 2.0s
+     - Use pre-computed grid for O(1) scoring
+  
+  Tools:
+  - edit_solution: Replace EVOLVE-BLOCK with complete C++ implementation
+  - evaluate_solution: Run C++ program, get score (mackerels-sardines+1)
+  - probe_solution: NOT useful - grid-based scoring is used internally
+  - finish: Submit when encoded
+  
+  Key differences from seed:
+  - Form ONE large rectangle instead of multiple tiny ones
+  - Expand edges by 20-100 units for more coverage
+  - 25 restarts instead of 15-20 for better exploration
+  - Simpler structure = fewer validation failures
+skill_description: Smart rectangle expansion with edge midpoint expansion. Build 200x200 grid, find top 10 cells, expand in 4 directions to form bounding box, apply edge expansions by 20-100 units, 25 restarts.
+tool_descriptions:
+  edit_solution: 'Replace EVOLVE-BLOCK with C++ implementing smart rectangle expansion:
+    1. Build 200x200 grid, count M/S per cell, compute M-S score
+    2. Find top 10 cells with positive score
+    3. From each, expand 4-directionally while M>=0 and S < M+2
+    4. Form bounding box and create rectangle
+    5. Try edge expansions by 20-100 units using grid queries
+    6. 25 restarts, output best rectangle
+    Ensure <1.5s execution, valid output format.'
+  evaluate_solution: Run C++ program. Returns score (mackerels-sardines+1), validity, and remaining evaluations (budget=30). Each run has ~1.5s search window.
+  probe_solution: NOT useful - full evaluation needed for accurate scoring.
+  finish: End when you have a working smart rectangle expansion with 25 restarts and edge expansion.
+sampling:
+  temperature: 1.0
+  top_p: 0.95
+  top_k: 25
+  max_tokens: 14336
+agent:
+  max_iterations: 45
+middleware:
+  budget_reminder_from_left: 3
+  long_tool_output_max_chars: 15000
+new_tools:
+- name: find_expansion_delta
+  description: 'Given a rectangle and a direction, compute the score delta from expanding the edge by given units using grid queries. Returns (delta_score, valid_expansion).'
+  input_schema:
+    type: object
+    properties:
+      rect:
+        type: object
+        properties:
+          min_x:
+            type: integer
+          min_y:
+            type: integer
+          max_x:
+            type: integer
+          max_y:
+            type: integer
+      direction:
+        type: string
+        enum:
+          - N
+          - S
+          - E
+          - W
+      expand_amount:
+        type: integer
+        default: 50
+  implementation_py: |
+    def run(ctx, args):
+        import json
+        rect = args.get("rect")
+        direction = args.get("direction")
+        expand_amount = args.get("expand_amount", 50)
+        
+        if rect is None or direction is None:
+            return {"error": "Missing rect or direction"}
+        
+        min_x, min_y = rect["min_x"], rect["min_y"]
+        max_x, max_y = rect["max_x"], rect["max_y"]
+        
+        # Parse program to extract fish positions
+        program_text = ctx.get_program()
+        fish_data = []
+        for line in program_text.split('\n'):
+            line = line.strip()
+            if line.startswith('fish['):
+                try:
+                    parts = line.replace('fish[', '').replace(']', '').split(',')
+                    if len(parts) >= 2:
+                        x, y = int(parts[0].strip()), int(parts[1].strip())
+                        fish_type = 1 if 'mackerel' in line.lower() else -1
+                        fish_data.append((x, y, fish_type))
+                except:
+                    continue
+        
+        # Build grid
+        grid_size = 200
+        grid = [[{'m': 0, 's': 0} for _ in range(grid_size)] for _ in range(grid_size)]
+        cell_size = 100000 // grid_size
+        
+        for x, y, ftype in fish_data:
+            cx, cy = x // cell_size, y // cell_size
+            if 0 <= cx < grid_size and 0 <= cy < grid_size:
+                if ftype == 1:
+                    grid[cy][cx]['m'] += 1
+                else:
+                    grid[cy][cx]['s'] += 1
+        
+        # Precompute prefix sums for fast rectangle queries
+        prefix_m = [[0] * (grid_size + 1) for _ in range(grid_size + 1)]
+        prefix_s = [[0] * (grid_size + 1) for _ in range(grid_size + 1)]
+        
+        for r in range(grid_size):
+            for c in range(grid_size):
+                prefix_m[r + 1][c + 1] = prefix_m[r][c + 1] + prefix_m[r + 1][c] - prefix_m[r][c] + grid[r][c]['m']
+                prefix_s[r + 1][c + 1] = prefix_s[r][c + 1] + prefix_s[r + 1][c] - prefix_s[r][c] + grid[r][c]['s']
+        
+        def query_rect_area(x1, y1, x2, y2):
+            if x1 > x2 or y1 > y2:
+                return 0, 0
+            c1, c2 = max(0, x1 // cell_size), min(grid_size - 1, x2 // cell_size)
+            r1, r2 = max(0, y1 // cell_size), min(grid_size - 1, y2 // cell_size)
+            if c1 > c2 or r1 > r2:
+                return 0, 0
+            m = prefix_m[r2 + 1][c2 + 1] - prefix_m[r1][c2 + 1] - prefix_m[r2 + 1][c1] + prefix_m[r1][c1]
+            s = prefix_s[r2 + 1][c2 + 1] - prefix_s[r1][c2 + 1] - prefix_s[r2 + 1][c1] + prefix_s[r1][c1]
+            return m, s
+        
+        # Current score
+        orig_m, orig_s = query_rect_area(min_x, min_y, max_x, max_y)
+        orig_score = orig_m - orig_s
+        
+        # Direction deltas
+        deltas = {"N": (0, expand_amount), "S": (0, -expand_amount), "E": (expand_amount, 0), "W": (-expand_amount, 0)}
+        if direction not in deltas:
+            return {"error": f"Invalid direction: {direction}"}
+        
+        dr, dc = deltas[direction]
+        
+        new_min_x, new_min_y = min_x, min_y
+        new_max_x, new_max_y = max_x, max_y
+        
+        if direction == "N":
+            new_max_y = max_y + expand_amount
+        elif direction == "S":
+            new_max_y = min_y - expand_amount
+        elif direction == "E":
+            new_max_x = max_x + expand_amount
+        elif direction == "W":
+            new_max_x = min_x - expand_amount
+        
+        new_m, new_s = query_rect_area(new_min_x, new_min_y, new_max_x, new_max_y)
+        new_score = new_m - new_s
+        
+        delta = new_score - orig_score
+        
+        # Check if expansion is reasonable (don't expand too much)
+        new_perimeter = 2 * ((new_max_x - new_min_x) + (new_max_y - new_min_y))
+        if new_perimeter > 400000:
+            return {"delta_score": delta, "valid_expansion": False, "note": "Perimeter exceeds limit"}
+        
+        return {"delta_score": delta, "valid_expansion": True, "new_m": new_m, "new_s": new_s}
+
+new_skills:
+- name: rectangle-optimization-playbook
+  description: Form one large rectangle from bounding box of top cells, expand edges by 20-100 units, 25 restarts.
+  body: |
+    # Rectangle Optimization Playbook
+    
+    ## Core Strategy
+    
+    Instead of building multiple tiny rectangles, build ONE large rectangle that covers multiple mackerel clusters.
+    
+    ## Step-by-Step Method
+    
+    ### Step 1: Grid Construction
+    
+    - Build 200x200 grid over [0,100000]x[0,100000] (cell_size = 500)
+    - Count mackerels (M) and sardines (S) in each cell
+    - Compute cell score = M - S
+    
+    ### Step 2: Find Top Cells
+    
+    - Identify top 10 cells with highest positive score (M - S > 0)
+    - These are your seed points
+    
+    ### Step 3: Directional Expansion
+    
+    For each top cell, expand in ALL 4 cardinal directions:
+    
+    - North: decrease y until M < 0 or S > M + 2 or boundary
+    - South: increase y until M < 0 or S > M + 2 or boundary  
+    - East: increase x until M < 0 or S > M + 2 or boundary
+    - West: decrease x until M < 0 or S > M + 2 or boundary
+    
+    Track the minimum x, maximum x, minimum y, maximum y of all expanded cells.
+    
+    ### Step 4: Form Bounding Box
+    
+    - Create a single rectangle from (min_x, min_y) to (max_x, max_y)
+    - This rectangle should cover all the expanded cells
+    
+    ### Step 5: Edge Expansion
+    
+    For each of the 4 edges, try expanding outward by 20, 40, 60, 80, 100 units:
+    
+    - Compute score delta using grid prefix sums
+    - If delta > 0 and perimeter still <= 400,000, keep the expansion
+    - Greedily expand each edge in the best direction
+    
+    ### Step 6: Multiple Restarts
+    
+    - Run 25 restarts with different random seeds
+    - Each restart: 
+      * Randomly perturb top cell selection (±50 units to coordinates)
+      * Build bounding box from perturbed seeds
+      * Apply edge expansions
+    
+    ### Step 7: Validation
+    
+    - Output: m (number of vertices = 4), then 4 vertices
+    - Ensure all coordinates in [0, 100000]
+    - Ensure perimeter <= 400,000
+    - Rectangle by definition has no self-intersection
+    
+    ## Key Success Factors
+    
+    - One large rectangle > multiple tiny ones (simpler = more robust)
+    - Edge expansion adds coverage without violating constraints
+    - 25 restarts ensure good exploration
+    - Grid-based scoring enables fast, efficient search
+new_middlewares:
+- name: rectangle_focus_reminder
+  hook: before_model
+  description: Focus solver on forming one large rectangle with edge expansion
+  implementation_py: |
+    def before_model(hook_input):
+        return "Focus: Build ONE large rectangle from bounding box of top 10 mackerel-dense cells. Expand edges by 20-100 units. Use grid prefix sums for fast scoring. 25 restarts. Keep perimeter <= 400,000."

@@ -1,0 +1,174 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are an expert in harmonic analysis and the Erdős minimum overlap problem.
+
+  Goal: Beat C5 ≤ 0.38092303510845016 by finding a step function h: [0,2]→[0,1] with ∫h=1 that minimizes max_k ∫h(x)(1−h(x+k))dx.
+
+  STRATEGY (follow this order):
+  1) BEFORE optimizing, call bound_probe(h_initial) to get a fast approximate score.
+  2) Generate diverse initializations using construct_structured_init().
+  3) For each candidate h, compute its bound_probe. Only optimize those with bound_probe < 0.385.
+  4) After optimizing a few candidates, use bound_probe to rank them and keep only the top 3 for full evaluation.
+  5) Run full evaluate_solution on the top candidates.
+
+  Why this works:
+  - bound_probe is 10x faster than evaluate_solution and does not consume the limited eval budget.
+  - Random/unstructured candidates waste evaluations. Filter them out first.
+  - Optimizing from bad starts often converges to worse local minima.
+
+  Target: combined_score > 1.0 (i.e., c5_bound < 0.380923).
+
+  Edit instructions:
+  - Implement bound_probe() as a cheap FFT-based evaluator using subsampling.
+  - Implement construct_structured_init() to generate 4–6 diverse initial h (bimodal peaks, triangular levels, periodic pattern, Golomb ruler-inspired, piecewise-constant).
+  - Integrate bound_probe into the workflow: generate → probe → optimize promising → eval top.
+
+skill_description: |
+  Structured initialization + bound_probe filtering for Erdős C5. Generate diverse initializations (bimodal peaks, triangular, periodic, Golomb), filter by cheap bound_probe, optimize promising candidates, and evaluate only the top ones. This avoids wasting the limited evaluation budget on bad candidates.
+
+skill_body: |
+  # Erdős C5 Optimization – Bound-Filtered Search
+
+  ## Problem
+  Minimize max_k ∫_0^2 h(x)(1−h(x+k)) dx over step functions h: [0,2]→[0,1] with ∫h=1.
+  Current best bound: C5 ≤ 0.38092303510845016. Goal: combined_score > 1.0 (c5_bound < 0.380923).
+
+  ## Why This Strategy
+  1) The objective depends on the self-convolution of h and 1−h via FFT.
+  2) A diverse set of principled constructions often outperforms random initialization.
+  3) Full evaluation is expensive. Use bound_probe() to quickly filter out bad candidates.
+  4) Optimize only the promising candidates, then evaluate them.
+
+  ## Workflow (follow this order):
+  1. Call construct_structured_init() to get 4–6 diverse initializations.
+     - Expect keys like: bimodal_tight, triangular_3step, periodic_2, golomb_5, piecewise_const_2, piecewise_const_3
+  2. For each candidate h (after sigmoid and integral correction to ∫h=1):
+     - Call bound_probe(h) to get an approximate c5_bound.
+     - If bound_probe(h) ≥ 0.385, discard it (too weak).
+     - Else, run optimization from h for 20k–30k steps with adaptive LR/penalty.
+  3. After optimizing several candidates, call bound_probe again to rank them.
+  4. Keep the top 2–3 candidates by bound_probe, then run evaluate_solution on them.
+  5. Report the best combined_score from the full evaluations.
+
+  ## Constructed Initializations
+  - bimodal_tight: Two narrow Gaussian-like peaks at x≈0.25 and 0.75.
+  - triangular_3step: Linear ramps forming a 3-level pattern.
+  - periodic_2: Alternating high/low on [0,0.5]/[0.5,1] (and repeat on [1,2]).
+  - golomb_5: Peaks placed at optimal spacing inspired by Golomb rulers.
+  - piecewise_const_2/3: Simple step functions with k levels, tuned to ∫h=1.
+
+  ## Bound-Filtered Optimization
+  - Always call bound_probe BEFORE optimize.
+  - Do not evaluate fully if bound_probe is not promising.
+  - If bound_probe stays high after optimization, the candidate is likely non-viable; move on.
+
+  ## Final Instructions
+  - Implement bound_probe() as a fast, subsampled FFT evaluator.
+  - Implement construct_structured_init() to generate diverse starts.
+  - Use the strategy above to edit the EVOLVE-BLOCK and improve the score.
+
+tool_descriptions:
+  edit_solution: |
+    Modify the EVOLVE-BLOCK to implement bound_probe() and construct_structured_init().
+    - bound_probe(h): Returns an approximate c5_bound using a subsampled FFT (e.g., N=800 with stride-2 or subsampling 20% of intervals).
+    - construct_structured_init(): Returns a dict with keys: bimodal_tight, triangular_3step, periodic_2, golomb_5, piecewise_const_2, piecewise_const_3.
+    Integrate bound_probe into the optimization loop as a filter before full evaluation.
+
+  evaluate_solution: |
+    Run the full evaluation and return combined_score = 0.38092303510845016 / c5_bound.
+    combined_score > 1.0 means a new record.
+
+  probe_solution: |
+    Quick approximate evaluation on subsampled data (~10s vs minutes for a full evaluation).
+    Use this to rank candidates before full evaluation, but prefer bound_probe for the structured workflow.
+
+  finish: |
+    End when no candidate achieves combined_score > 1.0 after exhausting diverse initializations.
+
+sampling:
+  temperature: 0.9
+  top_p: 0.9
+  top_k: 15
+  max_tokens: 12000
+agent:
+  max_iterations: 60
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 12000
+new_tools:
+  - name: bound_probe
+    description: |
+      Fast approximate c5 bound using subsampled FFT. Returns an estimated c5_bound for a given h (after sigmoid). Does not consume the evaluation budget. Use this to quickly filter out weak candidates before optimization or full evaluation. Target: call before optimize and after optimization to rank candidates.
+    input_schema:
+      type: object
+      properties:
+        h:
+          type: array
+          description: latent vector (input to sigmoid)
+          items:
+            type: number
+    implementation_py: |
+      def run(ctx, args):
+          import numpy as np
+          h_lat = args.get("h")
+          if h_lat is None:
+              return {"note": "missing h"}
+          h = np.sigmoid(h_lat).astype(np.float64)
+          N = len(h)
+          dx = 2.0 / N
+          # subsample to speed up: take every 4th point (keep ~250 points)
+          stride = 4
+          h_sub = h[::stride]
+          j_sub = 1.0 - h_sub
+          h_padded = np.pad(h_sub, (0, N))
+          j_padded = np.pad(j_sub, (0, N))
+          corr_fft = np.fft.fft(h_padded) * np.conj(np.fft.fft(j_padded))
+          corr = np.fft.ifft(corr_fft).real
+          c5_est = np.max(corr * dx)
+          # return approximate bound with small adjustment for subsampling
+          return {"c5_bound": float(c5_est)}
+
+new_skills:
+  - name: bound-filtered-search
+    description: |
+      Structured initialization with bound-probe filtering for Erdős C5. Generate diverse starts, filter by cheap bound_probe, optimize promising candidates, evaluate only top ones. Avoid wasting evaluations on weak candidates.
+    body: |
+      # Bound-Filtered Search for Erdős C5
+
+      ## Overview
+      1. Generate diverse initializations using construct_structured_init().
+      2. For each candidate, call bound_probe() to get a fast approximate c5_bound.
+      3. If bound_probe >= 0.385, discard it (too weak).
+      4. Else, run optimization from this candidate for 20k–30k steps.
+      5. After optimizing several, call bound_probe again to rank candidates.
+      6. Keep the top 2–3 candidates and run evaluate_solution on them.
+      7. Report the best combined_score.
+
+      ## Why This Works
+      - bound_probe is ~10x faster than evaluate_solution and does not consume the limited evaluation budget.
+      - Random/unstructured candidates waste evaluations. Filter them out first.
+      - Optimizing from bad starts often converges to worse local minima.
+
+      ## Initializations to Generate
+      - bimodal_tight: Two narrow peaks at 0.25 and 0.75.
+      - triangular_3step: 3-level linear ramps.
+      - periodic_2: Alternating pattern on [0,0.5]/[0.5,1] (repeat on [1,2]).
+      - golomb_5: Peaks at optimal spacing from Golomb ruler.
+      - piecewise_const_2/3: Simple step functions with k levels, integral normalized to 1.
+
+      ## Optimization Tips
+      - Use adaptive learning rate and penalty: start with lr=0.02, penalty=5000; later lr=0.003, penalty=15000.
+      - If bound_probe stays high after optimization, the candidate is likely non-viable; move on.
+      - Always call bound_probe BEFORE optimize and AFTER optimization.
+
+      ## Final Instructions
+      - Implement bound_probe() and construct_structured_init() in the EVOLVE-BLOCK.
+      - Follow the bound-filtered search workflow to improve the score.
+new_middlewares:
+  - name: probe_before_optimize
+    hook: before_model
+    description: |
+      Before each model call, remind the solver to use bound_probe to filter weak candidates. Encourage bound-filtered search strategy.
+    implementation_py: |
+      def before_model(hook_input):
+          return "Before optimizing, call bound_probe(h) to quickly estimate c5_bound. Discard candidates with bound_probe >= 0.385. Only optimize promising ones, then evaluate the top 2–3 with evaluate_solution."

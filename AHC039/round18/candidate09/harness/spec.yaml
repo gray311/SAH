@@ -1,0 +1,277 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are a C++ polygon optimizer for the "fish capture" problem. Goal: maximize (mackerels - sardines + 1).
+  
+  CORE STRATEGY: Refine the seed's KD-tree based hill climbing with targeted improvements.
+  
+  SEARCH METHOD:
+  
+  1. INITIAL POLYGON: Start with a simple axis-aligned rectangle that encloses the highest-density mackerel cluster.
+     - Compute centroid of all mackerels
+     - Build a bounding box around the top 2000 mackerels by density (mackerels per unit area)
+     - Ensure box fits within [0,100000]x[0,100000] and has perimeter <= 400,000
+  
+  2. MULTI-OBJECTIVE HILL CLIMBING:
+     - For each edge, try shifts ±10, ±20, ±30 units in both x and y directions
+     - Score each variant using the exact same KD-tree based counting as the seed
+     - Accept improvements AND sometimes accept worsening moves (probability = exp(-delta_score / T)) where T starts at 50 and cools by 0.95 each iteration
+     - Repeat 5 refinement rounds
+  
+  3. ITERATED RESTARTS:
+     - Run 8 restarts with different random seeds
+     - Each restart: perturb the initial rectangle corners by ±50 to ±200 units
+     - Apply hill climbing to each
+  
+  4. CLUSTER-BASED EXPANSION:
+     - After initial hill climbing, identify disconnected high-density mackerel clusters
+     - For each cluster, try adding a "lobe" (small rectangle) to the polygon if it improves the score
+     - Ensure no self-intersection
+  
+  5. VALIDATION:
+     - Output valid polygon only (4-1000 vertices, integer coords in [0,100000], no self-intersection)
+     - Use the seed's KVH validator
+  
+  Tools:
+  - edit_solution: Replace EVOLVE-BLOCK with complete C++ implementation
+  - evaluate_solution: Run C++ program, get score
+  - probe_solution: Not useful - full evaluation needed for accurate scoring
+  - finish: Submit when you have working code
+
+skill_description: Seed-based local search with simulated annealing. Start from mackerel cluster bounding box, apply multi-objective hill climbing with occasional worsening moves (simulated annealing), add lobe expansions for disconnected clusters, 8 restarts.
+skill_body: |
+  # Seed-Based Local Search with Simulated Annealing
+  
+  ## Phase 1: Initial Polygon Construction
+  
+  - Compute centroid of all mackerel points
+  - Group mackerels by a 500x500 grid and find the top 10 cells by mackerel density (mackerels/cell_area)
+  - Build a bounding rectangle around these top cells
+  - Ensure: all coords in [0,100000], perimeter <= 400,000, 4-1000 vertices
+  
+  ## Phase 2: Multi-Objective Simulated Annealing Hill Climbing
+  
+  For 5 refinement rounds:
+  
+  For each edge of the polygon:
+  - Try shifts in x direction: ±10, ±20, ±30
+  - Try shifts in y direction: ±10, ±20, ±30
+  - For each shifted edge, create a new polygon candidate
+  - Score each candidate using KD-tree based counting (exact score, not approximation)
+  - Compute delta_score = new_score - current_score
+  
+  Acceptance criteria:
+  - If delta_score > 0: always accept
+  - If delta_score <= 0: accept with probability exp(-delta_score / T)
+    where T starts at 50 and multiplies by 0.95 after each edge trial
+  
+  Keep the best polygon after all edge trials
+  
+  ## Phase 3: Iterated Restarts
+  
+  - Run 8 restarts with different random seeds
+  - Each restart:
+    * Perturb initial rectangle corners by random amount in [-200, +200]
+    * Apply simulated annealing hill climbing
+    * Track the best polygon across all restarts
+  
+  ## Phase 4: Lobe Expansion for Disconnected Clusters
+  
+  - After hill climbing, identify mackerel clusters that are outside the current polygon
+  - For each cluster (group of mackerels within 1000 distance of each other):
+    * Build a small rectangle around the cluster
+    * If adding this rectangle (union with current polygon) improves the score AND keeps perimeter <= 400,000, apply it
+    * Check for self-intersection after each addition
+  
+  ## Phase 5: Final Validation
+  
+  - Output exactly: m (number of vertices) then m lines of "x y" coordinates
+  - Ensure: 4 <= m <= 1000, all coords in [0,100000], no self-intersection, perimeter <= 400,000
+  - Use seed's KVH validator for self-intersection check
+  
+  ## Key Differences from Seed
+  
+  - Uses simulated annealing to escape local optima (seed uses greedy hill climbing only)
+  - Starts from data-driven initial polygon (seed uses random rectangles)
+  - Adds lobe expansion for disconnected clusters
+  - More restarts with corner perturbation
+tool_descriptions:
+  edit_solution: 'Replace EVOLVE-BLOCK with C++ implementing seed-based local search with simulated annealing:
+
+    1. Build initial polygon from mackerel cluster bounding box
+
+    2. Apply simulated annealing hill climbing (±10..30 shifts, T=50 cooling to 1)
+
+    3. Run 8 restarts with corner perturbation
+
+    4. Add lobe expansions for disconnected mackerel clusters
+
+    5. Validate output (4-1000 vertices, coords in bounds, no self-intersection)
+
+    Ensure <2.0s execution, valid output format.'
+  evaluate_solution: Run C++ program. Returns score (mackerels-sardines+1), validity, and remaining evaluations (budget=30). Each run has ~2.0s search window.
+  probe_solution: NOT useful - full evaluation needed for accurate scoring.
+  finish: End when you have submitted working code that uses simulated annealing for escape and lobe expansion.
+sampling:
+  temperature: 0.9
+  top_p: 0.95
+  top_k: 30
+  max_tokens: 12288
+agent:
+  max_iterations: 30
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 15000
+new_tools:
+- name: expand_corridor
+  description: 'Expand a corridor from a seed cell in a given direction, avoiding sardine-dense regions.
+
+    Returns the corridor path as a list of cell coordinates and final cell score.'
+  input_schema:
+    type: object
+    properties:
+      seed_cell:
+        type: object
+        properties:
+          row:
+            type: integer
+          col:
+            type: integer
+      direction:
+        type: string
+        enum:
+        - N
+        - S
+        - E
+        - W
+      max_length:
+        type: integer
+        default: 100
+  implementation_py: "def run(ctx, args):\n    import json\n    \n    seed_cell = args.get(\"seed_cell\"\
+    )\n    direction = args.get(\"direction\")\n    max_length = args.get(\"max_length\", 100)\n    \n\
+    \    if seed_cell is None:\n        return {\"error\": \"seed_cell not provided\"}\n    if direction\
+    \ is None:\n        return {\"error\": \"direction not provided\"}\n    \n    grid_size = 200\
+    \  \n    # Parse program to extract fish positions\n    program_text = ctx.get_program()\n    fish_data\
+    \ = []\n    for line in program_text.split('\\n'):\n        line = line.strip()\n        if line.startswith('fish['):\n\
+    \            try:\n                parts = line.replace('fish[', '').replace(']', '').split(',')\n\
+    \                if len(parts) >= 2:\n                    x, y = int(parts[0]), int(parts[1])\n  \
+    \                  fish_type = 1 if 'mackerel' in line.lower() else -1\n                    fish_data.append((x,\
+    \ y, fish_type))\n            except:\n                continue\n    \n    # Build grid\n    grid\
+    \ = [[{'m': 0, 's': 0} for _ in range(grid_size)] for _ in range(grid_size)]\n    cell_size = 100000\
+    \ // grid_size\n    \n    for x, y, ftype in fish_data:\n        cx, cy = x // cell_size, y // cell_size\n\
+    \        if 0 <= cx < grid_size and 0 <= cy < grid_size:\n            if ftype == 1:\n           \
+    \     grid[cy][cx]['m'] += 1\n            else:\n                grid[cy][cx]['s'] += 1\n    \n  \
+    \  # Direction deltas\n    deltas = {\n        \"N\": (-1, 0),\n        \"S\": (1, 0),\n        \"\
+    E\": (0, 1),\n        \"W\": (0, -1)\n    }\n    if direction not in deltas:\n        return {\"error\"\
+    : \"invalid direction\"}\n    dr, dc = deltas[direction]\n    \n    # Expand corridor\n    corridor\
+    \ = [seed_cell]\n    curr_r, curr_c = seed_cell[\"row\"], seed_cell[\"col\"]\n    max_score = grid[curr_r][curr_c][\"\
+    m\"] - grid[curr_r][curr_c][\"s\"]\n    \n    for _ in range(max_length):\n        new_r, new_c =\
+    \ curr_r + dr, curr_c + dc\n        if not (0 <= new_r < grid_size and 0 <= new_c < grid_size):\n\
+    \            break\n        \n        m_count = grid[new_r][new_c][\"m\"]\n        s_count = grid[new_r][new_c][\"\
+    s\"]\n        score = m_count - s_count\n        \n        # Stop conditions\n        if score < 0\
+    \ and s_count > m_count + 2:\n            break\n        \n        corridor.append({\"row\": new_r,\
+    \ \"col\": new_c, \"m\": m_count, \"s\": s_count, \"score\": score})\n        curr_r, curr_c = new_r,\
+    \ new_c\n    \n    return {\n        \"corridor\": corridor,\n        \"length\": len(corridor),\n\
+    \        \"final_score\": corridor[-1][\"score\"] if corridor else 0\n    }"
+new_skills:
+- name: corridor-expansion-guide
+  description: Use corridor expansion to grow from mackerel-dense cells through sardine-free paths. Expand
+    in 4 directions, avoid regions with S > M + 2, combine corridors into polygons.
+  body: '# Corridor Expansion Guide for Polygon Optimization
+
+
+    ## Core Idea
+
+    Instead of building polygons around isolated clusters, expand through sardine-free corridors
+
+    to connect mackerel-rich regions and create multi-lobed structures.
+
+
+    ## Step-by-Step Method
+
+
+    ### Step 1: Grid Analysis
+
+    - Build 200x200 grid over [0,100000]x[0,100000] (cell_size=500)
+
+    - Count mackerels (M) and sardines (S) in each cell
+
+    - Compute cell score = M - S
+
+    - Identify top 15 cells with positive score
+
+
+    ### Step 2: Directional Expansion
+
+    For each top cell, try expanding in each cardinal direction:
+
+    - North: decrease row index
+
+    - South: increase row index
+
+    - East: increase column index
+
+    - West: decrease column index
+
+
+    For each direction:
+
+    - Start from seed cell and move outward step by step
+
+    - At each step, check the new cell''s M, S counts
+
+    - Continue if: cell is in bounds AND (M >= S OR S < M + 2)
+
+    - Stop if: out of bounds, M - S < 0, or S > M + 2
+
+    - Record all cells in the corridor
+
+
+    ### Step 3: Polygon Formation
+
+    Convert corridor(s) into polygon:
+
+    - Single corridor: create rectangular boundary around corridor cells
+
+    - Multiple corridors from same seed: combine into L-shape or multi-lobed structure
+
+    - Ensure: 4 <= vertices <= 1000, integer coordinates, no self-intersection
+
+
+    ### Step 4: Hill Climbing
+
+    For each polygon candidate:
+
+    - For each edge, try shifts ±5, ±10, ±15, ±20, ±25 units
+
+    - Use grid-based rectangle query for fast scoring
+
+    - Keep shift that improves M - S
+
+    - Repeat 3 refinement rounds
+
+
+    ### Step 5: Multiple Restarts
+
+    - Run 15-20 restarts with different random seeds
+
+    - Each restart: perturb top cell selection, build 3-5 corridors, combine, hill climb
+
+    - Output best polygon across all restarts
+
+
+    ## Key Success Factors
+
+    - Avoid sardine-dense regions (S > M + 2) to minimize penalties
+
+    - Use corridor expansion to create extended polygons that capture multiple clusters
+
+    - Deep hill climbing to fine-tune edge positions
+
+    - Many restarts to explore diverse polygon shapes'
+new_middlewares:
+- name: restart_reminder
+  hook: before_model
+  description: generated middleware restart_reminder
+  implementation_py: "def before_model(hook_input):\n    return \"Use sardine-aware corridor expansion:\
+    \ from mackerel-dense cells, expand in 4 directions avoiding S>M+2, build multi-lobed polygons, deep\
+    \ hill climb with ±5..25 shifts, run 15-20 restarts.\""

@@ -1,0 +1,316 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are a C++ polygon optimizer for axis-aligned fish capture. Goal: maximize (mackerels - sardines + 1).
+
+  CRITICAL STRATEGY: Direct coordinate-space cluster exploitation with systematic vertex refinement.
+
+  SEARCH METHOD (encodes in EVOLVE-BLOCK C++ code):
+
+  1. POINT-BASED ANALYSIS:
+     - Parse fish coordinates directly (no grid binning)
+     - Identify mackerel clusters: groups of mackerels within 500-unit radius
+     - For each cluster, find its bounding box and centroid
+     - Mark all sardines that would be inside any candidate polygon
+
+  2. INITIAL POLYGON CONSTRUCTION:
+     - From each mackerel cluster, create an axis-aligned rectangle
+     - Extend rectangle edges to include nearby mackerels, avoid sardines
+     - Target vertex placement at coordinates like (min_x-100, min_y), (max_x+100, min_y), etc.
+     - Use cluster centroids as anchor points for vertex placement
+
+  3. SATURATION SEARCH:
+     - For each candidate polygon (up to 50):
+       * Start from seed solution
+       * Try vertex modifications: shift each vertex by ±1, ±2, ±5, ±10, ±20 units
+       * Test all 4-directional edge shifts
+       * Use fast counting: for a proposed vertex, compute mackerels/sardines in its vicinity
+       * Keep best shift pattern
+
+  4. MULTI-RESTART COORDINATE SEARCH:
+     - Run 10-15 restarts with different random perturbations
+     - Each restart: pick random mackerel subset (20-40), build polygon around them
+     - Use hill climbing with edge shifts ±5..50
+
+  5. VALIDATION:
+     - Output valid polygon only (4-1000 vertices, integer coords, no self-intersection)
+     - Ensure perimeter ≤ 400,000 and all coords in [0,100000]
+
+  Tools:
+  - edit_solution: Replace EVOLVE-BLOCK with complete C++ implementing point-based cluster search
+  - evaluate_solution: Run C++ program, get score
+  - probe_solution: Approximate scoring on subsample for fast ranking (use after building 5-10 candidates)
+  - finish: Submit when you have working solution with cluster exploitation
+
+  KEY DIFFERENCE from seed: Direct coordinate analysis replaces grid binning; systematic vertex refinement with multiple search phases
+skill_description: Point-based cluster exploitation. Parse fish coords directly, find mackerel clusters within 500-radius, build rectangles around clusters with careful vertex placement, systematic vertex refinement, 10-15 restarts, use probe_solution to rank candidates.
+skill_body: |
+  # Point-Based Cluster Exploitation Strategy
+
+  ## Phase 1: Direct Coordinate Analysis
+  - Parse fish coordinates directly from input (O(N), not grid-binned)
+  - Identify mackerel clusters: use Union-Find or BFS to group mackerels within 500-unit distance
+  - For each cluster, compute:
+    * Bounding box: (min_x, min_y, max_x, max_y)
+    * Centroid: ((min_x+max_x)/2, (min_y+max_y)/2)
+    * Cluster size (num mackerels)
+
+  ## Phase 2: Initial Rectangle Construction
+  For each mackerel cluster:
+  - Create a rectangle starting from centroid
+  - Expand in 4 directions to include nearby mackerels
+  - Target dimensions: width/height ≈ cluster_diameter * 1.5
+  - Place vertices at integer coordinates (use clustering-aware positions)
+  - For clusters near boundaries, adjust to stay within [0, 100000]
+
+  ## Phase 3: Multi-Point Polygon Construction
+  - If you have multiple clusters, try combining them with connecting corridors
+  - Use axis-aligned rectangles to separate clusters from sardines
+  - Ensure vertex coordinates are integers and distinct
+
+  ## Phase 4: Systematic Vertex Refinement
+  For each candidate polygon:
+  - For each vertex (up to 1000):
+    * Try shifts: ±1, ±2, ±5, ±10, ±20 in x and y directions
+    * For each shift, use probe_solution if available for fast scoring
+    * Keep shift that improves (mackerels - sardines)
+  - Repeat 2-3 refinement rounds with decreasing step sizes
+
+  ## Phase 5: Multi-Restart Search
+  - Run 10-15 restarts with different strategies:
+    * Random perturb cluster selection (±50 in x,y for cluster boundaries)
+    * Vary rectangle expansion factor (1.0x to 2.5x)
+    * Combine different clusters in various ways
+
+  ## Phase 6: Final Selection
+  - Use probe_solution to rank top 10 candidates
+  - Run full evaluate_solution on best 2-3
+  - Output best polygon (max score)
+
+  ## C++ Implementation Notes
+  - Use Union-Find for efficient clustering in O(N α(N))
+  - Rectangle intersection check for sardine avoidance
+  - Fast point-in-rectangle test for scoring
+  - Total time: <2.0s with efficient algorithms
+  - Include self-intersection check for polygon validity
+new_tools:
+- name: analyze_fish_clusters
+  description: |
+    Analyze fish coordinates directly to find mackerel clusters within 500-unit radius.
+    Returns cluster list with bounding boxes and suggested vertex positions.
+  input_schema:
+    type: object
+    properties: {}
+  implementation_py: |
+    def run(ctx, args):
+        program_text = ctx.get_program()
+        mackerels = []
+        sardines = []
+        
+        # Parse fish coordinates from the C++ code
+        lines = program_text.split('\n')
+        i = 0
+        while i < len(lines):
+            line = lines[i].strip()
+            if line.startswith('fish['):
+                try:
+                    content = line.replace('fish[', '').replace(']', '').strip()
+                    parts = content.split(',')
+                    if len(parts) >= 2:
+                        coords = []
+                        for p in parts:
+                            p = p.strip()
+                            if p:
+                                coords.append(int(p))
+                        if len(coords) >= 2:
+                            x, y = coords[0], coords[1]
+                            ftype = 1 if 'mackerel' in line.lower() else -1
+                            mackerels.append((x, y)) if ftype == 1 else sardines.append((x, y))
+                except:
+                    pass
+            i += 1
+        
+        if not mackerels:
+            return {"note": "no mackerels found"}
+        
+        # Cluster mackerels within 500-unit radius using simple distance grouping
+        clusters = []
+        used = [False] * len(mackerels)
+        for m_idx in range(len(mackerels)):
+            if used[m_idx]:
+                continue
+            cluster = [mackerels[m_idx]]
+            used[m_idx] = True
+            
+            for other_idx in range(m_idx + 1, len(mackerels)):
+                if not used[other_idx]:
+                    p1 = mackerels[m_idx]
+                    p2 = mackerels[other_idx]
+                    dist_sq = (p1[0] - p2[0])**2 + (p1[1] - p2[1])**2
+                    if dist_sq <= 250000:  # 500^2
+                        cluster.append(mackerels[other_idx])
+                        used[other_idx] = True
+            
+            if len(cluster) >= 2:
+                xs = [p[0] for p in cluster]
+                ys = [p[1] for p in cluster]
+                clusters.append({
+                    "center": [(sum(xs)/len(xs), sum(ys)/len(ys))],
+                    "min_x": min(xs), "min_y": min(ys),
+                    "max_x": max(xs), "max_y": max(ys),
+                    "size": len(cluster)
+                })
+        
+        # For clusters with fewer than 2 mackerels, add individually
+        for m_idx in range(len(mackerels)):
+            if not used[m_idx]:
+                m = mackerels[m_idx]
+                xs, ys = [m[0]], [m[1]]
+                clusters.append({
+                    "center": [m],
+                    "min_x": m[0], "min_y": m[1],
+                    "max_x": m[0], "max_y": m[1],
+                    "size": 1
+                })
+        
+        # Suggest vertex positions for each cluster
+        vertices_suggestions = []
+        for c in clusters:
+            cx, cy = c["min_x"], c["min_y"]
+            dx, dy = c["max_x"] - c["min_x"], c["max_y"] - c["min_y"]
+            
+            # Suggest vertices at cluster boundaries with small padding
+            vx1, vy1 = c["min_x"] - 50, c["min_y"]
+            vx2, vy2 = c["max_x"] + 50, c["min_y"]
+            vx3, vy3 = c["max_x"] + 50, c["max_y"] + 50
+            vx4, vy4 = c["min_x"] - 50, c["max_y"] + 50
+            
+            vertices_suggestions.append({
+                "cluster_idx": len(vertices_suggestions),
+                "vertices": [
+                    {"x": max(0, min(100000, vx1)), "y": max(0, min(100000, vy1))},
+                    {"x": max(0, min(100000, vx2)), "y": max(0, min(100000, vy2))},
+                    {"x": max(0, min(100000, vx3)), "y": max(0, min(100000, vy3))},
+                    {"x": max(0, min(100000, vx4)), "y": max(0, min(100000, vy4))}
+                ],
+                "size": c["size"]
+            })
+        
+        return {
+            "num_clusters": len(clusters),
+            "total_mackerels": len(mackerels),
+            "num_sardines": len(sardines),
+            "clusters": clusters,
+            "vertices_suggestions": vertices_suggestions
+        }
+tool_descriptions:
+  edit_solution: 'Replace EVOLVE-BLOCK with C++ implementing point-based cluster exploitation:
+
+    1. Parse fish coordinates directly, group mackerels into clusters (500-unit radius)
+
+    2. For each cluster, build axis-aligned rectangle around it
+
+    3. Systematic vertex refinement: shift each vertex by ±1, ±2, ±5, ±10, ±20 units
+
+    4. Use probe_solution to rank top 10 candidates (separate budget)
+
+    5. Run full evaluate_solution on best 2-3 candidates
+
+    6. 10-15 restarts with perturbations to cluster selection and rectangle sizing'
+  evaluate_solution: Run C++ program. Returns score (mackerels-sardines+1), validity, and remaining evaluations (budget=30). Each run has ~2.0s search window.
+  probe_solution: Approximate scoring on subsampled data (separate budget of 30 probes, cheap ~10s). Use to rank 5-10 candidate polygons before full evaluation.
+  finish: End when you have working solution with direct cluster exploitation, systematic vertex refinement, and probe-based candidate ranking.
+sampling:
+  temperature: 0.9
+  top_p: 0.85
+  top_k: 25
+  max_tokens: 14336
+agent:
+  max_iterations: 40
+middleware:
+  budget_reminder_from_left: 6
+  long_tool_output_max_chars: 16000
+new_skills:
+- name: cluster-exploitation-guide
+  description: Use direct coordinate analysis to find mackerel clusters, build axis-aligned rectangles around them, systematic vertex refinement with ±1..±20 shifts, probe-based candidate ranking.
+  body: '# Cluster Exploitation Guide for Axis-Aligned Polygon Optimization
+
+
+    ## Core Idea
+
+    Direct coordinate-space clustering replaces coarse grid binning. Find mackerels within 500-unit
+    radius, build tight rectangles around clusters, and systematically refine vertex positions.
+
+
+    ## Step-by-Step Method
+
+
+    ### Step 1: Direct Fish Parsing
+
+    - Parse all fish coordinates from input directly (O(N), no grid overhead)
+    - Separate mackerels and sardines into two lists
+    - Store as (x, y) integer pairs
+
+
+    ### Step 2: Mackerel Clustering
+
+    Group mackerels into clusters using distance-based grouping:
+
+    - Start with first unclustered mackerel
+    - Find all mackerels within 500-unit Euclidean distance (dist² ≤ 250000)
+    - Recursively add any mackerel within 500 units of any cluster member
+    - Compute cluster bounding box: (min_x, min_y, max_x, max_y)
+    - Compute cluster centroid for reference
+
+
+    ### Step 3: Rectangle Construction
+
+    For each cluster, construct an axis-aligned polygon:
+
+    - Start from cluster bounding box
+    - Add padding: 50-100 units in all directions
+    - Target vertices: (min_x-p, min_y), (max_x+p, min_y), (max_x+p, max_y+p), (min_x-p, max_y+p)
+    - Clamp all coordinates to [0, 100000]
+    - Ensure 4 <= vertices <= 1000
+
+
+    ### Step 4: Systematic Vertex Refinement
+
+    For each candidate polygon:
+
+    - For each vertex i in [0, vertices-1]:
+      * Try shifting vertex i in x: -20, -10, -5, -2, -1, +1, +2, +5, +10, +20
+      * Try shifting vertex i in y: same shifts
+      * Use probe_solution to score each variant (cheap!)
+      * Track shifts that improve score
+    - Apply best shifts iteratively (2-3 rounds)
+
+
+    ### Step 5: Multi-Cluster Combination
+
+    Try combining multiple clusters:
+
+    - Use axis-aligned corridors between nearby clusters
+    - Or create separate polygons for distant clusters
+    - Evaluate each combination
+
+    ### Step 6: Restart Variations
+
+    Run 10-15 restarts with different seeds:
+
+    - Perturb cluster boundary by ±50 in x,y
+    - Vary padding size (40, 60, 80, 100 units)
+    - Randomly select subsets of clusters to include
+
+
+    ## Key Success Factors
+
+    - Direct coordinate analysis captures fine-grained fish distribution
+    - Clustering within 500 units finds tight mackerel groups
+    - Vertex refinement with probe scoring finds optimal edge placement
+    - Many restarts explore diverse polygon shapes
+    - Avoid sardines by carefully placing polygon boundaries'
+new_middlewares:
+- name: cluster_restart_reminder
+  hook: before_model
+  description: generated middleware cluster_restart_reminder
+  implementation_py: "def before_model(hook_input):\n    return \"Use point-based clustering: find mackerel groups within 500-unit radius, build rectangles around them, refine vertices with ±1..±20 shifts, use probe_solution for ranking, run 10-15 restarts.\""

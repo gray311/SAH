@@ -1,0 +1,212 @@
+schema: h2spec/1.0
+system_prompt: |
+  Erdos minimum overlap problem (C5): Find h: [0,2]->[0,1] minimizing max_k integral h(x)(1-h(x+k))dx.
+
+  CONSTRAINT: integral(h) = 1 exactly. h values in [0,1].
+
+  Current best: C5 <= 0.38092303510845016 (combined_score = 1.0).
+
+  GOAL: Find h achieving c5_bound < 0.38092303510845016 (combined_score > 1.0).
+
+  PROBLEM DIAGNOSIS: The seed optimizer uses 800 intervals and gradient-based optimization (sigmoid(latent)).
+  GRADIENTS ARE WEAK: The objective is a max-overlap which is non-smooth and flat. Gradient descent on
+  sigmoided latent vectors may stall because small changes in latent don't move the max-correlation
+  peak significantly. The optimizer needs DISCRETE MUTATIONS that directly manipulate the step function
+  structure, not latent-space gradients.
+
+  RECOMMENDED STRATEGY:
+
+  1. FIRST, use generate_discrete_structures to create 3-5 discrete step functions with KNOWN
+     integral=1. These are pure step functions (no sigmoid), explicitly constructed to have low overlap.
+
+  2. CALL generate_discrete_structures once per iteration. It returns step functions h where:
+     - h is a step function with integer-valued blocks (e.g., h takes values 0, 0.25, 0.5, 0.75, 1.0)
+     - integral(h) = 1 exactly by construction
+     - c5_bound is computed analytically (FFT, no training)
+     - h is provided as a list of (interval_start, interval_end, value) tuples or as an array of 800 values
+
+  3. For each candidate from generate_discrete_structures:
+     - If c5_bound < 0.375, CALL evaluate_solution immediately (don't probe, go straight to full eval)
+     - If 0.375 <= c5_bound < 0.382, optionally probe first
+     - If c5_bound >= 0.382, discard
+
+  4. SECOND, if no discrete structure works, try LATENT-SHAPING:
+     - Start with num_restarts=5, num_steps=30000 (shorter training)
+     - Focus on editing the _get_best_initialization method to create sharper peaks
+     - Use patterns with fewer, wider blocks (not fine-grained noise)
+
+  5. TOLERATE INCOMPLETE OPTIMIZATION: The task is combinatorial. A 3-5 point step function may
+     outperform a 800-point optimized sigmoid curve. Accept candidates that are NOT fully trained
+     but have better structure.
+
+  6. USE BUDGET SMARTLY: With 30 evals, try 5-8 discrete structures (5-8 evals), then if needed,
+     try 2-3 latent-optimized candidates (6-9 evals). Leave room for iteration.
+
+  7. IF STUCK: Generate new discrete structures with different block counts (3 blocks, 5 blocks,
+     7 blocks) or different value distributions (more extreme: 0 vs 1, or 0 vs 0.5).
+
+  KEY INSIGHT: The seed optimizer is wrong for this task. It's a combinatorial search for discrete
+  step functions, not a gradient-based optimization of continuous latent vectors. Use generate_discrete_structures
+  to inject combinatorial search capability.
+skill_description: Combinatorial step function search for Erdos C5. Use generate_discrete_structures
+  to create integral=1 step functions with analytical c5 scoring. Directly edit step function
+  structure (block count, widths, values) rather than latent-space gradients.
+skill_body: '# Combinatorial Step Function Search for Erdos Problem\n\n## Core Strategy\n\nThe Erdos C5
+  problem is COMBINATORIAL: find a step function with low maximum overlap. Gradient descent on
+  continuous latent vectors is INEFFICIENT because the objective is non-smooth (max-overlap) and
+  gradients are weak. Directly construct step functions.\n\n## Step 1: Generate Discrete Structures\n\n1. CALL generate_discrete_structures()\n\
+  This creates 3-5 integral=1 step functions:\n   - Each is a pure step function (blocks of constant value)\n\
+  - Integral constraint satisfied by construction\n   - c5_bound computed analytically via FFT\n\n2. EXAMINE returned candidates:\n   - Check c5_bound for each\n   - Candidates are already evaluated (analytical score, no training)\n\n3. FILTER:\n   - KEEP if c5_bound < 0.375 (excellent, likely to beat record)\n   - CONSIDER if 0.375 <= c5_bound < 0.382 (worth full eval)\n   - DISCARD if c5_bound >= 0.382\n\n4. EVALUATE:\n   - CALL evaluate_solution on all kept candidates\n   - Each candidate gets 1 eval (you have 30 total)\n\n## Step 2: Pattern Variations (if Step 1 fails)\n\nIf no structure from generate_discrete_structures works:\n\n- Vary block count: Try 3-block, 5-block, 7-block structures\n- Vary block widths: Narrower peaks (e.g., width 0.2 instead of 0.4)\n- Vary values: More extreme (0 vs 1, or use intermediate values like 0.33, 0.66)\n- Try asymmetric distributions: More mass on one side of [0,2]\n\n## Step 3: Latent Optimization (fallback)\n\nOnly if combinatorial search fails:\n\n- Use generate_ready_candidates for 3 pre-computed latent vectors\n- Focus on latent shaping (not hyperparameter tuning)\n- Use probe_solution to screen, then evaluate\n\n## Budget Management\n\n- Discrete structures: 5-8 evals (5-8 candidates)\n- Latent optimization: 2-3 evals (2-3 candidates)\n- Total: ~10-11 evals, leaving room for iteration or retry\n\n## Expected Outcome\n\nWith combinatorial search, you should find c5_bound < 0.37 candidates quickly.\nThe seed optimizer is inefficient for this combinatorial task.\nDirect step function construction > gradient descent on latent vectors.\n'
+tool_descriptions:
+  edit_solution: |
+    Modify EVOLVE-BLOCK to create DIRECT STEP FUNCTIONS.
+
+    For discrete step functions:
+      - Set num_intervals=800
+      - Use a step function h that takes VALUES 0, 0.25, 0.5, 0.75, or 1.0
+      - Ensure integral(h) = 1 (sum of blocks * width = 1)
+
+    For latent optimization:
+      - Use existing patterns from _get_best_initialization
+      - Adjust num_restarts=3-5, num_steps=30000-60000
+
+    KEY: Create step functions where h is a step function, not a smooth sigmoid curve.
+  evaluate_solution: |
+    Full optimization of a step function or latent vector. Returns combined_score = 0.38092303510845016 / c5_bound.
+
+    Higher is better. combined_score > 1.0 means c5_bound < 0.38092303510845016 (new record).
+
+    Use for candidates from generate_discrete_structures (analytical c5_bound already computed).
+  probe_solution: |
+    Fast approximate evaluation (500 intervals). Uses probe budget.
+
+    Approximate but cheap. Good for screening latent candidates.
+
+    Budget: separate from eval budget, typically 30 probes available.
+
+    For discrete step functions: NOT needed (c5_bound already computed by generate_discrete_structures).
+    For latent candidates: use to filter before full evaluate.
+  finish: |
+    Submit when combined_score > 1.0 (c5_bound < 0.38092303510845016).
+sampling:
+  temperature: 0.7
+  top_p: 0.9
+  top_k: 15
+  max_tokens: 10000
+agent:
+  max_iterations: 25
+middleware:
+  budget_reminder_from_left: 3
+  long_tool_output_max_chars: 8000
+new_tools:
+- name: generate_discrete_structures
+  description: |
+    Generate 5 integral=1 step functions with analytical c5 scoring.
+
+    Returns 5 candidates, each with:
+      - h: step function as array of 800 values (pure step, no sigmoid)
+      - integral: exact sum(h)*dx (should be 1.0)
+      - c5_bound: max correlation (analytical FFT, no training)
+      - pattern_type: description of structure
+
+    Patterns: 3-block, 5-block, asymmetric, bipartite, tri-modal. All use domain=2, N=800.
+    Integral constraint satisfied by construction. c5_bound computed via FFT (no training).
+
+    Usage: Call once. Candidates with c5_bound < 0.375 are worth full evaluation.
+  input_schema:
+    type: object
+    properties:
+      seed:
+        type: integer
+        default: 42
+  implementation_py: |
+    def run(ctx, args):
+        import numpy as np
+        N = 800
+        domain = 2.0
+        dx = domain / N
+
+        def compute_c5(h):
+            j = 1.0 - h
+            h_padded = np.pad(h, (0, N))
+            j_padded = np.pad(j, (0, N))
+            corr_fft = np.fft.fft(h_padded) * np.conj(np.fft.fft(j_padded))
+            correlation = np.fft.ifft(corr_fft).real
+            c5 = np.max(correlation * dx)
+            return c5
+
+        def normalize_to_integral_1(h):
+            integral = np.sum(h) * dx
+            if integral > 0:
+                h = h / integral
+            return h
+
+        # Pattern 1: 3-block [high, medium, low]
+        h3 = np.zeros(N)
+        a, b = int(N * 0.33), int(N * 0.66)
+        h3[:a] = 2.0
+        h3[a:b] = 1.0
+        h3[b:] = 0.25
+        h3 = normalize_to_integral_1(h3)
+        c5_3 = compute_c5(h3)
+
+        # Pattern 2: 5-block [high, med, low, low, zero]
+        h5 = np.zeros(N)
+        h5[:int(N*0.2)] = 2.5
+        h5[int(N*0.2):int(N*0.4)] = 1.5
+        h5[int(N*0.4):int(N*0.6)] = 0.8
+        h5[int(N*0.6):int(N*0.8)] = 0.4
+        h5[int(N*0.8):] = 0.1
+        h5 = normalize_to_integral_1(h5)
+        c5_5 = compute_c5(h5)
+
+        # Pattern 3: Asymmetric [0,1] concentrated
+        h_asym = np.zeros(N)
+        h_asym[:int(N*0.7)] = 1.5
+        h_asym[int(N*0.7):int(N*1.4)] = 0.6
+        h_asym[int(N*1.4):] = 0.1
+        h_asym = normalize_to_integral_1(h_asym)
+        c5_asym = compute_c5(h_asym)
+
+        # Pattern 4: Bipartite [1.0, 0.0] at optimal split
+        h_bip = np.zeros(N)
+        split = int(N * 0.55)
+        h_bip[:split] = 2.0
+        h_bip[split:] = 0.5
+        h_bip = normalize_to_integral_1(h_bip)
+        c5_bip = compute_c5(h_bip)
+
+        # Pattern 5: Tri-modal [narrow peaks at 0.4, 1.0, 1.6]
+        h_tri = np.zeros(N)
+        for center in [int(N*0.4), int(N*1.0), int(N*1.6)]:
+            width = int(N * 0.08)
+            left = max(0, center - width)
+            right = min(N, center + width)
+            h_tri[left:right] = 4.0
+        h_tri = normalize_to_integral_1(h_tri)
+        c5_tri = compute_c5(h_tri)
+
+        candidates = [
+            {"h": h3.tolist(), "integral": float(np.sum(h3)*dx), "c5_bound": float(c5_3), "pattern_type": "3_block"},
+            {"h": h5.tolist(), "integral": float(np.sum(h5)*dx), "c5_bound": float(c5_5), "pattern_type": "5_block"},
+            {"h": h_asym.tolist(), "integral": float(np.sum(h_asym)*dx), "c5_bound": float(c5_asym), "pattern_type": "asymmetric"},
+            {"h": h_bip.tolist(), "integral": float(np.sum(h_bip)*dx), "c5_bound": float(c5_bip), "pattern_type": "bipartite"},
+            {"h": h_tri.tolist(), "integral": float(np.sum(h_tri)*dx), "c5_bound": float(c5_tri), "pattern_type": "tri_modal"}
+        ]
+        return {"candidates": candidates, "num_candidates": 5}
+new_skills:
+- name: combinatorial-step-search
+  description: Direct combinatorial search for integral=1 step functions. Use generate_discrete_structures to create candidates, evaluate promising ones (c5_bound < 0.375), then iterate with structure variations.
+  body: '# Combinatorial Step Function Search for Erdos Problem\n\n## Why This Works\n\nThe seed optimizer uses gradient descent on continuous latent vectors. This is INEFFICIENT for C5 minimization because:\n1. The objective is non-smooth (max-overlap)\n2. Gradients are weak and flat\n3. Optimal solutions are discrete step functions, not smooth curves\n\nDirect combinatorial search > gradient descent.\n\n## Workflow\n\n1. CALL generate_discrete_structures()\n   - Creates 5 integral=1 step functions\n   - c5_bound computed analytically (FFT)\n   - No training needed, no eval budget spent\n\n2. EXAMINE candidates:\n   - Each has precomputed c5_bound\n   - Check which are < 0.375 (excellent)\n   - Which are 0.375-0.382 (worth eval)\n\n3. EVALUATE promising candidates:\n   - CALL evaluate_solution on those with c5_bound < 0.375\n   - Each uses 1 eval from your 30-budget\n\n4. IF NO SUCCESS: VARY structure:\n   - Change block counts: 3 -> 4 -> 5 -> 7 blocks\n   - Change block widths: narrower or wider peaks\n   - Change value distributions: more extreme (0 vs 1)\n\n5. BUDGET MANAGEMENT:\n   - 5-8 evals for discrete structures\n   - Leave 20+ evals for iteration or retry\n\n## Key Insight\n\nCombinatorial search injects a fundamentally different capability: DIRECT CONSTRUCTION OF STEP FUNCTIONS with guaranteed integral constraint. The seed optimizer cannot do this.\n'
+new_middlewares:
+- name: structure_variety_reminder
+  hook: before_model
+  description: Remind the solver to vary step function structure (block count, widths, values) when no candidate succeeds.
+  implementation_py: |
+    def before_model(hook_input):
+        best_score = hook_input.get('best_score', 0.9999)
+        evals_used = hook_input.get('evals_used', 0)
+        remaining = 30 - evals_used
+        if best_score <= 0.999945 and remaining > 10:
+            return 'VARY STEP FUNCTION STRUCTURE: Try different block counts (3,4,5,7 blocks), widths (narrower/wider), or value distributions (more extreme 0/1). Do not just tweak hyperparameters. Call generate_discrete_structures again with different patterns.'
+        return None

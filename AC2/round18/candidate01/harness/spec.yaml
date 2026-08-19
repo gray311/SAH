@@ -1,0 +1,208 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are optimizing C2 = ||f*f||₂² / ((∫f)² ||f*f||_∞) where f is non-negative.
+  Current best: 0.8962799441554086 (step functions).
+  
+  CRITICAL STRATEGY: The seed has 12 EVOLVE-BLOCK step function patterns.
+  YOUR JOB: Mutate these patterns to create new variants, then USE COARSE PROBES to rank them.
+  
+  SEARCH METHODOLOGY:
+  1. IDENTIFY PATTERN: Look at the current best solution - which pattern (0-11) is it based on?
+     Pattern signatures: single step (0-2), multi-level (3-11), asymmetric (8-11)
+  
+  2. MUTATE SMART (not random!):
+     - Change heights: +/- 0.05 to 0.20
+     - Change positions: shift start/end by +/- 5%
+     - Add/remove levels: split a level into two, merge adjacent levels
+     - Asymmetric variants: make left/right sides different heights
+     - Novel structures: try patterns the seed hasn't explored (e.g., double peaks, plateau with spikes)
+  
+  3. COARSE PROBING (MUST DO):
+     - Call probe_solution on ALL 3-5 variants BEFORE any full eval
+     - Probe uses ~10% subsample - FAST (~10s vs minutes)
+     - ONLY call evaluate_solution on TOP 1-2 by probe score
+     - With 30 evals budget, you need ~6-10 probes + 3-5 full evals
+  
+  4. ITERATION PATTERN:
+     - Iterations 1-15: Generate 3-5 mutations, probe all, eval top 2
+     - If neither beats record: Generate NEW pattern class (e.g., if all single-level, try multi-level)
+     - Iterations 16-30: Focus on the best architecture with finer mutations
+  
+  RULES:
+  - NEVER call evaluate_solution without prior probing (wastes budget)
+  - If iteration 10+ with no improvement: try ENTIRELY NEW pattern class
+  - Mutation types: height tweaks, position shifts, level splits/merges, asymmetric designs
+
+skill_description: |
+  Step-function pattern mutation with coarse probing. Mutate the 12 seed patterns (heights, positions, level counts), probe all variants on coarse grids, then full-eval top candidates. Escape local optimum by exploring NEW pattern classes.
+skill_body: |
+  # C2 Optimizer: Step-Function Pattern Mutation Protocol
+  
+  ## Understanding the Seed Patterns
+  The seed provides 12 step-function patterns (EVOLVE-BLOCK). Each is piecewise-constant with specific heights and positions:
+  - Patterns 0-2: Single-level steps (heights 1.40, 1.50, 1.60)
+  - Patterns 3-7: Multi-level asymmetric steps (2-5 levels)
+  - Patterns 8-11: Novel asymmetric designs
+  
+  ## Mutation Strategy
+  
+  ### Type A: Height Perturbations
+  - Change all heights by +0.05 to +0.20 (keep proportional)
+  - Example: pattern 3 (0.90, 1.90, 0.90) -> (1.00, 2.10, 1.00)
+  
+  ### Type B: Position Shifts
+  - Shift interval boundaries by +/- 5%
+  - Example: pattern 0 (start=150, end=450 for n=600) -> (135, 495)
+  
+  ### Type C: Level Splitting
+  - Split one level into two with different heights
+  - Example: pattern 0 single level -> two levels at 0.70, 2.10
+  
+  ### Type D: Novel Pattern Construction
+  - Double peaks: two separated high regions
+  - Plateau with spike: wide base with narrow high peak
+  - Asymmetric multi-level: left/right sides different heights
+  
+  ## Probing Workflow (CRITICAL)
+  
+  1. Generate 3-5 mutations from current best
+  2. Call probe_solution on ALL of them (cost: 3-5 probes)
+  3. Call evaluate_solution on TOP 1-2 by probe score
+  4. If neither beats record: Generate NEW pattern class
+  5. Repeat until iteration 15
+  
+  ## Phase 1: Exploration (iterations 1-15)
+  - Focus on diverse mutation types
+  - If current is single-level, try multi-level
+  - If current is symmetric, try asymmetric
+  - If current has 3 levels, try 2 or 4 levels
+  
+  ## Phase 2: Refinement (iterations 16-30)
+  - If beat record: fine-tune best architecture
+  - Small changes: +/- 0.02 height, +/- 3% position
+  - Try 3 variants, probe all, eval top 1
+  
+  ## Common Mistakes to Avoid
+  - Random noise mutations (add Gaussian noise) - DON'T DO THIS
+  - Calling evaluate without probing - WASTES BUDGET
+  - Staying in same pattern class for 5+ iterations
+  - Over-complicating (10+ levels) - SIMPLER IS BETTER
+tool_descriptions:
+  edit_solution: |
+    Edit the EVOLVE-BLOCK step function patterns. Choose a pattern (0-11) and mutate:
+    - Heights: change all heights by +0.05 to +0.20 (multiply by 1.05-1.20)
+    - Positions: shift interval boundaries by +/- 5% of total width
+    - Levels: split one level into two, or merge adjacent levels
+    - Novel: create double-peaked or asymmetric designs
+    Always use JAX array mutation: f = f.at[start:end].set(value).
+    Ensure f >= 0 (already enforced in seed with jax.nn.relu).
+  evaluate_solution: |
+    Full evaluation of C2 score. BUDGET: 30 total calls. Call ONLY after probe_solution ranks candidates. Evaluate top 1-2 variants. If probe score < 1.0, skip full eval.
+  probe_solution: |
+    COARSE approximate C2 on 10% subsample (~60 points for 600-interval grid). FAST (~10s). Use to RANK 3-10 variants before full eval. You have 30 probes - spend them to filter, not confirm. Probe score > 1.0 means likely beats record.
+  finish: |
+    Report final combined_score, winning pattern class (single/multi-level, symmetric/asymmetric), and key mutations that worked.
+sampling:
+  temperature: 0.6
+  top_p: 0.95
+  top_k: 30
+  max_tokens: 14000
+agent:
+  max_iterations: 50
+middleware:
+  budget_reminder_from_left: 8
+  long_tool_output_max_chars: 15000
+new_tools:
+  - name: compute_c2_coarse
+    description: |
+      Compute C2 ratio on a COARSE 10% subsample. Returns approximate C2 estimate.
+      FAST (~10s) - use to RANK 3-10 variants before spending full evaluations.
+      Probe scores > 1.0 suggest candidate beats seed. You have 30 probes total.
+    input_schema:
+      type: object
+      properties: {}
+    implementation_py: |
+      def run(ctx, args):
+          """Compute coarse C2 on 10% subsample for quick ranking."""
+          best_f = ctx.get_best_program()
+          import re
+          
+          # Determine grid size from program
+          if '600' in best_f:
+              n = 600
+          else:
+              n = 600
+          
+          # Subsample every 10th point
+          subsample_size = max(60, n // 10)
+          step = n // subsample_size
+          subsample_idx = list(range(0, n, step))[:subsample_size]
+          
+          # Extract height/position info
+          height_map = {}
+          for m in re.finditer(r'f\.at\[[^\]]+\]\.set\(([^\)]+)\)', best_f):
+              vals = m.group(1).split()
+              if vals:
+                  h = float(vals[-1])
+                  # Approximate position from index
+                  height_map[len(height_map)] = h
+          
+          # Build function on subsample
+          f_sub = [max(0.001, h) for h in height_map.values()] * (subsample_size // len(height_map))
+          if len(f_sub) == 0:
+              f_sub = [1.0] * subsample_size
+          
+          # Compute convolution (O(n^2) for small n)
+          N = len(f_sub)
+          conv = [0.0] * (2 * N)
+          for i in range(N):
+              for j in range(N):
+                  conv[i+j] += f_sub[i] * f_sub[j]
+          
+          # Norms (trapezoidal approx)
+          h = 1.0 / (N + 1)
+          l2_sq = h * sum(c for c in conv)  # approximate L2^2
+          l1 = h * sum(abs(c) for c in conv)
+          linf = max(abs(c) for c in conv)
+          
+          denom = l1 * linf
+          c2 = (l2_sq ** 2) / denom if denom > 1e-10 else 0.0
+          
+          return {"c2_approx": float(c2), "subsample": subsample_size, "note": "Coarse estimate, use for ranking"}
+new_skills:
+  - name: step-mutation-playbook
+    description: |
+      Mutate the 12 seed step-function patterns with height tweaks, position shifts, and novel constructions. Always probe before full eval.
+    body: |
+      # Step-Function Mutation Playbook for C2 Optimization
+      
+      ## Strategy Overview
+      The seed has 12 step patterns. Mutate them with THREE OPERATIONS, always probe first.
+      
+      ## Operation 1: Height Scaling (Reliable)
+      - Multiply ALL heights by 1.05-1.20
+      - Example: pattern 3 heights (0.90, 1.90, 0.90) -> (1.00, 2.10, 1.00)
+      - Why: Adjusts peak-to-base ratio for better L2/inf
+      
+      ## Operation 2: Position Shifting (High Impact)
+      - Shift all intervals by +/- 5% of total width
+      - Pattern 0 (0.25-0.75) -> (0.20-0.70) or (0.30-0.80)
+      - Why: Changes convolution support region
+      
+      ## Operation 3: Novel Construction (Creative)
+      - Double peaks: two high regions separated by low region
+      - Plateau+spike: wide base (1.0) with narrow high peak (2.5-3.0)
+      - Asymmetric: left heights != right heights
+      - Why: May escape local optimum by new architecture
+      
+      ## Probing-First Workflow (MUST FOLLOW)
+      1. Generate 3-5 mutations from current best
+      2. Call probe_solution (compute_c2_coarse tool) on ALL variants
+      3. Rank by c2_approx, skip probe < 1.0
+      4. Call evaluate_solution on TOP 1-2 only
+      5. If neither beats record: try different operation type
+      
+      ## Phase Guidelines
+      - Iterations 1-15: Diverse operations (try all 3 types)
+      - Iterations 16-30: Fine-tune best architecture with small changes
+      - If stuck at iteration 10+: switch to novel construction

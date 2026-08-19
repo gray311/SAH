@@ -1,0 +1,246 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are an expert software developer tasked with iteratively improving a program to MAXIMIZE
+  the performance metrics reported by an automatic evaluator. Analyze the current program and the feedback
+  from previous attempts, and make targeted changes that increase the score. You are the fixed inner
+  harness (H2) driving a frozen executor over one discovery task.
+
+  The program has a single editable region between `# EVOLVE-BLOCK-START` and `# EVOLVE-BLOCK-END`. Only that region is yours to change;
+  everything outside it (imports and the fixed entry function the evaluator calls) is frozen and must
+  keep working exactly as given — keep the same inputs and outputs.
+
+  The task is to maximize C₂ = ||f ★ f||₂² / ((∫f)² ||f ★ f||_{∞}), a constant from harmonic analysis.
+  Theoretical upper bound: 1.0 (Young's inequality). Seed achieves 1.02649 combined_score. Your goal is to surpass this.
+
+  CRITICAL: The seed program already has sophisticated optimization (300 intervals, 40k steps, multi-start).
+  Parameter tuning alone will NOT improve it. You must CHANGE THE FUNCTION REPRESENTATION to escape the local optimum.
+
+  Strategic directions:
+  1. **Repertoire Revolution**: Systematically test fundamentally different function classes:
+     - Piecewise-constant (step functions, interval ratios, support positions)
+     - Piecewise-linear (different node configurations, symmetry patterns)
+     - Gaussian mixtures (vary K=2,3,5,10 with adaptive variances)
+     - Exponential combinations (single, double, with various decay rates)
+     - B-spline basis (different knot placements, orders)
+     - Fourier-space (band-limited constructions)
+  2. **Multi-rep exploration**: Use probe_solution to test 5-8 variants of EACH representation class before full evaluation.
+  3. **Diversity over refinement**: When stuck, change the function REPRESENTATION entirely, not just parameters.
+  4. **Symmetry exploitation**: Try even functions (f(-x)=f(x)), asymmetric variants, multi-modal structures.
+
+  Tool usage strategy:
+  - `scan_function_space()`: Call once at start to identify current representation and suggest alternatives.
+  - `probe_solution()`: Use aggressively to rank many variants across different representations (aim for 20-25 probes exploring diverse classes).
+  - `evaluate_solution()`: Confirm top 3-5 structural candidates from probing.
+  - `finish()`: Call when structural exploration exhausted or budget runs out.
+
+  Method:
+  1. Call scan_function_space to analyze current program's function representation.
+  2. Use probe_solution to rapidly test 5-10 different function representation classes (step, linear, Gaussian, exponential, B-spline).
+  3. Rank by probe score, confirm top 3 with evaluate_solution.
+  4. If no improvement, change representation class entirely (not parameters).
+  5. Continue with multi-start from each promising representation.
+  6. When stuck for 5+ iterations without improvement, try a completely new representation family.
+
+  Make changes that change the FUNCTION CLASS, not just hyperparameters.
+tool_descriptions:
+  edit_solution: 'Change the code inside the # EVOLVE-BLOCK region. Two accepted formats: (1) PREFERRED — one or more targeted SEARCH/REPLACE diff blocks, each matching the current program exactly: ""<<<<<<< SEARCH"" / exact original lines / ""======="" / new lines / "">>>>>>> REPLACE"". Do not rewrite the whole region for a small change. (2) A full rewrite — the complete new EVOLVE-BLOCK body as plain code (fenced ```python is allowed; the markers are optional). The fixed entry function and imports outside the block are preserved automatically. After editing, call evaluate_solution to score it.'
+  evaluate_solution: Run the current program through the task evaluator and report its score. Returns combined_score (higher is better), validity, any error, your best score so far, and how many evaluations remain. Use the feedback to improve the code, then evaluate again. The best-scoring version is kept automatically. Your number of evaluations is limited.
+  probe_solution: Cheaply score the CURRENT program on SUBSAMPLED data (~10s vs minutes). Fast (~10s per probe), separate budget (e.g., 30 probes available), NOT evaluated through full evaluation budget. Scores are approximate and NOT directly comparable to full evaluation scores — use this to rapidly rank multiple variants (e.g., 5-10 function representations, 20-50 parameterizations each), then confirm the top 3-5 candidates with evaluate_solution. Do not use probes instead of evaluate_solution for final verification; use probes to explore MORE candidates before committing eval budget.
+  finish: End the session. Call this when your evaluation budget is exhausted or you cannot improve the best score further. The best-scoring program is submitted automatically.
+sampling:
+  temperature: 1.3
+  top_p: 0.99
+  top_k: 30
+  max_tokens: 16384
+agent:
+  max_iterations: 60
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 8000
+new_tools:
+- name: scan_function_space
+  description: |
+    Analyze the current function representation in the EVOLVE-BLOCK and recommend alternative exploration directions.
+    Reports: detected function class (piecewise-linear, piecewise-constant, Gaussian mixture, B-spline, exponential, Fourier),
+    parameter count estimate, numerical stability, and 3-5 alternative representations to try next.
+    Call at the start to identify your current position in function space, and after each phase to ensure diversity.
+  input_schema:
+    type: object
+    properties: {}
+  implementation_py: |
+    def run(ctx, args):
+        program = ctx.get_program()
+        text = str(program)
+        analysis = {"class": "unknown", "params": "N/A", "stability": "unknown", "suggestions": []}
+        
+        if "B-spline" in text or "bspline" in text.lower():
+            analysis["class"] = "B-spline"
+            analysis["params"] = "knot positions + coefficients"
+            analysis["stability"] = "good"
+            analysis["suggestions"] = ["Try piecewise-constant (step functions)", "Try Gaussian mixtures", "Try Fourier-space optimization"]
+        elif "Gaussian" in text or "gaussian" in text.lower():
+            analysis["class"] = "Gaussian mixture"
+            analysis["params"] = "means + variances + weights (K components)"
+            analysis["stability"] = "excellent"
+            analysis["suggestions"] = ["Try piecewise-constant (step functions)", "Try exponential combinations", "Try B-splines"]
+        elif "step" in text.lower() or "piecewise-constant" in text.lower():
+            analysis["class"] = "Piecewise-constant"
+            analysis["params"] = "bin heights"
+            analysis["stability"] = "good"
+            analysis["suggestions"] = ["Try piecewise-linear for smoother transitions", "Try Gaussian mixtures", "Try asymmetric step functions"]
+        elif "piecewise-linear" in text.lower() or "interpolation" in text.lower():
+            analysis["class"] = "Piecewise-linear"
+            analysis["params"] = "node values"
+            analysis["stability"] = "good"
+            analysis["suggestions"] = ["Try piecewise-constant (step functions)", "Try Gaussian mixtures", "Try Fourier-based constructions"]
+        elif "exponential" in text.lower() or "decay" in text.lower():
+            analysis["class"] = "Exponential decay"
+            analysis["params"] = "rates + shapes"
+            analysis["stability"] = "excellent"
+            analysis["suggestions"] = ["Try Gaussian mixtures", "Try piecewise-constant", "Try B-splines"]
+        elif "Fourier" in text or "fft" in text.lower():
+            analysis["class"] = "Fourier-based"
+            analysis["params"] = "coefficients"
+            analysis["stability"] = "depends on discretization"
+            analysis["suggestions"] = ["Try piecewise-constant", "Try B-splines", "Try exponential combinations"]
+        elif "GaussianMixture" in text or "GMM" in text:
+            analysis["class"] = "Gaussian mixture"
+            analysis["params"] = "means + variances + weights"
+            analysis["stability"] = "excellent"
+            analysis["suggestions"] = ["Try piecewise-constant (step functions)", "Try exponential combinations", "Try B-splines"]
+        else:
+            analysis["class"] = "Custom/Other"
+            analysis["params"] = "varies"
+            analysis["stability"] = "to be determined"
+            analysis["suggestions"] = ["Try step functions (piecewise-constant)", "Try Gaussian mixtures", "Try B-splines", "Try exponential combinations", "Try Fourier-based optimization"]
+        
+        return analysis
+new_skills:
+- name: c2-representation-revolution
+  description: A method playbook for escaping local optima by changing function representations, not just parameters. Focuses on structural diversity using probe-based ranking.
+  body: |
+    # C₂ Representation Revolution Playbook
+
+    ## Core Insight
+    The seed program uses piecewise-linear optimization with 300 intervals and 40k steps.
+    Parameter tuning alone will NOT escape the local optimum. You must CHOOSE DIFFERENT FUNCTION CLASSES.
+
+    ## Phase 1: Representation Census (probe_solution)
+
+    Use probe_solution to test these representation families. Aim for 20-25 probes total across classes.
+
+    ### A. Piecewise-Constant (Step Functions)
+    - **Why**: Current record-holder for C₂ (0.8963 baseline). Simple, interpretable.
+    - **Parameterize**: Array of N bin heights with configurable support positions and heights.
+    - **Probe variants**:
+      * N=10, 20, 50, 100 intervals
+      * Symmetric: support [0.25, 0.75]
+      * Asymmetric: support [0.2, 0.8], [0.15, 0.55], etc.
+      * Multi-level: 2-3 height levels in different intervals
+    - **Key insight**: Vary support positions and height ratios, not just number of intervals.
+
+    ### B. Piecewise-Linear (Baseline - Be Careful)
+    - **Why**: Current seed approach. May be in local optimum.
+    - **Don't just tune parameters!** Try structural changes:
+      * Different node counts (100 vs 300)
+      * Symmetric triangular peaks
+      * Multi-modal with multiple peaks
+      * Different support widths
+    - **Probe budget**: Limited - prioritize other classes first.
+
+    ### C. Gaussian Mixture Models
+    - **Why**: Smooth, convex-like behavior. Often optimal for integral-based problems.
+    - **Parameterize**: K means, variances (σ²), weights (w). Ensure non-negativity via exp().
+    - **Probe variants**:
+      * K=2, 3, 5, 10
+      * Equal variance vs adaptive
+      * Means constrained to grid vs continuous
+      * Weight constraints (sum to 1, min weight > 0)
+    - **Key insight**: Start with K=2 (simple), then K=5 (moderate complexity).
+
+    ### D. Exponential Combinations
+    - **Why**: Natural decay, positive everywhere, smooth.
+    - **Parameterize**: Σ w_i * exp(-α_i * |x - μ_i|) with w_i ≥ 0.
+    - **Probe variants**:
+      * Single exponential (baseline)
+      * Double exponential with different rates
+      * Sum of 2-5 exponentials with different decay rates
+      * Mix with polynomial factors
+    - **Key insight**: Try different decay rate ratios (slow + fast).
+
+    ### E. B-Spline Basis Functions
+    - **Why**: Local support, C^k continuity control, flexible shape.
+    - **Parameterize**: Knot positions + spline coefficients.
+    - **Probe variants**:
+      * Uniform knot placement (n, 2n, 3n)
+      * Adaptive knots concentrated in support region
+      * Different knot orders (3, 4, 5)
+    - **Key insight**: Knot placement matters more than coefficient tuning.
+
+    ### F. Fourier-Space Optimization
+    - **Why**: Global parameterization, implicit smoothness constraints.
+    - **Parameterize**: Fourier coefficients with inverse-FFT positivity check.
+    - **Probe variants**:
+      * Low-frequency dominant (first N coefficients)
+      * Band-limited with hard cutoff
+      * Real-valued symmetric (cosine series)
+    - **Key insight**: Fewer parameters, strong smoothness prior.
+
+    ## Phase 2: Multi-Start within Each Class
+
+    For the top 2-3 representation classes by probe score:
+    1. Create 5-10 different initializations per class (different parameters)
+    2. Each runs a full optimization with different seeds
+    3. Track best from each class separately
+
+    ## Phase 3: Hybrid Approaches
+
+    - Ensemble: Weighted average of top performers from different classes
+    - Mixture: Combine components from Gaussian + step + exponential
+    - Analyze winners: What structural properties do they share?
+
+    ## Best Practices
+
+    - **Probe first, evaluate later**: 15-20 probes per representation family
+    - **Diversify immediately**: Don't spend evals on piecewise-linear alone
+    - **Track by class, not by edit**: Remember which function class each score belongs to
+    - **Reserve 5 evals**: One for each of the top 5 probe performers (different classes)
+    - **Validate**: Ensure f(x) ≥ 0, ∫f > 0 for all candidates
+
+    ## When Stuck
+
+    - If scores plateau for 5+ iterations: Call scan_function_space, then try a NEW representation class.
+    - Never tune the same representation class for more than 2 full evaluations without trying another class.
+    - The goal is to find the RIGHT function class, not the best parameters for the wrong class.
+new_middlewares:
+- name: force_representation_change
+  hook: before_model
+  description: |
+    Middleware that detects stagnation and forces structural change.
+    When scores plateau for 5+ iterations, suggests trying a completely different function representation class.
+  implementation_py: |
+    def before_model(hook_input):
+        state = hook_input.get("state", {})
+        best_score = state.get("best_score", 0)
+        last_score = state.get("last_score", 0)
+        iterations = state.get("iteration", 0)
+        recent_scores = state.get("recent_scores", [])
+        
+        # Check for plateau: 5+ iterations with minimal improvement
+        if iterations >= 5 and len(recent_scores) >= 5:
+            for s in recent_scores:
+                if s > last_score + 0.001:
+                    break
+            else:
+                # Truly plateaued - force structural change
+                recent_classes = state.get("recent_classes", [])
+                if len(recent_classes) >= 3:
+                    # Suggest trying a different class
+                    other_classes = ["step", "Gaussian", "exponential", "B-spline", "Fourier"]
+                    for cls in other_classes:
+                        if cls not in recent_classes:
+                            return f"REPRESENTATION_CHANGE_REQUIRED: Recent performance plateaued. Try {cls} functions instead of piecewise-linear. Use scan_function_space to confirm representation, then probe 5-10 variants before evaluation."
+                else:
+                    return "PLATEAU_DETECTED: Scores stable for 5+ iterations. Strongly consider changing the function REPRESENTATION (not just parameters). Use scan_function_space to identify alternatives."
+        
+        return None

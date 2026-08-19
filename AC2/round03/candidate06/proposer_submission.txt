@@ -1,0 +1,239 @@
+schema: h2spec/1.0
+system_prompt: "You are an expert software developer tasked with iteratively improving a program to MAXIMIZE the performance metrics reported by an automatic evaluator. Analyze the current program and the feedback from previous attempts, and make targeted changes that increase the score. You are the fixed inner harness (H2) driving a frozen executor over one discovery task.\n\nThe program has a single editable region between # EVOLVE-BLOCK-START and # EVOLVE-BLOCK-END. Only that region is yours to change; everything outside it (imports and the fixed entry function the evaluator calls) is frozen and must keep working exactly as given — keep the same inputs and outputs.\n\nThe task is to maximize C2 = ||f * f||2^2 / ((integral(f))^2 ||f * f||_inf), a constant from harmonic analysis. The theoretical upper bound is 1.0 (Young's inequality). Current best is 0.8963, achieved by step functions. Your goal is to push beyond this.\n\nCRITICAL STRATEGY: You have a LIMITED evaluation budget (~20 full evaluations). Your primary tool is probe_solution for cheap ranking of function variants. Then evaluate the top 2-3 candidates.\n\nFUNCTION REPRESENTATION TEMPLATES (USE THESE - DON'T REINVENT):\n1. Step functions: Use _create_step_function(width_fraction, height_fraction, support_fraction) - Vary width (0.2-0.5), heights (1.0-2.0), support (0.3-0.8)\n2. Triangular: Use _create_triangular(peak_position, width) - Vary peak_pos (0.3-0.7), width (0.1-0.4)\n3. Trapezoidal: Use _create_trapezoid(peak_position, top_width, base_width) - Vary all three\n4. Gaussian mixture: Use _create_gaussian_mixture(K, means=None, sigmas=None) - K=2-5, cluster or spread means\n5. Exponential: Use _create_exponential(combination_type=sum) - Vary decay rates (0.5-2.0)\n6. B-spline: Use _create_bspline(knots, coefficients) - knots at 20%-80%, coefficients positive\n\nWORKFLOW:\n1. At START of exploration, call code_template_probe to get ready-to-use function templates\n2. For each template family, generate 5-8 variants by varying parameters (NOT architecture)\n3. Probe all 30-40 variants to rank them\n4. Evaluate top 2-3 variants with DIFFERENT random seeds\n5. If no improvement after 4 evals: call code_template_probe again for a DIFFERENT function family (NOT the same one with different params)\n6. NEVER spend more than 3 evals on one function family without trying a completely different representation\n\nKey insight: TEMPLATE PARAMETER TUNING beats DESIGNING new architectures. The current record (0.8963) uses step functions - try VARIATIONS of step functions first with different widths/heights/supports.\n\nTool priority:\n1. code_template_probe — get executable templates for function families\n2. probe_solution — rank many variants cheaply (use liberally!)\n3. edit_solution — implement parameter variations using provided templates\n4. evaluate_solution — confirm top 1-2 candidates only (budget is limited!)"
+skill_description: "Maximize C2 by systematically testing FUNCTION REPRESENTATION TEMPLATES. Call code_template_probe at start to get ready-to-use code for step functions, triangles, trapezoids, Gaussians, exponentials, B-splines. For each family, vary 5-8 parameter combinations. Probe all variants, evaluate top 2-3 with multiple seeds. If no improvement after 4 evals, switch to a DIFFERENT function family. TEMPLATE TUNING beats architectural innovation."
+skill_body: "# C2 Optimization with Template-Based Exploration\n\n## Core Principle: TUNE EXISTING TEMPLATES, DON'T DESIGN FROM SCRATCH\n\nThe current harness strategy fails because it asks the executor to design new function representations from scratch, wasting precious evals on architectural decisions. The solution: USE PROVIDED TEMPLATES and focus on PARAMETER VARIATION.\n\n## Step 1: Get Templates\n\nCall code_template_probe at the start of your session. This returns ready-to-use function definitions for:\n- Step functions (vary width, height, support)\n- Triangular functions (vary peak position, width)\n- Trapezoidal functions (vary top/bottom widths, peak position)\n- Gaussian mixtures (vary K, means clustering, variance ratios)\n- Exponential combinations (vary decay rates, combination type)\n- B-splines (vary knot positions, coefficients)\n\n## Step 2: Parameter-Space Exploration\n\nFor EACH function family template:\n- Generate 5-8 variants by varying parameters\n- Example for step functions: width=0.2,0.3,0.4,0.5; height=1.0,1.2,1.5,2.0\n- That's 30-40 probe calls TOTAL across all families\n- Probe scores rank which variants are most promising\n\n## Step 3: Limited Full Evaluation\n\n1. Select top 2-3 variants from probe scores\n2. Each: run with 2-3 DIFFERENT random seeds\n3. Track which family performs best\n4. NEVER spend more than 3 evals on one family without trying a different one\n\n## Step 4: Reset on Stagnation\n\nIf no improvement after 4 evals:\n- Call code_template_probe AGAIN for a DIFFERENT function family\n- Do NOT continue tuning the same family with minor parameter changes\n- Example: If you explored step functions and didn't improve, switch to Gaussian mixtures or B-splines\n\n## Key Rules\n\n1. Templates over design: Use the provided code templates; vary parameters, not architecture\n2. Probe before eval: 30-40 probes, 2-3 evals max\n3. Diversify early: First 4 evals should cover 3+ function families\n4. Template families to try: Step functions -> Triangles -> Trapezoids -> Gaussians -> Exponentials -> B-splines\n5. Current record: 0.8963 uses step functions - try step function PARAMETER VARIATIONS first!"
+tool_descriptions:
+  edit_solution: Change the code inside the # EVOLVE-BLOCK region. Two accepted formats: (1) PREFERRED — one or more targeted SEARCH/REPLACE diff blocks, each matching the current program exactly. (2) A full rewrite — the complete new EVOLVE-BLOCK body as plain code. The fixed entry function and imports outside the block are preserved automatically. After editing, call evaluate_solution to score it.
+  evaluate_solution: Run the current program through the task evaluator and report its score. Returns combined_score (higher is better), validity, any error, your best score so far, and how many evaluations remain. Use the feedback to improve the code, then evaluate again. The best-scoring version is kept automatically. Your number of evaluations is limited.
+  probe_solution: Cheaply score the CURRENT program on SUBSAMPLED data (~10s vs minutes). Fast (~10s per probe), separate budget (e.g., 30 probes available), NOT evaluated through full evaluation budget. Scores are approximate and NOT directly comparable to full evaluation scores — use this to rapidly rank multiple variants, then confirm the top 3-5 candidates with evaluate_solution.
+  finish: End the session. Call this when your evaluation budget is exhausted or you cannot improve the best score further. The best-scoring program is submitted automatically.
+  code_template_probe: Return ready-to-use, executable function templates for C2 optimization. Provides complete code blocks for step functions with configurable width/height/support, triangular functions with peak position/width, trapezoidal functions, Gaussian mixtures with K components and clusterable means, exponential combinations with decay rates, and B-splines with adaptive knots. Each template includes parameter ranges, example usage, and is directly copy-pasteable into edit_solution with minimal parameter adjustments. Call this at the START of exploration and whenever you need to switch to a different function family.
+sampling:
+  temperature: 1.0
+  top_p: 0.95
+  top_k: 15
+  max_tokens: 14000
+agent:
+  max_iterations: 80
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 10000
+new_tools:
+- name: code_template_probe
+  description: Provide ready-to-use, executable function templates for C2 optimization. Returns complete code blocks for step functions, triangular functions, trapezoidal functions, Gaussian mixtures, exponential combinations, and B-splines. Each template includes parameter ranges, example usage, and is directly copy-pasteable into edit_solution with minimal parameter adjustments. Use this to switch between function families without designing from scratch. Call at START and when switching families.
+  input_schema:
+    type: object
+    properties: {}
+  implementation_py: |
+    def run(ctx, args):
+        return {
+            "templates": {
+                "step_function": {
+                    "name": "piecewise_constant_step",
+                    "signature": '''def _create_step_function(width_fraction, height_fraction, support_fraction):
+    n = hypers.num_intervals
+    f = jnp.zeros(n)
+    start = int(support_fraction * 0.3 * n)
+    end = int(support_fraction * 0.7 * n)
+    step_width = int(width_fraction * n)
+    h = height_fraction
+    f = f.at[start:end:step_width].set(h)
+    return f''',
+                    "parameter_ranges": {
+                        "width_fraction": ["0.2", "0.5"],
+                        "height_fraction": ["1.0", "2.0"],
+                        "support_fraction": ["0.3", "0.8"]
+                    },
+                    "example_usage": "_create_step_function(0.3, 1.5, 0.5)"
+                },
+                "triangular_function": {
+                    "name": "piecewise_linear_triangle",
+                    "signature": '''def _create_triangular(peak_position, width):
+    n = hypers.num_intervals
+    f = jnp.zeros(n)
+    start = int(peak_position * n - width * n / 2)
+    end = int(peak_position * n + width * n / 2)
+    for i in range(start, int(peak_position * n)):
+        f = f.at[i].set((peak_position * n - i) / (width * n))
+    for i in range(int(peak_position * n) + 1, end):
+        f = f.at[i].set((i - peak_position * n) / (width * n))
+    return f''',
+                    "parameter_ranges": {
+                        "peak_position": ["0.3", "0.7"],
+                        "width": ["0.1", "0.4"]
+                    },
+                    "example_usage": "_create_triangular(0.5, 0.25)"
+                },
+                "trapezoidal_function": {
+                    "name": "piecewise_linear_trapezoid",
+                    "signature": '''def _create_trapezoid(peak_position, top_width, base_width):
+    n = hypers.num_intervals
+    f = jnp.zeros(n)
+    base_end = int(peak_position * n + base_width * n / 2)
+    top_start = int(peak_position * n - top_width * n / 2)
+    for i in range(int(peak_position * n - base_width * n), top_start):
+        f = f.at[i].set(1.0)
+    for i in range(top_start, int(peak_position * n) + 1):
+        f = f.at[i].set(1.0)
+    for i in range(int(peak_position * n) + 1, base_end):
+        f = f.at[i].set(1.0)
+    return f''',
+                    "parameter_ranges": {
+                        "peak_position": ["0.3", "0.7"],
+                        "top_width": ["0.05", "0.3"],
+                        "base_width": ["0.1", "0.5"]
+                    },
+                    "example_usage": "_create_trapezoid(0.5, 0.15, 0.3)"
+                },
+                "gaussian_mixture": {
+                    "name": "gaussian_mixture",
+                    "signature": '''def _create_gaussian_mixture(K, means=None, sigmas=None):
+    n = hypers.num_intervals
+    f = jnp.zeros(n)
+    if means is None:
+        means = jnp.linspace(0.1, 0.9, K)
+    if sigmas is None:
+        sigmas = jnp.ones(K) * 0.1
+    for k in range(K):
+        mean = means[k]
+        sigma = sigmas[k]
+        x = jnp.arange(n) / n
+        f = f + 0.1 * jnp.exp(-((x - mean) ** 2) / (2 * sigma ** 2))
+    return f''',
+                    "parameter_ranges": {
+                        "K": ["2", "5"],
+                        "means": ["clustered", "spread"],
+                        "sigmas": ["0.05", "0.2"]
+                    },
+                    "example_usage": "_create_gaussian_mixture(3)"
+                },
+                "exponential": {
+                    "name": "exponential_decay",
+                    "signature": '''def _create_exponential(combination_type, decay_rates=None):
+    n = hypers.num_intervals
+    f = jnp.zeros(n)
+    x = jnp.arange(n) / n
+    if decay_rates is None:
+        decay_rates = [1.0]
+    for rate in decay_rates:
+        if combination_type == "sum":
+            f = f + jnp.exp(-rate * x)
+        elif combination_type == "product":
+            f = f + jnp.exp(-rate * x) * 0.5
+    return f''',
+                    "parameter_ranges": {
+                        "decay_rates": ["0.5", "2.0"],
+                        "combination_type": ["sum", "product"]
+                    },
+                    "example_usage": "_create_exponential(combination_type=sum, decay_rates=[1.0, 0.5])"
+                },
+                "bspline": {
+                    "name": "bspline_approximation",
+                    "signature": '''def _create_bspline(num_knots, knot_positions=None, coefficients=None):
+    n = hypers.num_intervals
+    f = jnp.zeros(n)
+    x = jnp.arange(n) / n
+    if knot_positions is None:
+        knot_positions = jnp.linspace(0.1, 0.9, num_knots)
+    if coefficients is None:
+        coefficients = jnp.ones(num_knots) * 1.0
+    for k in range(num_knots):
+        left = max(0, int(knot_positions[k] * n - 1))
+        right = min(n-1, int(knot_positions[k] * n + 1))
+        for i in range(left, right):
+            weight = abs(i - knot_positions[k] * n) / (right - left)
+            f = f + coefficients[k] * (1 - weight)
+    return f''',
+                    "parameter_ranges": {
+                        "num_knots": ["10", "30"],
+                        "knot_positions": ["0.1-0.9"],
+                        "coefficients": ["positive values"]
+                    },
+                    "example_usage": "_create_bspline(15)"
+                }
+            }
+        }
+"
+new_skills:
+- name: template-based-c2-exploration
+  description: Method playbook for C2 optimization using template-based exploration. Provides ready-to-use code templates and emphasizes parameter tuning over architectural innovation. Systematically explores 6 function families with parameter variation, probing 30-40 variants before evaluating top candidates.
+  body: |
+    # C2 Template-Based Exploration Playbook
+    
+    ## Core Principle: Use TEMPLATES, Don't Design from Scratch
+    
+    The current harness fails because it asks the executor to design new function representations from scratch. The solution: USE PROVIDED TEMPLATES and focus on PARAMETER VARIATION.
+    
+    ## Step 1: Get Templates
+    
+    Call code_template_probe at the START. This provides ready-to-use code for:
+    - Step functions (width/height/support parameters)
+    - Triangular functions (peak position, width)
+    - Trapezoidal functions (top width, base width, peak position)
+    - Gaussian mixtures (K components, means, variances)
+    - Exponential combinations (decay rates, combination type)
+    - B-splines (knot positions, coefficients)
+    
+    ## Step 2: Parameter-Space Exploration
+    
+    For EACH function family:
+    - Generate 5-8 variants by varying PARAMETERS (NOT architecture)
+    - Step functions: try width=0.2,0.3,0.4,0.5; height=1.0,1.2,1.5,2.0
+    - Triangular: peak_position=0.3,0.5,0.7; width=0.1,0.2,0.3
+    - That's 30-40 probe calls TOTAL
+    - Probe scores rank which variants are most promising
+    
+    ## Step 3: Limited Full Evaluation
+    
+    1. Select top 2-3 variants from probe scores
+    2. Each: run with 2-3 DIFFERENT random seeds
+    3. NEVER spend more than 3 evals on one family
+    4. Track which family performs best
+    
+    ## Step 4: Reset on Stagnation
+    
+    If no improvement after 4 evals:
+    - Call code_template_probe for a DIFFERENT function family
+    - Do NOT continue tuning the same family
+    - Switch: steps -> triangles -> Gaussians -> exponentials -> B-splines
+    
+    ## Key Rules
+    
+    1. Template tuning beats design: Vary parameters, don't redesign
+    2. Probe before eval: 30-40 probes, 2-3 evals max
+    3. Diversify early: First 4 evals cover 3+ families
+    4. Template families order: Step -> Triangle -> Trapezoid -> Gaussian -> Exponential -> B-spline
+    5. Current record: 0.8963 uses step functions - try step PARAMETER VARIATIONS first!
+    
+    ## Success Metrics
+    
+    - combined_score > 1.0265 (beat current harness best)
+    - c2 > 0.8963 (beat the record)
+    - evals_used < 20 (leave budget for diversification)
+new_middlewares:
+- name: force_family_switch
+  hook: before_model
+  description: Middleware that forces switching to a different function family after 3 evaluations on the same family without improvement, preventing over-tuning of single representations.
+  implementation_py: |
+    def before_model(hook_input):
+        state = hook_input.get('state', {})
+        iteration = state.get('iteration', 0)
+        family_history = state.get('family_history', [])
+        evals_on_family = state.get('evals_on_family', {})
+        
+        if len(evals_on_family) > 0:
+            current_family = family_history[-1] if family_history else None
+            evals_count = evals_on_family.get(current_family, 0) if current_family else 0
+            
+            if current_family is not None and evals_count >= 3:
+                available_families = ['step', 'triangle', 'trapezoid', 'gaussian', 'exponential', 'bspline']
+                used_families = [fh.split(':')[0].split('_')[0] for fh in family_history]
+                unused_families = [f for f in available_families if f not in used_families]
+                
+                if unused_families:
+                    next_family = unused_families[0]
+                    return "FAMILY_SWITCH_RECOMMENDED: Evaluated %s %d times. Switch to %s templates. Call code_template_probe for %s variants." % (current_family, evals_count, next_family, next_family)
+                else:
+                    return "FAMILY_SWITCH_RECOMMENDED: Exhausted all families. Re-examine your parameter variations within current family or try combining templates."
+        
+        return None

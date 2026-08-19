@@ -1,0 +1,47 @@
+schema: h2spec/1.0
+system_prompt: "You are solving the Erdos minimum overlap problem: find a step function h: [0,2] -> [0,1] with integral(h)=1 that minimizes max_k integral h(x)(1-h(x+k)) dx.\n\nCurrent best bound: C5 <= 0.380923\nYour seed program uses gradient descent with multi-restart, but it is STUCK AT THE SEED SCORE. This means the gradient approach is trapped in local minima.\n\nNEW STRATEGY: Do NOT just tune hyperparameters. Instead, DIRECTLY CONSTRUCT candidate step functions using piecewise-constant patterns. The optimal solution is likely a specific arrangement of plateaus at discrete values.\n\nPHASE 1: Constructive Search (Use all 30 evals)\n1. Build explicit step functions with SPECIFIC plateau configurations:\n   - Single plateau at value 0.5: h(x) = 0.5 for all x (gives integral=1, check c5)\n   - Two plateaus: h(x) = a for x in [0, L], h(x) = b for x in [L, 2] where a*L + b*(2-L) = 1\n   - Three plateaus: h(x) = a, b, c on intervals [0,p1], [p1,p2], [p2,2] with weighted sum = 1\n   - Staircase patterns: h(x) = [1,0,1,0,...] alternating (binomial pattern)\n   - Concentrated mass: h(x) = 1 on small interval, 0 elsewhere (spike pattern)\n   - Spread patterns: h(x) = 0.3 on wide intervals, 0.7 on narrow intervals\n2. For each construction, call probe_solution to quickly screen\n3. Call evaluate_solution on the best 3-4 candidates\n4. If no improvement, try DIFFERENT construction types (not just parameter tweaks)\n\nPHASE 2: Hybrid Approaches\nIf constructive search fails, then try:\n- Use constructive patterns as INITIALIZATIONS for gradient descent (not just random seeds)\n- Try DIRECT search over plateau configurations (enumerate small discretizations)\n\nPHASE 3: If still stuck\n- Modify _get_best_initialization to ADD constructive patterns (plateau-only, step-only)\n- Consider that the seed best might not be globally optimal\n\nFOCUS: BUILD SOLUTIONS DIRECTLY, DO NOT JUST OPTIMIZE RANDOM SEEDS."
+tool_descriptions:
+  edit_solution: Modify the EVOLVE-BLOCK to either directly construct a step function with explicit plateau values and positions, or change hyperparameters of the existing optimizer. Prefer constructive edits over hyperparameter tweaks when stuck.
+  evaluate_solution: Run full evaluation, returns combined_score. MAXIMIZE this (value > 1 means new record c5_bound < 0.380923).
+  probe_solution: Quick approximate evaluation (~10s, separate budget of 30 probes). USE THIS TO SCREEN MULTIPLE CONSTRUCTED PATTERNS before spending real evals.
+  finish: Submit when combined_score > 1.0 or all strategies exhausted.
+sampling:
+  temperature: 1.2
+  top_p: 0.95
+  top_k: 30
+  max_tokens: 14000
+agent:
+  max_iterations: 50
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 10000
+new_tools:
+- name: build_plateau_function
+  description: Construct explicit step functions with SPECIFIED plateau configurations.
+  input_schema:
+    type: object
+    properties: {}
+  implementation_py: |
+    def run(ctx, args):
+        import numpy as np
+        N = 800
+        domain = 2.0
+        dx = domain / N
+        constructions = {}
+        single = np.ones(N) * 0.5
+        constructions['single_05'] = single
+        for a in [0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8]:
+            L = 1.0
+            b = (1.0 - a * L) / (domain - L)
+            b_val = max(0.0, min(1.0, b))
+            if abs(a - b_val) < 0.01:
+                continue
+            bimodal = np.concatenate([np.ones(int(L*N)) * a, np.ones(N - int(L*N)) * b_val])
+            constructions['bimodal_' + str(int(a*100))] = bimodal
+        spike = np.concatenate([np.ones(400), np.zeros(400)])
+        constructions['spike_concentrated'] = spike
+        spread1 = np.concatenate([np.ones(400) * 0.4, np.ones(400) * 0.6])
+        constructions['spread_04_06'] = spread1
+        spread2 = np.concatenate([np.ones(400) * 0.3, np.ones(400) * 0.7])
+        constructions['spread_03_07'] = spread2
+        return {"constructions": constructions}

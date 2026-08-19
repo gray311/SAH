@@ -1,0 +1,102 @@
+schema: h2spec/1.0
+system_prompt: You are an expert in functional analysis and mathematical optimization. C2 = L2 squared divided by integral squared times L infinity, f non-negative. Current best: 0.8962799441554086 (step functions). PARALLEL DIVERSE EXPLORATION. DO NOT sequentially refine one pattern. Iteration 1: Call generate_candidates for 3-5 proposals across DIFFERENT families: step patterns, Gaussian mixtures, B-spline, Oscillatory decay, Piecewise-linear, Multi-level asymmetric steps. For EACH proposal: call probe_solution. You have 30 probes. Then evaluate top 2-3. Do NOT refine unless beat record by >0.005. If NO proposal beats record after 5 iterations: regenerate NEW diverse set. If one beats record: refine SLIGHTLY, then immediately generate fresh diverse candidates. NEVER spend >2 iterations on one candidate unless clearly winning. CONSTRAINTS: f(x) >= 0, int f > 0. Use JAX mutability. PROBE-FIRST: Always probe before full eval. DIVERSITY: If stuck, try NEW families.
+skill_description: Parallel diverse exploration protocol
+skill_body: |
+  # C2 Maximizer: Parallel Exploration
+  
+  ## Core Principle
+  The step-function record is a LOCAL optimum. Explore DIFFERENT function families in PARALLEL from iteration 1.
+  
+  ## Protocol
+  1. Generate: Call generate_candidates -> 3-5 proposals across families (step_mutated, gaussian_mixture, bspline, oscillatory_decay, multi_level_asymmetric)
+  
+  2. Probe: Call probe_solution on ALL proposals. You have 30 probes. Rank all. Skip evaluation if probe score < current best - 0.005.
+  
+  3. Evaluate: Evaluate top 2 by probe score. After evaluation: immediately generate NEW diverse candidates. Do NOT refine winner >2 iterations.
+  
+  4. Regenerate: After each evaluation, generate fresh diverse candidates.
+  
+  ## Key Rules
+  - PARALLEL > SEQUENTIAL
+  - PROBE-FIRST: 30 probes = filter many, evaluate few
+  - QUICK TURNAROUND: 1 eval -> immediate regeneration
+  - DIVERSITY: If stuck >10 iterations, try new families
+  - MINIMAL REFINEMENT: +/-5% or new family
+tool_descriptions:
+  edit_solution: |
+    Edit EVOLVE-BLOCK. SMALL mutations: +/-0.05 peaks, +/-5% intervals, +/-0.05 bumps. NEW ARCHITECTURES: Gaussian mixture, B-spline, Oscillatory decay, Piecewise-linear, Multi-level steps. Use JAX: f = f.at[start:end].set(value). f >= 0.
+  evaluate_solution: |
+    Full evaluation. Budget 30. Call ONLY after probing. Evaluate top 2 by probe. Skip if probe < best - 0.005. Never evaluate blindly. After eval: generate new diverse candidates.
+  probe_solution: |
+    Approximate score on 10% subsample. FAST. You have 30 probes. RANK ALL proposals before full eval. Call probe on every candidate, then evaluate top 2-3. Skip if probe < best - 0.005.
+  finish: Report best combined_score, function family, key mutations, whether it beats 0.8962799441554086.
+sampling:
+  temperature: 0.5
+  top_p: 0.9
+  top_k: 30
+  max_tokens: 14000
+agent:
+  max_iterations: 60
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 15000
+new_tools:
+- name: generate_candidates
+  description: |
+    Generate 3-5 diverse function proposals across DIFFERENT mathematical families. Families: Step patterns, Gaussian mixtures, B-spline basis, Oscillatory decay, Piecewise-linear, Multi-level asymmetric steps. Returns code snippets.
+  input_schema:
+    type: object
+    properties: {}
+  implementation_py: |
+    def run(ctx, args):
+        import random
+        random.seed(42)
+        proposals = []
+        proposals.append({"family": "step_mutated", "description": "Seed patterns with +/-5% widths, +/-0.05 heights", "code_snippet": "import jax.numpy as jnp\nimport jax\nn = len(f_values)\nf = jnp.zeros(n)\nleft_width = int(0.22 * n)\nright_width = int(0.28 * n)\nbase_height = 1.50\nf = f.at[0:left_width].set(base_height * 0.98)\nf = f.at[n-right_width:n].set(base_height * 0.98)\nf = jnp.maximum(f, 1e-6)", "rationale": "Small mutations may escape local optimum"})
+        proposals.append({"family": "gaussian_mixture", "description": "Weighted sum of Gaussians", "code_snippet": "import jax.numpy as jnp\nf_values = jnp.linspace(-3, 3, 600)\nmu = jnp.array([0.0, 1.2, -1.0])\nsigma = jnp.array([0.5, 0.7, 0.6])\nweights = jnp.array([0.4, 0.3, 0.3])\nf = weights[None,:] @ jnp.exp(-((f_values[:,None] - mu)[None,:,:])**2 / (2*sigma**2[None,:]))\nf = jnp.maximum(f, 1e-6)", "rationale": "Smooth multi-peaked functions"})
+        proposals.append({"family": "bspline", "description": "B-spline with softplus control points", "code_snippet": "import jax.numpy as jnp\nfrom scipy.interpolate import splev, splrep\nn_control = 40\nknots = jnp.linspace(-1, 1, 20)\ncontrols = jnp.random.uniform(0.5, 2.0, n_control)\ncontrols = jax.nn.softplus(controls)\nf_values = jnp.linspace(-3, 3, 600)\nfit = splev(f_values, knots, s=0, k=3, dx=1, w=controls)\nf = jnp.maximum(f, 1e-6)", "rationale": "Flexible smooth transitions"})
+        proposals.append({"family": "oscillatory_decay", "description": "f(x) = (1 + alpha*cos(beta*x))*exp(-gamma*|x|)", "code_snippet": "import jax.numpy as jnp\nf_values = jnp.linspace(-5, 5, 800)\nalpha, beta, gamma = 0.3, 4.0, 0.8\nf = (1 + alpha * jnp.cos(beta * f_values)) * jnp.exp(-gamma * jnp.abs(f_values))\nf = jnp.maximum(f, 1e-6)", "rationale": "Structured convolutions with decay"})
+        proposals.append({"family": "multi_level_asymmetric", "description": "Multi-level step with asymmetric heights", "code_snippet": "import jax.numpy as jnp\nf_values = jnp.linspace(-3, 3, 600)\nn = len(f_values)\nlevels = jnp.array([0.5, 1.2, 1.8, 1.4, 0.8])\npositions = jnp.array([0.12, 0.28, 0.45, 0.62, 0.78])\nf = jnp.zeros(n)\nfor i in range(len(positions) - 1):\n    start = int(positions[i] * n)\n    end = int(positions[i+1] * n)\n    f = f.at[start:end].set(levels[i])\nf = jnp.maximum(f, 1e-6)", "rationale": "Asymmetric multi-level steps"})
+        return {"proposals": proposals, "note": "Probe ALL, then eval top 2-3. Skip if probe < best - 0.005."}
+new_skills:
+- name: parallel-exploration-protocol
+  description: Parallel diverse exploration from iteration 1
+  body: |
+    # Parallel Exploration Protocol
+    
+    ## Core Principle
+    The step-function record is a LOCAL optimum. Explore DIFFERENT families in PARALLEL from iteration 1.
+    
+    ## Protocol
+    1. Generate: Call generate_candidates -> 3-5 proposals across families
+    
+    2. Probe: Call probe_solution on ALL proposals. You have 30 probes. Skip evaluation if probe < best - 0.005.
+    
+    3. Evaluate: Evaluate top 2 by probe. After eval: immediately generate NEW diverse candidates.
+    
+    4. Regenerate: After each eval, generate fresh diverse candidates.
+    
+    ## Key Rules
+    - PARALLEL > SEQUENTIAL
+    - PROBE-FIRST
+    - QUICK TURNAROUND: 1 eval -> immediate regeneration
+    - DIVERSITY: If stuck >10 iterations, try new families
+    - MINIMAL REFINEMENT: +/-5% or new family
+new_middlewares:
+- name: enforce_diversity
+  hook: before_model
+  description: Enforce diverse exploration
+  implementation_py: |
+    def before_model(hook_input):
+        iterations = hook_input.get("iteration", 0)
+        if iterations >= 5:
+            return "Call generate_candidates for NEW diverse families, not more mutations of same family."
+        return None
+- name: probe_before_eval_gating
+  hook: before_tool
+  description: Enforce probe-first
+  implementation_py: |
+    def before_tool(hook_input):
+        if "evaluate_solution" in hook_input.get("tool_name", ""):
+            return "PROBE-FIRST: Called probe_solution? Only eval if probe >= best - 0.005."
+        return None

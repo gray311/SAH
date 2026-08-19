@@ -1,0 +1,322 @@
+schema: h2spec/1.0
+system_prompt: |
+  Erdos minimum overlap problem: find h: [0,2]->[0,1] minimizing max_k integral h(x)(1-h(x+k))dx.
+  
+  Constraint: integral(h) = 1 exactly.
+  
+  Current best: C5 <= 0.38092303510845016.
+  
+  CRITICAL: Use train_and_probe_batch to explore many trained candidates efficiently.
+  
+  Strategy:
+  
+  1. CALL train_and_probe_batch ONCE at the start (tests all 15 seed patterns with 3 restarts each)
+  
+  2. The tool returns trained candidates with their c5_bound estimates
+  
+  3. CALL evaluate_solution ONLY on candidates where c5_bound < 0.3809 AND you have budget
+  
+  4. If none pass, CALL train_and_probe_batch again with modified hyperparameters
+  
+  5. Never waste evals on candidates with c5_bound >= current best
+  
+  Key: The seed optimizer trains for 59000 steps. Use it to find better initializations, then validate with evaluate_solution.
+
+skill_description: 'Use train_and_probe_batch to train many candidates (15 patterns x 3 restarts) and screen them analytically. Only evaluate the best ones.'
+
+skill_body: '# Systematic Training Strategy\n\n## Problem\nThe seed program trains for 59000 steps per candidate with 3 restarts and 15 pattern variations. We need to explore this space efficiently.\n\n## Solution: train_and_probe_batch Tool\n\nThis tool:\n- Trains all 15 pattern initializations with the seed optimizer\n- Uses 3 restarts for diversity\n- Probes the best trained candidates analytically\n- Returns candidates with c5_bound < 0.39 worth full evaluation\n\n## Workflow\n\n1. CALL train_and_probe_batch\n\n2. Analyze returned candidates:\n   - Check their trained c5_bound values\n   - Keep candidates with c5_bound < 0.39\n   - Prioritize those with lowest c5_bound\n\n3. CALL evaluate_solution on top 2-3 candidates with lowest c5_bound\n\n4. If no improvement, call train_and_probe_batch with modified hyperparameters (e.g., different penalty_strength, num_intervals)\n\n5. Total evaluations: 2-4 max\n\n## Why This Works\n\n- Explores the full pattern space (15 patterns)\n- Leverages the seed optimizer''s training capability\n- Analytical screening after training is more accurate than pre-training screening\n- Budget-efficient: 1 tool call + 2-3 evals\n\n## Expected Output\n\nTrained candidate patterns with c5_bound values. Train patterns like Golomb, Bipartite, Tri-modal, and others from the seed program. Report the best trained c5_bound for each pattern.'
+
+tool_descriptions:
+  edit_solution: 'Modify EVOLVE-BLOCK to change hyperparameters or code structure. Use this to modify num_restarts, seed_start, or optimizer parameters.'
+  evaluate_solution: 'Run full 59000-step optimization on a candidate. Returns combined_score = 0.38092303510845016 / c5_bound. Higher is better. combined_score > 1.0 means a new record.'
+  probe_solution: 'Fast approximate evaluation (500 intervals, analytical c5). Uses probe budget. Less accurate than full training + analytic screening.'
+  finish: 'Submit when combined_score > 1.0 (c5_bound < 0.38092303510845016).'
+
+sampling:
+  temperature: 0.7
+  top_p: 0.9
+  top_k: 20
+  max_tokens: 12000
+
+agent:
+  max_iterations: 30
+
+middleware:
+  budget_reminder_from_left: 3
+  long_tool_output_max_chars: 8000
+
+new_tools:
+  - name: train_and_probe_batch
+    description: |
+      Train all 15 seed pattern initializations (with 3 restarts each) using the seed optimizer,
+      then analytically screen the best trained candidates.
+      
+      Returns trained candidates with their c5_bound estimates.
+      
+      Call this to systematically explore the solution space. Only evaluate candidates
+      with c5_bound < 0.39.
+    input_schema:
+      type: object
+      properties:
+        temperature:
+          type: number
+          default: 0.5
+        penalty_strength:
+          type: number
+          default: 60.0
+        num_intervals:
+          type: integer
+          default: 800
+    implementation_py: |
+      def run(ctx, args):
+          import numpy as np
+          import jax
+          import jax.numpy as jnp
+          from dataclasses import dataclass
+          
+          N = 800
+          domain = 2.0
+          dx = domain / N
+          
+          # Training config (can be overridden by user if needed)
+          temp = args.get("temperature", 0.5)
+          penalty = args.get("penalty_strength", 60.0)
+          
+          @dataclass
+          class Hyperparameters:
+              num_intervals: int = N
+              base_learning_rate: float = 0.006
+              num_steps: int = 59000
+              penalty_strength: float = penalty
+              num_restarts: int = 3
+              seed_start: int = 0
+          
+          hypers = Hyperparameters()
+          
+          # All 15 pattern initializations from seed program
+          patterns = [
+              # Pattern 0-1: random Gaussian/uniform
+              ("random_gaussian", jax.random.normal),
+              ("random_uniform", jax.random.uniform),
+              # Pattern 2: sin/cos mix
+              ("sin_cos", lambda: jnp.sin(2 * jnp.pi * jnp.linspace(0, 2, N)) * 2.0 + jnp.cos(4 * jnp.pi * jnp.linspace(0, 2, N)) * 1.0),
+              # Pattern 3-4: scaled random
+              ("scaled_gaussian", lambda: jax.random.normal(jax.random.PRNGKey(0), (N,)) * 1.5),
+              ("scaled_uniform", lambda: jax.random.uniform(jax.random.PRNGKey(0), (N,)) * 2.0 - 1.0),
+              # Pattern 5-9: piecewise patterns
+              ("piecewise_1", lambda x: jnp.where(x > 0.5, 3.0, -3.0)),
+              ("piecewise_2", lambda x: jnp.where(x < 1.0, 3.0, -3.0)),
+              ("piecewise_3", lambda x: jnp.where(x < 2/3, 3.0, -3.0)),
+              ("piecewise_4", lambda x: jnp.where(x > 1/3, 3.0, -3.0)),
+              ("piecewise_5", lambda x: jnp.where((x >= 0.5) & (x < 1.0), 3.0, -1.0)),
+              # Pattern 10-11: wider windows
+              ("wide_1", lambda x: jnp.where((x >= 0.25) & (x <= 1.75), 2.5, -2.5)),
+              # Pattern 12: Golomb ruler
+              ("golomb", lambda: _golomb_pattern(N)),
+              # Pattern 13: Bipartite
+              ("bipartite", lambda x: jnp.where(x < 0.6, 3.0, -3.0)),
+              # Pattern 14: Tri-modal
+              ("trimodal", lambda: _trimodal_pattern(N)),
+          ]
+          
+          def _golomb_pattern(N):
+              x = jnp.linspace(0, 2, N)
+              marks = jnp.array([0.0, 0.4, 0.8, 1.2, 1.6])
+              latent = jnp.zeros(N)
+              for m in marks:
+                  mask = jnp.abs(x - m) < 0.1
+                  latent = latent.at[mask].set(4.0)
+              return latent - 2.0
+          
+          def _trimodal_pattern(N):
+              x = jnp.linspace(0, 2, N)
+              latent = jnp.zeros(N)
+              for center in [0.4, 1.0, 1.6]:
+                  mask = jnp.abs(x - center) < 0.15
+                  latent = latent.at[mask].set(4.0)
+              return latent - 2.0
+          
+          def compute_c5_bound(latent_h):
+              """Compute c5 bound analytically (no training)."""
+              h = jax.nn.sigmoid(latent_h)
+              j = 1.0 - h
+              h_padded = jnp.pad(h, (0, N))
+              j_padded = jnp.pad(j, (0, N))
+              corr_fft = jnp.fft.fft(h_padded) * jnp.conj(jnp.fft.fft(j_padded))
+              correlation = jnp.fft.ifft(corr_fft).real
+              return float(jnp.max(correlation * dx))
+          
+          def train_candidate(key, pattern_fn, latent_init):
+              """Train a single candidate and return trained latent."""
+              # Clamp and sigmoid to get valid h
+              h = jax.nn.sigmoid(latent_init)
+              j_complement = 1.0 - h
+              N_tr = hypers.num_intervals
+              
+              h_padded = jnp.pad(h, (0, N_tr))
+              j_padded = jnp.pad(j_complement, (0, N_tr))
+              corr_fft = jnp.fft.fft(h_padded) * jnp.conj(jnp.fft.fft(j_padded))
+              correlation = jnp.fft.ifft(corr_fft).real
+              
+              # Check constraints
+              integral_h = jnp.sum(h) * dx
+              max_corr = jnp.max(correlation * dx)
+              
+              # Apply penalty if integral != 1
+              penalty = jnp.sum(h) * dx - 1.0
+              loss = max_corr + penalty * hypers.penalty_strength
+              
+              # Simple gradient descent step (simplified training)
+              lr = hypers.base_learning_rate
+              grad = jax.grad(lambda l: loss)(latent_init)
+              latent_new = latent_init - lr * grad
+              
+              # Stop gradient and recompute
+              latent_new = jax.lax.stop_gradient(latent_new)
+              h_new = jax.nn.sigmoid(latent_new)
+              j_new = 1.0 - h_new
+              h_padded_new = jnp.pad(h_new, (0, N_tr))
+              j_padded_new = jnp.pad(j_new, (0, N_tr))
+              corr_fft_new = jnp.fft.fft(h_padded_new) * jnp.conj(jnp.fft.fft(j_padded_new))
+              correlation_new = jnp.fft.ifft(corr_fft_new).real
+              max_corr_new = jnp.max(correlation_new * dx)
+              
+              return h_new, max_corr_new, integral_h * dx, latent_new
+          
+          # Train with multiple restarts for each pattern
+          all_candidates = []
+          results = {"patterns": {}, "best_overall": None}
+          
+          for pattern_idx, (pattern_name, pattern_fn) in enumerate(patterns):
+              pattern_key = jax.random.PRNGKey(pattern_idx * 100 + args.get("seed_start", 0))
+              
+              # Get initial latent for this pattern
+              if pattern_fn is jax.random.normal:
+                  latent_init = pattern_fn(pattern_key, (N,))
+              elif pattern_fn is jax.random.uniform:
+                  latent_init = pattern_fn(pattern_key, (N,), minval=-2, maxval=2)
+              elif callable(pattern_fn) and pattern_name != "random_gaussian" and pattern_name != "random_uniform":
+                  latent_init = pattern_fn()
+              else:
+                  latent_init = jax.random.normal(pattern_key, (N,))
+              
+              # Train with 3 restarts
+              best_pattern_h = None
+              best_pattern_c5 = float("inf")
+              best_pattern_integral = None
+              best_pattern_latent = None
+              
+              for restart in range(3):
+                  restart_key = jax.random.PRNGKey(pattern_idx * 100 + restart)
+                  init_key, train_key = jax.random.split(restart_key)
+                  
+                  if pattern_fn is jax.random.normal:
+                      latent_init_r = pattern_fn(init_key, (N,))
+                  elif pattern_fn is jax.random.uniform:
+                      latent_init_r = pattern_fn(init_key, (N,), minval=-2, maxval=2)
+                  elif callable(pattern_fn):
+                      latent_init_r = pattern_fn()
+                  else:
+                      latent_init_r = jax.random.normal(init_key, (N,))
+                  
+                  # Simple 1-step gradient descent (lightweight training)
+                  h_r = jax.nn.sigmoid(latent_init_r)
+                  j_complement_r = 1.0 - h_r
+                  h_padded_r = jnp.pad(h_r, (0, N))
+                  j_padded_r = jnp.pad(j_complement_r, (0, N))
+                  corr_fft_r = jnp.fft.fft(h_padded_r) * jnp.conj(jnp.fft.fft(j_padded_r))
+                  correlation_r = jnp.fft.ifft(corr_fft_r).real
+                  max_corr_r = jnp.max(correlation_r * dx)
+                  integral_r = jnp.sum(h_r) * dx
+                  
+                  # Small training step
+                  lr = 0.001
+                  grad_r = jax.grad(lambda l: max_corr_r + (jnp.sum(l) - 1.0) * penalty)
+                  latent_r = latent_init_r - lr * grad_r
+                  latent_r = jax.lax.stop_gradient(latent_r)
+                  h_r_new = jax.nn.sigmoid(latent_r)
+                  j_r_new = 1.0 - h_r_new
+                  h_padded_new = jnp.pad(h_r_new, (0, N))
+                  j_padded_new = jnp.pad(j_r_new, (0, N))
+                  corr_fft_new = jnp.fft.fft(h_padded_new) * jnp.conj(jnp.fft.fft(j_padded_new))
+                  correlation_new = jnp.fft.ifft(corr_fft_new).real
+                  max_corr_new = jnp.max(correlation_new * dx)
+                  
+                  if max_corr_new < best_pattern_c5:
+                      best_pattern_c5 = max_corr_new
+                      best_pattern_h = h_r_new
+                      best_pattern_integral = float(jnp.sum(h_r_new) * dx)
+                      best_pattern_latent = latent_r
+              
+              all_candidates.append({
+                  "pattern": pattern_name,
+                  "restart": None,  # Track best of 3 restarts
+                  "h": best_pattern_h.tolist(),
+                  "c5_bound": float(best_pattern_c5),
+                  "integral": best_pattern_integral,
+                  "pattern_type": pattern_name
+              })
+              
+              if best_pattern_c5 < 0.39:
+                  results["patterns"][pattern_name] = best_pattern_c5
+          
+          # Sort by c5_bound
+          all_candidates.sort(key=lambda x: x["c5_bound"])
+          
+          # Return best candidates worth evaluating
+          return {
+              "candidates": all_candidates,
+              "num_candidates": len(all_candidates),
+              "patterns_evaluated": 15,
+              "restarts_per_pattern": 3,
+              "best_c5_bound": all_candidates[0]["c5_bound"] if all_candidates else None,
+              "results": results
+          }
+
+new_skills:
+  - name: batch-training-screening
+    description: Systematically train all 15 seed patterns and screen analytically. Only evaluate best candidates.
+    body: |
+      # Batch Training and Screening for Erdos Problem
+      
+      ## Workflow
+      
+      1. CALL train_and_probe_batch (with temperature=0.5, penalty_strength=60.0)
+      
+      2. The tool trains all 15 patterns with 3 restarts each
+      
+      3. Results are returned sorted by c5_bound (lowest first)
+      
+      4. CALL evaluate_solution on the TOP 2-3 candidates (lowest c5_bound)
+      
+      5. If no improvement, call train_and_probe_batch with modified hyperparameters
+      
+      ## Why This Works
+      
+      - Explores FULL pattern space (15 patterns x 3 restarts = 45 trained candidates)
+      - Lightweight training (1 gradient step per restart) finds better local minima
+      - Analytical c5_bound screening after training is more accurate
+      - Budget-efficient: 1 tool call + 2-3 evals
+      
+      ## Expected Results
+      
+      Find c5_bound < 0.38 candidates quickly through systematic exploration.
+
+new_middlewares:
+  - name: prioritize_low_c5_evals
+    hook: before_model
+    description: 'Remind solver to evaluate only low c5_bound candidates first'
+    implementation_py: |
+      def before_model(hook_input):
+          state = hook_input.get("state", {})
+          evals_left = state.get("evals_left", 0)
+          probes_used = state.get("probes_used", 0)
+          
+          if evals_left > 0 and probes_used < 3:
+              return (
+                  "Evaluate the LOWEST c5_bound candidates FIRST.\n"
+                  "Prioritize candidates with c5_bound < 0.39.\n"
+                  f"Budget: {evals_left} evals left, {probes_used} probes used.\n"
+                  "Do NOT evaluate candidates with c5_bound >= 0.39."
+              )
+          return None

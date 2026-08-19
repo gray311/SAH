@@ -1,0 +1,134 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are an expert in harmonic analysis and the Erdos minimum overlap problem.
+
+  Goal: Beat C5 <= 0.38092303510845016 by finding h: [0,2]->[0,1] with integral(h)=1 minimizing max_k integral(h(x)(1-h(x+k))dx.
+
+  KEY INSIGHT: Known constructions beat random optimization. Don't replace the optimizer; ADD specific mathematical blueprints to test.
+
+  STRATEGY:
+  1. Don't delete existing optimizer code - keep the Adam optimizer intact
+  2. BEFORE optimizing, test 3-4 blueprint functions: bimodal_step, periodic_alternating, golomb_construction
+  3. For each blueprint: (a) compute c5_bound directly, (b) if promising (<0.3809), fine-tune with optimizer for 2000 steps
+  4. Use probe_solution to rank blueprints BEFORE full evaluation
+  5. Full evaluate only on top 2 fine-tuned candidates
+
+  BLUEPRINTS to add:
+  - bimodal_step: Two intervals at [0.25,0.375] and [1.25,1.625] with value 1.0
+  - periodic_alternating: h=1 on [0,0.5] and [1,1.5], h=0 elsewhere
+  - golomb_construction: Five narrow peaks at Golomb ruler positions scaled to [0,2]
+
+  Workflow:
+  - Generate 3 blueprint functions, compute exact c5_bound
+  - For blueprints with c5_bound < 0.3809, use optimizer for 2000 steps with lr=0.01, penalty=1000
+  - Probe all variants, evaluate top 2 with evaluate_solution
+  - Target: combined_score > 1.0 (c5_bound < 0.380923)
+skill_description: Blueprint-first search for Erdos minimum overlap problem
+skill_body: |
+  # Erdos Minimum Overlap - Blueprint-First Strategy
+
+  ## Why Blueprints Beat Random Optimization
+
+  Known constructions for the Erdos problem are STRUCTURED and COMPLIANT with the integral constraint. Random initialization often fails to hit these sweet spots.
+
+  ## Three Blueprint Types to Test
+
+  1. bimodal_step: Two high-value intervals at [0.25,0.375] and [1.25,1.625], value 1; zero elsewhere. This gives integral=1 naturally.
+     Advantages: Creates large gaps between high regions, reducing overlap.
+
+  2. periodic_alternating: h=1 on [0,0.5] and [1,1.5], h=0 on [0.5,1] and [1.5,2].
+     Advantages: Simple periodic pattern, easy to fine-tune boundaries.
+
+  3. golomb_construction: Five narrow rectangular peaks at Golomb ruler positions scaled to [0,2].
+     Advantages: Maximizes separation between peaks.
+
+  ## Optimization Workflow
+
+  1. Blueprint generation: Implement 3 blueprint functions that satisfy integral(h)=1 exactly.
+  2. Direct c5 bound: For each blueprint, compute the exact c5_bound (no optimization yet).
+  3. Probe ranking: Use probe_solution on all 3 blueprints to get quick c5 estimates.
+  4. Fine-tune promising ones: For blueprints with c5_bound < 0.3809:
+     - Use Adam optimizer (same as seed) for 2000 steps
+     - lr=0.01, penalty=1000
+     - Add small random noise to the blueprint as perturbation.
+  5. Probe again: Rank all fine-tuned variants with probe.
+  6. Full evaluate: Evaluate top 2 candidates with evaluate_solution.
+  7. Goal: Achieve combined_score > 1.0.
+
+  ## Key Principles
+  - DO NOT delete or replace the existing optimizer class.
+  - DO NOT add random noise to initializations.
+  - Blueprint functions must satisfy integral(h)=1 by construction.
+  - Use probe_solution extensively before spending full evaluations.
+  - The seed code already works well; augment it, don't replace it.
+tool_descriptions:
+  edit_solution: |
+    Modify EVOLVE-BLOCK. Keep the ErdosOptimizer class intact. Add 3 blueprint functions outside the class. In _get_best_initialization, call these blueprints and try 2-3 random perturbations. Fine-tune each blueprint for 2000 steps before probing.
+  evaluate_solution: |
+    Run the full program and return combined_score.
+  probe_solution: |
+    Quick c5 bound estimate using 200 intervals.
+  finish: |
+    Stop when best combined_score <= seed score or budget exhausted.
+sampling:
+  temperature: 1.2
+  top_p: 0.9
+  top_k: 30
+  max_tokens: 16000
+agent:
+  max_iterations: 60
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 12000
+new_tools:
+  - name: generate_blueprints
+    description: |
+      Generate 3 compliant blueprint functions (bimodal_step, periodic_alternating, golomb_construction) each with integral(h)=1 exactly. Returns latent vectors for each blueprint.
+    input_schema:
+      type: object
+      properties: {}
+    implementation_py: |
+      def run(ctx, args):
+          import numpy as np
+          N = 800
+          domain = 2.0
+          x = np.linspace(0, domain, N)
+          dx = domain / N
+          
+          # bimodal_step
+          h1 = np.zeros(N)
+          h1[(x >= 0.25) & (x <= 0.375)] = 1.0
+          h1[(x >= 1.25) & (x <= 1.625)] = 1.0
+          integral_h1 = np.sum(h1) * dx
+          h1 = h1 / integral_h1
+          blueprints['bimodal_step'] = np.log(h1 + 1e-10) / 0.01
+          
+          # periodic_alternating
+          h2 = np.zeros(N)
+          h2[(x >= 0) & (x <= 0.5)] = 1.0
+          h2[(x >= 1) & (x <= 1.5)] = 1.0
+          integral_h2 = np.sum(h2) * dx
+          h2 = h2 / integral_h2
+          blueprints['periodic_alternating'] = np.log(h2 + 1e-10) / 0.005
+          
+          # golomb_construction
+          golomb = np.array([0, 1, 4, 9, 11])
+          scaled = golomb / 12.0 * 2.0
+          widths = np.array([0.1, 0.12, 0.15, 0.13, 0.1])
+          h_golomb = np.zeros(N)
+          for mark, w in zip(scaled, widths):
+              h_golomb += ((x >= mark - w/2) & (x <= mark + w/2)).astype(float)
+          integral_golomb = np.sum(h_golomb) * dx
+          h_golomb = h_golomb / integral_golomb
+          blueprints['golomb_construction'] = np.log(h_golomb + 1e-10) / 1.0
+          
+          return {'blueprints': blueprints, 'normalized': True}
+new_skills: []
+new_middlewares:
+  - name: blueprint_reminder
+    hook: before_model
+    description: Remind solver to generate blueprints and test before optimizing.
+    implementation_py: |
+      def before_model(hook_input):
+          reminder = "BEFORE ANY OPTIMIZATION: Generate 3 blueprint functions (bimodal_step, periodic_alternating, golomb_construction) and test their c5_bound directly. Only then fine-tune promising ones."
+          return reminder

@@ -1,0 +1,261 @@
+schema: h2spec/1.0
+system_prompt: 'Erdos minimum overlap problem (C5): Find h: [0,2]->[0,1] minimizing max_k integral h(x)(1-h(x+k))dx.
+
+CONSTRAINT: integral(h) = 1 exactly. h values in [0,1].
+
+Current best: C5 <= 0.38092303510845016 (combined_score = 1.0).
+
+GOAL: Find h achieving c5_bound < 0.38092303510845016 (combined_score > 1.0).
+
+CORE INSIGHT: The seed optimizer already implements 15 pattern types for initialization (Golomb ruler, bipartite, tri-modal, multi-peak). DO NOT just tune hyperparameters - EXPLORE THESE PATTERNS with different parameters!
+
+STRATEGY:
+1. USE probe_pattern_variants to generate 10 diverse pattern-based initializations (different peak positions, mark locations, amplitudes)
+2. FILTER for candidates with c5_bound < 0.375 (cheaper threshold since patterns are promising)
+3. EVALUATE the best 3-5 candidates fully
+4. If no improvement, try editing the pattern MARK LOCATIONS (e.g., marks=[0, 0.3, 0.7, 1.4, 1.8] instead of [0, 0.4, 0.8, 1.2, 1.6])
+5. TEST SINGLE-RESTART SEARCH with num_restarts=1, num_steps=50000 to quickly evaluate each pattern variant
+6. Only then tune hyperparameters (num_intervals, learning_rate, penalty_strength)
+
+PATTERN EXPLORATION PRIORITY:
+- Golomb ruler: vary mark spacing (marks at 0, a, 2a, 3a, 4a for different a)
+- Bipartite: vary split point a in [0,0.5], [0.5,1], [1,2]
+- Tri-modal: vary peak positions in [0.2,0.6], [0.8,1.4], [1.6,2.0]
+- Multi-peak: try 2, 3, 4, 5 peaks at different locations
+
+Remember: The seed already has GOOD pattern templates. Dont throw them away - parameterize them!
+Use probe_pattern_variants to generate candidates, probe_solution to screen, evaluate_solution to confirm.'
+skill_description: 'Pattern-based initialization search for Erdos C5 minimization. Use probe_pattern_variants to generate diverse pattern initializations (Golomb, bipartite, tri-modal with varied parameters). Screen with probe_solution (c5_bound < 0.375). Evaluate best candidates. Then edit pattern parameters (mark locations, split points) to fine-tune. Finally tune hyperparameters only if pattern search stalls.'
+skill_body: '# Pattern-Based Search for Erdos C5 Problem
+
+## Core Insight
+The seed optimizer has 15 pattern types. We need to EXPLORE these patterns with different parameters, not just tune hyperparameters.
+
+## Step 1: Generate Pattern Variants
+1. CALL probe_pattern_variants() - generates 10 diverse pattern initializations
+2. EXAMINE candidates with c5_bound < 0.375
+3. CALL evaluate_solution on top 3-5 best candidates
+
+## Step 2: Parameterize Existing Patterns
+The seed patterns include:
+
+**Golomb ruler (Pattern 12)**: marks = [0.0, 0.4, 0.8, 1.2, 1.6]
+- Try different spacings: [0, 0.3, 0.6, 0.9, 1.2], [0, 0.5, 1.0, 1.5], [0, 0.4, 0.9, 1.4]
+- Try 4 marks instead of 5: [0, 0.5, 1.0, 1.5]
+- Try different amplitudes: marks get value 5.0 or 8.0
+
+**Bipartite (Pattern 5, 13)**: x < 0.5: high, x >= 0.5: low
+- Try different split: x < 0.3, x < 0.4, x < 0.6, x < 0.7
+- Try two-split: x < 0.33: high, 0.33 <= x < 1.33: low, x >= 1.33: high
+
+**Tri-modal (Pattern 14)**: peaks at [0.4, 1.0, 1.6]
+- Try different peaks: [0.3, 1.0, 1.7], [0.2, 0.8, 1.4]
+- Try 2-peak: [0.5, 1.5]
+- Try 4-peak: [0.3, 0.7, 1.3, 1.7]
+
+## Step 3: Single-Restart Evaluation
+When testing one pattern variant:
+- Set num_restarts=1, num_steps=50000
+- This quickly evaluates that specific initialization
+- Use probe_solution to screen before full eval
+
+## Step 4: Only Then Tune Hyperparameters
+If pattern search yields no improvement:
+- Vary num_intervals: 400, 800, 1600 (coarse to fine)
+- Vary penalty_strength: 40, 60, 80 (weaker to stronger constraint)
+
+## Step 5: Iterate
+- If one pattern works well, try variants of it
+- If multiple patterns work, combine ideas
+- Stop when combined_score > 1.0
+
+## Tool Usage Summary
+1. probe_pattern_variants: Generate 10 pattern candidates
+2. probe_solution: Check c5_bound (cheap, < 10s)
+3. edit_solution: Modify pattern parameters or hyperparameters
+4. evaluate_solution: Confirm top candidates (full 59000 steps)'
+tool_descriptions:
+  edit_solution: 'Edit EVOLVE-BLOCK for pattern parameterization:
+
+**For Golomb ruler (Pattern 12)**: Change marks = [0.0, 0.4, 0.8, 1.2, 1.6] to [0.0, 0.3, 0.6, 0.9, 1.2] or [0.0, 0.5, 1.0, 1.5]
+
+**For Bipartite (Pattern 5)**: Change split point: x = jnp.where(x < 0.3, 4.0, -4.0) or x = jnp.where(x < 0.4, 3.0, -3.0)
+
+**For Tri-modal (Pattern 14)**: Change peak positions: centers = [0.3, 1.0, 1.7] or centers = [0.2, 0.8, 1.4]
+
+**For Single-restart**: Set num_restarts=1, num_steps=50000 for quick evaluation
+
+**For Fine-grained**: Increase num_intervals to 1600
+
+**For Stronger constraint**: Increase penalty_strength to 80-120'
+  evaluate_solution: 'Full 59000-step optimization with current EVOLVE-BLOCK. Returns combined_score = 0.38092303510845016 / c5_bound.
+
+Higher is better. combined_score > 1.0 means c5_bound < 0.38092303510845016 (new record).
+
+Use probe_solution first to filter candidates with c5_bound < 0.375. Only eval top 3-5 best.'
+  probe_solution: 'Fast approximate evaluation (500 intervals, analytical c5). Uses probe budget.
+
+Approximate but much cheaper than full eval (10s vs 3-5 mins).
+
+Use to screen pattern candidates from probe_pattern_variants. Keep candidates with c5_bound < 0.375.
+
+Budget: separate from eval budget, typically 30 probes available.
+
+Key: Screen many variants cheaply, then eval the best fully.'
+sampling:
+  temperature: 0.8
+  top_p: 0.9
+  top_k: 15
+  max_tokens: 12000
+agent:
+  max_iterations: 60
+middleware:
+  budget_reminder_from_left: 3
+  long_tool_output_max_chars: 8000
+new_tools:
+- name: probe_pattern_variants
+  description: 'Generate 10 diverse pattern-based initializations for Erdos C5 using proven structures (Golomb ruler, bipartite, tri-modal) with randomized parameters.
+
+Returns candidates with pre-computed c5_bound (analytical FFT, no training). All integral-constrained.
+
+Filters: c5_bound < 0.375 suggests good candidates for full evaluation.
+
+Patterns: Golomb (3 variants), Bipartite (3 variants), Tri-modal (3 variants), 2-peak (1 variant).'
+  input_schema:
+    type: object
+    properties:
+      num_variants:
+        type: integer
+        default: 10
+  implementation_py: |
+    def run(ctx, args):
+        import numpy as np
+        N = 800
+        domain = 2.0
+        dx = domain / N
+        
+        def sigmoid_scale(h_latent):
+            h = 1.0 / (1.0 + np.exp(-h_latent))
+            total = np.sum(h) * dx
+            if total < 1e-6:
+                return h, 1.0
+            h = h / total
+            return np.clip(h, 0.001, 1.0), np.sum(h) * dx
+        
+        def compute_c5(h):
+            j_val = 1.0 - h
+            h_padded = np.pad(h, (0, N))
+            j_padded = np.pad(j_val, (0, N))
+            corr_fft = np.fft.fft(h_padded) * np.conj(np.fft.fft(j_padded))
+            correlation = np.fft.ifft(corr_fft).real
+            return np.max(correlation * dx)
+        
+        def generate_golomb(variant, marks_base):
+            marks = marks_base + [marks_base[0] + 0.3 * variant] if variant < 2 else marks_base
+            h = np.zeros(N)
+            for m in marks:
+                idx = int(m * N)
+                width = int(N * 0.15)
+                mask = np.abs(np.arange(N) - idx) < width
+                h[mask] = 6.0 + np.random.normal(0, 0.5)
+            h, integral = sigmoid_scale(h)
+            c5 = compute_c5(h)
+            return {"h": h.tolist(), "integral": float(integral), "c5_bound": float(c5), "pattern": f"golomb_v{variant}"}
+        
+        def generate_bipartite(variant, split):
+            a = 0.3 + 0.05 * variant if variant < 5 else 0.4
+            h = np.zeros(N)
+            h[:int(N * a)] = 4.0 + np.random.normal(0, 0.3)
+            h[int(N * a):] = -2.0 + np.random.normal(0, 0.3)
+            h, integral = sigmoid_scale(h)
+            c5 = compute_c5(h)
+            return {"h": h.tolist(), "integral": float(integral), "c5_bound": float(c5), "pattern": f"bipartite_a{a:.2f}"}
+        
+        def generate_trimodal(variant, peaks_base):
+            peaks = peaks_base + [peaks_base[0] + 0.1 * variant] if variant < 2 else peaks_base
+            h = np.zeros(N)
+            for p in peaks:
+                idx = int(p * N)
+                width = int(N * 0.1)
+                mask = np.abs(np.arange(N) - idx) < width
+                h[mask] = 5.0 + np.random.normal(0, 0.4)
+            h, integral = sigmoid_scale(h)
+            c5 = compute_c5(h)
+            return {"h": h.tolist(), "integral": float(integral), "c5_bound": float(c5), "pattern": f"trimodal_peaks{peaks}"}
+        
+        candidates = []
+        for v in range(3):
+            if v == 0:
+                candidates.append(generate_golomb(v, [0.0, 0.4, 0.8, 1.2, 1.6]))
+            elif v == 1:
+                candidates.append(generate_golomb(v, [0.0, 0.5, 1.0, 1.5]))
+            else:
+                candidates.append(generate_golomb(v, [0.0, 0.3, 0.6, 0.9, 1.2]))
+        for v in range(3):
+            candidates.append(generate_bipartite(v, [0.3 + 0.05 * v]))
+        for v in range(3):
+            peaks = [0.4, 1.0, 1.6]
+            if v == 1:
+                peaks = [0.3, 1.0, 1.7]
+            elif v == 2:
+                peaks = [0.2, 0.8, 1.4]
+            candidates.append(generate_trimodal(v, peaks))
+        candidates.append(generate_trimodal(3, [0.5, 1.5]))
+        
+        candidates.sort(key=lambda x: x["c5_bound"])
+        top10 = candidates[:10]
+        return {"candidates": top10, "num_candidates": 10}
+new_skills:
+- name: pattern-exploration
+  description: 'Use probe_pattern_variants to generate diverse pattern initializations, then edit pattern parameters to fine-tune.
+
+Workflow:
+1. Call probe_pattern_variants to get 10 candidates
+2. Filter for c5_bound < 0.375
+3. Edit pattern parameters (mark positions, split points, peak locations) in EVOLVE-BLOCK
+4. Use probe_solution to screen edited patterns
+5. Evaluate best with evaluate_solution
+6. If one pattern type works, try variants of it'
+  body: '# Pattern Exploration for Erdos C5
+
+## Strategy
+The seed optimizer has 15 patterns. We need to EXPLORE them with different parameters.
+
+## Step 1: Generate Pattern Variants
+1. CALL probe_pattern_variants() - returns 10 candidates with c5_bound
+2. EXAMINE candidates with c5_bound < 0.375
+3. Keep top 3-5 for evaluation
+
+## Step 2: Parameterize Patterns
+
+### Golomb Ruler (Pattern 12)
+The seed uses marks = [0.0, 0.4, 0.8, 1.2, 1.6]
+- Edit to: marks = [0.0, 0.3, 0.6, 0.9, 1.2] (coarser spacing)
+- Edit to: marks = [0.0, 0.5, 1.0, 1.5] (4 marks)
+- Edit to: marks = [0.0, 0.45, 1.1, 1.7] (unequal spacing)
+
+### Bipartite (Pattern 5, 13)
+The seed uses x < 0.5: high, x >= 0.5: low
+- Edit to: x < 0.3: high, x >= 0.3: low
+- Edit to: x < 0.4: high, x >= 0.4: low
+- Edit to: x < 0.6: high, x >= 0.6: low
+
+### Tri-modal (Pattern 14)
+The seed uses peaks at [0.4, 1.0, 1.6]
+- Edit to: peaks = [0.3, 1.0, 1.7]
+- Edit to: peaks = [0.2, 0.8, 1.4]
+- Edit to: 2 peaks at [0.5, 1.5]
+
+## Step 3: Single-Restart Evaluation
+- Set num_restarts=1, num_steps=50000
+- Quickly evaluate each pattern variant
+- Use probe_solution to screen before full eval
+
+## Step 4: Iterate on Promising Patterns
+If Golomb works best:
+- Try more Golomb variants
+- Fine-tune mark spacing
+- Adjust amplitude
+
+## Expected Outcome
+By exploring pattern parameters, you should find c5_bound < 0.38092303510845016.'

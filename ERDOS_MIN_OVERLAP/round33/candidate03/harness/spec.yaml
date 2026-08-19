@@ -1,0 +1,238 @@
+schema: h2spec/1.0
+system_prompt: |
+  Erdos minimum overlap problem (C5): Find a step function h: [0,2]->[0,1] minimizing max_k integral h(x)(1-h(x+k))dx.
+
+  CONSTRAINT: integral(h) = 1 exactly. h values in [0,1].
+
+  Current best: C5 <= 0.38092303510845016 (combined_score = 1.0).
+
+  GOAL: Find h achieving c5_bound < 0.38092303510845016 (combined_score > 1.0).
+
+  STRATEGY: Build step functions directly from combinatorial constructions, not continuous optimization.
+
+  PHASE 1: Generate step functions from templates:
+  - Uniform partition (equal-width steps)
+  - Bipartite (single threshold at a)
+  - Tripartite (two thresholds at a, b)
+  - Golomb ruler-like (discrete marks)
+  - Peak patterns (n narrow peaks)
+
+  PHASE 2: For each candidate, call probe_solution to screen (cheap, 500 intervals).
+  Keep only those with c5_bound < 0.382.
+
+  PHASE 3: Call evaluate_solution on the best 1-2 probe-selected candidates.
+  If combined_score > 1.0, finish.
+
+  KEY INSIGHT: Continuous latent optimization is too slow. Build step functions directly from known good combinatorial patterns.
+
+  BUDGET: 60 full evals, ~30 probes. Use probes to screen many candidates quickly.
+skill_description: Generate step functions from combinatorial templates, screen with probe_solution, evaluate promising candidates.
+skill_body: |
+  # Step Function Construction for Erdos C5
+
+  ## Core Strategy: Direct Construction, Not Optimization
+
+  Do NOT use continuous latent-space optimization (too slow).
+  Instead, construct step functions directly from known combinatorial patterns.
+
+  ## Template Library
+
+  ### Template A: Uniform Partition
+  Divide [0,2] into N equal intervals, assign values 0/1 to each.
+  Adjust to satisfy integral(h)=1.
+
+  ### Template B: Bipartite (Single Threshold)
+  h(x) = 1 if x < a, else 0.
+  Choose a to satisfy integral(h)=1 (a=0.5 for domain [0,2]).
+  Vary a slightly to explore.
+
+  ### Template C: Tripartite (Two Thresholds)
+  h(x) = 1 if x < a or x > b, else 0.
+  Or: h(x) = 1 if a < x < b, else 0.
+  Tune a, b to satisfy integral(h)=1.
+
+  ### Template D: Golomb Ruler
+  Place narrow peaks at positions 0, d, 2d, 3d...
+  Each peak has width w, height 1.
+  Total integral = (number_of_peaks) * w = 1.
+
+  ### Template E: Peak Pattern
+  Place n peaks of width w at positions [x1, x2, ..., xn].
+  Each peak height = 1, width = w.
+  Total integral = n * w = 1, so w = 1/n.
+
+  ## Construction & Screening Pipeline
+
+  1. CHOOSE a template and parameters.
+  2. CONSTRUCT the step function h (discrete array).
+  3. CALL probe_solution to get approximate c5_bound (cheap, 500 intervals).
+  4. If c5_bound < 0.382, CALL evaluate_solution for full score.
+  5. If combined_score > 1.0, finish.
+  6. Otherwise, try different template/parameters.
+
+  ## Key Rules
+  - ALWAYS construct step functions directly from templates
+  - NEVER use continuous latent optimization
+  - PROBE before EVALUATE (use probe budget wisely)
+  - Try multiple templates: bipartite, tripartite, golomb, peaks
+tool_descriptions:
+  edit_solution: |
+    Construct a step function from a template (bipartite, tripartite, golomb, peaks).
+    The EVOLVE-BLOCK should generate discrete step functions, not latent variables.
+    Example: h = np.concatenate([np.ones(100), np.zeros(300)]) for bipartite.
+    Ensure integral(h) = 1 (sum(h) * dx = 1).
+  evaluate_solution: |
+    Full evaluation. Returns combined_score = 0.38092303510845016 / c5_bound.
+    Only call after probe_solution confirms c5_bound < 0.382.
+  probe_solution: |
+    Fast approximate evaluation (500 intervals, analytical c5).
+    Use to screen step function candidates before full evaluation.
+    Budget: ~30 probes available. Keep candidates with c5_bound < 0.382.
+  finish: |
+    Submit when combined_score > 1.0 (c5_bound < 0.38092303510845016).
+sampling:
+  temperature: 0.3
+  top_p: 0.8
+  top_k: 10
+  max_tokens: 8000
+agent:
+  max_iterations: 80
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 5000
+new_tools:
+  - name: step_function_generator
+    description: |
+      Generate a step function from a combinatorial template (bipartite, tripartite, golomb, or peaks).
+      The solver chooses the template and parameters. This tool returns a discrete step function h
+      as a numpy array with integral(h) = 1 and h in [0,1].
+      Templates:
+      - bipartite: single threshold at position a (h(x)=1 if x<a, else 0)
+      - tripartite: two thresholds (e.g., h(x)=1 if x<a or x>b)
+      - golomb: narrow peaks at positions 0, d, 2d, ... with width w=1/n_peaks
+      - peaks: n peaks of width 1/n at positions chosen by solver
+      Call this to quickly generate diverse step functions without optimization.
+    input_schema:
+      type: object
+      properties:
+        template:
+          type: string
+          enum: [bipartite, tripartite, golomb, peaks]
+        params:
+          type: object
+          properties:
+            threshold_a: {type: number}
+            threshold_b: {type: number}
+            num_peaks: {type: integer}
+            peak_positions:
+              type: array
+              items: {type: number}
+    implementation_py: |
+      def run(ctx, args):
+          import numpy as np
+          template = args.get("template", "bipartite")
+          params = args.get("params", {})
+          
+          N = ctx.hypers.num_intervals
+          domain = 2.0
+          dx = domain / N
+          
+          if template == "bipartite":
+              a = params.get("threshold_a", 0.5)
+              h = np.zeros(N)
+              mask = np.arange(N) * dx < a
+              h[mask] = 1.0
+              
+          elif template == "tripartite":
+              a = params.get("threshold_a", 0.33)
+              b = params.get("threshold_b", 0.66)
+              h = np.zeros(N)
+              mask = (np.arange(N) * dx < a) | (np.arange(N) * dx > b)
+              h[mask] = 1.0
+              
+          elif template == "golomb":
+              num_peaks = params.get("num_peaks", 3)
+              peak_positions = np.array([0.0, 0.66, 1.33])
+              for pos in peak_positions[:num_peaks]:
+                  mask = np.abs(np.arange(N) * dx - pos) < 0.05
+                  h[mask] = 1.0
+              
+          elif template == "peaks":
+              num_peaks = params.get("num_peaks", 5)
+              positions = params.get("peak_positions", [0.2, 0.5, 0.8, 1.2, 1.5])
+              width = 1.0 / num_peaks
+              for pos in positions:
+                  mask = np.abs(np.arange(N) * dx - pos) < width / 2
+                  h[mask] = 1.0
+          
+          # Normalize to integral(h) = 1
+          current_integral = h.sum() * dx
+          if current_integral > 0:
+              h = h / current_integral
+          
+          # Clip to [0,1]
+          h = np.clip(h, 0, 1)
+          
+          return {"h": h.tolist(), "template": template, "integral": float(h.sum() * dx)}
+new_skills:
+  - name: direct-construction-strategy
+    description: Build step functions from combinatorial templates, screen with probe, evaluate best.
+    body: |
+      # Direct Construction Strategy for Erdos C5
+
+      ## Core Principle
+      Build step functions directly from combinatorial patterns. Do NOT use continuous latent optimization.
+
+      ## Construction Templates
+
+      ### Bipartite (Single Threshold)
+      h(x) = 1 if x < a, else 0
+      For integral(h)=1 on [0,2]: a = 0.5
+
+      ### Tripartite (Two Thresholds)
+      Option 1: h(x) = 1 if x < a or x > b
+      Option 2: h(x) = 1 if a < x < b
+      Tune a, b to explore different structures.
+
+      ### Golomb Ruler
+      Narrow peaks at positions 0, d, 2d, 3d...
+      Each peak has width w, total integral = n_peaks * w = 1.
+
+      ### Peak Pattern
+      Place n peaks of equal width w = 1/n at positions x1, x2, ..., xn.
+
+      ## Workflow
+
+      1. CHOOSE a template (bipartite, tripartite, golomb, peaks).
+      2. CALL step_function_generator with template and parameters.
+      3. CALL probe_solution on the generated step function.
+      4. If c5_bound < 0.382, CALL evaluate_solution.
+      5. If combined_score > 1.0, finish.
+      6. Otherwise, try a different template/parameters.
+
+      ## Key Rules
+      - ALWAYS use step_function_generator (not latent optimization)
+      - PROBE before EVALUATE
+      - Try multiple templates
+      - Keep candidates with c5_bound < 0.382
+new_middlewares:
+  - name: probe_first_reminder
+    hook: before_model
+    description: Remind solver to use probe_solution before evaluate_solution
+    implementation_py: |
+      def before_model(hook_input):
+          history = hook_input.get("history", [])
+          last_turn = history[-1] if history else None
+          
+          if last_turn is None:
+              return "First turn: Use step_function_generator to create a step function, then probe_solution to screen."
+          
+          tools_used = str(last_turn.get("tools_used", []))
+          
+          if "evaluate_solution" in tools_used and "probe_solution" not in tools_used:
+              return "You just called evaluate_solution without probing first. Use probe_solution to screen candidates before full evaluation."
+          
+          if "step_function_generator" not in tools_used:
+              return "You haven't called step_function_generator yet. Use it to construct step functions from templates."
+          
+          return None

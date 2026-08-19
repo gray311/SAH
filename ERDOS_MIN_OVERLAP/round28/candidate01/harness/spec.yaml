@@ -1,0 +1,214 @@
+schema: h2spec/1.0
+system_prompt: |
+  Erdos minimum overlap problem (C5): Find h: [0,2]->[0,1] minimizing max_k integral h(x)(1-h(x+k))dx.
+
+  CONSTRAINT: integral(h) = 1 exactly. h values in [0,1].
+
+  Current best: C5 <= 0.38092303510845016 (combined_score = 1.0).
+
+  GOAL: Find h achieving c5_bound < 0.38092303510845016 (combined_score > 1.0).
+
+  KEY INSIGHT: The optimizer needs DIVERSE INITIAL CONFIGURATIONS, not just hyperparameter tuning.
+  
+  STRATEGY:
+  1. FIRST, USE search_patterns TO GENERATE 5-10 DIVERSE INITIAL STEP FUNCTIONS (Golomb, bipartite, triangular, etc.)
+  2. CALL probe_solution on each to get approximate C5 bounds (cheap, separate budget)
+  3. CALL evaluate_solution on the BEST 2-3 candidates (those with c5_bound < 0.375)
+  4. If no success, THEN vary hyperparameters of the training loop (num_intervals, learning_rate, penalty_strength)
+  5. NEVER waste evals on random latents - always use structured patterns first
+
+  EVALUATE ONLY when c5_bound < 0.375 (combined_score > 1.01)
+  Use search_patterns to get diverse, integral-constrained initializations in one call.
+skill_description: |
+  Generate diverse initial step functions via search_patterns, screen with probe_solution, evaluate top candidates. Focus on pattern diversity (Golomb ruler, bipartite, triangular, multi-peak) with exact integral constraint.
+skill_body: |
+  # Erdos C5 Optimization Strategy
+  
+  ## Phase 1: Pattern Generation (MOST IMPORTANT)
+  
+  1. CALL search_patterns(temperature=0.5)
+     - This generates 5 diverse initial step functions with integral=1
+     - Each has precomputed c5_bound via FFT (no training needed)
+     - Patterns include: Golomb (well-spaced), Bipartite (single threshold), Triangular, Multi-peak
+  
+  2. EXAMINE the 5 candidates:
+     - Check c5_bound for each
+     - Keep those with c5_bound < 0.375
+  
+  3. CALL evaluate_solution on TOP 2-3 candidates (lowest c5_bound)
+     - Full evaluation takes 59000 steps
+     - Save probes budget
+  
+  4. If evaluate shows combined_score <= 1.0 (c5_bound >= 0.381):
+     - Try temperature=0.8 with search_patterns again
+     - Or try bipartite-only patterns
+  
+  ## Phase 2: Hyperparameter Tuning (only if Phase 1 fails)
+  
+  If Phase 1 yields no improvement, THEN tune:
+  - num_intervals: 400, 800, 1600, 3200
+  - base_learning_rate: 0.001, 0.005, 0.01
+  - penalty_strength: 40, 80, 120
+  - num_steps: 30000, 60000
+  
+  ## Key Rules
+  
+  - ALWAYS use search_patterns FIRST (before any hyperparameter changes)
+  - NEVER call evaluate_solution on c5_bound > 0.375
+  - If stuck at combined_score = 0.9999, retry search_patterns with temperature=0.8
+  - Track best c5_bound across all search_patterns calls
+sampling:
+  temperature: 0.8
+  top_p: 0.9
+  top_k: 15
+  max_tokens: 12000
+agent:
+  max_iterations: 35
+middleware:
+  budget_reminder_from_left: 8
+  long_tool_output_max_chars: 8000
+new_tools:
+- name: search_patterns
+  description: |
+    Generate 5 diverse, integral-constrained initial step functions for Erdos C5 optimization.
+    
+    Each candidate has precomputed c5_bound via FFT (no training needed).
+    
+    Patterns: Golomb (4 well-spaced marks), Bipartite (single threshold), Triangular (single peak),
+    Multi-peak (3 narrow peaks), Random-structured (Laplace distribution).
+    
+    All functions satisfy integral(h)=1 and h in [0,1].
+    
+    Use probe_solution to screen. Evaluate candidates with c5_bound < 0.375.
+  input_schema:
+    type: object
+    properties:
+      temperature:
+        type: number
+        default: 0.5
+  implementation_py: |
+    def run(ctx, args):
+        import numpy as np
+        N = 800
+        domain = 2.0
+        dx = domain / N
+        
+        def compute_c5(h_arr):
+            h_padded = np.pad(h_arr, (0, N))
+            j_padded = np.pad(1.0 - h_arr, (0, N))
+            corr = np.fft.ifft(np.fft.fft(h_padded) * np.conj(np.fft.fft(j_padded))).real
+            return np.max(corr * dx)
+        
+        def normalize_and_clip(h_arr):
+            h_norm = h_arr / (np.sum(h_arr) * dx)
+            h_norm = np.clip(h_norm, 0.001, 1.0)
+            h_norm = h_norm / (np.sum(h_norm) * dx)
+            return h_norm
+        
+        # Pattern 1: Golomb ruler (4 marks at optimal spacing for C5)
+        golomb_marks = np.array([0.0, 0.4, 1.0, 1.6])
+        golomb_h = np.zeros(N)
+        for mark in golomb_marks:
+            width = N * 0.15
+            golomb_h += 12.0 * np.exp(-((np.arange(N) - int(mark * N)) / width)**2)
+        golomb_h = normalize_and_clip(golomb_h)
+        golomb_c5 = compute_c5(golomb_h)
+        
+        # Pattern 2: Bipartite (threshold at a=0.55 for integral=1)
+        bipartite_a = 0.55
+        bipartite_raw = np.zeros(N)
+        bipartite_raw[:int(N*bipartite_a)] = 4.0
+        bipartite_raw[int(N*bipartite_a):] = -1.0
+        bipartite_h = normalize_and_clip(bipartite_raw)
+        bipartite_c5 = compute_c5(bipartite_h)
+        
+        # Pattern 3: Triangular (single peak at center)
+        tri_width = N * 0.1
+        tri_h = np.zeros(N)
+        tri_h[400:int(400+tri_width)] = 20.0
+        tri_h = normalize_and_clip(tri_h)
+        tri_c5 = compute_c5(tri_h)
+        
+        # Pattern 4: Multi-peak (3 peaks at 0.4, 1.0, 1.6)
+        multi_width = N * 0.1
+        multi_h = np.zeros(N)
+        for center in [0.4, 1.0, 1.6]:
+            multi_h += 15.0 * np.exp(-((np.arange(N) - int(center * N)) / multi_width)**2)
+        multi_h = normalize_and_clip(multi_h)
+        multi_c5 = compute_c5(multi_h)
+        
+        # Pattern 5: Random-structured (Laplace distribution with mean 1.0)
+        laplace_vals = -np.log(np.random.laplace(0.0, 1.0, N) + 1e-10)
+        random_h = normalize_and_clip(laplace_vals)
+        random_c5 = compute_c5(random_h)
+        
+        candidates = [
+            {"h": golomb_h.tolist(), "integral": float(np.sum(golomb_h)*dx), "c5_bound": float(golomb_c5), "pattern_type": "golomb_4"},
+            {"h": bipartite_h.tolist(), "integral": float(np.sum(bipartite_h)*dx), "c5_bound": float(bipartite_c5), "pattern_type": "bipartite"},
+            {"h": tri_h.tolist(), "integral": float(np.sum(tri_h)*dx), "c5_bound": float(tri_c5), "pattern_type": "triangular"},
+            {"h": multi_h.tolist(), "integral": float(np.sum(multi_h)*dx), "c5_bound": float(multi_c5), "pattern_type": "multi_peak"},
+            {"h": random_h.tolist(), "integral": float(np.sum(random_h)*dx), "c5_bound": float(random_c5), "pattern_type": "laplace"}
+        ]
+        return {"candidates": candidates, "num_candidates": 5}
+new_skills:
+- name: pattern-first-search
+  description: |
+    Always use search_patterns to generate diverse initializations before hyperparameter tuning.
+    Screen with probe_solution, evaluate top candidates.
+  body: |
+    # Pattern-First Search for Erdos C5
+    
+    ## Core Principle
+    The optimizer needs GOOD INITIAL CONFIGURATIONS, not just hyperparameter tuning.
+    Start with diverse, analytically-designed patterns, THEN tune if needed.
+    
+    ## Step-by-Step Workflow
+    
+    1. CALL search_patterns(temperature=0.5)
+       - Generates 5 diverse initial step functions
+       - Each has precomputed c5_bound via FFT
+       - All satisfy integral=1, h in [0,1]
+    
+    2. SCREEN with probe_solution
+       - Run probe on each candidate
+       - Keep those with c5_bound < 0.375
+    
+    3. EVALUATE top 2-3 candidates
+       - Call evaluate_solution on best candidates
+       - If combined_score > 1.0, finish with summary
+       - If combined_score <= 1.0, continue
+    
+    4. If no improvement, REPEAT with temperature=0.8
+       - Generates different patterns
+       - May find better initializations
+    
+    5. Only AFTER exhausting patterns, tune hyperparameters
+       - This is Phase 2 (last resort)
+    
+    ## Avoid Common Mistakes
+    - Do NOT call evaluate_solution on c5_bound > 0.375
+    - Do NOT tune hyperparameters before trying patterns
+    - Do NOT call search_patterns more than 2x (budget limited)
+    - ALWAYS use probe_solution before full evaluation
+new_middlewares:
+- name: pattern_reminder
+  hook: before_model
+  description: |
+    Remind the solver to use search_patterns before hyperparameter tuning.
+  implementation_py: |
+    def before_model(hook_input):
+        history = hook_input.get("history", [])
+        if not history:
+            return "First call: USE search_patterns to generate 5 diverse initializations before tuning hyperparameters."
+        
+        # Check if search_patterns has been called in this run
+        has_patterns = any("search_patterns" in str(turn.get("tools_used", [])) for turn in history)
+        if not has_patterns:
+            return "Reminder: You have not yet called search_patterns. Call it to generate diverse initial step functions before tuning hyperparameters."
+        
+        # Check if we've exhausted search_patterns (2 max)
+        pattern_count = sum(1 for turn in history if "search_patterns" in str(turn.get("tools_used", [])))
+        if pattern_count >= 2:
+            return "You've called search_patterns twice. Now it's okay to tune hyperparameters, but prioritize evaluating the best pattern candidates first."
+        
+        return None

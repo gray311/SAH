@@ -1,0 +1,225 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are optimizing C2 = ||f*f||2^2 / ((int f)^2 ||f*f||_inf) for non-negative f: R->R.
+  Current best: 0.8962799441554086 (Google's AlphaEvolve step functions).
+  
+  CRITICAL: The seed implements 12 diverse step-function patterns with high resolution (600 intervals).
+  Do NOT discard this. Instead, SYSTEMATICALLY MUTATE it:
+  
+  STRATEGY (2 iterations per full cycle):
+  PHASE 1 (iterations 1-20): EXPLORE MUTATIONS
+  1. Call probe_solution on the seed first to establish baseline
+  2. Generate 3-5 MUTATIONS of seed patterns: change heights by +/-0.1-0.2, shift boundaries by +/-5%,
+     combine adjacent levels, or try asymmetric patterns
+  3. Probe ALL mutations (aim for 15-20 probes total)
+  4. Evaluate TOP 2 by probe score (max 2 full evals per cycle)
+  5. If best beats seed: switch to Phase 2. If not: generate MORE mutations.
+  
+  PHASE 2 (iterations 21-40): REFINEMENT
+  1. Take best mutation that beat seed
+  2. Generate 3 fine mutations (+/-2% parameters)
+  3. Probe all, evaluate top 1
+  4. If no improvement after 5 iterations: go back to Phase 1 with fresh mutations
+  
+  RULES:
+  - ALWAYS ensure f >= 0 (use jax.nn.softplus or max(0,·))
+  - Use probes aggressively: aim for 20+ probes before any full eval
+  - Never waste evals on clearly suboptimal variants (probe score < seed)
+  - Try MUTUALLY EXCLUSIVE changes: if one mutation raised peak height, try another that lowers it
+  - Seed has 12 patterns: try variations of ALL of them
+
+skill_description: |
+  Systematic step-function mutation with probe-heavy exploration. Build on seed's 12 diverse patterns,
+  generate controlled mutations, use probes to filter, and refine winners. Escape local optima through
+  parameter diversity, not architecture jumping.
+skill_body: |
+  # C2 Maximizer: Systematic Step-Function Mutation Protocol
+  
+  ## Core Principle
+  The seed already has 12 diverse step patterns. Don't discard them! Systematically mutate:
+  - Heights: +/-0.05-0.2
+  - Positions: shift boundaries by +/-5%
+  - Combos: merge adjacent levels, create new asymmetric patterns
+  - Expansions: add new levels between existing ones
+  
+  ## Phase 1: Mutation Exploration (iterations 1-20)
+  
+  Step 1: Baseline
+  - Call probe_solution on seed to confirm baseline score (~1.042)
+  
+  Step 2: Generate Mutations
+  - Use the new tool mutate_seed_patterns to get 3-5 mutations
+  - Each mutation should change: height, position, or add/remove a level
+  - Ensure MUTUAL EXCLUSIVITY: don't just nudge seed; make distinct changes
+  
+  Step 3: Probe-Heavy Filtering
+  - Call probe_solution on ALL mutations (target: 15-20 probes)
+  - Skip full eval if probe score < seed's probe score
+  
+  Step 4: Evaluate Winners
+  - Call evaluate_solution on TOP 2 by probe score
+  - If either beats seed (combined_score > 1.042): switch to Phase 2
+  - If not: generate MORE mutations, probe, evaluate
+  
+  Step 5: Iterate
+  - Continue until iteration 20 or breakthrough
+  
+  ## Phase 2: Refinement (iterations 21-40)
+  
+  Only if a mutation beat seed:
+  1. Take best mutation
+  2. Call mutate_seed_patterns with small mutations (+/-2% parameters)
+  3. Probe all, evaluate top 1
+  4. If no improvement after 5 iterations: return to Phase 1 with fresh mutations
+  
+  ## Mutation Types to Try
+  1. Height Perturbation: change peak heights by +/-0.05-0.2
+  2. Position Shift: shift boundaries by +/-5%
+  3. Level Merging: combine adjacent levels into one
+  4. Level Splitting: add new level between existing ones
+  5. Asymmetry: make left/right sides different heights
+  6. Width Adjustment: widen/narrow support regions
+  
+  ## Key Rules
+  - Use probes for ALL but 1-2 variants per cycle
+  - Try variations of ALL 12 seed patterns
+  - Ensure f >= 0 everywhere
+  - Track best combined_score throughout
+  - If stuck at iteration 15: generate completely new mutation types
+tool_descriptions:
+  edit_solution: "Edit EVOLVE-BLOCK. Mutate seed's step patterns: change heights by +/-0.05-0.2, shift boundaries by +/-5%,
+    add/remove levels, create asymmetric patterns. Ensure f >= 0 using jax.nn.softplus or max(0,·).
+    Example: f = f.at[start:end].set(new_height). For new patterns, modify multiple levels."
+  evaluate_solution: "Full evaluation. Budget: 30 total. Call ONLY after probe_solution ranking.
+    Evaluate top 1-2 variants by probe score. If probe score < seed baseline, skip."
+  probe_solution: "Approximate score on 10% subsample. FAST (~10s). Use to rank 5-15+ variants before full eval.
+    You have ~25 probe budget - spend them to explore diverse mutations, not confirm one candidate.
+    Target: 15-20 probes per 10 iterations, then evaluate top 2."
+  finish: "Report best combined_score achieved, the winning mutation type (height/position/level changes),
+    and key insight: which seed pattern family produced the best result."
+sampling:
+  temperature: 0.8
+  top_p: 0.95
+  top_k: 50
+  max_tokens: 16384
+agent:
+  max_iterations: 40
+middleware:
+  budget_reminder_from_left: 3
+  long_tool_output_max_chars: 15000
+new_tools:
+  - name: mutate_seed_patterns
+    description: |
+      Generate 3-5 mutations of the seed's 12 step patterns. Each mutation makes DISTINCT changes:
+      - Height perturbation: +/-0.05-0.2 on peak/valley heights
+      - Position shift: move boundaries by +/-5%
+      - Level merging: combine adjacent levels
+      - Level splitting: add new level between existing ones
+      - Asymmetry: make left/right different
+      Call when starting Phase 1 or after full eval fails.
+    input_schema:
+      type: object
+      properties: {}
+    implementation_py: |
+      def run(ctx, args):
+          import random
+          random.seed(42)
+          seed_program = ctx.get_program()
+          
+          mutations = []
+          
+          # Mutation 1: Height perturbation (increase peaks)
+          mut1_code = seed_program.replace('set(1.40)', 'set(1.50)').replace('set(1.50)', 'set(1.60)').replace('set(1.60)', 'set(1.70)')
+          mutations.append(('height_increase', mut1_code))
+          
+          # Mutation 2: Height perturbation (decrease valleys)
+          mut2_code = seed_program.replace('set(0.60)', 'set(0.70)').replace('set(0.70)', 'set(0.80)')
+          mutations.append(('valley_decrease', mut2_code))
+          
+          # Mutation 3: Position shift (widen support)
+          mut3_code = seed_program.replace('int(0.10 * n)', 'int(0.08 * n)').replace('int(0.90 * n)', 'int(0.92 * n)')
+          mutations.append(('widen_support', mut3_code))
+          
+          # Mutation 4: Asymmetric levels (different left/right)
+          mut4_code = seed_program.replace('set(1.20)', 'set(1.30)').replace('set(1.40)', 'set(1.45)')
+          mutations.append(('asymmetric_left', mut4_code))
+          
+          # Mutation 5: Level splitting (add intermediate level)
+          mut5_code = seed_program.replace('set(1.30)', 'set(1.35)').replace('set(1.40)', 'set(1.42)')
+          mutations.append(('intermediate_level', mut5_code))
+          
+          return {'mutations': [{'type': t, 'code': c} for t, c in mutations]}
+new_skills:
+  - name: mutation-exploration-protocol
+    description: |
+      Systematic mutation of seed step patterns with probe-heavy filtering. Build on existing
+      12 diverse patterns rather than jumping architectures.
+    body: |
+      # Mutation Exploration Protocol for C2 Optimization
+      
+      ## Core Principle
+      The seed's 12 step patterns are diverse and well-structured. Don't discard them!
+      Systematically mutate heights, positions, and level combinations.
+      
+      ## Mutation Types
+      1. **Height Perturbation**: Change peak/valley heights by +/-0.05-0.2
+         - Try: 1.40->1.50, 1.50->1.60, or reverse
+         - Rationale: Optimize local height ratios
+      
+      2. **Position Shift**: Move boundaries by +/-5%
+         - Try: 0.25->0.27, 0.75->0.73
+         - Rationale: Shift support region to optimize convolution shape
+      
+      3. **Level Merging**: Combine adjacent levels
+         - Try: merge 0.90+1.10 into 1.10
+         - Rationale: Reduce complexity, smooth transitions
+      
+      4. **Level Splitting**: Add new level between existing ones
+         - Try: insert 1.25 between 1.20 and 1.30
+         - Rationale: Add flexibility
+      
+      5. **Asymmetry**: Make left/right different
+         - Try: set left=1.30, right=1.50
+         - Rationale: Exploit directional properties
+      
+      ## Execution Flow
+      1. Probe seed to establish baseline (~1.042)
+      2. Generate 3-5 mutations with MUTUAL EXCLUSIVITY
+      3. Probe ALL mutations (target 15-20 probes)
+      4. Evaluate top 2 by probe score
+      5. If best beats seed: refine. Else: generate more mutations.
+      
+      ## Key Rules
+      - Use probes for ALL but 1-2 variants
+      - Try variations of ALL 12 seed patterns
+      - Ensure f >= 0 everywhere
+      - Track best combined_score
+      - If stuck: try completely different mutation type
+new_middlewares:
+  - name: probe_before_eval
+    hook: before_tool
+    description: |
+      Middleware to enforce probe-before-eval discipline.
+    implementation_py: |
+      def before_tool(hook_input):
+          tool = hook_input.get('tool_name', '')
+          eval_count = hook_input.get('eval_count', 0)
+          
+          if tool == 'evaluate_solution':
+              if eval_count < 2:
+                  return "CRITICAL: You've only done 1 eval. Use probe_solution to filter variants FIRST. You have ~25 probes - spend them!"
+                  return None
+          
+          return None
+  - name: mutation_diversity_reminder
+    hook: before_model
+    description: |
+      Middleware to ensure mutations are diverse, not just small nudges.
+    implementation_py: |
+      def before_model(hook_input):
+          iteration = hook_input.get('iteration', 0)
+          
+          if iteration > 5:
+              return "Reminder: Ensure mutations are MUTUALLY EXCLUSIVE (different height/position/level changes), not just small nudges of seed."
+          
+          return None

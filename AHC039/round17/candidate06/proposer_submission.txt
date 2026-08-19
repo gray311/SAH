@@ -1,0 +1,167 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are a C++ polygon optimizer for axis-aligned fish capture.
+  Goal: maximize (mackerels - sardines + 1).
+  
+  SEARCH METHOD (encodes in EVOLVE-BLOCK C++ code):
+  
+  1. BOUNDING BOX ANALYSIS:
+     - Find min/max x,y of all mackerels
+     - Build small rectangles around mackerel clusters
+   
+  2. SIMPLE POLYGON CONSTRUCTION:
+     - Create rectangles (4 vertices) or L-shaped polygons (6-8 vertices)
+     - Use tight bounds around mackerel clusters
+     - Ensure perimeter <= 400,000 and coords in [0,100000]
+   
+  3. FAST RANDOM PERTURBATION:
+     - Try 3-5 random rectangle sizes centered on mackerel clusters
+     - Each: pick random mackerel, expand ±100..500 in each direction
+     - Use simple rectangle (4 vertices) for speed
+   
+  4. LIMITED HILL CLIMBING:
+     - For each candidate, try edge shifts ±10, ±20
+     - Keep best valid polygon
+   
+  5. SINGLE RUN:
+     - No multiple restarts - too slow
+     - Output single best polygon from 3-5 candidates
+  
+  Tools:
+  - edit_solution: Replace EVOLVE-BLOCK with complete C++ implementing this fast strategy
+  - evaluate_solution: Run C++ program, get score (budget=30)
+  - probe_solution: Use for quick shape testing before full eval
+  - finish: Submit when you have a working fast polygon generator
+
+  KEY DIFFERENCE from seed: Use simple rectangles around mackerel clusters with minimal expansion, avoiding complex grid searches that cause timeouts.
+skill_description: Fast rectangle-based polygon search around mackerel clusters with limited random expansion and minimal hill climbing.
+skill_body: |
+  # Fast Rectangle-Based Polygon Search
+  
+  ## Core Strategy
+  Instead of complex grid analysis, directly construct simple axis-aligned rectangles around mackerel clusters.
+  
+  ## Step 1: Cluster Detection
+  - Parse input to find all mackerel coordinates
+  - Group mackerels by proximity (within 5000 units)
+  
+  ## Step 2: Rectangle Generation
+  - For each cluster, pick a central mackerel
+  - Create rectangle by expanding ±R where R is random (100-500)
+  - Ensure: 4 vertices, all coords in [0,100000], no self-intersection
+  
+  ## Step 3: Limited Refinement
+  - Try 3-5 rectangles per run
+  - For each, optionally try edge shifts ±10, ±20
+  - Validate perimeter <= 400,000
+  
+  ## Step 4: Output Best
+  - Return single best valid polygon
+  - Prioritize speed over exhaustive search
+tool_descriptions:
+  edit_solution: 'Replace EVOLVE-BLOCK with C++ implementing fast rectangle search:
+    1. Parse mackerel positions from input
+    2. Group by proximity (5000 unit threshold)
+    3. For each cluster, create 1-2 rectangles by expanding central mackerel ±100-500
+    4. Try 3-5 total rectangles per run
+    5. Optional: refine edges with ±10, ±20 shifts
+    6. Output best valid rectangle (4-8 vertices)
+    Ensure <1.5s execution for safety margin.'
+  evaluate_solution: Run C++ program. Returns score (mackerels-sardines+1), validity, and remaining evaluations (budget=30). Each run has ~1.5-2.0s search window.
+  probe_solution: Generate quick polygon sketches (no full eval) to test shape ideas.
+  finish: End when you have submitted a working fast rectangle-based search.
+sampling:
+  temperature: 0.9
+  top_p: 0.95
+  top_k: 30
+  max_tokens: 8192
+agent:
+  max_iterations: 30
+middleware:
+  budget_reminder_from_left: 3
+  long_tool_output_max_chars: 10000
+new_tools:
+- name: gen_rectangle
+  description: Generate a rectangle around a seed point, ensuring valid coordinates and perimeter.
+  input_schema:
+    type: object
+    properties:
+      seed_x:
+        type: integer
+      seed_y:
+        type: integer
+      expansion:
+        type: integer
+        default: 200
+  implementation_py: |
+    def run(ctx, args):
+        import random
+        seed_x = args.get("seed_x", 50000)
+        seed_y = args.get("seed_y", 50000)
+        expansion = args.get("expansion", 200)
+        
+        # Clamp to valid range
+        left = max(0, seed_x - expansion)
+        right = min(100001, seed_x + expansion + 1)
+        bottom = max(0, seed_y - expansion)
+        top = min(100001, seed_y + expansion + 1)
+        
+        # Ensure minimum size for valid polygon
+        if right - left < 1: right = left + 1
+        if top - bottom < 1: top = bottom + 1
+        
+        perimeter = 2 * ((right - left) + (top - bottom))
+        if perimeter > 400000:
+            # Scale down if too large
+            scale = 400000 / perimeter
+            left = max(0, left * scale)
+            right = min(100001, right * scale)
+            bottom = max(0, bottom * scale)
+            top = min(100001, top * scale)
+        
+        vertices = [
+            {"x": int(left), "y": int(bottom)},
+            {"x": int(right), "y": int(bottom)},
+            {"x": int(right), "y": int(top)},
+            {"x": int(left), "y": int(top)}
+        ]
+        
+        return {"vertices": vertices, "perimeter": perimeter, "type": "rectangle"}
+new_skills:
+- name: fast-rectangle-strategy
+  description: Use simple rectangles around mackerel clusters instead of complex grid searches.
+  body: |
+    # Fast Rectangle Strategy for Fish Capture
+    
+    ## Why This Works
+    The seed program already finds good solutions using some strategy.
+    Our goal is to find slightly better polygons with less computation.
+    
+    ## Method
+    
+    1. **Identify Mackerel Clusters**: Find groups of mackerels within 5000 units
+    
+    2. **Generate Rectangles**: For each cluster center, create a rectangle by expanding ±100-500 units
+    
+    3. **Limit Candidates**: Try only 3-5 rectangles per run (not 15-20 restarts)
+    
+    4. **Minimal Refinement**: Optionally try edge shifts of ±10 or ±20 units
+    
+    5. **Output Best**: Return the single best valid rectangle
+    
+    ## Advantages
+    - Much faster than grid-based corridor expansion
+    - Simpler code, less chance of bugs
+    - Focuses on tight mackerel clusters (maximizes mackerels, minimizes area = fewer sardines)
+    
+    ## Key Parameters
+    - Expansion range: 100-500 units
+    - Candidates per run: 3-5
+    - Edge shift refinement: ±10, ±20 units only
+new_middlewares:
+- name: quick_shape_prompt
+  hook: before_model
+  description: Remind the solver to use fast rectangle generation
+  implementation_py: |
+    def before_model(hook_input):
+        return "Generate 3-5 rectangles around mackerel clusters. Expand ±100-500 units. Use minimal edge refinement (±10,±20). Output best valid rectangle. Keep execution under 1.5s."

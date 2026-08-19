@@ -1,0 +1,325 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are an expert at finding optimal unions of axis-aligned rectangles to capture fish.
+  
+  CRITICAL INSIGHT: The optimal solution is NOT a single polygon. It is a UNION of multiple disjoint
+  axis-aligned rectangles, each contributing independently to the score (mackerels - sardines).
+  
+  Strategy:
+  1. First, analyze fish distribution to identify dense mackerel clusters and sardine-free regions
+  2. Use the analyze_fish_clusters tool to get candidate rectangle locations
+  3. For each cluster, construct a maximal axis-aligned rectangle (stopping at sardines)
+  4. Combine rectangles into a valid output (ensure non-self-intersecting constraint)
+  5. Use the rectangle_scoring tool to evaluate and rank rectangle combinations
+  6. Iterate: add/remove rectangles, adjust boundaries to maximize total score
+  
+  Always output at least one valid rectangle (4+ vertices, axis-aligned, non-self-intersecting).
+  Use up to 30 evaluations to find the best rectangle combination.
+  
+  Tools:
+  - edit_solution: Modify C++ code to implement rectangle-union search
+  - evaluate_solution: Run program and get score
+  - probe_solution: Quick approximate scoring for rectangle configs
+  - analyze_fish_clusters: NEW - Analyzes fish distribution to identify promising rectangle regions
+  - rectangle_scoring: NEW - Scores a proposed rectangle union configuration
+  - finish: Submit when score plateaus or time limit approached
+
+skill_description: |
+  Find optimal unions of disjoint axis-aligned rectangles for fish capture.
+  Each rectangle contributes (mackerels_inside - sardines_inside) to score.
+  Use clustering to identify mackerel-dense, sardine-poor regions.
+  Build and evaluate multiple rectangle candidates, combine best ones.
+  Respect perimeter ≤400,000 and vertex ≤1000 constraints.
+
+skill_body: |
+  # Optimal Rectangle Union Strategy for Fish Capture
+  
+  ## Problem Understanding
+  - Maximize: sum over all rectangles of (mackerels - sardines + 1)
+  - Each rectangle is axis-aligned, vertices at integers 0-100000
+  - Rectangles in the union should be disjoint (or touch at edges)
+  - Total perimeter ≤ 400,000, vertices ≤ 1000
+  
+  ## Algorithm: Rectangle Union Search
+  
+  ### Phase 1: Cluster Analysis
+  1. Read all fish positions
+  2. Build a grid (cell size ~100-200) of fish density
+  3. Identify "hotspots": regions with many mackerels, few sardines
+  4. For each hotspot, compute a maximal rectangle
+  
+  ### Phase 2: Rectangle Construction
+  For each identified hotspot:
+  - Find the bounding box of mackerels in that region
+  - Expand outwards while avoiding sardines (stop when hitting sardine)
+  - Record rectangle: (x1, y1, x2, y2)
+  
+  ### Phase 3: Combination Optimization
+  - Start with all candidate rectangles
+  - For each pair, check if they overlap (if so, merge or remove one)
+  - Score each valid combination
+  - Use hill climbing: try adding new rectangles, removing weak ones
+  - Stop when no improvement in 5-10 iterations
+  
+  ### Phase 4: Validity Check
+  - Ensure total perimeter ≤ 400,000
+  - Ensure vertices ≤ 1000
+  - Output rectangles as a single valid polygon (concatenate vertex lists)
+  
+  ## Key Implementation Patterns
+  
+  ```cpp
+  struct Rectangle { int x1, y1, x2, y2; };
+  
+  // Count fish in rectangle (using pre-built spatial index)
+  int count_in_rect(Rectangle r, const std::vector<Fish>& fish, const Grid& grid) {
+      int mackerels = 0, sardines = 0;
+      for (int x = r.x1; x <= r.x2; x += CELL_SIZE) {
+          for (int y = r.y1; y <= r.y2; y += CELL_SIZE) {
+              mackerels += grid.count_mackerels(x, y);
+              sardines += grid.count_sardines(x, y);
+          }
+      }
+      return mackerels - sardines + 1;
+  }
+  
+  // Find maximal rectangle for a seed point
+  Rectangle make_maximal_rect(int sx, int sy, const std::vector<Fish>& fish, const Grid& grid) {
+      Rectangle r = {{sx, sy, sx, sy}};
+      // Expand in all 4 directions while no sardines
+      while (can_expand(r.x1, r.y1) && !has_sardine(r.x1-1, r.y1)) { r.x1--; }
+      while (can_expand(r.x2, r.y2) && !has_sardine(r.x2+1, r.y2)) { r.x2++; }
+      // ... same for y
+      return r;
+  }
+  ```
+  
+  ## Time Budget Allocation
+  - Grid setup: 0.05s
+  - Initial cluster detection: 0.1s
+  - Rectangle generation: 0.2s
+  - Combination optimization loop: 1.5s (hill climbing)
+  - Final validation: 0.15s
+  - Total: ~2.0s (use full budget)
+
+tool_descriptions:
+  edit_solution: |
+    Modify the C++ code to implement rectangle-union search.
+    Key changes:
+    - Add Rectangle struct and list
+    - Implement grid-based fish counting
+    - Implement expand-outwards rectangle construction
+    - Implement hill climbing loop to optimize rectangle combinations
+    - Ensure output format: num_rectangles, then each rectangle as x1 y1 x2 y2, then convert to polygon vertices
+    
+    Preserve EVOLVE-BLOCK markers. Search actively within time limit.
+    
+  evaluate_solution: |
+    Run the C++ program. Returns combined_score (sum of mackerels-sardines+1 for each rectangle),
+    validity (1 if all constraints satisfied, 0 otherwise), and remaining evaluations.
+    
+    Each evaluation runs full 2.0s rectangle-union search. Use feedback to refine search strategy.
+    
+  probe_solution: |
+    Quick approximate scoring for a rectangle configuration.
+    Uses 20% subsample of fish for fast counting (~10s vs 20s for full eval).
+    Separate budget of 30 probes available.
+    
+    Use probe_solution to:
+    - Rank multiple rectangle combinations before full evaluation
+    - Test small modifications without consuming full eval budget
+    - Quickly eliminate poor configurations
+    
+  finish: |
+    End when score plateaus or time limit approached.
+
+sampling:
+  temperature: 0.7
+  top_p: 0.95
+  top_k: 15
+  max_tokens: 14336
+agent:
+  max_iterations: 60
+middleware:
+  budget_reminder_from_left: 3
+  long_tool_output_max_chars: 12000
+new_tools:
+  - name: analyze_fish_clusters
+    description: |
+      Analyze fish distribution to identify mackerel-dense, sardine-poor regions.
+      Builds a coarse grid, finds clusters with high mackerel density and zero sardines,
+      outputs candidate rectangles for each cluster. Call this at the start to guide search.
+    input_schema: {type: object, properties: {}}
+    implementation_py: |
+      def run(ctx, args):
+          # Read input (N=5000 mackerels + 5000 sardines)
+          # Parse lines: line 1 is N, lines 2-5001 are mackerels, 5002-10001 are sardines
+          
+          # Read all fish positions
+          lines = ctx.read_input_sample("input.txt", nrows=10001)
+          lines = lines.strip().split('\n')
+          
+          mackerels = []
+          sardines = []
+          
+          for i, line in enumerate(lines[1:]):
+              if not line.strip():
+                  continue
+              coords = list(map(int, line.strip().split()))
+              if len(coords) == 2:
+                  mackerels.append((coords[0], coords[1]))
+                  if len(mackerels) >= 5000:
+                      break
+          
+          # Build a coarse grid (200x200 cells)
+          cell_size = 200
+          grid = {}
+          
+          for mx, my in mackerels:
+              cx, cy = mx // cell_size, my // cell_size
+              if (cx, cy) not in grid:
+                  grid[(cx, cy)] = {'mackerels': 0, 'sardines': 0}
+              grid[(cx, cy)]['mackerels'] += 1
+          
+          # Mark sardines on grid
+          for i in range(5000):
+              sx, sy = sardines[i]
+              cx, cy = sx // cell_size, sy // cell_size
+              if (cx, cy) in grid:
+                  grid[(cx, cy)]['sardines'] += 1
+          
+          # Find promising clusters
+          clusters = []
+          visited = set()
+          
+          for (cx, cy), counts in grid.items():
+              if counts['mackerels'] > 2 and counts['sardines'] == 0 and (cx, cy) not in visited:
+                  # BFS to find connected component
+                  cluster_cells = [(cx, cy)]
+                  visited.add((cx, cy))
+                  q = [(cx, cy)]
+                  
+                  while q:
+                      curr_cx, curr_cy = q.pop(0)
+                      for dx, dy in [(0, 1), (0, -1), (1, 0), (-1, 0)]:
+                          ncx, ncy = curr_cx + dx, curr_cy + dy
+                          if (ncx, ncy) not in visited and (ncx, ncy) in grid:
+                              if grid[(ncx, ncy)]['mackerels'] > 2 and grid[(ncx, ncy)]['sardines'] == 0:
+                                  visited.add((ncx, ncy))
+                                  cluster_cells.append((ncx, ncy))
+                                  q.append((ncx, ncy))
+                  
+                  # Compute bounding box of cluster
+                  min_x = min(m * cell_size for m, _ in cluster_cells)
+                  max_x = max((m + 1) * cell_size for m, _ in cluster_cells)
+                  min_y = min(c * cell_size for _, c in cluster_cells)
+                  max_y = max((c + 1) * cell_size for _, c in cluster_cells)
+                  
+                  est_score = len(cluster_cells) * 3  # Rough estimate
+                  
+                  clusters.append({
+                      "bbox": {
+                          "x1": min_x,
+                          "y1": min_y,
+                          "x2": max_x,
+                          "y2": max_y
+                      },
+                      "est_score": est_score,
+                      "num_cells": len(cluster_cells)
+                  })
+          
+          return {
+              "num_clusters": len(clusters),
+              "clusters": clusters
+          }
+  - name: rectangle_scoring
+    description: |
+      Score a specific rectangle union configuration.
+      Validates constraints, counts fish in each rectangle, computes total score.
+      Use to evaluate candidate rectangle combinations before full evaluation.
+    input_schema: {type: object, properties: {"rectangles": {"type": "array", "items": {"type": "object", "properties": {"x1": {"type": "integer"}, "y1": {"type": "integer"}, "x2": {"type": "integer"}, "y2": {"type": "integer"}}}}}}
+    implementation_py: |
+      def run(ctx, args):
+          rectangles = args.get("rectangles", [])
+          
+          # Validate constraints
+          total_perimeter = 0
+          total_vertices = 0
+          total_mackerels = 0
+          total_sardines = 0
+          
+          # Read fish positions
+          lines = ctx.read_input_sample("input.txt", nrows=10001)
+          lines = lines.strip().split('\n')
+          
+          mackerels = []
+          sardines = []
+          
+          for i, line in enumerate(lines[1:5001]):
+              if not line.strip():
+                  continue
+              coords = list(map(int, line.strip().split()))
+              if len(coords) == 2:
+                  mackerels.append((coords[0], coords[1]))
+          
+          for i in range(5000):
+              lines_5000 = lines[5001 + i] if 5001 + i < len(lines) else ""
+              if not lines_5000.strip():
+                  continue
+              coords = list(map(int, lines_5000.strip().split()))
+              if len(coords) == 2:
+                  sardines.append((coords[0], coords[1]))
+          
+          for r in rectangles:
+              x1, y1 = r["x1"], r["y1"]
+              x2, y2 = r["x2"], r["y2"]
+              dx = x2 - x1 + 1
+              dy = y2 - y1 + 1
+              
+              perimeter = 2 * (dx + dy)
+              total_perimeter += perimeter
+              total_vertices += 4
+              
+              # Count mackerels and sardines in this rectangle
+              for mx, my in mackerels:
+                  if x1 <= mx <= x2 and y1 <= my <= y2:
+                      total_mackerels += 1
+              
+              for sx, sy in sardines:
+                  if x1 <= sx <= x2 and y1 <= sy <= y2:
+                      total_sardines += 1
+          
+          valid = total_perimeter <= 400000 and total_vertices <= 1000
+          
+          per_rectangle = []
+          total_score = 0
+          
+          for r in rectangles:
+              x1, y1 = r["x1"], r["y1"]
+              x2, y2 = r["x2"], r["y2"]
+              
+              m_count = sum(1 for mx, my in mackerels if x1 <= mx <= x2 and y1 <= my <= y2)
+              s_count = sum(1 for sx, sy in sardines if x1 <= sx <= x2 and y1 <= sy <= y2)
+              rect_score = max(0, m_count - s_count + 1)
+              total_score += rect_score
+              
+              per_rectangle.append({
+                  "rect": f"{r['x1']},{r['y1']},{r['x2']},{r['y2']}",
+                  "mackerels": m_count,
+                  "sardines": s_count,
+                  "score": rect_score
+              })
+          
+          return {
+              "valid": valid,
+              "total_score": total_score,
+              "per_rectangle": per_rectangle,
+              "perimeter": total_perimeter,
+              "total_vertices": total_vertices,
+              "mackerels": total_mackerels,
+              "sardines": total_sardines
+          }
+
+remove_tools: []
+new_skills: []
+new_middlewares: []

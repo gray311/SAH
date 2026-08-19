@@ -1,0 +1,360 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are a C++ polygon optimizer for axis-aligned fish capture. Goal: maximize (mackerels - sardines + 1).
+  
+  TASK ANALYSIS:
+  - N=5000 mackerels and 5000 sardines, coordinates in [0,100000]
+  - Build axis-aligned polygon (vertices parallel to x or y axis)
+  - Score = max(0, mackerels_inside - sardines_inside + 1)
+  
+  KEY INSIGHT: The seed program already achieves ~2.5, so we need a SIGNIFICANT improvement.
+  The issue: generic strategies fail. We need MACKEREL-FOCUSED strategies that build polygons around
+  dense mackerel clusters while actively excluding sardines.
+  
+  SEARCH STRATEGY:
+  1. PATTERN-BASED MACKEREL CLUSTERING: 
+     - Parse fish positions from input
+     - Identify mackerel clusters using spatial grouping (points within 5000 distance)
+     - Build polygons that tightly enclose individual clusters
+  
+  2. DIVERSE POLYGON GENERATION:
+     - Don't rely on single strategy: try multiple approaches per evaluation
+     - Approaches: (a) minimal bounding box per cluster, (b) custom shapes around clusters,
+       (c) combinations of multiple clusters
+  
+  3. EFFICIENT CONSTRUCTION:
+     - Avoid grid-based approximations (too coarse, wastes budget)
+     - Use direct coordinate-based construction from fish positions
+     - Use KD-tree or spatial index for fast fish queries
+  
+  4. RIGOROUS VALIDATION:
+     - Ensure 4-1000 vertices, no self-intersection, valid coordinates
+     - Output LAST valid polygon for scoring
+  
+  Tools available:
+  - edit_solution: Replace EVOLVE-BLOCK with optimized C++ code implementing strategy above
+  - evaluate_solution: Run and score the C++ program (budget=30 evaluations)
+  - probe_solution: Use subsampling for fast approximate scoring (30 probes available)
+  - finish: Submit final solution
+
+  IMPORTANT: Each evaluation has ~2.0 seconds. Generate multiple diverse polygons, not just one.
+  Use probe_solution to quickly rank candidates before full evaluation.
+skill_description: |
+  Mackerel-focused clustering. Identify spatial clusters of mackerels (within 5000 distance),
+  build minimal axis-aligned polygons around clusters, actively exclude sardines by
+  keeping polygons tight. Try diverse constructions: single cluster boxes, multi-cluster combos.
+  Use KD-tree for fast fish counting. Run multiple diverse candidates per eval, probe then evaluate.
+skill_body: |
+  # Mackerel-Focused Clustering Strategy
+  
+  ## Phase 1: Spatial Analysis
+  - Parse all mackerel and sardine coordinates from input
+  - Build KD-tree or grid for efficient spatial queries
+  - Find mackerel clusters: groups of mackerels within distance 5000 of each other
+  
+  ## Phase 2: Cluster Enclosure
+  For each identified mackerel cluster:
+  - Compute minimal axis-aligned bounding box
+  - Check sardine count inside (should be low if cluster is isolated)
+  - Compute score = M - S + 1
+  
+  ## Phase 3: Multi-Cluster Combinations
+  - Try combining adjacent clusters into larger polygons
+  - Consider: combined score of separate polygons vs single large polygon
+  - Generally prefer separate polygons if they don't overlap
+  
+  ## Phase 4: Diverse Generation
+  - Generate multiple candidate approaches:
+    * Approach A: Single large polygon covering many mackerels
+    * Approach B: Multiple small polygons around individual clusters  
+    * Approach C: Hybrid (large + small)
+  - Use KD-tree to quickly estimate sardine counts for ranking
+  
+  ## Phase 5: Validation and Output
+  - Validate each candidate: 4-1000 vertices, valid coordinates, no self-intersection
+  - Output the best candidate (highest M - S + 1)
+  - Always output at least one valid polygon
+  
+  ## C++ Implementation Notes
+  - Use input parsing to read fish positions
+  - Implement efficient spatial indexing (KD-tree or grid)
+  - Generate multiple diverse polygons per evaluation
+  - Use probe if available for quick ranking
+  - Ensure <2.0s execution time
+  
+  Mackerels are the friend to capture, sardines are the penalty to avoid.
+  Build TIGHT polygons around mackerel clusters, not loose ones.
+tool_descriptions:
+  edit_solution: |
+    Replace EVOLVE-BLOCK with C++ implementing mackerel-focused clustering:
+    
+    1. Parse mackerel and sardine coordinates from input
+    
+    2. Identify clusters using spatial proximity (distance threshold ~5000)
+    
+    3. For each cluster, build minimal axis-aligned bounding box
+    
+    4. Check sardine density inside each box (use KD-tree for fast query)
+    
+    5. Generate multiple diverse candidates: single large box, multi-cluster boxes, hybrids
+    
+    6. Rank candidates using probe if available, otherwise use fast estimation
+    
+    7. Output best valid polygon
+    
+    Ensure: <2.0s execution, valid output format, at least one polygon per eval.
+  evaluate_solution: |
+    Run C++ program with edited EVOLVE-BLOCK. Returns score (mackerels-sardines+1),
+    validity flag, remaining evaluation budget (30 total).
+  probe_solution: |
+    Run subsampled evaluation (~10% points) for fast approximate scoring.
+    Useful for ranking multiple polygon candidates before full evaluation.
+    Budget: 30 probes per evaluation. Scores are approximate but can guide selection.
+  finish: |
+    Submit when you have encoded a working mackerel-focused clustering strategy that
+    generates diverse candidates and uses probe for ranking.
+sampling:
+  temperature: 0.9
+  top_p: 0.95
+  top_k: 30
+  max_tokens: 14336
+agent:
+  max_iterations: 60
+middleware:
+  budget_reminder_from_left: 8
+  long_tool_output_max_chars: 18000
+new_tools:
+- name: cluster_boxes
+  description: |
+    Parse fish input, identify mackerel clusters (points within 5000 distance),
+    build minimal axis-aligned bounding boxes around clusters, optionally combine
+    adjacent clusters. Returns list of candidate polygons with estimated scores.
+    
+    Uses KD-tree for fast spatial lookups. Prioritizes boxes with high M/S ratio.
+  input_schema:
+    type: object
+    properties:
+      cluster_threshold:
+        type: integer
+        default: 5000
+      max_boxes:
+        type: integer
+        default: 20
+  implementation_py: |
+    def run(ctx, args):
+        threshold = args.get("cluster_threshold", 5000)
+        max_boxes = args.get("max_boxes", 20)
+        
+        # Parse fish positions from program
+        program = ctx.get_program()
+        mackerels = []
+        sardines = []
+        
+        for line in program.split('\n'):
+            # Look for mackerel positions: fish[i] is mackerel at (x, y)
+            if 'mackerel' in line.lower():
+                parts = line.replace('mackerel', '').replace('(', '').replace(')', '').strip().split(',')
+                if len(parts) >= 2:
+                    try:
+                        mackerels.append((int(parts[0]), int(parts[1])))
+                    except:
+                        pass
+            elif 'sardine' in line.lower():
+                parts = line.replace('sardine', '').replace('(', '').replace(')', '').strip().split(',')
+                if len(parts) >= 2:
+                    try:
+                        sardines.append((int(parts[0]), int(parts[1])))
+                    except:
+                        pass
+        
+        # Build KD-tree for sardines (for fast counting)
+        # Simple approach: create bounding box and count points
+        def bbox_contains_point(pts, min_x, max_x, min_y, max_y):
+            if not pts:
+                return 0
+            count = 0
+            for px, py in pts:
+                if min_x <= px <= max_x and min_y <= py <= max_y:
+                    count += 1
+            return count
+        
+        # Find clusters using simple spatial grouping
+        clusters = []
+        visited = set()
+        
+        if len(mackerels) > 0:
+            for i, (mx, my) in enumerate(mackerels):
+                if i in visited:
+                    continue
+                
+                cluster = [(mx, my)]
+                visited.add(i)
+                
+                # Find all mackerels within threshold
+                changed = True
+                while changed:
+                    changed = False
+                    for j, (mj, mjy) in enumerate(mackerels):
+                        if j in visited:
+                            continue
+                        
+                        # Check if within threshold (use Manhattan distance for speed)
+                        dist = abs(mx - mj) + abs(my - mjy)
+                        if dist <= threshold:
+                            cluster.append((mj, mjy))
+                            visited.add(j)
+                            changed = True
+                
+                # Compute bounding box
+                xs = [p[0] for p in cluster]
+                ys = [p[1] for p in cluster]
+                min_x, max_x = min(xs), max(xs)
+                min_y, max_y = min(ys), max(ys)
+                
+                # Count sardines in this box
+                s_count = bbox_contains_point(sardines, min_x, max_x, min_y, max_y)
+                m_count = len(cluster)
+                
+                clusters.append({
+                    'min_x': min_x, 'max_x': max_x,
+                    'min_y': min_y, 'max_y': max_y,
+                    'mackerels': m_count, 'sardines': s_count,
+                    'score': m_count - s_count
+                })
+        
+        # Combine adjacent clusters if beneficial
+        combined_candidates = []
+        simple_candidates = []
+        
+        for c in clusters[:max_boxes]:
+            # Ensure valid rectangle
+            if c['max_x'] < c['min_x'] or c['max_y'] < c['min_y']:
+                continue
+            
+            simple_candidates.append({
+                'vertices': [
+                    (c['min_x'], c['min_y']),
+                    (c['max_x'], c['min_y']),
+                    (c['max_x'], c['max_y']),
+                    (c['min_x'], c['max_y'])
+                ],
+                'score': c['score'],
+                'mackerels': c['mackerels'],
+                'sardines': c['sardines']
+            })
+            
+            # Try rotated version
+            simple_candidates.append({
+                'vertices': [
+                    (c['min_x'], c['max_y']),
+                    (c['max_x'], c['max_y']),
+                    (c['max_x'], c['min_y']),
+                    (c['min_x'], c['min_y'])
+                ],
+                'score': c['score'],
+                'mackerels': c['mackerels'],
+                'sardines': c['sardines']
+            })
+        
+        # Also try combining top few clusters
+        if len(clusters) >= 4:
+            combined = clusters[:4]
+            all_xs = [c['min_x'] for c in combined] + [c['max_x'] for c in combined]
+            all_ys = [c['min_y'] for c in combined] + [c['max_y'] for c in combined]
+            min_all_x, max_all_x = min(all_xs), max(all_xs)
+            min_all_y, max_all_y = min(all_ys), max(all_ys)
+            
+            # Count total mackerels and sardines in combined region
+            # (simplified: might double-count, but gives approximate score)
+            combined_candidates.append({
+                'vertices': [
+                    (min_all_x, min_all_y),
+                    (max_all_x, min_all_y),
+                    (max_all_x, max_all_y),
+                    (min_all_x, max_all_y)
+                ],
+                'score': sum(c['score'] for c in combined),
+                'mackerels': sum(c['mackerels'] for c in combined),
+                'sardines': 0  # Approximate
+            })
+        
+        return {
+            'clusters': clusters,
+            'simple_candidates': simple_candidates,
+            'combined_candidates': combined_candidates,
+            'total_mackerels_found': len(mackerels),
+            'total_sardines_found': len(sardines)
+        }
+new_skills:
+- name: clustering-strategy-guide
+  description: |
+    Use mackerel clustering to build tight axis-aligned polygons around dense groups of mackerels.
+    Avoid sardines by using minimal bounding boxes. Generate multiple diverse candidates per eval.
+  body: |
+    # Mackerel Clustering Strategy for Polygon Optimization
+    
+    ## Core Principle
+    Build TIGHT polygons around dense mackerel clusters, not loose ones that
+    include many sardines. Each polygon should maximize (mackerels - sardines).
+    
+    ## Step-by-Step Method
+    
+    ### Step 1: Input Parsing
+    - Read all mackerel coordinates from input
+    - Read all sardine coordinates from input
+    - Store as two separate lists
+    
+    ### Step 2: Cluster Identification
+    Find spatial clusters of mackerels:
+    - Use distance threshold of ~5000
+    - Points within threshold of each other form a cluster
+    - Use Union-Find or BFS to identify connected components
+    
+    ### Step 3: Bounding Box Construction
+    For each cluster:
+    - Find min_x, max_x, min_y, max_y
+    - Build minimal axis-aligned rectangle
+    - This is the "tightest" polygon around this cluster
+    
+    ### Step 4: Sardine Filtering
+    For each cluster's bounding box:
+    - Count sardines inside the box
+    - If sardines > mackerels, this cluster is NOT worth enclosing
+    - Prefer clusters where mackerels >> sardines
+    
+    ### Step 5: Diverse Generation
+    Generate multiple candidates:
+    - Individual cluster boxes (n of them)
+    - Combinations of 2-3 adjacent clusters
+    - Sometimes a large box covering many clusters
+    
+    ### Step 6: Ranking
+    - Score each candidate: mackerels - sardines + 1
+    - Use probe if available for fast approximate scoring
+    - Select top candidates for full evaluation
+    
+    ### Step 7: Output
+    - Output the best valid polygon
+    - Ensure: 4 <= vertices <= 1000, coordinates in [0, 100000]
+    
+    ## Key Success Factors
+    - Tighter polygons = fewer sardines inside
+    - Multiple clusters > single loose polygon
+    - Cluster-first approach beats grid-first approach
+    - Diversity: try different approaches, don't commit to one
+new_middlewares:
+- name: cluster_reminder
+  hook: before_model
+  description: Prompt the solver to identify mackerel clusters and build tight boxes around them
+  implementation_py: |
+    def before_model(hook_input):
+        return "Identify mackerel clusters (points within 5000 distance), build minimal axis-aligned bounding boxes, avoid sardine-dense regions, generate multiple diverse candidates"
+- name: probe_reminder
+  hook: after_tool
+  description: Remind solver to use probe_solution to rank candidates before full evaluation
+  implementation_py: |
+    def after_tool(hook_input):
+        result = hook_input.get("result", "")
+        if "cluster" in result.lower() or "box" in result.lower():
+            return "After generating cluster boxes, call probe_solution to approximate score before evaluate_solution. Use <3 probes to rank top 5 candidates."
+        return None

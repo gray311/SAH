@@ -1,0 +1,226 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are an expert software developer tasked with iteratively improving a program
+  to MAXIMIZE the performance metrics reported by an automatic evaluator. Analyze
+  the current program and the feedback from previous attempts, and make targeted
+  changes that increase the score. You are the fixed inner harness (H2) driving a
+  frozen executor over one discovery task.
+
+  The program has a single editable region between `# EVOLVE-BLOCK-START` and
+  `# EVOLVE-BLOCK-END`. Only that region is yours to change; everything outside it
+  (imports and the fixed entry function the evaluator calls) is frozen and must
+  keep working exactly as given — keep the same inputs and outputs.
+
+  This task focuses on optimizing an Expert Parallelism Load Balancer algorithm.
+  The evaluator rewards BOTH load balancing quality AND algorithm execution speed.
+  Key strategy: The rebalance_experts_hierarchical function likely needs parameter tuning
+  (e.g., internal threshold values, grouping strategies) and potentially completing
+  missing implementation details. The combined_score reflects a trade-off between
+  load balance and runtime efficiency.
+
+  Make exactly one tool call per turn:
+  - `edit_solution(code)` — change the EVOLVE-BLOCK. Prefer a **targeted SEARCH/REPLACE
+    diff** that modifies only the lines carrying your hypothesis.
+  - `evaluate_solution()` — run the current program; returns `combined_score` (higher is better),
+    `validity`, any error, your best score so far, and how many evaluations remain.
+  - `probe_solution()` — A **CRITICAL tool** for this task: cheaply scores the CURRENT
+    code on subsampled data (fast, ~10s). Does NOT consume the real evaluation budget.
+    Use probes to rank 3-5 variant edits cheaply, then pick the best one for a full
+    `evaluate_solution` call.
+  - `finish(summary)` — end the session.
+
+  Method:
+  1. Load and follow the `discovery-optimization` skill first.
+  2. **FIRST CALL**: Use `probe_solution` on the seed to establish a baseline (costs no evals).
+  3. **EDIT STRATEGY**: Hypothesize ONE concrete change per iteration:
+     - Parameter tuning: Modify numeric thresholds, weights, or group sizes
+     - Structural completion: Complete truncated functions with sensible defaults
+     - Algorithm variant: Try different grouping or replication strategies
+  4. **EXPLORATION LOOP**: When you have 2-3 variant edits:
+     - Call `probe_solution` on each to rank them cheaply
+     - Pick the top-ranked variant and call `evaluate_solution` on it
+  5. **CONVERGENCE**: When `validity=1` and no improvement after 3 probe-then-eval cycles, call `finish`.
+  6. **FAILURE RECOVERY**: If `validity=0`, fix the error and retry. If score drops, revert to best_so_far.
+  7. **BUDGET MANAGEMENT**: Use probes liberally; save `evaluate_solution` for top 2 ranked variants.
+  8. Don't rewrite whole region for small changes. Keep fixed entry function intact."
+skill_description: Iteratively optimize a program's EVOLVE-BLOCK to maximize an automatic evaluator score under a fixed evaluation budget. This skill is optimized for algorithm-speed and heuristic discovery tasks.
+skill_body: |
+  # Expert Load Balancer Optimization Playbook
+
+  ## Objective
+  Maximize combined_score by balancing load distribution quality vs algorithm runtime.
+
+  ## Key Strategy: Probe-Then-Evaluate
+  With ~20 evaluations, use probes:
+  1. For each iteration, create 2-3 variant edits
+  2. Call probe_solution on each (costs NO eval budget)
+  3. Pick top-ranked variant, call evaluate_solution
+  4. This allows exploring 4-6 variants per eval call
+
+  ## Parameter Tuning Priority
+  Focus on: thresholds, batch sizes, grouping strategies, iteration bounds.
+  Try small increments (±5-10%).
+
+  ## Exploration Loop
+  When evaluations_left > 5:
+  1. Generate 3 variant edits (different parameter sets or strategies)
+  2. Probe all 3 → rank them
+  3. Full-eval the top 2 → keep best
+  4. Repeat or converge
+
+  ## Failure Recovery
+  - validity=0: Fix error, retry
+  - Score drop: Revert to best_so_far, try different change category
+  - Stalled after 3 cycles: Call finish
+
+  ## Budget Discipline
+  - Use probes for variant ranking (free!)
+  - Save evaluate_solution for promising variants only
+  - With 20 evals, you can afford ~10 good variants + their probes"
+tool_descriptions:
+  edit_solution: Change the code inside the # EVOLVE-BLOCK region. Preferred format: one or more targeted SEARCH/REPLACE diff blocks matching the current program exactly. Alternative: full rewrite of the EVOLVE-BLOCK body. The fixed entry function and imports outside the block are preserved automatically.
+  evaluate_solution: Run the current program through the task evaluator. Returns combined_score (higher is better), validity, any error, your best score so far, and how many evaluations remain. The best-scoring version is kept automatically.
+  probe_solution: |
+    **CRITICAL FOR THIS TASK**: Scores CURRENT code on SUBSAMPLED data (first ~2000 rows).
+    - FAST (~10s vs minutes for full eval)
+    - Does NOT consume evaluation budget
+    - Scores are approximate, not comparable to full scores
+    - Strategy: Generate 3-5 variants → probe all → pick top 2 → full-eval those
+  finish: End the session when your evaluation budget is exhausted or you cannot improve the best score further.
+sampling:
+  temperature: 1.0
+  top_p: 0.9
+  top_k: 40
+  max_tokens: 12288
+agent:
+  max_iterations: 45
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 10000
+new_tools:
+  - name: analyze_algorithm_structure
+    description: |
+      Perform lightweight static analysis of the EVOLVE-BLOCK to identify:
+      1. Incomplete or truncated functions
+      2. Missing helper functions or library imports
+      3. Parameter variables that could be tuned
+      4. Potential optimization opportunities
+      Call this once at start to inform your first edit.
+    input_schema:
+      type: object
+      properties: {}
+    implementation_py: |
+      def run(ctx, args):
+          code = ctx.get_program()
+          analysis = {
+              "truncated_function": None,
+              "potential_params": [],
+              "has_missing_libs": False
+          }
+          lines = code.split('\n')
+          last_complete_line = len(lines)
+          for i in range(len(lines)-1, -1, -1):
+              line = lines[i].strip()
+              if line and not (line.startswith('"""') or line.startswith("'''") or
+                              line == '' or line.startswith('#') or
+                              line.endswith(':') or line.endswith('=') or
+                              line.endswith(',') or line.endswith(']') or
+                              line.endswith(')') or line.endswith('{')):
+                  last_complete_line = i
+                  break
+          if last_complete_line < len(lines) - 2:
+              analysis["truncated_function"] = f"Function possibly truncated near line {last_complete_line+1}"
+          else:
+              analysis["truncated_function"] = "No obvious truncation detected"
+          if 'def rebalance_experts_hierarchical' in code:
+              func_start = code.find('def rebalance_experts_hierarchical')
+              if func_start >= 0:
+                  func_end = code.find('\n\ndef ', func_start+1)
+                  if func_end == -1:
+                      func_end = code.find('\n# ', func_start+1)
+                  if func_end == -1:
+                      func_end = len(code)
+                  func_body = code[func_start:func_end]
+                  import re
+                  numeric_vars = re.findall(r'(\w+)\s*=\s*\d+(\.\d+)?', func_body)
+                  analysis["potential_params"] = [v[0] for v in numeric_vars[:10]]
+          analysis["has_missing_libs"] = 'import numpy' not in code and 'import torch' not in code
+          analysis["summary"] = f"Truncation: {analysis['truncated_function']}; Potential params: {analysis['potential_params']}; Missing libs: {analysis['has_missing_libs']}"
+          return analysis
+new_skills:
+  - name: eplb-optimization-playbook
+    description: |
+      Method playbook for optimizing Expert Parallelism Load Balancer algorithms.
+      Guides parameter tuning, algorithm completion, and systematic exploration.
+    body: |
+      # EPLB Load Balancer Optimization Playbook
+
+      ## Core Principle
+      Maximize combined_score by balancing load distribution quality vs algorithm runtime.
+
+      ## Phase 1: Diagnose and Complete (If needed)
+      1. Check if rebalance_experts_hierarchical is complete (ends with proper syntax)
+      2. If truncated: complete the function with a sensible default strategy
+         - Use greedy hierarchical grouping if cut off mid-function
+         - Add inverse mapping computation
+         - Ensure all branches have return statements
+
+      ## Phase 2: Parameter Tuning (Primary strategy)
+      1. Identify tunable numeric parameters: thresholds, group sizes, iteration limits
+      2. For each parameter, try small increments (±5-15%)
+      3. Use probe_solution to rank before full evaluation
+      4. Iterate: after tuning one parameter, move to next
+
+      ## Phase 3: Structural Variants
+      1. If parameter tuning stalls, try structural changes
+      2. Alter grouping strategy (different assignment heuristics)
+      3. Modify replication logic (different expert selection criteria)
+
+      ## Phase 4: Convergence
+      1. When validity=1 and 3 consecutive cycles show no improvement:
+         Call finish with summary of approach and best score
+      2. If validity=0, fix the error and retry
+      3. If score drops, revert to best_so_far and try different approach
+
+      ## Tool Usage
+      - probe_solution: Rank variants cheaply (do this liberally!)
+      - evaluate_solution: Only for top-ranked variants from probing
+      - edit_solution: Targeted SEARCH/REPLACE, one hypothesis per edit
+      - finish: When budget exhausted or converged
+      "
+  - name: exploration-loop-strategy
+    description: |
+      A systematic exploration strategy for constrained evaluation budgets.
+      Guides generating, ranking, and selecting variants using probe_solution.
+    body: |
+      # Exploration Loop for Limited Evaluation Budget
+
+      ## The Strategy
+      With only ~20 evaluations, use probes:
+      - 1 evaluate_solution call → rank 3-5 variants → explore 3-5 effectively
+      - Test 40-60 hypotheses with 20 evals
+
+      ## Step-by-Step
+      1. **INITIALIZE**: Probe the seed (baseline)
+      2. **VARIANT GENERATION**: Create 3 SEARCH/REPLACE edits (parameter tweak, different algorithm, structural improvement)
+      3. **PROBE RANKING**: Call probe_solution on each variant → rank them
+      4. **FULL EVALUATION**: Call evaluate_solution on top 2 variants → keep best
+      5. **REPEAT** (while evaluations_left > 5):
+         Generate new variants around current best → Probe all → Evaluate top 2
+      6. **CONVERGE**: When no improvement after 3 cycles, call finish
+
+      ## Decision Rules
+      - Probe scores diverge: trust probe, full-eval the winner
+      - Probe scores similar: full-eval both
+      - Probe crashes: check validity, fix code
+      - Validity=0 after full-eval: fix error, retry with corrected code
+
+      ## Example Session Flow
+      Probe seed → Rank = 1.0
+      Gen 3 variants → Probe all → Variants A,B,C rank 0.95, 0.92, 0.88
+      Evaluate A,B → A wins, B discarded
+      Gen 3 variants around A → Probe → Rank A-mod1=0.98, A-mod2=0.97, A-mod3=0.94
+      Evaluate A-mod1 → 1.03 (best)
+      ... (repeat) ...
+      Finish with score 1.03
+      "

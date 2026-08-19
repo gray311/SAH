@@ -1,0 +1,271 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are a C++ polygon optimizer for axis-aligned fish capture (mackerels +1, sardines -1).
+  Goal: maximize (mackerels - sardines + 1) within a rectilinear polygon (edges parallel to axes).
+  
+  CORE STRATEGY: Build 2D histogram of fish density, find mackerel-dense regions, construct bounding
+  polygons around clusters, avoid sardine-dense areas.
+  
+  SEARCH METHOD:
+  1. Parse fish positions from input to build a 2D histogram grid
+  2. Find all connected components of cells with positive density (M > S)
+  3. For each component, compute its axis-aligned bounding box
+  4. For each bounding box, count exact M and S using inclusion
+  5. Output the best bounding box polygon (4 vertices, axis-aligned rectangle)
+  
+  If no positive-density region found, output a minimal 4-vertex rectangle at origin.
+  
+  CONSTRAINTS: 4-1000 vertices, integer coords in [0,100000], perimeter <= 400,000, no self-intersection.
+  Use edit_solution to replace EVOLVE-BLOCK with complete C++ code implementing this strategy.
+  Use evaluate_solution to get exact score.
+  Use probe_solution for quick approximate scoring if you have it.
+  Use new_tool analyze_fish_grid to get fish density map before constructing polygons.
+skill_description: |
+  Fish-density histogram approach: parse fish positions, build 2D histogram, find connected positive
+  density regions, construct bounding boxes around each cluster, evaluate exact score for each,
+  output best rectangle polygon. Avoid sardine-dense areas naturally by focusing on positive regions.
+skill_body: |
+  # Histogram-Based Polygon Construction Strategy
+  
+  ## Step 1: Parse Fish Input
+  - Extract all fish coordinates from input (first N lines mackerels, next N lines sardines)
+  - Store in separate lists for quick access
+  
+  ## Step 2: Build 2D Density Grid
+  - Choose grid resolution: ~500-1000x500-1000 cells (each ~100x100 or ~200x200 units)
+  - For each grid cell, count mackerels (M) and sardines (S)
+  - Compute cell score = M - S
+  - This is O(N) where N = 10000 fish total
+  
+  ## Step 3: Find Connected Positive-Density Regions
+  - Use flood-fill or BFS/DFS to find all connected components of cells where M >= S
+  - Each connected region is a "mackerel cluster"
+  
+  ## Step 4: Compute Bounding Boxes
+  - For each connected component:
+    - Find min/max x and min/max y across all cells in the component
+    - Create an axis-aligned rectangle (bounding box)
+    - This rectangle captures the entire cluster
+  - Each bounding box has exactly 4 vertices
+  
+  ## Step 5: Exact Evaluation
+  - For each bounding box, do exact counting:
+    - Use 2D range sum or sweep-line to count all fish inside
+    - Score = M_inside - S_inside + 1
+  - Track best score and corresponding polygon
+  
+  ## Step 6: Output Best Rectangle
+  - Output the single best axis-aligned rectangle (4 vertices)
+  - Format: m (vertices count), then each vertex as "x y"
+  
+  ## Implementation Notes
+  - Use fixed-size arrays for speed (no dynamic allocation in hot path)
+  - Use integer grid coordinates to avoid floating-point errors
+  - Total time target: < 0.5s per evaluation to allow multiple attempts
+  - If multiple positive regions exist, test all bounding boxes
+  - If no positive regions, output a minimal rectangle at (0,0)-(100,100)
+tool_descriptions:
+  edit_solution: |
+    Replace EVOLVE-BLOCK with C++ implementing histogram-based polygon construction:
+    1. Parse fish positions from input
+    2. Build 2D density grid (M-S per cell)
+    3. Find connected components of positive-density cells
+    4. Compute bounding box for each component
+    5. Evaluate each bounding box with exact counting
+    6. Output best rectangle polygon
+    Ensure < 0.5s execution, valid format (m then m vertices).
+  evaluate_solution: |
+    Run C++ program, get exact score (mackerels - sardines + 1), validity status, remaining evals (budget=30).
+    Each run has ~2.0s search window.
+  probe_solution: |
+    Optional approximate scoring tool. For this task, exact evaluation is recommended due to small input size.
+  finish: |
+    End when you have a working histogram-based rectangle builder that outputs valid polygons.
+sampling:
+  temperature: 0.5
+  top_p: 0.95
+  top_k: 30
+  max_tokens: 8192
+agent:
+  max_iterations: 30
+middleware:
+  budget_reminder_from_left: 3
+  long_tool_output_max_chars: 10000
+new_tools:
+  - name: analyze_fish_grid
+    description: |
+      Parse fish positions from program input, build a 2D histogram grid, and identify all connected
+      components of positive-density cells (M >= S). Returns grid statistics and component locations.
+      Call this FIRST to inform polygon construction.
+    input_schema:
+      type: object
+      properties: {}
+    implementation_py: |
+      def run(ctx, args):
+          # Parse fish positions from the program (input is embedded)
+          program = ctx.get_program()
+          
+          fish_x = []
+          fish_y = []
+          fish_type = []  # 1 for mackerel, -1 for sardine
+          
+          lines = program.split('\n')
+          in_input_section = False
+          
+          for line in lines:
+              line = line.strip()
+              if 'cin >> N' in line or 'N =' in line or 'int N' in line:
+                  in_input_section = True
+                  continue
+              if in_input_section and 'cin >>' in line or '=' in line:
+                  try:
+                      # Try to extract coordinate from line
+                      if 'x' in line or 'y' in line:
+                          # Look for numbers in the line
+                          import re
+                          nums = re.findall(r'[\d.]+', line)
+                          if len(nums) >= 2:
+                              # This is tricky - need to know which is x and which is y
+                              # Alternative: look for pattern in input loop
+                              pass
+                      # Better approach: parse the EVOLVE-BLOCK section specifically
+                  except:
+                      pass
+          
+          # More robust approach: extract from the input parsing code
+          # Look for the input reading loop
+          import re
+          
+          # Find all coordinate pairs
+          coords = []
+          # Pattern for coordinate assignment
+          pattern = r'[(\s*]\s*(\d+)[,\s]+(\d+)[,\s*]'
+          matches = re.findall(pattern, program)
+          if matches:
+              for mx, my in matches:
+                  coords.append((int(mx), int(my)))
+          
+          # Build grid
+          grid_size = 200
+          cell_size = 100000 // grid_size
+          
+          grid = [[{'m': 0, 's': 0} for _ in range(grid_size)] for _ in range(grid_size)]
+          
+          for x, y in coords:
+              if 0 <= x < 100000 and 0 <= y < 100000:
+                  cx, cy = min(x // cell_size, grid_size - 1), min(y // cell_size, grid_size - 1)
+                  grid[cy][cx]['m'] += 1
+                  grid[cy][cx]['s'] += 1
+          
+          # Compute scores and find positive regions
+          positive_cells = []
+          for r in range(grid_size):
+              for c in range(grid_size):
+                  score = grid[r][c]['m'] - grid[r][c]['s']
+                  if score >= 0:
+                      positive_cells.append((r, c, grid[r][c]['m'], grid[r][c]['s'], score))
+          
+          # Find connected components using flood fill
+          visited = [[False] * grid_size for _ in range(grid_size)]
+          components = []
+          
+          def dfs(cr, cc):
+              stack = [(cr, cc)]
+              comp = []
+              while stack:
+                  r, c = stack.pop()
+                  if r < 0 or r >= grid_size or c < 0 or c >= grid_size or visited[r][c]:
+                      continue
+                  visited[r][c] = True
+                  comp.append((r, c, grid[r][c]['m'], grid[r][c]['s']))
+                  
+                  # 4-connectivity
+                  for dr, dc in [(-1,0), (1,0), (0,-1), (0,1)]:
+                      nr, nc = r + dr, c + dc
+                      if not visited[nr][nc] and grid[nr][nc]['m'] - grid[nr][nc]['s'] >= 0:
+                          stack.append((nr, nc))
+              return comp
+          
+          for r in range(grid_size):
+              for c in range(grid_size):
+                  if not visited[r][c] and grid[r][c]['m'] - grid[r][c]['s'] >= 0:
+                      comp = dfs(r, c)
+                      if comp:
+                          components.append(comp)
+          
+          total_m = sum(comp[0][2] for comp in components)
+          total_s = sum(comp[0][3] for comp in components)
+          
+          result = {
+              "grid_size": grid_size,
+              "cell_size": cell_size,
+              "total_positive_cells": len(positive_cells),
+              "num_components": len(components),
+              "components": components,
+              "total_m_in_positive": total_m,
+              "total_s_in_positive": total_s,
+              "has_positive_region": len(components) > 0
+          }
+          
+          return result
+new_skills:
+  - name: rectangle-from-density
+    description: |
+      Build axis-aligned rectangles from mackerel-dense regions using 2D histogram analysis.
+      Find connected positive-density cells, compute bounding boxes, output best rectangles.
+    body: |
+      # Rectangle-from-Density Strategy
+      
+      ## Overview
+      Parse fish positions, build a 2D histogram, find connected regions of mackerel-dense cells,
+      and construct axis-aligned rectangles around each region.
+      
+      ## Step-by-Step Algorithm
+      
+      ### 1. Build Histogram Grid
+      - Divide [0, 100000]x[0, 100000] into a regular grid (e.g., 200x200, 1000x1000 cells)
+      - Cell size: 500 units per cell for 200x200 grid
+      - For each fish, increment the count in its cell (mackerels in M bucket, sardines in S bucket)
+      - Compute cell score = M - S
+      
+      ### 2. Find Positive-Density Regions
+      - A positive-density region has M >= S (score >= 0)
+      - Use connected components (flood-fill / BFS / DFS) with 4-connectivity
+      - Each component is a cluster of adjacent positive cells
+      
+      ### 3. Compute Bounding Boxes
+      - For each connected component:
+        - Find min_x, max_x, min_y, max_y across all cells
+        - Create rectangle: (min_x, min_y) to (max_x, max_y)
+        - Convert cell coordinates to pixel coordinates
+      - Each bounding box has exactly 4 vertices
+      
+      ### 4. Evaluate Each Rectangle
+      - For each bounding box, do exact fish counting:
+        - Count mackerels strictly inside the rectangle
+        - Count sardines strictly inside the rectangle
+        - Note: points on edges count as inside
+      - Score = M_inside - S_inside + 1
+      
+      ### 5. Output Best Rectangle
+      - Track rectangle with maximum score
+      - Output as polygon with 4 vertices in order
+      - If no positive region, output minimal rectangle at origin
+      
+      ## Implementation Tips
+      
+      - Use integer arithmetic only (no floating point)
+      - Precompute cell-to-pixel mappings
+      - For exact counting, use O(N) iteration over fish list (fast enough)
+      - 200x200 grid with 10000 fish is very fast to build
+      - Edge case: single fish = positive region
+      - Edge case: all cells negative = use fallback rectangle
+new_middlewares:
+  - name: use_analyze_tool
+    hook: before_model
+    description: |
+      Remind the executor to use the analyze_fish_grid tool before attempting to edit the solution.
+      This tool provides the critical insight about fish density distribution.
+    implementation_py: |
+      def before_model(hook_input):
+          return "Call analyze_fish_grid first to get fish density map and connected positive regions, then build bounding box polygons."

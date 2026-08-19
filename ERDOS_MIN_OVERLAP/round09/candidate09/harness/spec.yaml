@@ -1,0 +1,42 @@
+schema: h2spec/1.0
+system_prompt: 'You are an expert in harmonic analysis and the Erdős minimum overlap problem.
+
+Goal: Beat C5 ≤ 0.38092303510845016 by finding a step function h: [0,2]→[0,1] with ∫h=1 that minimizes max_k ∫h(x)(1-h(x+k))dx.
+
+CRITICAL STRATEGY:
+1. Use gen_constrained_constructions() to generate VALID (integral=1, range=[0,1]) initial functions
+2. For each construction, run a focused optimization: 3 restarts × 10000 steps each with varying learning rates
+3. Use probe_solution to rank variants by c5_bound (cheaper, subsampled evaluation)
+4. Pick top 2 candidates by probe score and run FULL evaluation
+5. Iterate: keep best full-eval score, generate new constrained constructions, optimize further
+
+Key insight: The seed program fails because random/noisy initializations miss structured optima. You MUST use the constraint generator to create valid starting points, then let the optimizer refine them.
+
+When editing:
+- Replace the _get_best_initialization method with calls to gen_constrained_constructions()
+- Add multiple restarts with different learning rates (0.001 to 0.01)
+- Use adaptive penalty (start high, decrease as constraint is satisfied)'
+skill_description: 'Constraint-aware structured initialization for Erdos optimization. Generates valid h functions (∫h=1, h∈[0,1]) from mathematical constructions, then refines with multi-restart optimization.'
+skill_body: '# Erdos Minimum Overlap - Constraint-Aware Optimization\n\n## Strategy\nThe problem requires h: [0,2]→[0,1] with ∫h=1. Random initializations rarely satisfy this. Use gen_constrained_constructions() to generate valid starting points, then refine with multi-restart optimization.\n\n## Workflow\n\n### Step 1: Generate Constrained Constructions\nCall gen_constrained_constructions() which returns 4-6 constructions:\n- Each h satisfies: 0≤h≤1, ∫h=1\n- Types: bimodal (two peaks), triangular (3-level), periodic, golomb-inspired\n\n### Step 2: Multi-Restart Optimization\nFor EACH construction:\n1. Run 3 restarts with different seeds and learning rates (0.001, 0.005, 0.01)\n2. Each restart: 10000 optimization steps\n3. Track best h from each construction\n\n### Step 3: Probe & Rank\nUse probe_solution on all refined candidates to get quick c5_bound estimates.\n- Sort by c5_bound (lower is better for the probe metric)\n- Keep top 3\n\n### Step 4: Full Evaluation\nRun evaluate_solution on top 3 candidates.\n- Record combined_score = 0.380923 / c5_bound\n- Keep the highest combined_score\n\n### Step 5: Iterate\nRepeat from Step 1, starting from the best previous result.\n\n## Critical Edits\n\n1. **Replace _get_best_initialization()**: Call gen_constrained_constructions() and return one of the valid h functions.\n\n2. **Add multi-restart loop**: For each construction, run 3 optimizations with varying hyperparameters.\n\n3. **Adaptive penalty**: Start with penalty=5000, reduce to 1000 if integral constraint nearly satisfied.\n\n## Why This Works\n- Constrained constructions guarantee valid starting points\n- Multi-restart with diverse hyperparameters escapes local minima\n- Probe-guided selection focuses evaluation budget on promising candidates'
+tool_descriptions:
+  edit_solution: Modify the EVOLVE-BLOCK region. Replace _get_best_initialization with gen_constrained_constructions integration, add multi-restart optimization loop with adaptive hyperparameters.
+  evaluate_solution: Run the full optimizer and return combined_score (higher=success).
+  probe_solution: Quick approximate c5_bound on subsampled data. Use to rank variants before full evaluation.
+  finish: End when no improvement in 3 iterations or budget exhausted.
+sampling:
+  temperature: 1.0
+  top_p: 0.9
+  top_k: 30
+  max_tokens: 16000
+agent:
+  max_iterations: 80
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 12000
+new_tools:
+  - name: gen_constrained_constructions
+    description: 'Generate 4-6 valid step function initializations for Erdos problem. Each construction satisfies: 0≤h(x)≤1 and ∫₀²h(x)dx=1. Returns dict mapping construction names to h values (already sigmoid-transformed and integral-normalized). Types: bimodal_tight, triangular_3step, periodic_alternating, golomb_5, sawtooth_4level, plateau_3level.'
+    input_schema:
+      type: object
+      properties: {}
+    implementation_py: 'def run(ctx, args):\n    import numpy as np\n    N = 800\n    domain = 2.0\n    dx = domain / N\n    rng = np.random.default_rng(123)\n    constructions = {}\n    x = np.linspace(0, domain, N)\n    \n    # Bimodal: two narrow peaks at 0.25 and 0.75, equal mass\n    latent = np.exp(-((x-0.25)/0.12)**2 * 30) + np.exp(-((x-0.75)/0.12)**2 * 30)\n    h = 1.0 / (1.0 + np.exp(-latent))\n    integral = np.sum(h) * dx\n    scale = 1.0 / np.sum(h)  # normalize integral to 1\n    h = h * scale\n    h = np.clip(h, 0.01, 0.99)  # ensure strictly in (0,1)\n    constructions["bimodal_tight"] = h\n    \n    # Triangular 3-step: low, medium, high levels\n    h = np.zeros(N)\n    phases = np.array([0.0, 0.333, 0.666])\n    levels = np.array([0.1, 0.4, 0.8])\n    for p, lev in zip(phases, levels):\n        h += lev * ((x >= p) & (x < p + 0.333))\n    integral = np.sum(h) * dx\n    scale = 1.0 / np.sum(h)\n    h = h * scale\n    h = np.clip(h, 0.01, 0.99)\n    constructions["triangular_3step"] = h\n    \n    # Periodic alternating: high on [0,0.5], low on [0.5,1]\n    h = np.zeros(N)\n    h[x < 1.0] = 0.6\n    h[x >= 1.0] = 0.4\n    integral = np.sum(h) * dx\n    scale = 1.0 / np.sum(h)\n    h = h * scale\n    h = np.clip(h, 0.01, 0.99)\n    constructions["periodic_alternating"] = h\n    \n    # Golomb-inspired 5 peaks\n    marks = np.array([0.0, 0.375, 0.625, 0.875, 1.0])\n    widths = np.array([0.08, 0.1, 0.09, 0.09, 0.08])\n    h = np.zeros(N)\n    for m, w in zip(marks, widths):\n        h += 3.0 * np.exp(-((x-m)/w)**2 * 20)\n    integral = np.sum(h) * dx\n    scale = 1.0 / np.sum(h)\n    h = h * scale\n    h = np.clip(h, 0.01, 0.99)\n    constructions["golomb_5"] = h\n    \n    # Sawtooth 4-level\n    h = np.zeros(N)\n    levels = [0.15, 0.35, 0.55, 0.75]\n    for i, lev in enumerate(levels):\n        start = i * 0.5\n        end = (i+1) * 0.5 if i < 3 else 2.0\n        h[(x >= start) & (x < end)] = lev\n    integral = np.sum(h) * dx\n    scale = 1.0 / np.sum(h)\n    h = h * scale\n    h = np.clip(h, 0.01, 0.99)\n    constructions["sawtooth_4level"] = h\n    \n    # Plateau 3-level with flat top\n    h = np.zeros(N)\n    h[x < 0.333] = 0.2\n    h[(x >= 0.333) & (x < 0.666)] = 0.8\n    h[x >= 0.666] = 0.25\n    integral = np.sum(h) * dx\n    scale = 1.0 / np.sum(h)\n    h = h * scale\n    h = np.clip(h, 0.01, 0.99)\n    constructions["plateau_3level"] = h\n    \n    return {"constructions": constructions, "count": len(constructions)}'

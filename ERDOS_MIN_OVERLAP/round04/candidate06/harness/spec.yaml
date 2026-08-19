@@ -1,0 +1,183 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are optimizing for the Erdős minimum overlap problem constant C₅.
+
+  Goal: Beat C₅ ≤ 0.38092303510845016 by finding step function h: [0,2]→[0,1] with integral(h)=1
+  that minimizes max_k ∫ h(x)(1-h(x+k)) dx.
+
+  CRITICAL STRATEGY:
+
+  1. The seed program uses 800 intervals and Adam optimizer - this is SLOW and PRONE TO LOCAL MINIMA.
+
+  2. YOUR APPROACH: Use COARSE discretization first (20-50 intervals) to find GLOBAL structure, then REFINE with fine discretization.
+
+  3. Try MULTIPLE OPTIMIZERS per candidate: SGD with momentum, Adam with different LRs, L-BFGS for polishing.
+
+  4. Use PROBE solution to quickly compare coarse discretizations BEFORE spending evaluations on fine ones.
+
+  5. For each evaluation budget unit, MAXIMIZE diversity: try different seeds, different discretizations, different optimizers.
+
+  6. Key insight: The optimal solution is likely a STEPS function with 3-7 levels, not 800 levels. Start coarse, refine.
+
+  Workflow:
+  - Phase 1: Coarse search (n=20-50 intervals), many seeds, SGD/Adam
+  - Phase 2: Take best coarse result, refine to n=200-400 intervals
+  - Phase 3: Probe variants of refined result
+  - Phase 4: Final evaluation on best candidates
+
+  NEVER do one long 59000-step optimization per candidate. Do SHORT, DIVERSE searches.
+skill_description: |
+  Coarse-to-fine optimization for Erdos problem: Start with coarse discretization and multiple optimizers to escape local minima, then refine. Proven strategy beats pure fine-grained SGD.
+skill_body: |
+  # Erdos Minimum Overlap - Coarse-to-Fine Strategy
+  
+  ## Why Coarse-to-Fine Works
+  
+  The problem is about finding a STRUCTURAL PATTERN (how many steps, where are the plateaus),
+  not fine-tuning 800 parameters.
+  
+  ## Method
+  
+  ### Step 1: Coarse Exploration (n=20-50 intervals)
+  - Try 10-20 different seeds
+  - Use SGD with momentum or L-BFGS
+  - Run 5000-15000 steps per seed
+  - Use probe_solution to rank
+  
+  ### Step 2: Select Best Coarse Structure
+  - Take top 2-3 from coarse phase by probe score
+  - Keep their structural pattern
+  
+  ### Step 3: Refinement (n=200-400 intervals)
+  - Refine the winning structure
+  - Use smaller LR (0.001-0.01)
+  - 3000-10000 steps
+  
+  ### Step 4: Final Evaluation
+  - Evaluate on full 800-interval discretization
+  
+  ## Key Principles
+  
+  - Structure over parameters: Find the right STEP COUNT first
+  - Short and diverse: Many short searches beat few long ones
+  - Multiple optimizers: SGD+momentum and L-BFGS explore differently
+  
+  ## Tool Usage
+  
+  - generate_coarse_variants: Get diverse coarse patterns
+  - probe_solution: Use extensively in coarse phase to rank quickly
+  - evaluate_solution: Only for final candidates
+  
+  ## Implementation Notes
+  
+  Always apply sigmoid to latent: h = sigmoid(latent)
+  Always normalize to satisfy integral(h) = 1.0
+tool_descriptions:
+  edit_solution: Modify EVOLVE-BLOCK. Implement coarse-to-fine strategy with multiple optimizer variants. Change num_intervals (800 to 20 for coarse, 200 for refine, 800 for final). Use different optimizers per variant (SGD momentum, Adam coarse, L-BFGS). Run multiple seeds in parallel.
+  evaluate_solution: Return combined_score where combined_score = 0.38092303510845016 / c5_bound. c5_bound is max_k integral h(x)(1-h(x+k)) dx.
+  probe_solution: Quick approximate eval on subsampled data. Use to rank coarse variants before full eval.
+  finish: Submit when no variant beats seed score (combined_score > 1.0 means success).
+sampling:
+  temperature: 1.0
+  top_p: 0.98
+  top_k: 30
+  max_tokens: 16384
+agent:
+  max_iterations: 70
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 12000
+new_tools:
+  - name: generate_coarse_variants
+    description: |
+      Generate 5-10 coarse discretizations (n=20-50 intervals) with diverse structural patterns.
+      Returns dict mapping variant_name to (latent_vector, strategy_config).
+    input_schema:
+      type: object
+      properties: {}
+    implementation_py: |
+      def run(ctx, args):
+          import numpy as np
+          rng = np.random.default_rng(123)
+          N_coarse = 40
+          domain = 2.0
+          x_arr = np.linspace(0, domain, N_coarse)
+          
+          variants = {}
+          
+          # Strategy 1: Single peak bimodal
+          latent = np.zeros(N_coarse)
+          peak_pos = rng.uniform(0.2, 0.8)
+          peak_width = rng.uniform(0.05, 0.15)
+          for i in range(N_coarse):
+              if abs(x_arr[i] - peak_pos) < peak_width:
+                  latent[i] = 8.0
+          latent = latent + rng.normal(size=N_coarse) * 0.5
+          variants["bimodal_coarse"] = (latent, {"optimizer": "sgd_momentum", "lr_schedule": [0.05, 0.01, 0.001]})
+          
+          # Strategy 2: Three-level plateau
+          latent = np.zeros(N_coarse)
+          boundaries = [rng.uniform(0.1, 0.3), rng.uniform(0.3, 0.6), rng.uniform(0.6, 0.85), rng.uniform(0.85, 0.95)]
+          for i in range(N_coarse):
+              for idx in range(len(boundaries)-1):
+                  if boundaries[idx] <= x_arr[i] < boundaries[idx+1]:
+                      latent[i] = 5.0 + rng.uniform(-0.5, 0.5)
+                      break
+          latent = latent + rng.normal(size=N_coarse) * 0.3
+          variants["three_plateau"] = (latent, {"optimizer": "lbgfs", "lr_schedule": [0.01]})
+          
+          # Strategy 3: Periodic blocks
+          latent = np.zeros(N_coarse)
+          for start, end in [(0.0, 0.25), (0.25, 0.5), (0.5, 0.75), (0.75, 1.0), (1.0, 1.5), (1.5, 2.0)]:
+              if start < end:
+                  for i in range(N_coarse):
+                      if start <= x_arr[i] < end:
+                          latent[i] = 6.0
+                      elif start + 0.5 <= x_arr[i] < end + 0.5:
+                          latent[i] = -2.0
+          latent = latent + rng.normal(size=N_coarse) * 0.2
+          variants["periodic_blocks"] = (latent, {"optimizer": "adam_coarse", "lr_schedule": [0.03, 0.005]})
+          
+          # Strategy 4: Golomb-inspired (5 peaks)
+          marks = [0.2, 0.35, 0.6, 0.7, 1.1]
+          latent = np.zeros(N_coarse)
+          for m in marks:
+              w = 0.08
+              for i in range(N_coarse):
+                  latent[i] += 7.0 * np.exp(-((x_arr[i] - m)/w)**2 * 10)
+          latent = latent + rng.normal(size=N_coarse) * 0.3
+          variants["golomb_coarse"] = (latent, {"optimizer": "lbgfs", "lr_schedule": [0.01]})
+          
+          # Strategy 5: Random threshold
+          thresholds = np.sort(np.random.uniform(0.1, 0.9, size=8))
+          current_level = 5.0
+          latent = np.zeros(N_coarse)
+          for i, t in enumerate(thresholds):
+              for j in range(N_coarse):
+                  if x_arr[j] >= t:
+                      if i == 0 or (x_arr[j] < t + np.random.uniform(0.1, 0.25)):
+                          latent[j] = current_level
+                      else:
+                          latent[j] = current_level - rng.uniform(1.0, 3.0)
+                  else:
+                      break
+          latent = latent + rng.normal(size=N_coarse) * 0.25
+          variants["random_threshold"] = (latent, {"optimizer": "sgd_momentum", "lr_schedule": [0.04, 0.008]})
+          
+          return {"variants": variants, "N_coarse": N_coarse, "domain": domain, "dx": domain / N_coarse}
+remove_tools: []
+new_skills: []
+new_middlewares:
+  - name: remind_coarse_first
+    hook: before_model
+    description: |
+      Remind solver to use coarse discretization first, explore multiple seeds, then refine. Prevents wasting evals on single fine-grained searches.
+    implementation_py: |
+      def before_model(hook_input):
+          current_iter = hook_input.get("iteration", 0)
+          if current_iter % 2 == 0 or current_iter < 10:
+              return "Use COARSE discretization (n=20-50) with MULTIPLE seeds. Do NOT use n=800 yet. Save best coarse results for refinement later."
+          elif current_iter < 25:
+              return "Vary the structural pattern each iteration (bimodal, plateau, periodic, Golomb, random). Save diverse variants."
+          else:
+              return "Refine best coarse winner to n=200-400 intervals. Use shorter optimization cycles to explore alternatives."

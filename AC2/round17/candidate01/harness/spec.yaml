@@ -1,0 +1,319 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are an expert in functional analysis and mathematical optimization for the C2 constant:
+  C2 = ||f*f||2^2 / ((int f)^2 ||f*f||_inf), where f: R->R is non-negative.
+
+  Current best: 0.8962799441554086 (achieved by step functions).
+
+  CRITICAL INSIGHT: The seed's 5 step patterns are ALL in the SAME local optimum. 
+  Sequential refinement cannot escape it. You MUST:
+  1. Use analyze_convolution_profile to diagnose WHY the current best fails
+  2. Generate ENTIRELY NEW function architectures (Gaussian mixtures, splines, oscillatory)
+  3. Use probes aggressively to explore 10+ diverse candidates before any full eval
+
+  STRATEGY - DIVERSE ARCHITECTURE EXPLORATION:
+
+  PHASE 1 (iterations 1-15): PARALLEL DIVERSE GENERATION
+  1. Call analyze_convolution_profile ON the current best to understand its structure
+  2. Call generate_candidates to get 5 proposals across DIFFERENT families (Gaussian, B-spline, 
+     oscillatory, piecewise-linear, multi-level steps)
+  3. Call probe_solution on ALL 5 candidates (5 probes used)
+  4. Call evaluate_solution on TOP 2 by probe score
+  5. If either beats record: switch to Phase 2. If not: generate 5 MORE diverse candidates
+   
+  Repeat until: one beats record OR you hit 15 iterations.
+
+  PHASE 2 (iterations 16-30): FOCUSED REFINEMENT
+  1. Take the best architecture from Phase 1 (if any beat record)
+  2. Apply SMALL targeted mutations (+/-5% width, +/-0.05 height) to 3 variants
+  3. Probe all, evaluate top 1-2
+  4. If no improvement after 5 iterations: go back to Phase 1 with NEW architectures
+
+  RULES:
+  - NEVER refine the same function type for 3+ iterations without trying new families
+  - Use probes to explore 8-12 variants before spending 1 full eval
+  - If stuck at iteration 10: generate completely new architectures (not mutations)
+  - Always analyze convolution profile before generating new candidates
+
+  TOOL USAGE:
+  - analyze_convolution_profile: Call ONCE at start of each phase to diagnose current best
+  - generate_candidates: Call when starting new phase or stuck
+  - probe_solution: Call on ALL candidates before any full eval (30 total budget)
+  - evaluate_solution: Call ONLY after probing and ranking (top 1-2)
+
+skill_description: |
+  Diverse architecture exploration with convolution analysis. Diagnose step-function 
+  limitations, generate fundamentally different function families, use probes to explore 
+  10+ candidates before full evaluation. Jump between architectures rather than refining 
+  one type sequentially.
+skill_body: |
+  # C2 Maximizer: Diverse Architecture Exploration Protocol
+
+  ## Core Principle
+  The step-function local optimum cannot be escaped by small mutations. You MUST 
+  explore fundamentally different function architectures in parallel, using probes to 
+  filter before full evaluation.
+
+  ## Phase 1: Diagnostic + Diverse Generation (iterations 1-15)
+
+  Step 1: Analyze Current Best
+  - Call analyze_convolution_profile on your best function
+  - Note: Where is ||f*f||2^2 concentrated? Where is ||f*f||_inf?
+  - If L2 is concentrated in a narrow region and sup is at peak: need wider support
+  - If sup is too high relative to L2: need smoother transitions
+
+  Step 2: Generate Diverse Candidates
+  - Call generate_candidates to get 5 proposals across DIFFERENT families:
+    * Gaussian mixtures: smooth multi-peaked functions
+    * B-spline: flexible smooth transitions with optimized control points
+    * Oscillatory decay: (1 + alpha*cos(beta*x))*exp(-gamma*|x|) for structured convolution
+    * Piecewise-linear: controlled smoothness
+    * Multi-level steps: refined asymmetric step structures
+
+  Step 3: Probe-Based Filtering
+  - Call probe_solution on ALL 5 candidates (5 probes total)
+  - Call evaluate_solution on TOP 2 by probe score
+  - If probe score < 1.0 (worse than seed), skip full eval and try next candidate
+
+  Step 4: Iterate
+  - If neither full eval beats record: generate 5 MORE diverse candidates
+  - Use probe_solution on all new candidates
+  - Evaluate top 1-2
+  - Continue until iteration 15 or a candidate beats record
+
+  ## Phase 2: Focused Refinement (iterations 16-30)
+
+  Only if a new architecture beat the record:
+  1. Analyze its convolution profile
+  2. Generate 3 variants with SMALL mutations (+/-5% width, +/-0.05 height, +/-10% weight)
+  3. Probe all, evaluate top 1
+  4. If no improvement after 5 iterations: go back to Phase 1
+
+  ## Key Rules
+  - PARALLEL DIVERSITY > SEQUENTIAL REFINEMENT
+  - Use 30 probes to explore 10-15+ variants before full evaluations
+  - NEVER refine the same architecture for 3+ iterations
+  - If iteration 10+: generate completely new families
+  - Always analyze convolution profile to guide architecture choice
+
+tool_descriptions:
+  edit_solution: |
+    Edit the EVOLVE-BLOCK. For new architectures: implement Gaussian mixtures, B-splines, 
+    oscillatory decay, or piecewise-linear functions. For mutations: small changes (+/-5% width, +/-0.05 height).
+    Always ensure f >= 0 using jax.nn.softplus or max(0,·). Use JAX array mutation: f = f.at[start:end].set(value).
+  evaluate_solution: |
+    Full evaluation. Budget: 30 total. Call ONLY after probe_solution ranking. Evaluate top 1-2 
+    variants by probe score. If probe < 1.0, skip full eval.
+  probe_solution: |
+    Approximate score on 10% subsample. FAST. Use to rank 5-10+ variants before full eval. 
+    You have 30 probes - spend them to explore diverse architectures, not to confirm one candidate.
+  finish: |
+    Report best combined_score, the winning architecture family, and key insights from convolution analysis.
+sampling:
+  temperature: 0.5
+  top_p: 0.9
+  top_k: 30
+  max_tokens: 16384
+agent:
+  max_iterations: 40
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 12000
+new_tools:
+  - name: analyze_convolution_profile
+    description: |
+      Analyze the convolution of the current best function to diagnose why it fails to beat the record.
+      Returns detailed diagnostic: where L2 norm is concentrated, where sup norm occurs,
+      whether interference is constructive or destructive, and specific recommendations for
+      architectural changes. Call this ONCE at the start of each phase to guide candidate generation.
+    input_schema:
+      type: object
+      properties: {}
+    implementation_py: |
+      def run(ctx, args):
+          import numpy as np
+          f_text = ctx.get_best_program()
+          exec_globals = {'jnp': np, 'np': np, 'jnp_exp': np.exp, 'jnp_abs': np.abs}
+          try:
+              code = f_text.replace('\n', ' ')
+              f_func = eval('lambda x: ' + code, exec_globals)
+          except:
+              return {"error": "Could not parse function", "note": "Use seed function instead"}
+          
+          x = np.linspace(-5, 5, 2000)
+          try:
+              f_vals = f_func(x)
+              f_vals = np.maximum(f_vals, 1e-10)
+          except:
+              return {"error": "Function evaluation failed", "note": "Check for numerical issues"}
+          
+          N = len(x)
+          f_padded = np.pad(f_vals, (0, N))
+          fft_f = np.fft.fft(f_padded)
+          conv = np.fft.ifft(fft_f * fft_f).real
+          conv = conv[:N]
+          
+          l2_sq = np.trapz(conv**2, dx=(x[1]-x[0]))
+          norm1 = np.trapz(np.abs(conv), dx=(x[1]-x[0]))
+          norm_inf = np.max(np.abs(conv))
+          
+          l2_mask = conv**2 > np.max(conv**2) * 0.5
+          l2_range = (np.min(x[l2_mask]), np.max(x[l2_mask])) if np.any(l2_mask) else ('unknown', 'unknown')
+          
+          sup_idx = np.argmax(np.abs(conv))
+          sup_location = x[sup_idx]
+          
+          typical_conv = np.median(np.abs(conv))
+          interference_ratio = norm_inf / (typical_conv + 1e-10) if typical_conv > 0 else 1.0
+          
+          if interference_ratio > 3:
+              interference = 'strong constructive'
+              recommendation = 'Widen function support or add destructive interference regions'
+          elif interference_ratio < 1.5:
+              interference = 'weak constructive'
+              recommendation = 'Sharpen peaks or increase peak height'
+          else:
+              interference = 'moderate constructive'
+              recommendation = 'Balance peak sharpness with support width'
+          
+          return {
+              'l2_concentration': l2_range,
+              'sup_location': sup_location,
+              'norm_inf': norm_inf,
+              'interference_pattern': interference,
+              'interference_ratio': interference_ratio,
+              'recommendation': recommendation,
+              'current_l2_sq': l2_sq,
+              'norm1': norm1
+          }
+  - name: generate_candidates
+    description: |
+      Generate 5 diverse proposals across DIFFERENT mathematical families: Gaussian mixtures, 
+      B-spline basis, oscillatory decay, piecewise-linear, multi-level steps. Returns ready-to-edit code. 
+      Call this when starting Phase 1, when stuck, or after full eval fails.
+    input_schema:
+      type: object
+      properties: {}
+    implementation_py: |
+      def run(ctx, args):
+          import random
+          random.seed(42)
+          proposals = []
+          
+          # Family 1: Gaussian mixtures
+          proposals.append({
+              'family': 'gaussian_mixture',
+              'description': 'Weighted sum of Gaussians: f(x) = sum w_i * exp(-((x-mu_i)^2)/(2*sigma_i^2))',
+              'code_snippet': 'import jax.numpy as jnp\\nimport jax\\n\\nf_values = jnp.linspace(-3, 3, 600)\\nmu = jnp.array([0.0, 1.2, -1.0])\\nsigma = jnp.array([0.5, 0.7, 0.6])\\nweights = jnp.array([0.4, 0.3, 0.3])\\nf = weights[None,:] @ jnp.exp(-((f_values[:,None] - mu)[None,:,:])**2 / (2*sigma**2[None,:]))',
+              'rationale': 'Smooth functions may achieve better L2/inf ratio than sharp steps'
+          })
+          
+          # Family 2: B-spline basis
+          proposals.append({
+              'family': 'bspline',
+              'description': 'B-spline with optimized control points and knots',
+              'code_snippet': 'import jax.numpy as jnp\\nimport jax\\nfrom scipy.interpolate import splev, splrep\\n\\nn_control = 50\\nknots = jnp.linspace(-1, 1, 20)\\ncontrols = jnp.random.uniform(0.5, 2.0, n_control)\\ncontrols = jax.nn.softplus(controls)\\nf_values = jnp.linspace(-3, 3, 600)\\nfit = splev(f_values, knots, s=0, k=3, dx=1, w=controls)\\nf = jnp.maximum(f, 0)',
+              'rationale': 'Splines offer flexible smooth transitions; optimize control points for C2'
+          })
+          
+          # Family 3: Piecewise-linear
+          proposals.append({
+              'family': 'piecewise_linear',
+              'description': 'Linear segments connecting vertices, optimized for shape',
+              'code_snippet': 'import jax.numpy as jnp\\n\\nf_values = jnp.linspace(-3, 3, 600)\\nn_vertices = 30\\nvertices = jnp.linspace(-2, 2, n_vertices)\\nheights = 0.5 + 0.5 * jnp.sin(jnp.linspace(0, 2*jnp.pi, n_vertices))\\nf = jnp.piecewise(f_values, [(f_values <= x) for x in vertices[:-1]], [lambda x: heights[i] * (x - vertices[i]) / (vertices[i+1] - vertices[i]) for i in range(n_vertices-1)])\\nf = jnp.maximum(f, 0)',
+              'rationale': 'Piecewise-linear can mimic step functions with smoother transitions, potentially better norms'
+          })
+          
+          # Family 4: Oscillatory with decay
+          proposals.append({
+              'family': 'oscillatory_decay',
+              'description': 'f(x) = (1 + alpha * cos(beta*x)) * exp(-gamma*|x|)',
+              'code_snippet': 'import jax.numpy as jnp\\nimport jax\\n\\nf_values = jnp.linspace(-5, 5, 800)\\nalpha = 0.3\\nbeta = 4.0\\ngamma = 0.8\\nf = (1 + alpha * jnp.cos(beta * f_values)) * jnp.exp(-gamma * jnp.abs(f_values))\\nf = jnp.maximum(f, 1e-6)',
+              'rationale': 'Oscillatory functions create structured convolutions; decay ensures integrability'
+          })
+          
+          # Family 5: Multi-level improved step
+          proposals.append({
+              'family': 'multi_level_improved',
+              'description': 'Multi-level step with optimized heights and asymmetric structure',
+              'code_snippet': 'import jax.numpy as jnp\\nimport jax\\n\\nf_values = jnp.linspace(-3, 3, 600)\\nn = len(f_values)\\nlevels = [0.5, 1.2, 2.0, 1.2, 0.5]\\npositions = jnp.array([0.10, 0.30, 0.50, 0.70, 0.90])\\nf = f_values\\nfor i in range(len(positions) - 1):\\n    start = int(positions[i] * n)\\n    end = int(positions[i+1] * n)\\n    f = f.at[start:end].set(levels[i])\\nf = jnp.maximum(f, 0)',
+              'rationale': 'Refined multi-level steps with asymmetric heights may beat simple step patterns'
+          })
+          
+          return {
+              'proposals': proposals,
+              'note': 'Use probe_solution to rank these quickly before full evaluation.'
+          }
+new_skills:
+  - name: architecture-jump-protocol
+    description: Jump between fundamentally different function families to escape local optima.
+    body: |
+      # Architecture Jump Protocol for C2 Maximization
+
+      ## Core Principle
+      Small mutations within step-functions cannot escape the local optimum. You MUST
+      jump to completely different function families that have different mathematical properties.
+
+      ## When to Jump (trigger conditions)
+      1. After 3 failed mutation attempts on same architecture
+      2. After iteration 10 without improvement
+      3. When probe scores plateau across 5+ variants
+      4. When analyze_convolution_profile suggests structural changes
+
+      ## Architecture Families (rotate through these)
+      1. Gaussian Mixtures: f(x) = sum w_i * exp(-((x-mu_i)^2)/(2*sigma_i^2))
+         Pros: Smooth, analytically tractable convolution
+         Call when: analysis suggests widening support
+         
+      2. B-spline Basis: Optimized control points with softplus positivity
+         Pros: Flexible smooth transitions, many degrees of freedom
+         Call when: need fine control over shape
+         
+      3. Oscillatory Decay: f(x) = (1 + alpha*cos(beta*x))*exp(-gamma*|x|)
+         Pros: Creates structured convolution with potential for better L2/inf ratio
+         Call when: interference pattern suggests adding structure
+         
+      4. Piecewise-Linear: Linear segments connecting optimized vertices
+         Pros: Balances smoothness with computational efficiency
+         Call when: smooth functions don't improve
+         
+      5. Multi-Level Asymmetric Steps: Refined step structures with varying heights
+         Pros: Keeps advantages of steps while adding flexibility
+         Call when: steps still show promise but need refinement
+
+      ## Execution Flow
+      1. Call analyze_convolution_profile to get diagnosis
+      2. Choose architecture family based on diagnosis
+      3. Call generate_candidates with that family focus
+      4. Probe all candidates, evaluate top 2
+      5. If no improvement after 2 full evals: switch to next family
+
+      ## Key Rule
+      NEVER stay in one family for more than 3 iterations. Rotate families every time you
+      run out of promising variants. Parallel diversity beats sequential refinement.
+new_middlewares:
+  - name: enforce_diversity
+    hook: before_tool
+    description: Prevents consecutive iterations from refining the same architecture
+    implementation_py: |
+      def before_tool(hook_input):
+          iterations = hook_input.get("iteration", 0)
+          last_arch = hook_input.get("last_architecture", "unknown")
+          tool_name = hook_input.get("tool_name", "")
+          
+          if iterations >= 12 and last_arch != "unknown":
+              return "Warning: You've refined the same architecture for multiple iterations. Call generate_candidates to try a new architecture family."
+          
+          if tool_name == "evaluate_solution":
+              return "Remember: Have you probed all variants first? Use probes to filter before full eval."
+          
+          return None
+  - name: periodic_analysis_reminder
+    hook: before_model
+    description: Ensures convolution profile analysis happens regularly
+    implementation_py: |
+      def before_model(hook_input):
+          iteration = hook_input.get("iteration", 0)
+          if iteration == 0 or iteration % 5 == 0:
+              return "Reminder: Call analyze_convolution_profile on your best function to guide architecture choices. This tells you WHAT to change, not just HOW."
+          return None

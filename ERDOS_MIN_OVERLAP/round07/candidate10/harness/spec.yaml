@@ -1,0 +1,306 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are an expert in mathematical optimization for the Erdős minimum overlap problem.
+
+  **THE OBJECTIVE**: Maximize combined_score = 0.38092303510845016 / c5_bound
+  where c5_bound is the maximum overlap integral found. You must find c5_bound < 0.38092303510845016.
+
+  **CONSTRAINTS**: The step function h must have values in [0,1] and integrate to exactly 1 over [0,2].
+
+  **WHY GRADIENT DESCENT FAILS HERE**: The objective landscape is rugged. Adam optimization gets stuck near the seed's solution (score=0.999641).
+
+  **YOUR NEW CAPABILITY**: Use the `construct_candidate` tool to generate diverse step functions through combinatorial construction instead of relying solely on gradient descent.
+
+  **SEARCH STRATEGY**:
+  1. Use `construct_candidate` to create 3-5 diverse candidate functions (uniform, symmetric, concentrated, multi_step)
+  2. Evaluate each with evaluate_solution
+  3. Take the best, optionally refine with `edit_solution`
+  4. Avoid long gradient descent runs; focus on construction
+
+  **SUCCESS CRITERIA**: combined_score > 1.0 means c5_bound < 0.38092303510845016
+
+  **KEY INSIGHT**: This problem rewards clever construction over brute-force optimization. Think of piecewise constant functions.
+skill_description: |
+  Erdős C₅ bound optimization harness. The seed's gradient-based approach is stuck at 0.999641. Use the construct_candidate tool to build diverse step function candidates through combinatorial search rather than relying on Adam optimization alone. Target combined_score > 1.0.
+skill_body: |
+  # Erdős C₅ Minimum Overlap Problem
+  
+  ## Problem Statement
+  
+  Find a step function h: [0,2] → [0,1] that minimizes:
+  max_k ∫₀² h(x)(1-h(x+k)) dx
+  
+  Subject to: h∈[0,1], ∫₀² h(x)dx = 1
+  
+  Current best: C₅ ≤ 0.38092303510845016
+  
+  ## Why Gradient Descent Gets Stuck
+  
+  The objective landscape has many local optima. Adam optimization from random or simple patterns consistently converges to near-0.999641. The problem rewards clever piecewise constructions.
+
+  ## Strategic Approach: Combinatorial Construction
+  
+  **Do not rely solely on the seed's multi-restart Adam approach.** Instead:
+
+  ### 1. Use construct_candidate for Diverse Generations
+  
+  The `construct_candidate` tool builds step functions through:
+  - uniform: n equal-width intervals with constant height
+  - symmetric: patterns centered at x=1 (mirrored)
+  - concentrated: mass concentrated near endpoints [0,a]∪[2-a,2]
+  - multi_step: k-piece function with strategic breakpoints
+  
+  Call this 3-4 times with different parameters to get diversity.
+
+  ### 2. Evaluate, Don't Overfit
+  
+  Each evaluation is precious (~30 total). After constructing 3-5 candidates:
+  - Evaluate the best ones
+  - If any score > 1.0, STOP and submit
+  - Otherwise, construct 2-3 new variations around the best structure
+
+  ### 3. Refinement Strategy
+  
+  If a constructed candidate is promising but not optimal:
+  - Use edit_solution to make targeted changes
+  - Adjust only 1-2 parameters
+  - Avoid long gradient descent runs
+
+  ### 4. Template Constructions to Try
+  
+  **Type A: Uniform Split**
+  - Divide [0,2] into n equal intervals
+  - Set h(x) = 2/n for half intervals, 0 for others
+  
+  **Type B: Concentrated Mass**
+  - h(x) = c on [0,a] and [2-a,2]
+  - Choose c = 1/(2a) to satisfy ∫h = 1
+  
+  **Type C: Symmetric Patterns**
+  - Create patterns centered at x=1, mirrored
+  
+  **Type D: Multi-Step Functions**
+  - k-piece step functions with strategic breakpoints
+  
+  ## Execution Flow
+  
+  1. Call construct_candidate(n_intervals=100, style="uniform") → evaluate
+  2. Call construct_candidate(n_intervals=100, style="symmetric") → evaluate
+  3. Call construct_candidate(n_intervals=200, style="concentrated") → evaluate  
+  4. Call construct_candidate(n_intervals=50, style="multi_step", steps=4) → evaluate
+  5. Pick best score, construct variations around it
+  6. If no improvement after 10 evals, try n_intervals=400, 800 on best style
+
+  ## Critical Reminders
+  
+  - **∫h must equal exactly 1** - construct_candidate handles this
+  - **h must be in [0,1]** - don't violate this
+  - **Coarse discretization often finds better global optima**
+  - **Stop when combined_score > 1.0**
+tool_descriptions:
+  edit_solution: |
+    Modify the EVOLVE-BLOCK. Prefer complete rewrites that change the optimization strategy entirely.
+    
+    **For this task**: Try fundamentally different approaches - replace Adam with construction-based solver, change initialization, use fewer intervals.
+    
+    Keep class structure but rewrite the core optimization loop.
+  evaluate_solution: |
+    Run and get combined_score (higher=better). You have ~30 evaluations.
+    
+    This task rewards diverse construction over brute-force search. Use each eval carefully.
+  probe_solution: NOT AVAILABLE. The JAX/NumPy evaluator is fast enough that each eval is the real thing. Use it deliberately.
+  finish: |
+    End when:
+    - combined_score > 1.0 (new record!)
+    - 25+ evaluations used with no improvement
+    - You've exhausted diverse construction strategies
+sampling:
+  temperature: 0.8
+  top_p: 0.95
+  top_k: 15
+  max_tokens: 12288
+agent:
+  max_iterations: 40
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 10000
+new_tools:
+  - name: construct_candidate
+    description: |
+      Generate a diverse step function candidate for the Erdős C₅ problem.
+      Constructs piecewise constant functions: uniform, symmetric, concentrated, multi_step.
+      Ensures ∫h=1 over [0,2] and h∈[0,1].
+      Returns a seed program with the generator pre-built.
+      **When to use**: Call 3-5 times with different parameters. Do NOT rely solely on Adam.
+      **Parameters**: n_intervals (50-200), style, steps (for multi_step).
+    input_schema:
+      type: object
+      properties:
+        n_intervals:
+          type: integer
+          description: Discretization resolution (50-200 recommended)
+        style:
+          type: string
+          description: Construction style (uniform, symmetric, concentrated, multi_step)
+        steps:
+          type: integer
+          description: Number of piecewise segments (for multi_step, 2-6)
+    implementation_py: |
+      def run(ctx, args):
+          import jax.numpy as jnp
+          from dataclasses import dataclass, asdict
+          
+          n_intervals = args.get("n_intervals", 100)
+          style = args.get("style", "uniform")
+          steps = args.get("steps", 3)
+          
+          N = n_intervals
+          domain = 2.0
+          dx = domain / N
+          h_values = jnp.zeros(N)
+          
+          if style == "uniform":
+              for i in range(N):
+                  mid = (i + 0.5) * dx
+                  if mid < 1.0:
+                      h_values = h_values.at[i].set(2.0 / N)
+                  else:
+                      h_values = h_values.at[i].set(0.0)
+          elif style == "symmetric":
+              h_values = jnp.ones(N) / 2.0
+              center = N // 2
+              half_width = N // 8
+              h_values = h_values.at[center-half_width:center+half_width].set(0.0)
+              h_values = h_values.at[:half_width].set(1.0)
+              h_values = h_values.at[N-half_width:N-half_width+half_width].set(1.0)
+          elif style == "concentrated":
+              h_values = jnp.zeros(N)
+              edge_width = N // 6
+              h_values = h_values.at[:edge_width].set(3.0 / edge_width)
+              h_values = h_values.at[N-edge_width:N].set(3.0 / edge_width)
+          elif style == "multi_step":
+              h_values = jnp.zeros(N)
+              segment_width = N // steps
+              for step in range(steps):
+                  center_idx = step * segment_width + segment_width // 2
+                  amplitude = 1.5 if step < steps // 2 else -0.5
+                  for i in range(N):
+                      dist = abs((i + 0.5) * dx - (center_idx + 0.5) * dx)
+                      h_values = h_values.at[i].set(h_values[i] + amplitude * jnp.exp(-dist**2 / (segment_width*dx**2)))
+          
+          h_values = jnp.clip(h_values, 0.0, 1.0)
+          integral = jnp.sum(h_values) * dx
+          if integral > 0:
+              h_values = h_values / integral
+          
+          latent = jnp.log(h_values / (1.0 - h_values + 1e-10))
+          
+          class Hyperparameters:
+              num_intervals = n_intervals
+              base_learning_rate = 0.01
+              num_steps = 20000
+              penalty_strength = 1000.0
+              num_restarts = 1
+              seed_start = 42 + int(sum(h_values))
+          
+          lines = str(ctx.get_best_program()).split('\n')
+          new_lines = []
+          for i, line in enumerate(lines):
+              new_lines.append(line)
+              if i == 2 and 'num_intervals' in line:
+                  new_lines[i] = line.replace('num_intervals = 800', f'num_intervals = {n_intervals}')
+              if i == 3 and 'base_learning_rate' in line:
+                  new_lines[i] = line.replace('0.0053', '0.01')
+          
+          new_lines.append('')
+          new_lines.append(f'    initial_latent = latent')
+          new_program = '\n'.join(new_lines)
+          
+          return {
+              "constructed": True,
+              "n_intervals": n_intervals,
+              "style": style,
+              "steps": steps,
+              "integral": float(jnp.sum(h_values) * dx),
+              "min_h": float(jnp.min(h_values)),
+              "max_h": float(jnp.max(h_values)),
+              "new_seed_program": new_program,
+              "note": f"Constructed {style} step function with {N} intervals"
+          }
+new_skills:
+  - name: construction-strategy
+    description: |
+      Combinatorial construction strategy for Erdős C₅ problem.
+      Focus on piecewise constant functions, not gradient descent.
+      Use construct_candidate for diverse candidates, evaluate, pick best.
+    body: |
+      # Combinatorial Construction for C₅ Optimization
+      
+      ## Core Insight
+      
+      This problem rewards clever piecewise constant constructions, not smooth gradient descent. The seed's Adam optimizer gets stuck because the landscape is rugged.
+      
+      ## Construction Types
+      
+      ### 1. Uniform Split (Type A)
+      Divide [0,2] into n equal intervals. Set h(x) = 2/n for the first n/2 intervals, 0 elsewhere.
+      - Ensures ∫h = 1
+      
+      ### 2. Concentrated Mass (Type B)
+      Place mass near endpoints: h(x) = c on [0,a] ∪ [2-a,2], 0 elsewhere.
+      - Choose c = 1/(2a) to satisfy ∫h = 1
+      
+      ### 3. Symmetric Patterns (Type C)
+      Create patterns centered at x=1, mirrored around the center.
+      
+      ### 4. Multi-Step Functions (Type D)
+      k-piece step functions with strategic breakpoints.
+      - k=2: simple split
+      - k=3-4: alternating high/low regions
+      
+      ## Execution Strategy
+      
+      1. **Diversity First**: Call construct_candidate 3-5 times with different (n, style) pairs
+      
+      2. **Evaluate Strategically**: Each evaluation is precious. Evaluate top 3-4 candidates.
+      
+      3. **Refine Wisely**: If a candidate shows promise (score > 0.999641 but < 1.0):
+         - Increase n_intervals to 400-800
+         - Run fewer steps but with the good starting point
+      
+      4. **Stop Conditions**:
+         - combined_score > 1.0: RECORD BROKEN, submit immediately
+         - 20+ evals with no improvement: try coarser n_intervals (50-100)
+      
+      ## Critical Reminders
+      
+      - ∫h must equal EXACTLY 1
+      - h must be in [0,1] - clip before normalizing
+      - Coarse discretization (n=50-200) often finds better global optima
+      - Don't over-optimize: A good construction beats a long gradient run
+new_middlewares:
+  - name: construction_reminder
+    hook: before_model
+    description: |
+      Before each generation, remind the executor to use combinatorial construction
+      over gradient descent, and to evaluate diverse candidates before refining.
+    implementation_py: |
+      def before_model(hook_input):
+          remaining = hook_input.get("budget_left", {}).get("evals", 0)
+          best_score = hook_input.get("best_score", 0.999641)
+          
+          if remaining > 5:
+              return (f"💡 STRATEGY REMINDER: You have {remaining} evaluations left.\n"
+                      f"Best score so far: {best_score:.6f} (need > 1.0 for record).\n\n"
+                      f"**Do NOT rely on gradient descent alone.** Use `construct_candidate`\n"
+                      f"to generate 3-5 diverse step functions:\n"
+                      f"- construct_candidate(100, \"uniform\")\n"
+                      f"- construct_candidate(100, \"concentrated\")\n"
+                      f"- construct_candidate(200, \"symmetric\")\n"
+                      f"- construct_candidate(50, \"multi_step\", 4)\n\n"
+                      f"Evaluate each, pick best, then optionally refine. "
+                      f"Stop when combined_score > 1.0.")
+          else:
+              return (f"⏰ BUDGET ALERT: Only {remaining} evaluations left!\n\n"
+                      f"Focus on the BEST 2-3 candidates from your constructions.\n"
+                      f"Submit immediately if combined_score > 1.0.")

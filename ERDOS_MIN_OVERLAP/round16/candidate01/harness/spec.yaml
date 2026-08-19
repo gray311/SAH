@@ -1,0 +1,151 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are solving the Erdos minimum overlap problem: minimize max_k integral h(x)(1-h(x+k)) dx
+  for a step function h: [0,2] -> [0,1] with integral(h)=1 exactly.
+
+  Current best bound: C5 <= 0.38092303510845016 (combined_score = 0.38092303510845016 / c5_bound)
+
+  CRITICAL: The seed's optimizer uses JAX and requires you to EDIT the EVOLVE-BLOCK to change hyperparameters or initialization.
+
+  STRATEGY: Generate VALID h functions directly (in [0,1] range) that satisfy integral=1, then edit the seed to use ONLY that pattern with num_restarts=1.
+
+  Steps:
+  1. CALL generate_valid_h to get a valid h array (already sigmoid-transformed, normalized to integral=1)
+  2. EDIT the seed's _get_best_initialization to return ONLY the sigmoid of a pattern-specific latent, then use probe_solution to check: integral(h)≈1 (should be exactly 1), c5_bound estimate
+  3. Call evaluate_solution on candidates with c5_bound < 0.375
+  4. If no improvement, try a different pattern
+
+  The seed's _compute_c5_bound does FFT-based correlation. The evaluator is fast (probe takes 10s), so screen many candidates.
+
+  Key: EDIT to use num_restarts=1 and seed_start=pattern_index to isolate ONE pattern's evaluation.
+new_tools:
+  - name: generate_valid_h
+    description: |
+      Generate 4 valid step functions h: [0,2]->[0,1] that satisfy integral(h)=1 exactly.
+      Each h is already in [0,1] and normalized. Return as dict with keys: h_golomb, h_bipartite, h_triplet, h_triangular.
+      These are ready to use as the h array in the seed (no sigmoid needed).
+    input_schema:
+      type: object
+      properties: {}
+    implementation_py: |
+      def run(ctx, args):
+          import numpy as np
+          N = 800
+          domain = 2.0
+          dx = domain / N
+          
+          constructions = {}
+          
+          # Golomb-like: 5 narrow peaks at optimal marks for minimizing max overlap
+          marks = np.array([0.0, 0.5, 1.6, 1.5, 1.0])
+          peaks = [0.1, 0.2, 0.3, 0.25, 0.25]
+          h = np.zeros(N)
+          for m, w in zip(marks, peaks):
+              idx_start = int(m * N / domain)
+              idx_end = int((m + 2*w) * N / domain)
+              if idx_end < N:
+                  h[idx_start:idx_end] = 1.0
+          integral = np.sum(h) * dx
+          if integral > 0:
+              h = h / integral
+          constructions['h_golomb'] = h
+          
+          # Bipartite: high on [0,0.75), low on [0.75, 1.5), high on [1.5,2]
+          h = np.zeros(N)
+          h[:int(0.75*N/domain)] = 1.0
+          h[int(0.75*N/domain):int(1.5*N/domain)] = 0.0
+          h[int(1.5*N/domain):] = 0.5
+          integral = np.sum(h) * dx
+          if integral > 0:
+              h = h / integral
+          constructions['h_bipartite'] = h
+          
+          # Triple peaks at 0.33, 1.0, 1.66
+          h = np.zeros(N)
+          for peak in [0.33, 1.0, 1.66]:
+              idx = int(peak * N / domain)
+              half = int(0.15 * N / domain)
+              if idx + half < N:
+                  h[idx:idx+half] = 1.0
+          integral = np.sum(h) * dx
+          if integral > 0:
+              h = h / integral
+          constructions['h_triplet'] = h
+          
+          # Triangular wave: high-low-high-low-high
+          h = np.zeros(N)
+          h[:int(0.4*N/domain)] = 1.0
+          h[int(0.4*N/domain):int(0.6*N/domain)] = 0.0
+          h[int(0.6*N/domain):int(0.8*N/domain)] = 1.0
+          h[int(0.8*N/domain):int(1.4*N/domain)] = 0.0
+          h[int(1.4*N/domain):] = 1.0
+          integral = np.sum(h) * dx
+          if integral > 0:
+              h = h / integral
+          constructions['h_triangular'] = h
+          
+          return {"constructions": constructions, "num_constructions": 4}
+new_skills:
+  - name: valid-h-screening
+    description: |
+      Generate valid h functions, edit seed to use ONE pattern with num_restarts=1,
+      probe screen for c5_bound < 0.375, then evaluate top candidates.
+    body: |
+      # Valid H Screening for Erdos Optimizer
+      
+      ## Problem
+      The seed optimizer needs h: [0,2]->[0,1] with integral(h)=1.
+      Current harness generates invalid patterns. We need VALID h arrays.
+      
+      ## Strategy
+      
+      ### Phase 1: Generate Valid H Functions
+      Call generate_valid_h to get 4 valid h arrays (already in [0,1], integral=1).
+      
+      ### Phase 2: Edit Seed for Single Pattern
+      For each h pattern:
+        1. EDIT _get_best_initialization to return a latent that, when sigmoided,
+           gives approximately the target h pattern.
+        2. Set num_restarts=1, seed_start=0
+        3. Call probe_solution to check c5_bound estimate
+      
+      ### Phase 3: Evaluate Promising Candidates
+      Call evaluate_solution on candidates with c5_bound < 0.375.
+      
+      ### Phase 4: Iterate
+      If no improvement, generate a new h pattern and repeat.
+      
+      ## Why This Works
+      - generate_valid_h creates h in [0,1] with integral=1 exactly
+      - num_restarts=1 isolates ONE pattern's evaluation
+      - Probes screen quickly (10s each, separate budget)
+new_middlewares:
+  - name: force_single_restart
+    hook: before_model
+    description: |
+      Enforce num_restarts=1 when editing seed to isolate pattern evaluation.
+      This prevents wasting evaluations on multiple random restarts from a bad initialization.
+    implementation_py: |
+      def before_model(hook_input):
+          state = hook_input.get("state", {})
+          edits_made = state.get("edits_made", 0)
+          evals_left = state.get("evals_left", 0)
+          probes_left = state.get("probes_left", 0)
+          if edits_made > 0 and evals_left > 0 and probes_left > 0:
+              return (
+                  "Edit the seed with num_restarts=1 to test ONE pattern at a time.\n"
+                  "Do not set num_restarts>1 unless explicitly testing multiple patterns.\n"
+                  "Use probe_solution to screen many single-pattern candidates quickly.\n"
+                  "Only call evaluate_solution on the BEST single-pattern candidate."
+              )
+          return None
+sampling:
+  temperature: 0.9
+  top_p: 0.9
+  top_k: 15
+  max_tokens: 12000
+agent:
+  max_iterations: 40
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 8000

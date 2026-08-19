@@ -1,0 +1,201 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are solving the Erdos minimum overlap problem: find a step function h: [0,2]->[0,1] with integral(h)=1 that minimizes max_k integral h(x)(1-h(x+k)) dx.
+  
+  Current best bound: C5 <= 0.38092303510845016
+  
+  CRITICAL INSIGHT: The seed program's 12 initialization patterns are all Gaussian/sigmoid-based. They all lead to the same local minimum.
+  
+  STRATEGY: Generate RADICALLY different initialization structures and screen them with probes. Do NOT tune hyperparameters or gradually improve bad initializations.
+  
+  WORKFLOW (follow exactly):
+  1. Call generate_5_init to create 5 structurally diverse initializations
+  2. For EACH of the 5, EDIT the seed to use ONLY that initialization (set num_restarts=1, use the latent as the only init)
+  3. Call probe_solution on all 5 edited programs
+  4. Identify any with c5_bound < 0.37 AND integral close to 1
+  5. Call evaluate_solution on at most 2 promising candidates
+  6. If no improvement, call generate_5_init again to get NEW structures
+  7. STOP when combined_score > 1.0 or probes run out
+  
+  NEVER do: hyperparameter tuning, multi-restart optimization of bad starts, or gradual improvements.
+  
+  Focus entirely on finding INITIALLY BETTER functions through structural diversity.
+skill_description: |
+  Escape the seed's local minimum by generating radically different initialization structures (piecewise constant, binary step, asymmetric) and screening with probes before evaluation.
+skill_body: |
+  # Breaking the Erdos Local Minimum
+  
+  ## The Problem
+  The seed uses 12 similar Gaussian/sigmoid initializations. All converge to c5 ≈ 0.3809.
+  
+  ## The Solution
+  Generate INITIALLY DIFFERENT structures that cannot be reached by tuning.
+  
+  ## Tool: generate_5_init
+  - Creates 5 fundamentally different step function shapes
+  - Each has a latent vector that when sigmoided gives h(x) in [0,1]
+  - Types: binary step, piecewise 3-part, asymmetric trapezoid, bimodal, sparse 3-peak
+  
+  ## Tool: probe_solution
+  - CHEAP: 500 intervals, ~10s runtime
+  - Returns estimated c5_bound and constraint satisfaction
+  - Use all 30 probes to test the 5 initializations BEFORE any full evaluation
+  
+  ## Execution Flow
+  1. generate_5_init → get 5 latents
+  2. For each latent: EDIT seed to use ONLY that pattern (num_restarts=1, seed_start=0, use the latent as h)
+  3. probe_solution all 5 → check c5_bound < 0.37
+  4. evaluate_solution on max 2 best candidates
+  5. Repeat with new random seed for generate_5_init
+  6. If combined_score > 1.0, finish
+  
+  ## Success
+  - combined_score > 1.0 means c5_bound < 0.380923
+tool_descriptions:
+  edit_solution: |
+    Modify the EVOLVE-BLOCK to change the initialization strategy.
+    
+    To use a single latent h_latent as the ONLY initialization:
+    - Set num_restarts=1
+    - Set seed_start=0
+    - Replace _get_best_initialization to return h_latent directly
+    - Remove the Gaussian/sigmoid pattern loop
+    
+    Example edit to use h_latent (shape (800,)):
+    - Add: h_latent = <the latent values>
+    - Change: initial_latent = h_latent (instead of _get_best_initialization(seed))
+  evaluate_solution: |
+    Run full evaluation with high-resolution discretization (800 intervals).
+    Returns combined_score = 0.38092303510845016 / c5_bound.
+    Value > 1.0 means new record.
+  probe_solution: |
+    Quick approximate evaluation with 500 intervals, ~10s runtime.
+    Returns {c5_bound_estimate, integral_h, valid}.
+    
+    Use this to screen candidates cheaply:
+    - probe is SEPARATE from evaluation budget (30 probes available)
+    - c5_bound estimates are approximate but directionally correct
+    - Call probe BEFORE calling evaluate to avoid wasting full evals
+  finish: |
+    Submit when combined_score > 1.0 (c5_bound < 0.38092303510845016).
+    Summary should mention the best c5_bound found.
+sampling:
+  temperature: 0.8
+  top_p: 0.9
+  top_k: 10
+  max_tokens: 12000
+agent:
+  max_iterations: 40
+middleware:
+  budget_reminder_from_left: 10
+  long_tool_output_max_chars: 8000
+new_tools:
+  - name: generate_5_init
+    description: |
+      Generate 5 structurally different step function initializations for the Erdos optimizer.
+      
+      Patterns:
+      1. Binary step: h=1 on [0,a], h=0 elsewhere (sharp cutoff)
+      2. 3-part piecewise: h=0.8 on [0,a], h=0.4 on [a,b], h=0 on [b,2]
+      3. Asymmetric trapezoid: high on [0,0.4], medium on [0.4,1.2], low on [1.2,2]
+      4. Bimodal: two narrow peaks at [0.3,0.6] and [1.4,1.7]
+      5. Sparse 3-peak: three narrow peaks at [0.4,0.55], [0.9,1.05], [1.5,1.65]
+      
+      Each returns a latent vector. The seed uses sigmoid(latent) as h(x).
+    input_schema:
+      type: object
+      properties: {}
+    implementation_py: |
+      def run(ctx, args):
+          import numpy as np
+          np.random.seed(42)
+          N = 800
+          domain = 2.0
+          dx = domain / N
+          constructions = {}
+          
+          # Pattern 1: Binary step
+          a = 1.0 / 0.6
+          h_pat1 = np.zeros(N)
+          h_pat1[:int(N*a)] = 6.0  # High value before sigmoid
+          constructions['binary_step'] = h_pat1
+          
+          # Pattern 2: 3-part piecewise
+          a, b = 0.4, 1.2
+          h_pat2 = np.zeros(N)
+          h_pat2[:int(N*a)] = 5.0
+          h_pat2[int(N*a):int(N*b)] = 2.0
+          h_pat2[int(N*b):] = -1.0
+          constructions['piecewise_3'] = h_pat2
+          
+          # Pattern 3: Asymmetric trapezoid
+          h_pat3 = np.zeros(N)
+          h_pat3[:int(N*0.4)] = 8.0
+          h_pat3[int(N*0.4):int(N*1.2)] = 3.0
+          h_pat3[int(N*1.2):] = -1.0
+          constructions['asymmetric_trap'] = h_pat3
+          
+          # Pattern 4: Bimodal
+          h_pat4 = np.zeros(N)
+          h_pat4[int(N*0.3*1000/2):int(N*0.6*1000/2)] = 10.0
+          h_pat4[int(N*1.4*1000/2):int(N*1.7*1000/2)] = 10.0
+          constructions['bimodal'] = h_pat4
+          
+          # Pattern 5: Sparse 3-peak
+          h_pat5 = np.zeros(N)
+          h_pat5[int(N*0.4*1000/2):int(N*0.55*1000/2)] = 12.0
+          h_pat5[int(N*0.9*1000/2):int(N*1.05*1000/2)] = 12.0
+          h_pat5[int(N*1.5*1000/2):int(N*1.65*1000/2)] = 12.0
+          constructions['sparse_3peak'] = h_pat5
+          
+          return {"constructions": constructions, "num_constructions": 5}
+new_skills:
+  - name: radical-reinit-strategy
+    description: |
+      Escape local minima by generating radically different initialization structures. Use probes to screen before evaluation.
+    body: |
+      # Radical Reinitialization Strategy
+      
+      ## Why the Seed Fails
+      The seed's 12 patterns are all Gaussian/sigmoid-based. They explore similar regions.
+      
+      ## The Fix
+      Generate INITIALLY DIFFERENT structures that cannot be reached by tuning.
+      
+      ## Pattern Types to Try
+      - Binary step functions (sharp cutoffs)
+      - Piecewise constant with 2-4 regions
+      - Asymmetric distributions
+      - Multi-peak with narrow support
+      - Sparse distributions
+      
+      ## Workflow
+      1. generate_5_init → 5 latents
+      2. For each: EDIT to use ONLY that latent (num_restarts=1)
+      3. probe_solution all 5 → screen for c5_bound < 0.37
+      4. evaluate_solution on best 2
+      5. If no improvement, repeat with new random seed
+      
+      ## Key Constraints
+      - integral(h) must be exactly 1
+      - h(x) in [0,1]
+      - Use ALL 30 probes before any full evaluation
+new_middlewares:
+  - name: enforce_probe_first
+    hook: before_model
+    description: |
+      Enforce probing all candidates before any full evaluation. Prevents wasting evals on untested initializations.
+    implementation_py: |
+      def before_model(hook_input):
+          state = hook_input.get("state", {})
+          probes_left = state.get("probes_left", 0)
+          evals_left = state.get("evals_left", 0)
+          
+          if probes_left >= 5 and evals_left >= 3:
+              return (
+                  "PROBE FIRST: You have probes available. Probe all new candidates\n"
+                  "before calling evaluate_solution. Do not call evaluate_solution\n"
+                  "until you've probed at least 3-5 candidates.\n"
+                  "Use probes to find c5_bound < 0.37 before spending evaluations."
+              )
+          return None

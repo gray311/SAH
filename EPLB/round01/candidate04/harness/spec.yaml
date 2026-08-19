@@ -1,0 +1,196 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are an expert software developer optimizing a MoE EPLB expert rearrangement algorithm for vLLM.
+  The evaluator measures combined_score (higher is better) balancing: (1) load balance quality and (2) execution speed.
+  
+  KEY INSIGHT: The seed algorithm uses inefficient Python loops. You MUST replace them with vectorized PyTorch operations.
+  
+  Method — edit and probe aggressively:
+  1. START by replacing the balanced_packing loop with vectorized scatter operations.
+     Hint: Use torch.argsort, torch.bincount, or scatter_add to pack in one pass.
+  2. Use probe_solution to rapidly test vectorized variants (cheaper, faster scoring).
+  3. Before full evaluation, ensure your code compiles and runs quickly (under 1 second per eval target).
+  4. When evaluate_solution returns, extract the score/validity/error and adjust accordingly.
+  5. Final submission uses only vectorized code (no nested Python loops over experts).
+  
+  Only change the EVOLVE-BLOCK region. Preserve all function signatures and inputs/outputs.
+  Use edit_solution (targeted diff or full rewrite), then probe_solution for fast ranking, then evaluate_solution.
+skill_description: |
+  Optimize MoE EPLB expert rearrangement algorithms for vLLM. Maximize combined_score by improving both load balancing quality and execution speed through vectorized PyTorch operations.
+skill_body: |
+  # MoE EPLB Algorithm Optimization
+  
+  ## Core Strategy: Vectorize Everything
+  
+  The seed implementation uses slow Python nested loops. Replace with PyTorch vectorized ops:
+  - balanced_packing: Use torch.argsort + torch.cumsum or scatter to pack in O(n) time
+  - replicate_experts: Use torch.argsort on normalized weights + torch.cumsum for rankings
+  
+  ## Concrete Transformation Steps
+  
+  1. For balanced_packing: Replace the nested for-loop with:
+     Sort by weight descending, then assign packs using bucketization.
+     Target: groups_per_pack items per pack, minimizing pack weight variance.
+  
+  2. For replicate_experts: Use torch.argsort on weight/logcnt to find max-load experts.
+  
+  ## Use Probe Heavily
+  
+  - Probe budget: around 30 cheap evaluations (subsampled, fast scoring)
+  - Use probes to rank 5 to 10 vectorized variants before spending full evaluations
+  - Only call evaluate_solution on top 2 to 3 variants that are syntactically valid, show promising probe scores, and have clean vectorized implementations
+  
+  ## Checklist Before Evaluation
+  
+  - No Python for-loops over expert indices (use vectorized ops)
+  - All tensor operations use torch functions (argsort, scatter, cumsum)
+  - Memory layout optimized (contiguous tensors, proper dtype)
+  - Code runs in under 1 second on a single GPU
+  - Function signatures unchanged from seed
+  
+  ## Typical Improvements
+  
+  - Speed: O(n^2) to O(n) via vectorization
+  - Score: Better load balance due to more exhaustive search in limited time
+  
+  Remember: The evaluator rewards BOTH load balance AND speed. A fast algorithm that achieves good (not perfect) balance scores highest.
+tool_descriptions:
+  edit_solution: |
+    Change the EVOLVE-BLOCK code. For algorithmic improvements, send the complete new EVOLVE-BLOCK body as plain Python code.
+    Preserve the fixed entry function rebalance_experts_hierarchical and all imports outside the block.
+    Replace slow loops with vectorized PyTorch ops.
+  evaluate_solution: |
+    Run the full evaluator on the current EVOLVE-BLOCK. Returns combined_score (higher is better), validity, error, best_so_far, and evaluations remaining.
+    Limited budget: 20 evaluations. Use strategically after probing.
+  probe_solution: |
+    CHEAP probe on subsampled data (around 2000 rows, around 10 seconds runtime, separate budget of around 30 probes).
+    Uses approximate scoring — NOT comparable to full scores. Ideal for ranking multiple vectorized variants quickly, iterating on algorithm structure without budget penalty, confirming basic functionality before full eval.
+  finish: |
+    End session when budget exhausted or no further improvement possible. The best-scoring program auto-submits.
+sampling:
+  temperature: 1.1
+  top_p: 0.98
+  top_k: 30
+  max_tokens: 12288
+agent:
+  max_iterations: 50
+middleware:
+  budget_reminder_from_left: 0
+  long_tool_output_max_chars: 12000
+new_tools:
+  - name: analyze_algorithm
+    description: |
+      Perform complexity analysis of the current EVOLVE-BLOCK code. Report time complexity of each function, bottleneck operations (Python loops, repeated tensor copies), vectorization opportunities (replace with argsort, scatter, cumsum), and estimated speedup if optimized.
+      Call this ONCE at the start to understand optimization potential.
+    input_schema:
+      type: object
+      properties: {}
+    implementation_py: |
+      def run(ctx, args):
+          code = ctx.get_program()
+          lines = code.split('\n')
+          
+          def find_function_body(name):
+              for i, line in enumerate(lines):
+                  if line.strip().startswith('def ' + name + '('):
+                      j = i + 1
+                      indent = len(lines[i]) - len(lines[i].lstrip())
+                      while j < len(lines) and (len(lines[j]) - len(lines[j].lstrip()) > indent or lines[j].strip().startswith('def ')):
+                          j += 1
+                      return '\n'.join(lines[i+1:j])
+              return None
+          
+          report = []
+          funcs_to_check = ['balanced_packing', 'replicate_experts']
+          
+          for fname in funcs_to_check:
+              body = find_function_body(fname)
+              if body:
+                  has_loops = bool([l for l in body.split('\n') if 'for ' in l and 'in range' in l])
+                  has_torch_ops = bool([l for l in body.split('\n') if 'torch.' in l])
+                  nops = body.count('torch.')
+                  if has_loops:
+                      report.append(fname + ': Has Python loops (NEED vectorization)')
+                  else:
+                      report.append(fname + ': Vectorized OK')
+                  report.append(fname + ': Uses ' + str(nops) + ' torch ops')
+          
+          report.append('\nRecommendations:')
+          if len([l for l in lines if 'for ' in l and 'in range' in l]) > 0:
+              report.append('1. Replace for-loops with torch.argsort() + scatter operations')
+              report.append('2. Use torch.cumsum() for running totals')
+              report.append('3. Batch all operations to reduce overhead')
+          else:
+              report.append('1. Consider further optimization: tensor fusion, GPU kernels')
+          
+          return {'analysis': '\n'.join(report), 'needs_vectorization': len(report) > 0}
+new_skills:
+  - name: eplb-optimization-playbook
+    description: |
+      Playbook for optimizing MoE EPLB expert rearrangement algorithms.
+      Goal: Maximize combined_score by improving load balance AND execution speed.
+      Score components: load balance quality + inverse of runtime penalty.
+    body: |
+      # EPLB Optimization Playbook
+      
+      ## Understanding the Score
+      
+      The combined_score rewards:
+      1. Load balance quality: How evenly experts are distributed across physical replicas
+      2. Execution speed: How fast the algorithm completes (no timeout violations)
+      
+      ## Key Insight
+      
+      The seed algorithm is O(n^2) due to nested Python loops over expert indices.
+      This is the PRIMARY bottleneck. Vectorization can achieve O(n) with minimal score loss.
+      
+      ## Transformation Guide
+      
+      ### balanced_packing
+      
+      Problem: Nested loop assigns groups one-by-one, finding min pack each time (O(n^2)).
+      Solution: Use torch.argsort to sort globally, then // groups_per_pack for pack assignment.
+      
+      OLD (slow):
+      for group in indices[i]:
+          pack = min(...) if pack_items[i] < groups_per_pack), key=pack_weights.__getitem__)
+      
+      NEW (fast):
+      indices = torch.argsort(weight, dim=-1, descending=True)
+      pack_index = indices // groups_per_pack
+      rank_in_pack = indices % groups_per_pack
+      
+      ### replicate_experts
+      
+      Problem: Repeatedly search for max load logical expert (O(m * (phy-log))).
+      Solution: Precompute logical expert indices, use vectorized max operations where possible.
+      
+      ## Iteration Strategy
+      
+      1. Call analyze_algorithm first to get complexity report
+      2. Replace loops with vectorized ops in balanced_packing (biggest win)
+      3. Probe 3 to 5 variants with probe_solution to rank by approximate score
+      4. Evaluate top 2 variants with evaluate_solution
+      5. Iterate on the best-performing variant
+      
+      ## Common Pitfalls
+      
+      - Do not introduce Python loops over expert indices
+      - Ensure tensor dtypes match (int64 for indices, float for weights)
+      - Test on small inputs first (seed is small: num_logical_experts % num_groups == 0)
+      - Preserve function signatures exactly
+      - No device mismatches (all tensors on same device as input)
+      
+      ## Expected Improvements
+      
+      - Speed: 10x to 100x faster (Python loops to vectorized ops)
+      - Score: Maintains around 90% to 95% of seed's balance quality
+      - Combined: 5% to 20% net score increase from speed penalty reduction
+      
+      ## Final Check Before Submit
+      
+      - No for i in range( loops over expert indices
+      - All expert assignment uses torch.argsort() or equivalent
+      - All tensor ops inlined (no generator expressions in loops)
+      - Code runs under time limit (under 1 second)
+      - Function signatures unchanged

@@ -1,0 +1,222 @@
+schema: h2spec/1.0
+system_prompt: |
+  Erdos minimum overlap problem: find h: [0,2]->[0,1] minimizing max_k integral h(x)(1-h(x+k))dx.
+  
+  Constraint: integral(h) = 1 exactly.
+  
+  Current best: C5 <= 0.38092303510845016.
+  
+  Goal: Beat seed score (combined_score > 1.0, meaning c5_bound < 0.380923).
+  
+  Strategy:
+  
+  1. The seed program has 15 initialization patterns but may have code issues. Use probe_solution to test candidates cheaply.
+  
+  2. Generate structural variants: modify the wave patterns, try different Golomb rulers, experiment with Fourier-based constructions.
+  
+  3. Use the new tool structural_variants() to get 5 diverse program edits (modifying the pattern generation code).
+  
+  4. Probe all 5 variants cheaply (uses probe budget, no full evals yet).
+  
+  5. Call evaluate_solution on the best 2-3 probes (lowest c5_bound).
+  
+  6. If no improvement, use structural_variants again with different seeds/strategies.
+  
+  7. Keep num_intervals=800 (higher resolution = more accurate c5), penalty=61 (good constraint satisfaction), steps=120000 (enough training).
+  
+  8. Budget: 20 evals total - use probes aggressively, full evals only on promising variants.
+skill_description: |
+  Generate structural variants of the pattern initialization code. Modify wave parameters, try new Golomb rulers, experiment with different initialization strategies. Use probes to screen before full evaluation.
+skill_body: |
+  # Structural Variant Generation Strategy
+  
+  ## Problem
+  The seed's 15 patterns may not explore the right region. We need systematic modifications.
+  
+  ## Solution: structural_variants Tool
+  
+  This tool generates 5 program edits that modify the initialization code:
+  - Wave pattern modifications (different frequencies/amplitudes)
+  - New Golomb ruler constructions (optimal spacing)
+  - Fourier-based spectral methods
+  - Threshold pattern variations
+  - Hybrid constructions
+  
+  ## Workflow
+  
+  1. CALL structural_variants() - get 5 program edits
+  
+  2. For each variant:
+     - CALL probe_solution to check c5_bound (cheap, ~10s)
+     - Record the score
+  
+  3. Rank by probe score (lowest c5_bound = best)
+  
+  4. CALL evaluate_solution on top 2-3 variants (full score)
+  
+  5. If best new score < 0.380923, CALL structural_variants again with different strategies
+  
+  6. Total probes: 5-7. Total evals: 2-6.
+  
+  ## Why This Works
+  
+  - Structural changes, not just hyperparameters
+  - Probe-based screening: find winners before expensive evals
+  - Multiple variants per call: diverse exploration
+  - Focus on code-level innovations, not grid search
+tool_descriptions:
+  edit_solution: |
+    Modify EVOLVE-BLOCK to change initialization patterns or hyperparameters.
+    
+    To modify patterns: edit the _get_best_initialization method - change frequencies, amplitudes, thresholds, Golomb marks.
+    
+    Example - change Golomb marks:
+    Replace:
+    marks = jnp.array([0.0, 0.4, 0.8, 1.2, 1.6])
+    With:
+    marks = jnp.array([0.0, 0.5, 1.0, 1.5])
+    
+    Example - change wave pattern (Pattern 2):
+    Replace:
+    latent = latent + jnp.sin(2 * jnp.pi * x) * 2.0 + jnp.cos(4 * jnp.pi * x) * 1.0
+    With:
+    latent = latent + jnp.sin(3 * jnp.pi * x) * 2.5 + jnp.cos(5 * jnp.pi * x) * 1.5
+  evaluate_solution: |
+    Run full optimization with current hyperparameters. Returns combined_score = 0.38092303510845016 / c5_bound.
+    
+    Higher is better. combined_score > 1.0 means c5_bound < 0.380923 (new record!).
+  probe_solution: |
+    Fast approximate evaluation using 500 intervals. Returns c5_bound (not combined_score).
+    
+    Uses probe budget (separate from eval budget). Score is approximate but good for ranking.
+    
+    Use this to screen multiple variants before spending full evals.
+  finish: |
+    Submit when combined_score > 1.0 (c5_bound < 0.38092303510845016).
+sampling:
+  temperature: 1.2
+  top_p: 0.9
+  top_k: 30
+  max_tokens: 16384
+agent:
+  max_iterations: 40
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 10000
+new_tools:
+  - name: structural_variants
+    description: |
+      Generate 5 diverse program edits that modify the initialization code structure.
+      Includes wave modifications, new Golomb rulers, Fourier methods, threshold variations.
+      Each edit is a complete replacement for the EVOLVE-BLOCK.
+    input_schema:
+      type: object
+      properties: {}
+    implementation_py: |
+      def run(ctx, args):
+          import numpy as np
+          edits = []
+          
+          # Edit 1: Higher frequency waves
+          edit1 = """Pattern 2: Higher frequency waves
+          latent = latent + jnp.sin(3 * jnp.pi * x) * 2.5 + jnp.cos(5 * jnp.pi * x) * 1.5"""
+          edits.append(edit1)
+          
+          # Edit 2: Different Golomb ruler
+          edit2 = """Pattern 12: Different Golomb ruler
+          marks = jnp.array([0.0, 0.33, 0.66, 1.33, 2.0])
+          latent = jnp.zeros(N)
+          for m in marks:
+              mask = jnp.abs(x - m) < 0.12
+              latent = latent.at[mask].set(4.5)
+          latent = latent - 2.0"""
+          edits.append(edit2)
+          
+          # Edit 3: Multi-scale Gaussian mixture
+          edit3 = """Pattern 15: Multi-scale Gaussian
+          latent = jnp.zeros(N)
+          centers = jnp.array([0.3, 0.7, 1.3, 1.7])
+          widths = jnp.array([0.1, 0.2, 0.15, 0.25])
+          amplitudes = jnp.array([3.0, 2.5, 3.5, 2.0])
+          for c, w, a in zip(centers, widths, amplitudes):
+              latent = latent + a * jnp.exp(-((x - c) / w)**2)
+          latent = latent - 1.5"""
+          edits.append(edit3)
+          
+          # Edit 4: Adaptive threshold
+          edit4 = """Pattern 16: Adaptive threshold
+          x = jnp.linspace(0, 2, N)
+          threshold = 0.75
+          latent = jnp.where(x < 0.5, 3.5, jnp.where(x > 1.0, 3.5, -2.5))
+          latent = latent - jnp.sin(2 * jnp.pi * x) * 1.0"""
+          edits.append(edit4)
+          
+          # Edit 5: Symmetric peaks
+          edit5 = """Pattern 17: Symmetric peaks
+          latent = jnp.zeros(N)
+          x = jnp.linspace(0, 2, N)
+          for center in [0.5, 1.0, 1.5]:
+              mask = jnp.abs(x - center) < 0.1
+              latent = latent.at[mask].set(4.0)
+          latent = latent + jnp.sin(4 * jnp.pi * x) * 0.5
+          latent = latent - 1.5"""
+          edits.append(edit5)
+          
+          # Wrap each edit as a program modification
+          return {"edits": edits, "num_edits": len(edits)}
+new_skills:
+  - name: probe-first-exploration
+    description: |
+      Use probe_solution to screen multiple variants cheaply before full evaluation.
+      Focus on structural code changes rather than hyperparameter tuning.
+    body: |
+      # Probe-First Exploration Strategy
+      
+      ## Core Principle
+      Use cheap probes to rank variants before spending expensive full evaluations.
+      
+      ## Workflow
+      
+      1. Generate 5 structural variants (structural_variants tool).
+      
+      2. Probe all 5 variants:
+         - Call probe_solution for each edit
+         - Record c5_bound scores
+         - Typical probe: ~10 seconds, very cheap
+      
+      3. Rank by probe score (lowest c5_bound = best)
+      
+      4. Select top 2-3 variants for full evaluation:
+         - Call evaluate_solution on each
+         - Record combined_scores
+      
+      5. If best new score > 1.0, we found improvement!
+      
+      6. If no improvement, generate new variants and repeat.
+      
+      ## Budget Management
+      
+      - Probes: Use 5-7 (plenty for screening)
+      - Full evals: Use 2-6 (only on promising variants)
+      - Total budget: 20 evals available
+      
+      ## Why Probe-First Works
+      
+      - Full evals take minutes each - use sparingly
+      - Probes are fast - can screen many variants
+      - Structural changes have large effects - easy to rank with probes
+      - Avoid wasting evals on clearly bad variants
+new_middlewares:
+  - name: force_probing
+    hook: before_tool
+    description: |
+      Force solver to use probe_solution before evaluate_solution.
+      Encourage structural exploration, not hyperparameter grid search.
+    implementation_py: |
+      def before_tool(hook_input):
+          if "evaluate_solution" in hook_input.get("tool_to_call", ""):
+              return "Warning: You're about to call evaluate_solution without probing.\n" \
+                     "Consider calling probe_solution first on your variant to check the score cheaply.\n" \
+                     "Use probes to screen - only eval the best 2-3 variants.\n" \
+                     "Budget: 5-7 probes available, 2-6 full evals."
+          return None

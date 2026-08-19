@@ -1,0 +1,191 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are an expert in functional analysis and mathematical optimization. Your task: maximize
+  C2 = ||f * f||_2^2 / ((int_f)^2 ||f * f||_inf) for the second autocorrelation inequality.
+
+  - Theoretical upper bound: 1.0 (Young's inequality)
+  - Current best in literature: 0.8963 (achieved by step functions)
+  - Target: surpass 0.8963
+
+  CRITICAL: The seed program uses PIECEWISE-LINEAR optimization with _create_step_initializer that creates LINEAR ramps. This fails!
+
+  You must create TRUE PIECEWISE-CONSTANT step functions (flat over intervals, not sloped).
+
+  STRATEGY:
+  1. Generate random step function SPECIFICATIONS (num_steps=3-8, heights 0.5-2.5, interval boundaries at fixed fractions of domain)
+  2. Convert SPEC to CODE using jnp.piecewise: f = jnp.piecewise(x, [cond1, cond2, ...], [h1, h2, ...])
+  3. Use jnp.linspace to create domain points, then assign constant values via piecewise
+
+  WORKFLOW:
+  1. Generate step config: random num_steps (3-8), random symmetric/asymmetric, random heights (0.5-2.5)
+  2. Edit to create TRUE step function using jnp.piecewise with CONSTANT heights
+  3. Verify structure matches your config
+  4. Probe 3-5 variants to rank
+  5. Evaluate TOP 1-2 only (max ~5 evals total)
+
+  The seed's _create_step_initializer creates LINEAR ramps (e.g., jnp.linspace). YOU MUST USE jnp.piecewise with CONSTANT values.
+skill_description: C2 maximization via TRUE step functions. Must use jnp.piecewise with CONSTANT heights, NOT linear ramps. Generate random step specs, convert to code, verify, probe, evaluate top.
+tool_descriptions:
+  edit_solution: |
+    Change code in EVOLVE-BLOCK. Create TRUE step functions that are CONSTANT over intervals using jnp.piecewise:
+
+    - Generate random step config: num_steps (3-8), symmetric (true/false), heights array (0.5-2.5)
+    - Create domain: x = jnp.linspace(-10, 10, num_intervals)
+    - Define conditions: boundaries at fixed fractions (e.g., [-0.75, -0.25, 0.25, 0.75] for 4 steps)
+    - Use: f = jnp.piecewise(x, [x < -0.75, (x >= -0.75) & (x < -0.25), (x >= -0.25) & (x < 0.25), x >= 0.25], [h1, h2, h3, h4])
+    - h1, h2, h3, h4 MUST be constant numbers, NOT functions of x
+    - Delete the seed's _create_step_initializer entirely - it creates linear ramps!
+    - Rewrite _objective_fn to work with the new step function interface
+  evaluate_solution: |
+    Run full evaluator. Returns combined_score. Use SPARINGLY (max ~20 total). Only evaluate after probing and verifying step structure.
+  probe_solution: |
+    Cheap score on subsampled data (~10s). Separate budget (~30). Use for ranking variants. NOT comparable to full scores.
+  finish: |
+    End the session. Call when budget exhausted or no improvement possible.
+sampling:
+  temperature: 1.2
+  top_p: 0.9
+  top_k: 30
+  max_tokens: 16384
+agent:
+  max_iterations: 80
+middleware:
+  budget_reminder_from_left: 3
+  long_tool_output_max_chars: 20000
+new_tools:
+  - name: generate_step_spec
+    description: |
+      Generate a random step function specification: num_steps (3-8), symmetric (true/false),
+      interval boundaries (fixed fractions of domain), and heights (0.5-2.5). Returns a dict with
+      all parameters needed to construct a TRUE piecewise-constant step function. Call this FIRST
+      before any edit to get a well-formed random spec.
+    input_schema:
+      type: object
+      properties: {}
+    implementation_py: |
+      def run(ctx, args):
+          import random
+          import math
+          random.seed(42 + ctx.get_random_seed())
+          
+          num_steps = random.choice(range(3, 9))
+          symmetric = random.choice([True, False])
+          
+          # Generate boundaries as fixed fractions of domain [-10, 10]
+          fractions = sorted([random.uniform(0.1, 0.9) for _ in range(num_steps - 1)])
+          boundaries = [-10 + 20 * f for f in fractions]
+          boundaries = [-10] + boundaries + [10]
+          
+          # Generate heights
+          heights = [random.uniform(0.5, 2.5) for _ in range(num_steps)]
+          
+          # For symmetric case with even steps
+          if symmetric and num_steps % 2 == 0:
+              center = num_steps // 2
+              heights = heights[:center+1] + heights[center-1::-1]
+          
+          return {
+              "num_steps": num_steps,
+              "symmetric": symmetric,
+              "boundaries": boundaries,
+              "heights": [round(h, 2) for h in heights[:num_steps]],
+              "num_intervals": num_steps + 1
+          }
+remove_tools: []
+new_skills:
+  - name: step-function-construction
+    description: Playbook for constructing TRUE step functions from random specs using jnp.piecewise. Never use linear ramps!
+    body: |
+      # Step Function Construction Playbook
+
+      ## Critical: Step = Piecewise-Constant, NOT Linear
+
+      The seed program creates PIECEWISE-LINEAR functions via jnp.linspace or linear interpolation. This FAILS.
+
+      You must create PIECEWISE-CONSTANT step functions using jnp.piecewise with CONSTANT heights.
+
+      ## Workflow
+
+      ### Step 1: Generate Random Spec
+
+      CALL generate_step_spec FIRST to get:
+      - num_steps: 3-8 (more complex may achieve higher C2)
+      - symmetric: true/false (try both)
+      - boundaries: array of x-coordinates where steps occur
+      - heights: array of constant values for each step (0.5-2.5)
+
+      ### Step 2: Convert Spec to Code
+
+      In edit_solution:
+
+      1. Create domain: x = jnp.linspace(-10, 10, num_intervals)
+      2. Define conditions based on boundaries
+      3. Use jnp.piecewise: f = jnp.piecewise(x, [cond1, cond2, ...], [h1, h2, ...])
+      4. h1, h2, etc. MUST be CONSTANT NUMBERS, NOT functions of x
+
+      Example for 4 steps:
+      ```python
+      x = jnp.linspace(-10, 10, 400)
+      f = jnp.piecewise(x, 
+          [x < -0.5, (x >= -0.5) & (x < 0.5), (x >= 0.5) & (x < 2.0), x >= 2.0],
+          [1.2, 1.8, 2.1, 0.9])
+      ```
+
+      ### Step 3: Rewrite Objective Function
+
+      Update _objective_fn to:
+      - Use the NEW step function interface
+      - Keep the convolution and C2 calculation the same
+      - Ensure f_non_negative = jax.nn.relu(f)
+
+      ### Step 4: Verify with analyze_step_structure
+
+      Call analyze_step_structure after edit. Verify:
+      - function_type: "step"
+      - is_piecewise_constant: True
+      - num_regions matches your num_steps
+
+      If wrong, RE-Evaluate the edit. Common errors:
+      - Used jnp.linspace instead of jnp.piecewise
+      - Heights are functions of x instead of constants
+      - Conditions are wrong (too many/few steps)
+
+      ### Step 5: Probe & Evaluate
+
+      - Probe 3-5 variants to rank them cheaply
+      - Evaluate only TOP 1-2 (max ~5 evals total)
+      - If no improvement, generate NEW random spec and repeat
+
+      ## Checklist
+
+      - [ ] Called generate_step_spec first
+      - [ ] Used jnp.piecewise with CONSTANT heights
+      - [ ] Verified with analyze_step_structure (is_piecewise_constant: True)
+      - [ ] Only then probed/evaluated
+      - [ ] Max 5-6 evals total to stay in budget
+new_middlewares:
+  - name: enforce_random_spec_first
+    hook: before_model
+    description: Force the solver to generate a random step spec before editing, ensuring well-formed configs.
+    implementation_py: |
+      def before_model(hook_input):
+          state = hook_input.get("state", {})
+          iteration = state.get("iteration", 0)
+          last_tool = state.get("last_tool", "unknown")
+          used_generate = state.get("used_generate", 0)
+          
+          # First edit must use generate_step_spec
+          if iteration >= 1 and last_tool == "edit_solution":
+              if used_generate == 0:
+                  return "CRITICAL: You edited without generating a step spec! Call generate_step_spec FIRST to get a random step configuration (num_steps, boundaries, heights), then edit using that spec."
+          
+          # Warn if evaluating without generate
+          if last_tool == "evaluate_solution" and used_generate == 0:
+              return "WARNING: You're about to evaluate without generating a step spec! Did you call generate_step_spec and use its output in your edit?"
+          
+          # Track generation
+          if last_tool == "generate_step_spec":
+              used_generate += 1
+              state["used_generate"] = used_generate
+          
+          return None

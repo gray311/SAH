@@ -1,0 +1,270 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are an expert in functional analysis. Your task: maximize C2 = ||f * f||₂² / ((∫f)² ||f * f||_∞).
+  
+  Current baseline: 1.02872 (seed). Target: > 1.02872.
+  
+  CRITICAL INSIGHT: The seed uses 9 step-function initializations that are already optimized. The current harness FAILED because it mutated optimizer hyperparameters (learning_rate, num_intervals) instead of CREATING NEW STEP FUNCTION CONFIGURATIONS.
+  
+  YOUR STRATEGY - Step Function Diversification:
+  
+  1. DIRECT STEP CONSTRUCTION: Don't edit optimizer params. Edit the _create_step_initializer to create truly diverse step patterns:
+     - 2-step: single rectangular peak
+     - 3-step: left-middle-right with different heights
+     - 4-step: bimodal with valley
+     - Asymmetric: shifted peaks
+     - Multi-cluster: 3+ separated peaks
+  
+  2. VARY THESE PARAMETERS EXPLICITLY:
+     - Step count: 2, 3, 4, 5, 7
+     - Support width: 0.2n to 0.8n (as fraction of num_intervals)
+     - Heights: 0.8 to 2.0 (relative)
+     - Symmetry: centered vs left/right biased
+     - Multi-peak: 2, 3, 5 separated clusters
+  
+  3. PROBE-THEN-EVAL DISCIPLINE:
+     - Create 5-7 step function variants
+     - Probe each (cheap, ranks them)
+     - Evaluate ONLY top 2
+  
+  4. IF STILL STUCK: Try polynomial decay f(x) = exp(-alpha*|x|^beta), then Gaussian mixtures.
+  
+  TOOL USAGE:
+  - edit_solution: Create NEW step functions with explicit intervals (use jnp.where, jnp.piecewise)
+  - probe_solution: Rank variants (call 5-7 times before any eval)
+  - evaluate_solution: Only for top 2 candidates
+  - finish: When done
+skill_description: |
+  Maximize C2 by creating diverse STEP FUNCTION configurations. The seed has 9 close-but-not-optimal step initializations. Create new ones with varied: step count (2-5), widths (0.2n-0.8n), heights (0.8-2.0), symmetry (centered/asymmetric), and multi-peak patterns. Probe 5-7 variants, eval top 2.
+skill_body: |
+  # C2 Optimization: Step Function Diversity Protocol
+  
+  ## Objective
+  Maximize C2 > 1.02872. Current baseline: 1.02872 (seed uses 9 step-like initializations).
+  
+  ## Why Step Functions Win
+  - Theoretical record: 0.8963
+  - Seed is ALREADY using step functions (9 initializations)
+  - The harness failed by mutating optimizer params, NOT step function structure
+  
+  ## Strategy: Diversify Step Function Architectures
+  
+  ### Phase 1: Create Diverse Step Patterns
+  Don't tweak learning rates. Create NEW step functions:
+  
+  **Single-Peak Steps:**
+  - 2-step: f(x) = h for |x| < w, 0 otherwise
+  - Vary: w = [0.2n, 0.3n, 0.4n, 0.5n, 0.6n], h = [1.0, 1.2, 1.5, 2.0]
+  
+  **Multi-Peak Steps:**
+  - 3-step: left, center, right regions with different heights
+  - Bimodal: two peaks with valley in center
+  - 4+ step: multiple separated clusters
+  
+  **Asymmetric Steps:**
+  - Left-biased: mass concentrated on negative side
+  - Right-biased: mass on positive side
+  - Skewed single peak
+  
+  **Phase Transitions:**
+  - Flat baseline + elevated region
+  - Nested rectangles
+  
+  ### Phase 2: Probe & Rank
+  1. Create 5-7 diverse step configurations
+  2. Probe each (cheap ~10s, separate budget)
+  3. Rank by probe score
+  4. Evaluate TOP 2 only
+  
+  ### Phase 3: If Still Stuck
+  - Try polynomial: f(x) = exp(-alpha * |x|^beta)
+  - Try Gaussian mixture: sum of 2-3 Gaussians
+  - Try hybrid: step base + smooth tails
+  
+  ## Tool Usage
+  - edit_solution: Write explicit step function code (jnp.where, jnp.piecewise)
+  - probe_solution: Rank many cheaply
+  - evaluate_solution: Only for top 2
+  - finish: When done
+tool_descriptions:
+  edit_solution: |
+    Change code in EVOLVE-BLOCK. To create step functions:
+    
+    - Use jnp.where for simple cases: f = jnp.where((x > -w) & (x < w), h, 0)
+    - Use jnp.piecewise for multi-step: jnp.piecewise(x, [bins], [heights])
+    - Direct array construction: f = jnp.zeros(n); f[start:end] = h
+    
+    KEY: Create piecewise-CONSTANT functions (flat regions), NOT linear ramps. The seed's _create_step_initializer is close; create variants with different:
+    - num_intervals support width
+    - step heights (0.8 to 2.0)
+    - number of steps (2, 3, 4, 5)
+    - symmetry (centered vs asymmetric)
+  evaluate_solution: |
+    Run full evaluator. Returns combined_score. Use MAX 4 times. Only evaluate after probing 5+ variants.
+  probe_solution: |
+    Cheap score on subsampled data. ~10s vs minutes. Separate budget (~30). RANKING ONLY - scores not comparable to full scores. Probe 5-7 variants before any eval.
+  finish: |
+    End session. Call when no improvement or budget exhausted.
+sampling:
+  temperature: 1.2
+  top_p: 0.9
+  top_k: 30
+  max_tokens: 14000
+agent:
+  max_iterations: 50
+middleware:
+  budget_reminder_from_left: 1
+  long_tool_output_max_chars: 8000
+new_tools:
+  - name: step_pattern_generator
+    description: |
+      Generate diverse step function configurations. Returns numpy-compatible arrays for piecewise-constant functions. Varies: number of steps, widths, heights, symmetry, multi-peak patterns. Call to create concrete step functions to test.
+    input_schema:
+      type: object
+      properties:
+        num_steps:
+          type: integer
+          description: Number of step regions (2-6)
+        symmetric:
+          type: boolean
+          description: Symmetric around x=0
+        height_range:
+          type: object
+          description: min/max height for steps
+          properties:
+            min:
+              type: number
+            max:
+              type: number
+    implementation_py: |
+      def run(ctx, args):
+          import numpy as np
+          config = args
+          # Get num_intervals from the seed program
+          prog = ctx.get_program()
+          num_intervals_line = [line for line in prog.split('\n') if 'num_intervals:' in line]
+          n = 350  # default from seed
+          if num_intervals_line:
+              try:
+                  n = int(num_intervals_line[0].split(' = ')[1].strip())
+              except:
+                  pass
+          
+          # Generate step configuration
+          num_steps = config.get("num_steps", int(np.random.uniform(2, 6)))
+          symmetric = config.get("symmetric", True)
+          min_h = config.get("height_range", {}).get("min", 0.8)
+          max_h = config.get("height_range", {}).get("max", 2.0)
+          
+          # Generate step intervals
+          step_widths = np.random.uniform(0.15, 0.25, num_steps)
+          centers = np.zeros(num_steps)
+          heights = np.random.uniform(min_h, max_h, num_steps)
+          
+          if symmetric:
+              # Symmetric around 0
+              centers[0] = 0.0
+              half_width = np.random.uniform(0.3, 0.5)
+              centers[1] = half_width
+              centers[2] = -half_width
+              centers = centers[centers != 0]
+          else:
+              # Asymmetric: random centers
+              centers = np.random.uniform(-0.4, 0.4, num_steps)
+          
+          # Create step function as numpy array
+          f = np.zeros(n)
+          for c, sw, h in zip(centers, step_widths, heights):
+              left = int((c - sw) * n)
+              right = int((c + sw) * n)
+              f[left:right] = h
+          
+          return {
+              "type": "step_function",
+              "num_steps": num_steps,
+              "symmetric": symmetric,
+              "centers": centers.tolist(),
+              "widths": step_widths.tolist(),
+              "heights": heights.tolist(),
+              "array_preview": f[:10].tolist(),
+              "instructions": f"Replace num_intervals={n} and create step function with {num_steps} steps at centers={centers.tolist()}, widths={step_widths.tolist()}, heights={heights.tolist()}"
+          }
+new_skills:
+  - name: aggressive-step-diversification
+    description: |
+      Method for creating diverse step function families. Focus on structural variety (num steps, widths, heights, symmetry), probe 5-7 variants, eval top 2. Maximum 4 evals total.
+    body: |
+      # Aggressive Step Function Diversification
+      
+      ## Problem Diagnosis
+      The seed uses 9 step-like initializations achieving 1.02872. The current harness FAILED because it mutated optimizer hyperparameters instead of CREATING NEW STEP FUNCTION STRUCTURES.
+      
+      ## Solution: Structural Step Diversification
+      
+      ### Step 1: Analyze Seed Structure
+      The seed's _create_step_initializer creates step functions with:
+      - 9 different patterns
+      - Step widths: 0.25n, 0.33n, 0.5n, etc.
+      - Heights: 1.0, 1.18, 1.2, 1.5, etc.
+      
+      ### Step 2: Create DIVERSE Variants
+      Don't reuse seed patterns. Create NEW configurations:
+      
+      **Family A: Fewer Steps**
+      - 2-step: Single wide peak, width 0.4n-0.6n
+      - 3-step: Left-center-right, asymmetric
+      
+      **Family B: More Steps**
+      - 4-step: Bimodal with narrow valley
+      - 5-step: Multi-cluster
+      
+      **Family C: Extreme Heights**
+      - High central peak: h=2.0-2.5
+      - Low baseline + high center: h_baseline=0.5, h_center=2.0
+      
+      **Family D: Asymmetric**
+      - Left-biased: 60% mass on negative side
+      - Right-skewed: exponential-like decay
+      
+      ### Step 3: Probe Before Eval
+      1. Generate 5-7 step configurations (STRUCTURALLY diverse)
+      2. Probe each (call probe_solution)
+      3. Rank by probe score
+      4. Evaluate ONLY TOP 2
+      
+      ### Step 4: If Still Stuck
+      - Try polynomial: f(x) = exp(-alpha*|x|^beta), alpha in [0.1, 1.0], beta in [1.5, 3.0]
+      - Try Gaussian mixture: sum of 2-3 Gaussians with varied sigmas
+      
+      ## Critical Rules
+      - MAX 4 full evaluations
+      - Always probe 5+ variants before eval
+      - STRUCTURAL diversity: don't just tweak heights, change step count, widths, symmetry
+new_middlewares:
+  - name: enforce_step_diversity
+    hook: before_model
+    description: |
+      Enforce step function structural diversity. Warn if exploring same pattern. Track: num_steps, symmetry, height_range.
+    implementation_py: |
+      def before_model(hook_input):
+          state = hook_input.get("state", {})
+          iteration = state.get("iteration", 0)
+          recent_configs = state.get("recent_configs", [])
+          
+          if len(recent_configs) >= 3:
+              # Check for diversity
+              step_counts = [c.get("num_steps", 0) for c in recent_configs]
+              symms = [c.get("symmetric", True) for c in recent_configs]
+              
+              # Warn if too similar
+              if len(set(step_counts)) == 1 and len(set(symms)) == 1:
+                  last_num_steps = step_counts[0]
+                  last_sym = symms[0]
+                  return f"WARNING: Your last 3 configs all have {last_num_steps} steps and {last_sym}. Create structurally different step functions (vary num_steps: 2,3,4,5 and symmetry)."
+              
+              # Warn if repeating same pattern
+              if len(recent_configs) >= 4:
+                  if recent_configs[-1] == recent_configs[-3]:
+                      return "WARNING: Repeating the same step pattern. Create a NEW step function configuration." 
+          
+          return None

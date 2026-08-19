@@ -1,0 +1,137 @@
+schema: h2spec/1.0
+system_prompt: 'Erdos minimum overlap problem (C5): Find h: [0,2]->[0,1] minimizing max_k integral h(x)(1-h(x+k))dx.
+
+  CONSTRAINT: integral(h) = 1 exactly. h values in [0,1].
+
+  Current best: C5 <= 0.38092303510845016 (combined_score = 1.0).
+
+  GOAL: Find h achieving c5_bound < 0.38092303510845016 (combined_score > 1.0).
+
+  STRATEGY:
+
+  1. FIRST, CALL search_patterns to generate 5 diverse initial step functions with precomputed c5_bound.
+
+  2. PICK the best pattern (lowest c5_bound < 0.375).
+
+  3. CALL best_pattern_to_code(pattern_type=<type>) to generate the EXACT code edit to use this pattern.
+
+  4. APPLY the edit using edit_solution.
+
+  5. CALL evaluate_solution to get combined_score.
+
+  6. If no improvement, try next best pattern or tune hyperparameters.
+
+  KEY: Always convert patterns to code edits before evaluating. Never evaluate raw patterns directly.'
+skill_description: Generate diverse patterns, pick best, convert to code edit, evaluate. Focus on pattern diversity (Golomb, bipartite, triangular) with exact integral constraint. Always use best_pattern_to_code to translate patterns to edits.
+skill_body: '# Erdos C5 Optimization Strategy
+
+## Phase 1: Pattern Generation and Code Conversion
+
+1. CALL search_patterns(temperature=0.5)
+   - Generates 5 diverse initial step functions with precomputed c5_bound
+   - Patterns: Golomb (4 marks), Bipartite (threshold), Triangular (single peak), Multi-peak, Laplace
+
+2. IDENTIFY the best pattern:
+   - Find candidate with lowest c5_bound
+   - Must have c5_bound < 0.375 to warrant full evaluation
+
+3. CALL best_pattern_to_code(pattern_type=<best_pattern_type>)
+   - This generates the EXACT code edit to use this pattern in the EVOLVE-BLOCK
+   - The edit replaces the random initialization with the deterministic pattern
+
+4. APPLY the edit using edit_solution
+   - The edit_solution tool applies the diff to the seed program
+
+5. CALL evaluate_solution
+   - Run the full 59000-step optimization with the new initialization
+   - Check combined_score
+
+## Phase 2: Iteration
+
+If combined_score <= 1.0:
+- Try the next best pattern from search_patterns
+- Or call search_patterns(temperature=0.8) for different patterns
+- Only after exhausting patterns, tune hyperparameters
+
+## Key Rules
+
+- ALWAYS use best_pattern_to_code to convert patterns to code edits
+- NEVER evaluate raw patterns without applying the edit first
+- Focus on patterns with c5_bound < 0.375
+- Track the pattern_type that gave best c5_bound'
+tool_descriptions:
+  edit_solution: 'Apply a code diff to the EVOLVE-BLOCK. Use best_pattern_to_code to generate the edit, then apply it. For single-candidate testing: set num_restarts=1, num_steps=30000-60000. For diversity: keep num_restarts=3-5. For fine-grained search: increase num_intervals to 1600 or 3200. For stronger integral constraint: increase penalty_strength to 80-120.'
+  evaluate_solution: 'Full 59000-step optimization. Returns combined_score = 0.38092303510845016 / c5_bound. Higher is better. combined_score > 1.0 means c5_bound < 0.38092303510845016 (new record). Use probe_solution first to filter candidates.'
+  probe_solution: |
+    Fast approximate evaluation (500 intervals, analytical c5). Uses probe budget.
+    Approximate but much cheaper than full eval. Good for screening many candidates.
+    Use probe to find candidates with c5_bound < 0.382, then evaluate them fully.
+    Budget: separate from eval budget, typically 30 probes available.
+  finish: Submit when combined_score > 1.0 (c5_bound < 0.38092303510845016).
+sampling:
+  temperature: 0.8
+  top_p: 0.9
+  top_k: 20
+  max_tokens: 12000
+agent:
+  max_iterations: 50
+middleware:
+  budget_reminder_from_left: 8
+  long_tool_output_max_chars: 8000
+new_tools:
+  - name: best_pattern_to_code
+    description: |
+      Convert a mathematical pattern into an EXACT code edit for the EVOLVE-BLOCK.
+      Input: pattern_type (golomb_4, bipartite, triangular, multi_peak, laplace).
+      Output: SEARCH/REPLACE diff that replaces random initialization with deterministic
+      pattern, ensuring integral(h)=1 and h in [0,1]. Call AFTER search_patterns,
+      pass best pattern_type, apply result via edit_solution before evaluate_solution.
+    input_schema:
+      type: object
+      properties:
+        pattern_type:
+          type: string
+          description: 'Pattern type: golomb_4, bipartite, triangular, multi_peak, laplace'
+    implementation_py: |
+      def run(ctx, args):
+          pattern_type = args.get("pattern_type", "golomb_4")
+          import numpy as np
+          N = 800
+          
+          if pattern_type == "golomb_4":
+              marks = [0.0, 0.4, 1.0, 1.6]
+              h = np.zeros(N)
+              for mark in marks:
+                  width = N * 0.15
+                  h += 12.0 * np.exp(-((np.arange(N) - int(mark * N)) / width)**2)
+          elif pattern_type == "bipartite":
+              a = 0.55
+              h = np.zeros(N)
+              h[:int(N*a)] = 4.0
+              h[int(N*a):] = -1.0
+          elif pattern_type == "triangular":
+              tri_width = N * 0.1
+              h = np.zeros(N)
+              h[400:int(400+tri_width)] = 20.0
+          elif pattern_type == "multi_peak":
+              multi_width = N * 0.1
+              h = np.zeros(N)
+              for center in [0.4, 1.0, 1.6]:
+                  h += 15.0 * np.exp(-((np.arange(N) - int(center * N)) / multi_width)**2)
+          elif pattern_type == "laplace":
+              h = -np.log(np.abs(np.random.laplace(0.0, 1.0, N)) + 1e-10)
+          
+          # Normalize to integral=1 and clip to [0,1]
+          h_sum = np.sum(h) * (2.0 / N)
+          h_norm = h / h_sum
+          h_norm = np.clip(h_norm, 0.001, 1.0)
+          h_norm = h_norm / (np.sum(h_norm) * (2.0 / N))
+          
+          # Generate the SEARCH/REPLACE diff
+          edit_template = "<<<<<<< SEARCH\n      latent = jax.random.normal(subkey, (N,))\n      key, subkey = jax.random.split(key)\n      latent = latent + jax.random.normal(subkey, (N,)) * 0.3\n      key, subkey = jax.random.split(key)\n      latent = jax.lax.stop_gradient(latent)\n      h = jax.nn.sigmoid(latent)\n      j_val = 1.0 - h\n      h_padded = jnp.pad(h, (0, N))\n      j_padded = jnp.pad(j_val, (0, N))\n      corr_fft = jnp.fft.fft(h_padded) * jnp.conj(jnp.fft.fft(j_padded))\n      correlation = jnp.fft.ifft(corr_fft).real\n      obj = jnp.max(correlation * self.dx)\n      best_latent = latent\n      best_obj = obj\n      return best_latent, best_obj\n=======\n      # Use {pt} pattern\n      import numpy as np\n      N = self.hypers.num_intervals\n      domain = 2.0\n      dx = domain / N\n\n      if {pt} == "golomb_4":\n          marks = [0.0, 0.4, 1.0, 1.6]\n          h_init = np.zeros(N)\n          for mark in marks:\n              width = N * 0.15\n              h_init += 12.0 * np.exp(-((np.arange(N) - int(mark * N)) / width)**2)\n      elif {pt} == "bipartite":\n          a = 0.55\n          h_init = np.zeros(N)\n          h_init[:int(N*a)] = 4.0\n          h_init[int(N*a):] = -1.0\n      elif {pt} == "triangular":\n          tri_width = N * 0.1\n          h_init = np.zeros(N)\n          h_init[400:int(400+tri_width)] = 20.0\n      elif {pt} == "multi_peak":\n          multi_width = N * 0.1\n          h_init = np.zeros(N)\n          for center in [0.4, 1.0, 1.6]:\n              h_init += 15.0 * np.exp(-((np.arange(N) - int(center * N)) / multi_width)**2)\n      elif {pt} == "laplace":\n              h_init = -np.log(np.abs(np.random.laplace(0.0, 1.0, N)) + 1e-10)\n\n      # Normalize to integral=1\n      h_sum = np.sum(h_init) * dx\n      h_init = h_init / h_sum\n      h_init = np.clip(h_init, 0.001, 1.0)\n      h_init = h_init / (np.sum(h_init) * dx)\n\n      h = jax.nn.sigmoid(jax.lax.stop_gradient(h_init * 10.0))\n      j_val = 1.0 - h\n      h_padded = jnp.pad(h, (0, N))\n      j_padded = jnp.pad(j_val, (0, N))\n      corr_fft = jnp.fft.fft(h_padded) * jnp.conj(jnp.fft.fft(j_padded))\n      correlation = jnp.fft.ifft(corr_fft).real\n      obj = jnp.max(correlation * self.dx)\n      best_latent = h_init\n      best_obj = obj\n      return best_latent, best_obj\n>>>>>>> REPLACE\n"
+          
+          edit = edit_template.format(pt=pattern_type)
+          return {"edit": edit, "pattern_type": pattern_type, "h_norm": h_norm.tolist()}
+remove_tools: []
+new_skills: []
+new_middlewares: []

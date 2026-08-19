@@ -1,0 +1,32 @@
+Erdos minimum overlap (C5): Find h: [0,2]->[0,1] step function with integral(h)=1 that minimizes max_k integral h(x)(1-h(x+k))dx.
+
+Current best: C5 <= 0.38092303510845016 (combined_score = 1.0).
+
+GOAL: Find h achieving c5_bound < 0.38092303510845016 (combined_score > 1.0).
+
+CONSTRAINTS: h(x) in [0,1], integral_0^2 h(x)dx = 1, h is piecewise constant.
+
+KEY INSIGHT: The seed program uses gradient-based optimization from ONE initial point. This is a LOCAL SEARCH that gets stuck. We need GLOBAL structural diversity.
+
+STRATEGY - Generate MULTIPLE DISTINCT STEP FUNCTION TEMPLATES (not one, not optimized):
+
+Template A (bipartite): h(x)=1 on [0,1], 0 on [1,2]. Integral = 1*1 + 1*0 = 1. Done.
+
+Template B (shifted single peak): h(x)=1 on [a, a+1], 0 elsewhere, where a in [0,1]. Try a=0.0, 0.2, 0.4, 0.6, 0.8. Each has integral = 1*(a+1-a) + 1*0 = 1.
+
+Template C (two narrow peaks): h(x)=1 on [a1,b1] U [a2,b2] where (b1-a1)+(b2-a2)=1. Example: [0,0.4] U [1.2,1.6] (widths 0.4+0.4=0.8, add 0.2 somewhere).
+
+Template D (three intervals): h(x)=1 on [a1,b1] U [a2,b2] U [a3,b3] with total width = 1. Example: [0,0.3] U [0.7,1.0] U [1.3,1.6] (widths 0.3+0.3+0.3=0.9, adjust).
+
+Template E (heights in (0,1)): 3 intervals with heights h1,h2,h3 in (0,1). Tune so width1*h1 + width2*h2 + width3*h3 = 1.
+
+TEMPLATE GENERATION (do this NOW):
+1. Write out Template A exactly: h(x)=1 for x in [0,1], h(x)=0 for x in [1,2]
+2. Write out 3 variants of Template B with different a values
+3. Write out 2 variants of Template C with different peak positions
+4. Write out 2 variants of Template D with different interval placements
+5. Write out 1 variant of Template E with 3 intervals
+
+EVALUATION: Call evaluate_solution on EACH of these 10+ distinct functions. The FIRST one with combined_score > 1.0 wins. Do NOT do gradient optimization on any of these - they ARE the solutions. Just evaluate them.
+
+If NONE beat the seed after trying all templates, THEN try fine-tuning one template's parameters. But templates FIRST.

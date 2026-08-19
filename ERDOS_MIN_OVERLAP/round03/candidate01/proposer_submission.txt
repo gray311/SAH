@@ -1,0 +1,254 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are solving the Erdős minimum overlap problem: minimize max_k ∫ h(x)(1-h(x+k)) dx for h: [0,2]→[0,1] with ∫h=1.
+
+  CURRENT BEST BOUND: C5 ≤ 0.38092303510845016
+
+  CRITICAL STRATEGY CHANGE:
+  The previous approach (continuous optimization from structured seeds) FAILED - it got stuck at the seed score.
+
+  NEW STRATEGY: DISCRETE STRUCTURE SEARCH
+  1. Use probe_discrete_structures() to generate 10-15 SPARSE step-function candidates
+     - These are CLEAN step functions with few transitions (2-6 steps)
+     - Easily verifiable that ∫h=1
+     - Evaluated instantly (no optimization)
+  2. For promising structures, optionally refine with short gradient descent
+  3. Use probe_solution to quickly rank discrete candidates
+  4. Evaluate top 1-2 with evaluate_solution
+
+  Why discrete structures?
+  - Erdős problems have combinatorial optima (Golomb rulers, difference sets)
+  - Continuous optimization gets stuck in local minima
+  - Sparse step functions avoid the complexity of gradient descent
+  - We can enumerate ALL 3-step, 4-step, 5-step functions with ∫h=1 and pick the best
+
+  Tool Priority:
+  1. FIRST: probe_discrete_structures() - generates discrete candidates
+  2. Optionally: edit_solution to add gradient refinement
+  3. Then: probe_solution to rank, evaluate_solution to confirm
+skill_description: |
+  Discrete structure search for Erdős optimization. Generates sparse step-function candidates with clean transitions, avoiding the failure mode of continuous gradient descent that gets stuck.
+skill_body: |
+  # Discrete Structure Search for Erdős Minimum Overlap
+
+  ## Why Discrete Structures Beat Continuous Optimization
+
+  The current best bound C5 ≤ 0.380923 comes from a STRUCTURED construction. Continuous gradient descent from random/structured seeds gets STUCK.
+
+  ## New Strategy: Enumerate Sparse Step Functions
+
+  ### Step 1: Generate Discrete Candidates (probe_discrete_structures)
+  Generate 10-15 SPARSE step functions:
+  - 3-step functions: Two thresholds dividing [0,2] into 3 regions
+  - 4-step functions: Three thresholds, 4 regions
+  - 5-step functions: Four thresholds, 5 regions
+
+  Each must satisfy ∫h = 1 exactly.
+
+  ### Step 2: Quick Screening
+  Use probe_solution on each discrete candidate (instant eval).
+  Rank by c5_bound.
+
+  ### Step 3: Optional Refinement
+  For top 2-3 structures, add short gradient descent (1000-2000 steps max).
+  Often unnecessary - the discrete structure is already optimal.
+
+  ### Example 3-Step Construction
+  x ∈ [0, a) → h = h1
+  x ∈ [a, b) → h = h2
+  x ∈ [b, 2] → h = h3
+  Constraint: h1*a + h2*(b-a) + h3*(2-b) = 1
+
+  ### Key Insight
+  Erdős problems have COMBINATORIAL optima. Systematically enumerate structures,
+  don't blindly optimize. The best C5 bound likely comes from a 3-6 step function
+  with carefully chosen thresholds, not a smooth sigmoidal curve.
+tool_descriptions:
+  edit_solution: |
+    Modify the EVOLVE-BLOCK. Can add discrete structure enumeration, or refine discrete candidates with gradient descent.
+  evaluate_solution: |
+    Full evaluation, returns combined_score.
+  probe_solution: |
+    Approximate evaluation on subsampled data (use for ranking discrete candidates).
+  finish: |
+    End when exhausted discrete search or no improvement.
+sampling:
+  temperature: 0.3
+  top_p: 0.9
+  top_k: 10
+  max_tokens: 12000
+agent:
+  max_iterations: 40
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 8000
+new_tools:
+  - name: probe_discrete_structures
+    description: |
+      Generate 10-15 SPARSE step-function candidates for Erdős problem. Each has 3-6 transitions and satisfies ∫h=1 exactly. Returns list of dicts with thresholds, step_values, and latent representation. These are INSTANT to evaluate (no optimization needed). Call this FIRST.
+    input_schema:
+      type: object
+      properties: {}
+    implementation_py: |
+      def run(ctx, args):
+          import numpy as np
+          N = 800
+          domain = 2.0
+          dx = domain / N
+          candidates = []
+          
+          # Generate 3-step functions
+          for _ in range(12):
+              a = np.random.uniform(0.2, 0.8)
+              b = np.random.uniform(a + 0.1, min(a + 1.0, 1.8))
+              h1, h2, h3 = np.random.uniform(0.3, 0.7, 3)
+              areas = np.array([a, b-a, 2-b])
+              norm = h1*areas[0] + h2*areas[1] + h3*areas[2]
+              if norm == 0: continue
+              h1, h2, h3 = h1/norm, h2/norm, h3/norm
+              
+              step_vals = [h1, h2, h3]
+              thresholds = [0, a, b, 2]
+              
+              x = np.linspace(0, domain, N)
+              latent = np.zeros(N)
+              latent = np.where((x >= 0) & (x < thresholds[1]), h1, latent)
+              latent = np.where((x >= thresholds[1]) & (x < thresholds[2]), h2, latent)
+              latent = np.where((x >= thresholds[2]) & (x < thresholds[3]), h3, latent)
+              latent = np.clip(latent, 0, 1)
+              integral = np.sum(latent) * dx
+              if abs(integral - 1.0) > 0.01:
+                  scale = 1.0 / integral
+                  latent = latent * scale
+                  latent = np.clip(latent, 0, 1)
+              
+              candidates.append({
+                  "num_steps": 3,
+                  "thresholds": [round(t, 6) for t in thresholds[:-1]],
+                  "step_values": [round(float(v), 6) for v in step_vals],
+                  "latent": latent.tolist(),
+                  "approx_integral": round(integral, 6)
+              })
+          
+          # Generate 4-step functions
+          for _ in range(8):
+              a = np.random.uniform(0.1, 0.6)
+              b = np.random.uniform(a + 0.2, min(a + 0.9, 1.4))
+              c = np.random.uniform(b + 0.1, min(b + 0.8, 1.9))
+              
+              h1, h2, h3, h4 = np.random.uniform(0.2, 0.8, 4)
+              areas = np.array([a, b-a, c-b, 2-c])
+              norm = sum(hi*areas[i] for i in range(4))
+              if norm == 0: continue
+              h1, h2, h3, h4 = h1/norm, h2/norm, h3/norm, h4/norm
+              
+              step_vals = [h1, h2, h3, h4]
+              thresholds = [0, a, b, c, 2]
+              
+              x = np.linspace(0, domain, N)
+              latent = np.zeros(N)
+              latent = np.where((x >= 0) & (x < thresholds[1]), h1, latent)
+              latent = np.where((x >= thresholds[1]) & (x < thresholds[2]), h2, latent)
+              latent = np.where((x >= thresholds[2]) & (x < thresholds[3]), h3, latent)
+              latent = np.where((x >= thresholds[3]) & (x < thresholds[4]), h4, latent)
+              latent = np.clip(latent, 0, 1)
+              integral = np.sum(latent) * dx
+              if abs(integral - 1.0) > 0.01:
+                  scale = 1.0 / integral
+                  latent = latent * scale
+                  latent = np.clip(latent, 0, 1)
+              
+              candidates.append({
+                  "num_steps": 4,
+                  "thresholds": [round(t, 6) for t in thresholds[:-1]],
+                  "step_values": [round(float(v), 6) for v in step_vals],
+                  "latent": latent.tolist(),
+                  "approx_integral": round(integral, 6)
+              })
+          
+          # Generate 5-step functions
+          for _ in range(5):
+              a = np.random.uniform(0.1, 0.4)
+              b = np.random.uniform(a + 0.15, min(a + 0.5, 0.9))
+              c = np.random.uniform(b + 0.15, min(b + 0.5, 1.3))
+              d = np.random.uniform(c + 0.15, min(c + 0.5, 1.7))
+              
+              h1, h2, h3, h4, h5 = np.random.uniform(0.1, 0.9, 5)
+              areas = np.array([a, b-a, c-b, d-c, 2-d])
+              norm = sum(hi*areas[i] for i in range(5))
+              if norm == 0: continue
+              h1, h2, h3, h4, h5 = h1/norm, h2/norm, h3/norm, h4/norm, h5/norm
+              
+              step_vals = [h1, h2, h3, h4, h5]
+              thresholds = [0, a, b, c, d, 2]
+              
+              x = np.linspace(0, domain, N)
+              latent = np.zeros(N)
+              latent = np.where((x >= 0) & (x < thresholds[1]), h1, latent)
+              latent = np.where((x >= thresholds[1]) & (x < thresholds[2]), h2, latent)
+              latent = np.where((x >= thresholds[2]) & (x < thresholds[3]), h3, latent)
+              latent = np.where((x >= thresholds[3]) & (x < thresholds[4]), h4, latent)
+              latent = np.where((x >= thresholds[4]) & (x < thresholds[5]), h5, latent)
+              latent = np.clip(latent, 0, 1)
+              integral = np.sum(latent) * dx
+              if abs(integral - 1.0) > 0.01:
+                  scale = 1.0 / integral
+                  latent = latent * scale
+                  latent = np.clip(latent, 0, 1)
+              
+              candidates.append({
+                  "num_steps": 5,
+                  "thresholds": [round(t, 6) for t in thresholds[:-1]],
+                  "step_values": [round(float(v), 6) for v in step_vals],
+                  "latent": latent.tolist(),
+                  "approx_integral": round(integral, 6)
+              })
+          
+          return {"candidates": candidates[:15]}
+new_skills:
+  - name: discrete-search-playbook
+    description: |
+      Playbook for discrete structure enumeration in Erdős optimization. When continuous optimization stalls, switch to generating sparse step functions and evaluating them directly.
+    body: |
+      # Discrete Structure Search Playbook
+
+      ## When to Use
+      After trying continuous optimization with gradient descent and getting no improvement (scores stuck at ~0.9996), switch to discrete search.
+
+      ## Method
+
+      ### 1. Generate Discrete Candidates
+      Call probe_discrete_structures() to get 10-15 sparse step functions.
+      - These have 3-6 clean transitions
+      - Each satisfies ∫h = 1 exactly
+      - No optimization needed - just evaluate
+
+      ### 2. Quick Screening with probe
+      Use probe_solution on each candidate (fast, subsampled).
+      - Track the best c5_bound seen
+      - Look for candidates with bound < 0.38
+
+      ### 3. Full Evaluation
+      Evaluate top 2-3 promising candidates with evaluate_solution.
+      - A score > 1.0 means you beat the current bound!
+
+      ### 4. Optional Refinement
+      If a discrete candidate is close but not quite there:
+      - Edit to add a short gradient refinement (500-1000 steps max)
+      - Often the discrete structure is already optimal - no need to refine
+
+      ## Key Principle
+      Erdős problems have COMBINATORIAL optima. The best bound likely comes from
+      a simple 3-5 step function, not a complex gradient descent curve. Enumerate,
+      then evaluate - don't optimize.
+new_middlewares:
+  - name: discrete_check
+    hook: before_model
+    description: |
+      Remind solver to use discrete structures when continuous optimization stalls
+    implementation_py: |
+      def before_model(hook_input):
+          best_score = hook_input.get("best_score", 0.99)
+          if best_score <= 1.0:
+              return "STALLED: Try probe_discrete_structures() for 10-15 sparse step-function candidates. Evaluate with probe_solution to rank, then evaluate top 2 with evaluate_solution."
+          return None

@@ -1,0 +1,290 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are an expert C++ developer optimizing polygon-finding algorithms for a NP-hard heuristic problem.
+  
+  TASK: Build an orthogonal polygon (edges parallel to x or y axes) to maximize: (mackerels_inside - sardines_inside + 1)
+  CONSTRAINTS: vertices <= 1000, perimeter <= 400000, integer coords 0-100000, no self-intersection
+  
+  METHOD — 4-PHASE APPROACH with BOUNDED INTERNAL SEARCH:
+  
+  Phase 1: INITIALIZATION (must run first)
+    - Load all fish into efficient data structures (KD-tree or grid hash)
+    - Initialize with the seed polygon if present, or start with a minimal 4-vertex rectangle
+    
+  Phase 2: POLYGON CONSTRUCTION LOOP (bounded iterations, e.g., 10-50 constructs)
+    - For EACH construct:
+      a) Build an orthogonal polygon using one of these strategies:
+         - Grid-sweep: scan x-coordinates, snap to fish positions
+         - Center-out: start from centroid, grow axis-aligned segments toward fish
+         - Rectangle-merge: combine overlapping rectangles covering mackerels while excluding sardines
+         - Perimeter-bound: ensure each step stays within 400000 perimeter limit
+      b) VALIDATE the polygon using validate_polygon tool BEFORE evaluation
+         - Must check: vertex count <= 1000, perimeter <= 400000, all edges axis-aligned
+         - Only valid polygons proceed to Phase 3
+      c) Store valid polygons and their metadata
+    
+  Phase 3: EVALUATION (limited evaluations, e.g., 5-15)
+    - Evaluate ONLY the top N valid polygons using evaluate_solution
+    - Use probe_solution to pre-rank if available, but scores are approximate
+    - Track best combined_score
+    
+  Phase 4: OUTPUT
+    - Return the polygon with highest combined_score
+    - Format: vertex count, then each vertex (x y)
+    
+  CRITICAL: The search loop MUST be INSIDE the C++ code between EVOLVE-BLOCK markers.
+  Implement it as a while/for loop with a time-based exit (e.g., 1.85 seconds for 1.95s limit).
+  Do NOT output until all constructive search iterations complete.
+  
+  Each edit must add ONE concrete capability: new polygon construction method,
+  better validation, or improved search logic. Never rewrite the whole code for a small change.
+skill_description: |
+  Optimize polygon-finding C++ code for NP-hard heuristic tasks. Build bounded internal search loops that construct multiple orthogonal polygons, validate them efficiently, and output the best one within time limits. Use validate_polygon to screen variants before expensive evaluations.
+skill_body: |
+  # Orthogonal Polygon Optimization Strategy
+  
+  ## Objective
+  Maximize: (mackerels_inside - sardines_inside + 1) using an orthogonal polygon.
+  
+  ## 4-Phase Search Loop (inside C++ main loop)
+  
+  ### Phase 1: Setup
+  - Read all fish coordinates into arrays
+  - Build spatial index (grid or KD-tree) for fast point queries
+  - Store fish in separate lists: mackerels (type=1), sardines (type=-1)
+  
+  ### Phase 2: Construct Multiple Polygons
+  Implement 3+ construction strategies:
+  
+  Strategy A: Grid-Sweep from Centroid
+  - Find bounding box of all mackerels
+  - Start from centroid or a chosen mackerel
+  - Grow 4 directions (N,S,E,W) placing vertices on integer grid
+  - Each segment must be axis-aligned and <= 200000
+  - Prefer vertices that include mackerels, avoid sardines
+  
+  Strategy B: Rectangle Expansion
+  - Start with smallest rectangle containing all mackerels
+  - If perimeter > 400000, shrink or merge with neighbor rectangles
+  - Iteratively add pockets that include mackerels but exclude sardines
+  
+  Strategy C: Perimeter-Constrained Path Following
+  - Sort mackerels by x-coordinate
+  - Build orthogonal path visiting ~200-500 mackerels
+  - Close the loop ensuring orthogonality and perimeter <= 400000
+  
+  For each construct:
+  1. Call validate_polygon to check constraints
+  2. If invalid, discard and try different parameters
+  3. If valid, store for potential evaluation
+  
+  ### Phase 3: Evaluate Top Candidates
+  - Use probe_solution if available to rank top 5-10 polygons cheaply
+  - Evaluate only the top 3-5 using evaluate_solution
+  - Track best score
+  
+  ### Phase 4: Output
+  - Output the polygon with highest combined_score
+  - Format: vertex_count, then x0 y0, x1 y1, ..., x_{n-1} y_{n-1}
+  
+  ## Implementation Notes
+  - Time budget: ~1.85s for search + evaluation
+  - Aim for 10-20 full evaluations with good pre-ranking
+  - Use long long for perimeter calculations
+  - Free all dynamic memory before exit
+  
+  ## Failure Recovery
+  - If validation fails: check if vertex count > 1000 or perimeter > 400000
+  - If timeout: reduce number of constructs or evaluation candidates
+  - If all polygons invalid: fall back to simple 4-vertex rectangle covering all mackerels
+tool_descriptions:
+  edit_solution: |
+    Modify code inside # EVOLVE-BLOCK region. Preferred: targeted SEARCH/REPLACE diffs
+    matching current code exactly. For polygon search, add new construction methods
+    or validation logic inside the search loop. Preserve the C++ structure and entry
+    point - only change the internal algorithm between EVOLVE-BLOCK markers.
+  evaluate_solution: |
+    Run current program on full task (all 150 test cases). Returns combined_score (higher better),
+    validity (0 if constraint violation), error messages, best_so_far, and evaluations_remaining.
+    Each call counts against your 20-eval budget. Use sparingly - pre-rank with probes.
+  probe_solution: |
+    Cheap approximate evaluation on subsampled data (~2000 rows). Fast (10s), separate budget (30 probes),
+    scores are approximate and NOT comparable to full evaluate_solution scores. Use to rank your
+    internally constructed polygons before spending full evaluations. Good for filtering weak candidates.
+  finish: |
+    End session. Best program auto-submitted. Call when budget exhausted or no further improvement.
+sampling:
+  temperature: 1.0
+  top_p: 0.9
+  top_k: 30
+  max_tokens: 12288
+agent:
+  max_iterations: 48
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 12000
+new_tools:
+  - name: validate_polygon
+    description: |
+      Check if a polygon represented as vertex list satisfies all constraints:
+      1. Vertex count: 4 <= vertices <= 1000 (all distinct)
+      2. Perimeter: sum of edge lengths <= 400000
+      3. Orthogonality: each edge parallel to x or y axis
+      4. Coords: 0 <= x,y <= 100000
+      Returns: valid (bool), reason (string), perimeter (int), vertex_count (int).
+      Call AFTER constructing a polygon, BEFORE calling evaluate_solution.
+    input_schema:
+      type: object
+      properties:
+        vertices:
+          type: array
+          items:
+            type: object
+            properties:
+              x: {type: integer}
+              y: {type: integer}
+    implementation_py: |
+      def run(ctx, args):
+          vertices = args.get("vertices", [])
+          if not vertices:
+              return {"valid": False, "reason": "no vertices"}
+          if len(vertices) < 4:
+              return {"valid": False, "reason": "need >= 4 vertices, got " + str(len(vertices))}
+          if len(vertices) > 1000:
+              return {"valid": False, "reason": "max 1000 vertices, got " + str(len(vertices))}
+          perim = 0
+          for i in range(len(vertices)):
+              x1, y1 = vertices[i]["x"], vertices[i]["y"]
+              x2, y2 = vertices[(i+1) % len(vertices)]["x"], vertices[(i+1) % len(vertices)]["y"]
+              dist = abs(x2-x1) + abs(y2-y1)
+              perim += dist
+              if dist == 0:
+                  return {"valid": False, "reason": "duplicate vertex at index " + str(i)}
+              if x1 != x2 and y1 != y2:
+                  return {"valid": False, "reason": "non-orthogonal edge at " + str(i)}
+              if not (0 <= x1 <= 100000 and 0 <= y1 <= 100000):
+                  return {"valid": False, "reason": "coord out of range at " + str(i)}
+          if perim > 400000:
+              return {"valid": False, "reason": "perimeter " + str(perim) + " > 400000"}
+          return {"valid": True, "reason": "ok", "perimeter": perim, "vertex_count": len(vertices)}
+  - name: quick_perimeter_check
+    description: |
+      Fast-only perimeter calculation for polygon vertices (no full validation).
+      Returns: perimeter (int), status (string). Use during search loop to prune
+      expensive full validations. Status is "ok", "over_budget", or "unknown".
+    input_schema:
+      type: object
+      properties:
+        vertices:
+          type: array
+          items:
+            type: object
+            properties:
+              x: {type: integer}
+              y: {type: integer}
+    implementation_py: |
+      def run(ctx, args):
+          vertices = args.get("vertices", [])
+          perim = 0
+          for i in range(len(vertices)):
+              x1, y1 = vertices[i]["x"], vertices[i]["y"]
+              x2, y2 = vertices[(i+1) % len(vertices)]["x"], vertices[(i+1) % len(vertices)]["y"]
+              perim += abs(x2 - x1) + abs(y2 - y1)
+          status = "ok" if perim <= 400000 else "over_budget"
+          return {"perimeter": perim, "status": status}
+new_skills:
+  - name: orthogonal-polygon-search
+    description: |
+      Build multiple orthogonal polygons inside C++ search loop. Use spatial indexing
+      (grid/KD-tree) for fast point queries. Implement 3+ construction strategies:
+      grid-sweep, rectangle-merge, and perimeter-constrained path-following.
+      Validate each candidate with validate_polygon before evaluation. Budget: ~1.85s
+      search, 10-20 full evals.
+    body: |
+      # Orthogonal Polygon Search Playbook
+      
+      ## Core Loop Structure
+      best_score = -1
+      best_polygon = []
+      
+      time_remaining = 1.85
+      start_time = now()
+      
+      while time_remaining > 0.05 and iterations < 100:
+          # Phase 2: Construct
+          polygon = construct_polygon(strategy=X, params=p)
+          
+          if polygon is null:
+              try_next_strategy()
+              continue
+          
+          # Fast perimeter filter
+          pcheck = quick_perimeter_check(polygon.vertices)
+          if pcheck.status == "over_budget":
+              continue
+          
+          # Full validation
+          vresult = validate_polygon(polygon.vertices)
+          if not vresult.valid:
+              continue
+          
+          # Phase 3: Evaluate top candidates
+          if we have < 15 evals used:
+              score = evaluate_solution()
+              if score > best_score:
+                  best_score = score
+                  best_polygon = polygon
+          
+          # Phase 2.5: Probe-ranking (optional)
+          if we have probes left and have > 5 valid polygons:
+              rank_polygons_with_probes()
+              only eval top 3
+      end loop
+      
+      # Phase 4: Output best
+      return best_polygon
+      
+      ## Construction Strategies
+      
+      ### Strategy 1: Grid-Sweep from Centroid
+      1. Find centroid of all mackerels: cx = avg(x), cy = avg(y)
+      2. Place initial 4 vertices at (cx +/- dx, cy +/- dy) for some dx,dy
+      3. Expand in spiral pattern: each ring adds 4 edges
+      4. Snap vertices to integer grid points
+      5. Prune vertices that add sardines without enough mackerels
+      
+      ### Strategy 2: Bounding-Box + Hole Removal
+      1. Compute bounding box of all mackerels
+      2. If sardines inside, carve out orthogonal holes
+      3. Expand bounding box to include more mackerels if needed
+      4. Ensure perimeter <= 400000
+      
+      ### Strategy 3: Perimeter-Bound MST Path
+      1. Select ~300 mackerels with highest density
+      2. Build orthogonal path visiting them (Manhattan MST variant)
+      3. Close the loop ensuring no self-intersection
+      4. Fill interior and count mackerels/sardines
+      
+      ## Validation Checklist
+      - vertices >= 4 and <= 1000
+      - all vertices distinct
+      - each edge axis-aligned (dx=0 or dy=0)
+      - perimeter <= 400000 (use Manhattan sum for orthogonal)
+      - coords in [0, 100000]
+      - no self-intersection (non-adjacent edges do not share points)
+      
+      ## Timing Budget
+      - Grid building: O(N) with hash table
+      - Vertex construction: O(V^2) where V ~ 300-500 vertices
+      - Point-in-polygon: O(V) naive, O(log V) with KD-tree
+      - Aim for < 50ms per polygon construct
+      - Leave 0.5s for evaluation if needed
+new_middlewares:
+  - name: polygon_validation_reminder
+    hook: before_model
+    description: |
+      Remind solver to construct, validate, and rank polygons before evaluating.
+      Fires each turn to keep strategy on track.
+    implementation_py: |
+      def before_model(hook_input):
+          return "Construct a valid orthogonal polygon using a search loop. Call quick_perimeter_check first, then validate_polygon. Only evaluate the top 3-5 valid candidates after pre-ranking. Respect the 1.85s search budget."

@@ -1,0 +1,210 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are an expert in functional analysis and mathematical optimization. Your task: maximize
+  C2 = ||f * f||_2^2 / ((int_f)^2 ||f * f||_inf) for the second autocorrelation inequality.
+
+  - Theoretical upper bound: 1.0 (Young's inequality)
+  - Current best in literature: 0.8963 (achieved by step functions)
+  - Current program's combined_score: 1.029 (your baseline)
+  - Target: surpass 1.029
+
+  CRITICAL: Step functions are theoretical champions. Use BOTH step_config_generator AND pattern_mutation_tool.
+
+  STRATEGY:
+
+  1. First 2-3 iterations: Use step_config_generator to explore NEW step function families
+  2. After finding something promising (>1.030): Switch to pattern_mutation_tool to fine-tune
+  3. Pattern mutation: Take seed patterns (0-13) and MUTATE heights/positions
+  4. Probe 3-5 variants from EACH method, evaluate top 2 (max 4 evals)
+  5. Diversify: try symmetric, asymmetric, 2-5 step configurations, and seed pattern mutations
+
+  TOOLS:
+
+  - step_config_generator: Get step function configuration (intervals, heights, symmetry)
+  - pattern_mutation_tool: Mutate seed patterns (indices 0-13) with controlled perturbations
+  - edit_solution: Create TRUE step functions from tool output
+  - probe_solution: Cheap ranking (~10s, separate budget)
+  - evaluate_solution: Only for top candidates (max ~4 total)
+  - finish: When done
+
+  WORKFLOW:
+  Phase 1 (iterations 1-3): step_config_generator -> edit -> probe 3-5 -> evaluate top 2
+  Phase 2 (iterations 4+): pattern_mutation_tool -> edit -> probe 3-5 -> evaluate top 2
+  Always: probe before eval, max 4 evals total
+sampling:
+  temperature: 0.6
+  top_p: 0.9
+  top_k: 15
+  max_tokens: 16384
+agent:
+  max_iterations: 40
+middleware:
+  budget_reminder_from_left: 2
+  long_tool_output_max_chars: 10000
+new_tools:
+- name: pattern_mutation_tool
+  description: |
+    Mutate seed patterns (0-13) with controlled perturbations. After Phase 1 exploration,
+    use this to fine-tune known-good patterns. Returns 3-5 variants with mutated heights
+    (±5-15%) and positions (±10-20%). Use when score > 1.030 or iteration > 3.
+  input_schema:
+    type: object
+    properties:
+      pattern_idx:
+        type: integer
+        description: Seed pattern index (0-13)
+      height_scale:
+        type: number
+        description: Height perturbation scale (0.95-1.15)
+      pos_shift:
+        type: number
+        description: Position shift scale (0.8-1.2)
+      num_variants:
+        type: integer
+        description: Number of variants to generate (3-5)
+  implementation_py: |
+    def run(ctx, args):
+        import random
+        pattern_idx = args.get("pattern_idx", random.randint(0, 13))
+        height_scale = args.get("height_scale", random.uniform(0.95, 1.15))
+        pos_shift = args.get("pos_shift", random.uniform(0.95, 1.05))
+        num_variants = args.get("num_variants", random.randint(3, 5))
+        
+        # Seed patterns: (pattern_name, default_intervals)
+        patterns = {
+            0: ("high_peak_single", [{"start": 0.25, "end": 0.75, "height": 1.25}]),
+            1: ("higher_peak", [{"start": 0.28, "end": 0.72, "height": 1.35}]),
+            2: ("very_high_narrow", [{"start": 0.30, "end": 0.70, "height": 1.5}]),
+            3: ("multi_level_mid", [{"start": 0.15, "end": 0.25, "height": 0.8},
+                                     {"start": 0.25, "end": 0.75, "height": 1.8},
+                                     {"start": 0.75, "end": 0.85, "height": 0.8}]),
+            4: ("three_level_asym", [{"start": 0.1, "end": 0.2, "height": 1.0},
+                                     {"start": 0.2, "end": 0.5, "height": 2.2},
+                                     {"start": 0.5, "end": 0.7, "height": 1.3}]),
+            5: ("two_high_steps", [{"start": 0.2, "end": 0.4, "height": 1.4},
+                                   {"start": 0.5, "end": 0.8, "height": 1.4}]),
+            6: ("four_level", [{"start": 0.05, "end": 0.2, "height": 0.6},
+                               {"start": 0.2, "end": 0.35, "height": 1.2},
+                               {"start": 0.35, "end": 0.65, "height": 1.6},
+                               {"start": 0.65, "end": 0.95, "height": 0.9}]),
+            7: ("narrow_high_wings", [{"start": 0.1, "end": 0.3, "height": 0.7},
+                                      {"start": 0.3, "end": 0.7, "height": 1.9},
+                                      {"start": 0.7, "end": 0.9, "height": 0.7}]),
+            8: ("staircase", [{"start": 0.05, "end": 0.25, "height": 0.5},
+                              {"start": 0.25, "end": 0.45, "height": 0.9},
+                              {"start": 0.45, "end": 0.65, "height": 1.4},
+                              {"start": 0.65, "end": 0.95, "height": 1.1}]),
+            9: ("very_high_central", [{"start": 0.22, "end": 0.78, "height": 1.6}]),
+            10: ("high_peak_variant", [{"start": 0.24, "end": 0.76, "height": 1.55}]),
+            11: ("pyramid", [{"start": 0.05, "end": 0.20, "height": 0.6},
+                             {"start": 0.20, "end": 0.40, "height": 1.4},
+                             {"start": 0.40, "end": 0.60, "height": 2.0},
+                             {"start": 0.60, "end": 0.80, "height": 1.4},
+                             {"start": 0.80, "end": 0.95, "height": 0.6}]),
+            12: ("ultra_stretched_pyramid", [{"start": 0.03, "end": 0.18, "height": 0.5},
+                                             {"start": 0.18, "end": 0.38, "height": 1.2},
+                                             {"start": 0.38, "end": 0.62, "height": 1.9},
+                                             {"start": 0.62, "end": 0.82, "height": 1.2},
+                                             {"start": 0.82, "end": 0.97, "height": 0.5}]),
+            13: ("high_plateau", [{"start": 0.2, "end": 0.8, "height": 1.5}])
+        }
+        
+        pattern = patterns.get(pattern_idx)
+        if not pattern:
+            return {"error": f"Pattern {pattern_idx} not found"}
+        
+        name, default_intervals = pattern
+        
+        mutations = []
+        for _ in range(num_variants):
+            # Mutate each interval
+            mutated_intervals = []
+            for interval in default_intervals:
+                start = interval["start"] * pos_shift + random.uniform(-0.05, 0.05)
+                end = interval["end"] * pos_shift + random.uniform(-0.05, 0.05)
+                height = interval["height"] * height_scale + random.uniform(-0.15, 0.15)
+                mutated_intervals.append({
+                    "start": max(0, min(1, start)),
+                    "end": max(start, min(1, end)),
+                    "height": max(0.1, height)
+                })
+            mutations.append({
+                "name": name,
+                "pattern_idx": pattern_idx,
+                "intervals": mutated_intervals,
+                "mutation": {"height_scale": height_scale, "pos_shift": pos_shift}
+            })
+        
+        return {
+            "type": "pattern_mutation",
+            "pattern_idx": pattern_idx,
+            "variants": mutations,
+            "num_variants": len(mutations)
+        }
+new_skills:
+- name: pattern-mutation-strategy
+  description: |
+    Playbook for Phase 1 (new configs) and Phase 2 (pattern mutation) C2 optimization.
+    Phase 1 uses step_config_generator to explore. Phase 2 uses pattern_mutation_tool
+    to fine-tune the 13 seed patterns which are near-optimal.
+  body: |
+    # C2 Maximization: Two-Phase Strategy
+
+    ## Phase 1: Exploration (Iterations 1-3)
+    Goal: Discover new step function families
+
+    1. CALL step_config_generator
+       - Try symmetric (2-4 steps), asymmetric (2-5 peaks)
+       - Vary heights: 0.5-2.0, widths: 0.15-0.45
+    2. Create step functions with jnp.piecewise
+    3. Probe 3-5 variants
+    4. Evaluate top 2
+    5. Track best score
+
+    ## Phase 2: Refinement (Iteration 4+ or if score > 1.030)
+    Goal: Fine-tune SEED PATTERNS (0-13) which are near-optimal
+
+    1. CALL pattern_mutation_tool
+       - Select pattern_idx from 0-13
+       - Mutate heights: ±5-15%
+       - Mutate positions: ±10-20%
+       - Generate 3-5 variants
+    2. Create step functions
+    3. Probe 3-5 variants
+    4. Evaluate top 2
+    5. Continue until score > 1.030 or budget exhausted
+
+    ## Critical Rules
+    - MAX 4 full evaluations TOTAL
+    - Phase 1: step_config_generator
+    - Phase 2: pattern_mutation_tool (after iter 3 or score > 1.030)
+    - Probe 3-5 before any eval
+    - Seed patterns 0-13 are PROVEN - we optimize, don't replace
+    - TRUE step functions only (constant, not linear)
+new_middlewares:
+- name: phase_transition_enforcer
+  hook: before_model
+  description: |
+    Enforce Phase 1 (exploration) then Phase 2 (refinement) strategy.
+    Prevents premature use of pattern_mutation_tool and guides transition.
+  implementation_py: |
+    def before_model(hook_input):
+        state = hook_input.get("state", {})
+        iteration = state.get("iteration", 0)
+        best_score = state.get("best_score", 1.029)
+        used_step_config = state.get("used_step_config", False)
+        used_pattern_mutation = state.get("used_pattern_mutation", False)
+        
+        # Phase 1: iterations 0-2, explore with step_config_generator
+        if iteration <= 2:
+            if used_pattern_mutation:
+                return "WARNING: Don't use pattern_mutation_tool yet. Phase 1 (exploration) should use step_config_generator first."
+        
+        # Phase 2: iteration 3+ or score > 1.030, refine with pattern_mutation_tool
+        if iteration >= 3 or best_score > 1.030:
+            if not used_pattern_mutation:
+                return "PROMPT: Phase 2 ready. Use pattern_mutation_tool to mutate seed patterns (0-13). They're near-optimal - we need to fine-tune them."
+            if used_step_config:
+                return "PROMPT: Consider switching to Phase 2. You've explored new configs. Try pattern_mutation_tool to fine-tune seed patterns (0-13)."
+        
+        return None

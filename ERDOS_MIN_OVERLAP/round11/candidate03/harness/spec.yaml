@@ -1,0 +1,203 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are solving the Erdos minimum overlap problem: find a step function h: [0,2] -> [0,1] with integral(h)=1 that minimizes max_k integral h(x)(1-h(x+k)) dx.
+  
+  Current best bound: C5 <= 0.38092303510845016 (combined_score = 1.0)
+  Goal: Find h with combined_score > 1.0 (c5_bound < 0.380923)
+  
+  KEY INSIGHT: The optimal h likely has ASYMMETRIC BIMODAL structure with peaks at different locations to minimize overlap between h and h(x+k).
+  
+  SEARCH STRATEGY (use all 30 evals):
+  Phase 1 - Generate diverse initializations:
+    - Call generate_variants() to get 4-8 diverse candidate latent vectors
+    - These include asymmetric bimodal, periodic, and multi-peak patterns
+    - Convert each to h = sigmoid(latent), verify integral ≈ 1
+  
+  Phase 2 - Rapid screening:
+    - For each candidate, call probe_solution (fast, ~10s) to check:
+      * Does integral(h) ≈ 1? (penalty should be < 100)
+      * What's the approximate c5_bound?
+    - Rank by: lowest c5_bound among those passing constraint check
+  
+  Phase 3 - Full evaluation:
+    - Call evaluate_solution on top 2-3 candidates that passed probe
+    - Track best combined_score
+  
+  Phase 4 - Refinement (if budget allows):
+    - If a candidate shows promise (combined_score ~ 1.01-1.02), EDIT the EVOLVE-BLOCK
+      to use THAT specific initialization pattern
+    - Then run optimization from there with careful hyperparameter tuning
+  
+  DO NOT just tune hyperparameters of the seed's existing initialization.
+  Generate NEW initializations first, then refine.
+  
+  Success means combined_score > 1.0 (c5_bound < 0.380923)
+skill_description: |
+  Search for asymmetric bimodal step functions using diverse initialization generation and probe-based screening to find candidates with low overlap.
+skill_body: |
+  # Erdos Minimum Overlap - Diverse Initialization Strategy
+  
+  ## Why This Works
+  The seed's 12 initialization patterns may not include the optimal asymmetric bimodal structure.
+  We need to GENERATE new candidates outside the seed's search space.
+  
+  ## Two-Phase Search
+  
+  ### Phase 1: Generate and Probe (Use 20-25 evals)
+  1. CALL generate_variants() to get diverse latent vectors
+  2. For each variant:
+     - Convert to h = sigmoid(latent)
+     - CALL probe_solution to get quick score + check constraint penalty
+     - Keep variants with penalty < 100 AND lowest probe score
+  3. Rank top 3-5 variants by probe score
+  
+  ### Phase 2: Full Evaluation (Use 5-10 evals)
+  4. CALL evaluate_solution on top 2-3 variants from Phase 1
+  5. If any achieve combined_score > 1.0, FINISH
+  
+  ### Phase 3: Refinement (if needed)
+  6. If best score is ~0.999-1.0 but not > 1.0:
+     - EDIT EVOLVE-BLOCK to use the initialization pattern of the best variant
+     - Tune ONE hyperparameter (learning rate, penalty, or num_steps)
+     - Call evaluate_solution on refined version
+     - Repeat 1-2 times if budget remains
+  
+  ## Key Patterns to Look For
+  - Asymmetric bimodal: two peaks at different heights/locations
+  - Multi-peak with varying widths
+  - Functions that are NOT symmetric about x=1
+  
+  ## Tool Usage
+  - generate_variants(): Get diverse candidates (call once, get 4-8) - NEW TOOL
+  - probe_solution(): Quick score (~10s), uses separate budget (call for each candidate)
+  - evaluate_solution(): Full score, consumes real eval budget (call on top candidates)
+  - edit_solution(): Only after finding promising candidate to refine further
+  - finish(): Submit when combined_score > 1.0
+tool_descriptions:
+  edit_solution: |
+    Modify the EVOLVE-BLOCK region. Use this to:
+    - Change hyperparameters (after finding promising initialization)
+    - Replace initialization patterns with ones from generate_variants output
+    - Always keep the optimizer class structure intact
+  evaluate_solution: |
+    Run full evaluation, returns combined_score = 0.380923/c5_bound.
+    Use this ON THE BEST candidates after probe screening.
+  probe_solution: |
+    Quick approximate evaluation (~10s, separate budget of 30 probes).
+    Use this to SCREEN many variants quickly. Check constraint penalty and approximate c5_bound.
+    Skip full evaluation for variants with high penalty or poor probe score.
+  finish: |
+    Submit final solution when combined_score > 1.0 (c5_bound < 0.380923) or all strategies exhausted.
+sampling:
+  temperature: 1.2
+  top_p: 0.95
+  top_k: 30
+  max_tokens: 14000
+agent:
+  max_iterations: 30
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 10000
+new_tools:
+- name: generate_variants
+  description: |
+    Generate 4-8 diverse step function initializations for the Erdos problem.
+    Produces asymmetric bimodal, multi-peak, and other patterns NOT in the seed's 12 patterns.
+    Each latent vector is designed so sigmoid(latent) gives h in [0,1] with integral ≈ 1.
+    Call this ONCE at the start to explore new regions of initialization space.
+  input_schema:
+    type: object
+    properties: {}
+  implementation_py: |
+    def run(ctx, args):
+        import numpy as np
+        N = 800
+        domain = 2.0
+        dx = domain / N
+        rng = np.random.default_rng(123)
+        constructions = {}
+        
+        # 1. asymmetric_bimodal: Two peaks at different heights/locations
+        x = np.linspace(0, domain, N)
+        h1 = np.exp(-((x - 0.2) / 0.15)**2 * 15)
+        h2 = np.exp(-((x - 0.8) / 0.12)**2 * 12)
+        latent = (h1 + h2) / (np.max(h1+h2) + 1e-10)
+        constructions['asymmetric_bimodal'] = latent
+        
+        # 2. symmetric_bimodal: Two equal peaks (for comparison)
+        latent = np.exp(-((x - 0.25) / 0.15)**2 * 15) + np.exp(-((x - 0.75) / 0.15)**2 * 15)
+        latent = (latent - np.min(latent)) / (np.max(latent) - np.min(latent) + 1e-10)
+        constructions['symmetric_bimodal'] = latent
+        
+        # 3. tri_modal: Three peaks with varying widths
+        latent = np.zeros(N)
+        latent += np.exp(-((x - 0.15) / 0.12)**2 * 12)
+        latent += np.exp(-((x - 0.5) / 0.15)**2 * 10)
+        latent += np.exp(-((x - 0.95) / 0.11)**2 * 13)
+        latent = (latent - np.min(latent)) / (np.max(latent) - np.min(latent) + 1e-10)
+        constructions['tri_modal'] = latent
+        
+        # 4. periodic_3: Three-level alternating pattern
+        phases = np.array([0.0, 0.5, 1.0])
+        levels = np.array([5, -5, 5])
+        latent = np.zeros(N)
+        for p, l in zip(phases, levels):
+            in_range = (x >= p) & (x < p + 0.5)
+            latent += l * in_range
+        latent += rng.normal(size=N) * 0.2
+        constructions['periodic_3'] = latent
+        
+        # 5. multi_peak_4: Four narrow peaks with optimal-ish spacing
+        marks = np.array([0.1, 0.4, 0.7, 1.0])
+        widths = np.array([0.08, 0.09, 0.08, 0.09])
+        latent = np.zeros(N)
+        for m, w in zip(marks, widths):
+            latent += np.exp(-((x - m) / w)**2 * 18)
+        latent = (latent - np.min(latent)) / (np.max(latent) - np.min(latent) + 1e-10)
+        constructions['multi_peak_4'] = latent
+        
+        return {"constructions": constructions, "keys_used": list(constructions.keys())}
+new_skills:
+- name: probe-first-search
+  description: |
+    Use probe_solution to screen many initialization variants before full evaluation.
+    Focus on asymmetric bimodal and multi-peak patterns that minimize overlap.
+  body: |
+    # Probe-First Search for Erdos Optimization
+    
+    ## Strategy
+    1. Generate diverse candidates using generate_variants()
+    2. For EACH candidate:
+       - Convert latent to h = sigmoid(latent)
+       - Check integral(h) ≈ 1 (constraint penalty)
+       - CALL probe_solution for quick score
+    3. Rank by probe score (lowest c5_bound wins)
+    4. CALL evaluate_solution on top 2-3 candidates
+    5. If best score > 1.0, FINISH immediately
+    
+    ## Why Probe-First?
+    - Full evaluation takes minutes; probe takes ~10s
+    - With 30 eval budget, you can test 30+ candidates with probes
+    - This lets you explore INITIALIZATION space, not just hyperparameters
+    
+    ## Key Insight
+    The optimal h likely has ASYMMETRIC bimodal structure.
+    Seed's 12 patterns may miss this. generate_variants provides NEW patterns.
+    
+    ## Success Criteria
+    - Find variant with probe_score corresponding to c5_bound < 0.380923
+    - Verify with full evaluate_solution (combined_score > 1.0)
+    - Submit with finish()
+remove_tools: []
+new_middlewares:
+- name: probe_before_eval
+  hook: before_model
+  description: |
+    Remind the agent to use probe_solution before calling evaluate_solution on new variants.
+    This ensures efficient use of the 30 full evaluation budget.
+  implementation_py: |
+    def before_model(hook_input):
+        current_score = hook_input.get("best_score", None)
+        if current_score is None or current_score < 1.0:
+            return "REMEMBER: Use probe_solution to screen variants BEFORE calling evaluate_solution. Full evaluation is expensive (minutes) but probe takes ~10s. Test many candidates cheaply, then evaluate only the top 2-3."
+        return None

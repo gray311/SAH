@@ -1,0 +1,308 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are a polygon-optimization specialist for axis-aligned fish-capture problems.
+
+  Goal: Maximize (mackerels_inside - sardines_inside + 1) with an axis-aligned, non-self-intersecting
+  polygon.
+
+  CRITICAL SEARCH STRATEGY:
+
+  1. FIRST: Call analyze_mackerel_clusters to find dense mackerel regions and their centroids
+  2. SECOND: Build polygons AROUND these clusters (not random rectangles)
+  3. THIRD: Use stepped/L-shaped polygons to exclude nearby sardines
+  4. FOURTH: Refine with local edge perturbations
+  5. STOP when time limit is nearly reached (use full 2.0s budget)
+
+  Why this works: The problem is to maximize mackerels while avoiding sardines.
+  Dense mackerel clusters are your primary targets. Start there, then carefully
+  exclude adjacent sardines with polygon indentations.
+
+  Tools:
+  - analyze_mackerel_clusters: Find dense mackerel regions (CALL THIS FIRST!)
+  - edit_solution: Modify the C++ code
+  - evaluate_solution: Run and score the program
+  - finish: End when you have a high-scoring solution
+
+  Preserve EVOLVE-BLOCK markers and fixed I/O format. Each edit should encode
+  ONE concrete improvement: use cluster-based polygon construction, then refine.
+skill_description: |
+  Optimize C++ polygon construction for fish-capture maximization. Use
+  analyze_mackerel_clusters to find dense mackerel regions, then build
+  axis-aligned polygons around these clusters while excluding nearby sardines.
+  Implement stepped/L-shaped polygon constructors and systematic local refinement.
+skill_body: |
+  # Cluster-Based Polygon Optimization
+  
+  ## Phase 1: Analyze Mackerel Clusters (MANDATORY FIRST STEP)
+  - Call analyze_mackerel_clusters to get:
+    - Top 5-10 dense mackerel clusters with centroids
+    - Cluster densities (mackerels per unit area)
+    - Distance to nearest sardines for each cluster
+  - Sort clusters by density / sardine-proximity ratio
+  - Select top 2-3 clusters as primary targets
+  
+  ## Phase 2: Build Targeted Polygons
+  For each selected cluster:
+  - **Rectangular baseline**: Bounding box of cluster ± margin
+  - **Stepped polygon**: Create staircase around cluster edges to exclude nearby sardines
+  - **L-shaped variant**: If sardines form a line, use L-shape to step around them
+  - Calculate score for each variant using grid counting
+  
+  ## Phase 3: Multi-Cluster Combination
+  - Try combining top 2 clusters with a connecting rectangle
+  - Score the combined polygon
+  - If beneficial, keep the combined shape
+  
+  ## Phase 4: Local Refinement
+  - From best polygon, perturb each edge by ±1 to ±10 units
+  - Keep modifications that increase score
+  - Try up to 100 refinements within time budget
+  
+  ## Phase 5: Time Budget Management
+  - 0.1s: Cluster analysis
+  - 0.3s: Baseline polygon construction
+  - 0.5s: Advanced shape variants (stepped, L-shaped)
+  - 0.8s: Local refinement
+  - 0.3s: Final validation
+  - Always output a VALID polygon even if score is suboptimal
+  
+  ## C++ Implementation Patterns
+  ```cpp
+  // Grid-based fast counting
+  int count_in_rect(int minX, int maxX, int minY, int maxY) {
+      int count = 0;
+      for (int x = minX; x <= maxX; x++) {
+          for (int y = minY; y <= maxY; y++) {
+              if (is_inside(x, y)) count++;
+          }
+      }
+      return count;
+  }
+  
+  // Stepped polygon around cluster
+  vector<Point> make_stepped_polygon(const vector<Point>& cluster, const vector<Sardine>& nearby) {
+      // Create staircase pattern that follows cluster boundary
+      // Indent inward near sardines
+  }
+  ```
+tool_descriptions:
+  edit_solution: |
+    Modify the C++ code in EVOLVE-BLOCK. Target changes:
+    1. Add cluster-based polygon construction
+    2. Add stepped/L-shaped polygon variants
+    3. Improve grid counting efficiency
+    4. Add time-based search loop with proper budget management
+    Preserve EVOLVE-BLOCK markers and I/O format strictly.
+  evaluate_solution: |
+    Run the C++ program. Returns combined_score (higher = better mackerels-sardines+1),
+    validity (0 if invalid polygon or program error), and remaining evals (budget=30).
+    Each evaluation runs ~2.0s internal search. Use feedback to guide next edit.
+  probe_solution: |
+    Not applicable - use analyze_mackerel_clusters instead for task-specific insight.
+  finish: |
+    End when you have a consistently high-scoring polygon (3+ consecutive good scores)
+    or exhaust the 30 evaluation budget.
+sampling:
+  temperature: 0.7
+  top_p: 0.95
+  top_k: 15
+  max_tokens: 14336
+agent:
+  max_iterations: 60
+middleware:
+  budget_reminder_from_left: 3
+  long_tool_output_max_chars: 12000
+new_tools:
+  - name: analyze_mackerel_clusters
+    description: |
+      Analyze the mackerel positions to find dense clusters. Returns top clusters
+      with their centroids, densities, and distances to nearest sardines. This
+      guides polygon construction to target high-value regions first. Call ONCE
+      at the start of search to inform all subsequent polygon designs.
+    input_schema:
+      type: object
+      properties: {}
+    implementation_py: |
+      def run(ctx, args):
+          # Get all fish positions
+          mackerels = ctx.read_input_df("mackerels.csv", nrows=5000)
+          sardines = ctx.read_input_df("sardines.csv", nrows=5000)
+          
+          if mackerels.empty:
+              return {"note": "No mackerel data"}
+          
+          # Cluster analysis: use simple density-based clustering
+          # Compute grid cells and count mackerels per cell
+          cell_size = 5000  # 5km grid cells
+          grid = {}
+          for idx, row in mackerels.iterrows():
+              cell_x = row['x'] // cell_size
+              cell_y = row['y'] // cell_size
+              key = (cell_x, cell_y)
+              grid[key] = grid.get(key, 0) + 1
+          
+          # Find top clusters by density
+          cluster_info = []
+          for (cx, cy), count in sorted(grid.items(), key=lambda x: -x[1])[:10]:
+              # Get centroid of mackerels in this cluster
+              cluster_mask = (mackerels['x'] >= cx * cell_size) & \
+                            (mackerels['x'] < (cx + 1) * cell_size) & \
+                            (mackerels['y'] >= cy * cell_size) & \
+                            (mackerels['y'] < (cy + 1) * cell_size)
+              cluster_mackerels = mackerels[cluster_mask]
+              
+              if not cluster_mackerels.empty:
+                  centroid_x = int(cluster_mackerels['x'].mean())
+                  centroid_y = int(cluster_mackerels['y'].mean())
+                  
+                  # Find nearest sardine
+                  min_sardine_dist = float('inf')
+                  for idx, sr in sardines.iterrows():
+                      dist = ((sr['x'] - centroid_x)**2 + **(sr['y'] - centroid_y)2)**0.5
+                      min_sardine_dist = min(min_sardine_dist, dist)
+                  
+                  cluster_info.append({
+                      "centroid_x": centroid_x,
+                      "centroid_y": centroid_y,
+                      "count": int(count),
+                      "density": count / (cell_size ** 2),
+                      "nearest_sardine_dist": float(min_sardine_dist)
+                  })
+          
+          return {
+              "num_clusters": len(cluster_info),
+              "clusters": cluster_info
+          }
+  - name: quick_score_rect
+    description: |
+      Quickly score a rectangular polygon using grid approximation (not full eval).
+      Returns approximate (mackerels - sardines) count for a given bounding box.
+      Use for rapid comparison of multiple rectangle candidates before full evaluation.
+    input_schema:
+      type: object
+      properties:
+        min_x:
+          type: integer
+        max_x:
+          type: integer
+        min_y:
+          type: integer
+        max_y:
+          type: integer
+    implementation_py: |
+      def run(ctx, args):
+          min_x = args.get("min_x", 0)
+          max_x = args.get("max_x", 100000)
+          min_y = args.get("min_y", 0)
+          max_y = args.get("max_y", 100000)
+          
+          # Quick grid-based approximation (sample every 10th point)
+          mackerels = ctx.read_input_df("mackerels.csv", nrows=5000)
+          sardines = ctx.read_input_df("sardines.csv", nrows=5000)
+          
+          # Approximate counts by subsampling
+          sample_step = 50
+          m_count = 0
+          s_count = 0
+          
+          for idx in range(0, len(mackerels), sample_step):
+              if mackerels.iloc[idx]['x'] >= min_x and mackerels.iloc[idx]['x'] <= max_x and \
+                 mackerels.iloc[idx]['y'] >= min_y and mackerels.iloc[idx]['y'] <= max_y:
+                  m_count += 1
+          
+          for idx in range(0, len(sardines), sample_step):
+              if sardines.iloc[idx]['x'] >= min_x and sardines.iloc[idx]['x'] <= max_x and \
+                 sardines.iloc[idx]['y'] >= min_y and sardines.iloc[idx]['y'] <= max_y:
+                  s_count += 1
+          
+          # Scale back to estimate full counts
+          scale_factor = len(mackerels) / sample_step
+          est_m = int(m_count * scale_factor)
+          est_s = int(s_count * scale_factor)
+          
+          return {
+              "approx_mackerels": est_m,
+              "approx_sardines": est_s,
+              "approx_score": max(0, est_m - est_s + 1)
+          }
+new_skills:
+  - name: cluster-guided-search
+    description: |
+      Method playbook: Use cluster analysis to guide polygon construction.
+      Build polygons around dense mackerel clusters while excluding nearby sardines.
+      Start with cluster centroids, expand to bounding boxes, then refine with
+      stepped polygons to avoid sardines.
+    body: |
+      # Cluster-Guided Search Strategy
+      
+      ## Step 1: Cluster Analysis (MANDATORY)
+      - Call analyze_mackerel_clusters at the start
+      - Identify top 3 clusters by density
+      - For each cluster, compute:
+        * Centroid (mean x, y)
+        * Bounding box
+        * Distance to nearest sardine
+      
+      ## Step 2: Polygon Construction Pipeline
+      
+      ### Option A: Single Cluster Bounding Box
+      - Create rectangle around cluster centroid
+      - Extend by 2000 units in all directions
+      - Calculate score using quick_score_rect
+      
+      ### Option B: Stepped Polygon (Recommended)
+      - Start with bounding box
+      - For each edge, check if sardines are nearby
+      - If sardine < 500 units from edge, indent the edge inward
+      - Create staircase pattern: move edge inward, then parallel offset
+      - This excludes sardines while keeping mackerels
+      
+      ### Option C: L-Shaped Polygon
+      - If sardines form a line or cluster near one corner
+      - Use L-shape to step around the sardine cluster
+      - Vertices: (min_x, min_y) -> (max_x, min_y) -> (max_x, sardine_y) -> 
+                   (sardine_x, sardine_y) -> (sardine_x, max_y) -> (min_x, max_y) -> (min_x, min_y)
+      
+      ## Step 3: Multi-Cluster Combination
+      - If top 2 clusters are close (< 5000 units apart)
+      - Try combining with a connecting rectangle
+      - Score the combined shape
+      
+      ## Step 4: Local Refinement
+      - From best polygon, try edge perturbations
+      - For each edge, try moving by ±1, ±2, ..., ±10 units
+      - Keep only improvements
+      - Limit to 100 refinement attempts
+      
+      ## Step 5: Validation
+      - Ensure polygon is non-self-intersecting
+      - Check perimeter ≤ 400,000
+      - Ensure vertices are integers
+      - Output in correct format
+tool_descriptions:
+  edit_solution: |
+    Modify C++ code in EVOLVE-BLOCK. Focus on:
+    1. Adding cluster analysis at startup
+    2. Implementing stepped polygon constructor
+    3. Adding L-shaped polygon variant
+    4. Implementing time-based search loop (0.1s analysis, 1.5s refinement)
+    5. Grid-based fast counting for rapid scoring
+    Always preserve EVOLVE-BLOCK markers and exact I/O format.
+  evaluate_solution: |
+    Run C++ program. Returns combined_score (higher = better), validity (0=invalid),
+    and remaining evals (budget=30). Each eval runs ~2.0s internal search.
+    Use feedback to guide cluster-based improvements.
+  probe_solution: |
+    Not useful - use analyze_mackerel_clusters for task-specific insight.
+  finish: |
+    End when score stabilizes (3+ consecutive similar scores) or budget exhausted.
+remove_tools: []
+new_middlewares:
+  - name: cluster_reminder
+    hook: before_model
+    description: |
+      Remind the solver to use cluster analysis before building polygons.
+      Ensures every search iteration starts with informed cluster targeting.
+    implementation_py: |
+      def before_model(hook_input):
+          return "FIRST: Call analyze_mackerel_clusters to find dense mackerel regions before constructing any polygons. Use cluster centroids as polygon centers."

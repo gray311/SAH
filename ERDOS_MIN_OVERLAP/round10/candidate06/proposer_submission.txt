@@ -1,0 +1,187 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are solving the Erdos minimum overlap problem: minimize max_k integral h(x)(1-h(x+k)) dx
+  for a step function h: [0,2] -> [0,1] with integral(h)=1.
+  
+  Current best bound: C5 <= 0.38092303510845016
+  Goal: Find h where combined_score > 1.0 (i.e., c5_bound < 0.380923)
+  
+  CRITICAL: The seed program already has sophisticated optimization (12 init patterns, Adam optimizer).
+  YOUR JOB IS NOT TO TUNE HYPERPARAMETERS but to generate BETTER INITIALIZATIONS.
+  
+  Strategy: Use PROBE_CONSTRUCTION tool to generate mathematically principled candidate functions.
+  Then EDIT to use one construction, and EVALUATE to test it.
+  
+  Steps:
+  1. CALL probe_construction to get 3-4 different construction types
+  2. For EACH construction type, EDIT _get_best_initialization to use that construction
+  3. CALL evaluate_solution ONCE per construction type (30 evals total budget)
+  4. Track which gives best combined_score
+  5. If one gives score > 1.0, refine it with small edits
+  6. Document which construction type achieved the best score
+  
+  Key insight: The optimal h might be a step function with specific jump points (not smooth sigmoid).
+  The seed's sigmoid initialization may be suboptimal for finding the true step function.
+skill_description: |
+  Generate mathematically principled step function initializations for Erdos problem using probe_construction tool.
+skill_body: |
+  # Erdos Minimum Overlap - Construction-Based Strategy
+  
+  ## Problem
+  Find step function h: [0,2] -> [0,1] minimizing max_k integral h(x)(1-h(x+k)) dx
+  
+  ## Why Construction-Based Search
+  The seed uses sigmoid of random latents, but optimal h may be a sharp step function.
+  Mathematically principled constructions are more likely to yield low C5 bounds.
+  
+  ## Strategy
+  
+  ### Phase 1: Systematic Construction Exploration (Use all 30 evals)
+  1. Use probe_construction tool to get 3-4 different construction types:
+     - bimodal_tight: Two narrow peaks at 0.25 and 0.75
+     - periodic_step: Alternating step function
+     - golomb_ruler: Peaks at optimal spacing [0, 0.25, 0.625, 0.9375, 1.0]
+     - triangular_wave: Piecewise linear with 3 levels
+  
+  2. For EACH construction type, EDIT the _get_best_initialization to:
+     - Replace the pattern loop with a single construction
+     - Ensure integral(h) ≈ 1 (adjust peak widths)
+  
+  3. CALL evaluate_solution ONCE per construction type
+     - Track which gives best combined_score
+     - Stop when score > 1.0
+  
+  ### Phase 2: Refinement
+  If a construction type yields score > 1.0:
+  - Make small edits to adjust peak positions/widths
+  - Fine-tune the constraint penalty
+  - Try to push score further above 1.0
+  
+  ## Success Criteria
+  - combined_score > 1.0 (new C5 upper bound)
+  - Document which construction type worked best
+  
+  ## Tool Usage
+  - probe_construction: Generate candidate latent vectors (NO EVAL used)
+  - evaluate_solution: Test a construction (costs 1 eval)
+  - edit_solution: Modify _get_best_initialization to use a specific construction
+tool_descriptions:
+  edit_solution: |
+    Modify the EVOLVE-BLOCK to change _get_best_initialization to use a specific
+    mathematical construction. Focus on replacing the pattern loop with a single
+    well-specified function (bimodal, periodic, or Golomb-like).
+  evaluate_solution: |
+    Run full evaluation, returns combined_score. Each call costs 1 of 30 budget.
+    Use AFTER verifying the construction satisfies integral(h) ≈ 1.
+  finish: |
+    Submit when combined_score > 1.0 or all construction types tested.
+sampling:
+  temperature: 0.7
+  top_p: 0.9
+  top_k: 50
+  max_tokens: 14000
+agent:
+  max_iterations: 30
+middleware:
+  budget_reminder_from_left: 2
+  long_tool_output_max_chars: 10000
+new_tools:
+- name: probe_construction
+  description: |
+    Generate mathematically principled step function initializations for the Erdos problem.
+    Returns 4 construction types: bimodal_tight, periodic_step, golomb_ruler, triangular_wave.
+    Each construction is designed to have integral(h) ≈ 1 and produce sharp step-like functions.
+    Use this to explore function shapes BEFORE full evaluation (no eval budget used).
+  input_schema:
+    type: object
+    properties: {}
+  implementation_py: |
+    def run(ctx, args):
+        import numpy as np
+        N = 800
+        domain = 2.0
+        dx = domain / N
+        rng = np.random.default_rng(42)
+        constructions = {}
+        
+        # bimodal_tight: Two sharp peaks at 0.25 and 0.75 with equal area
+        x = np.linspace(0, domain, N)
+        peak1, peak2 = 0.25, 0.75
+        width1, width2 = 0.12, 0.12
+        heights = 4.0
+        bimodal = heights * np.exp(-((x-peak1)/width1)**2) + heights * np.exp(-((x-peak2)/width2)**2)
+        bimodal = np.clip(bimodal, 0, 1)
+        constructions['bimodal_tight'] = bimodal
+        
+        # periodic_step: Alternating between 0 and 1 with adjusted widths
+        x = np.linspace(0, domain, N)
+        widths = [0.3, 0.3, 0.3, 0.1]
+        periodic = np.zeros(N)
+        for i, (start, width) in enumerate([(0.0, widths[0]), (0.3, widths[1]), (0.6, widths[2]), (0.9, widths[3])]):
+            if start + width <= domain:
+                periodic = periodic + np.where((x >= start) & (x < min(start+width, domain)), 1.0, 0.0)
+        periodic = periodic + rng.normal(size=N) * 0.02
+        periodic = np.clip(periodic, 0, 1)
+        constructions['periodic_step'] = periodic
+        
+        # golomb_ruler: 5 peaks at optimal spacing
+        x = np.linspace(0, domain, N)
+        marks = np.array([0.0, 0.5, 1.5, 1.8, 2.0])
+        widths = np.array([0.12, 0.1, 0.08, 0.08, 0.1])
+        heights = 6.0
+        golomb = np.zeros(N)
+        for mark, width in zip(marks, widths):
+            golomb = golomb + heights * np.exp(-((x-mark)/width)**2)
+        golomb = np.clip(golomb, 0, 1)
+        constructions['golomb_ruler'] = golomb
+        
+        # triangular_wave: 3-level piecewise function
+        x = np.linspace(0, domain, N)
+        boundaries = [0.0, 0.333, 0.666, 1.0]
+        levels = [0.0, 0.5, 1.0, 0.0]
+        triangular = np.zeros(N)
+        for i in range(1, len(boundaries)):
+            start, end = boundaries[i-1], boundaries[i]
+            if start < end:
+                triangular = triangular + levels[i-1] * np.where((x >= start) & (x < end), 1.0, 0.0)
+        triangular = np.clip(triangular, 0, 1)
+        constructions['triangular_wave'] = triangular
+        
+        return {"constructions": constructions,
+                "integral_info": {k: np.trapz(np.clip(constructions[k], 0, 1), x)
+                                  for k in constructions}}
+new_skills:
+- name: construction-search
+  description: |
+    Systematically explore mathematically principled step function constructions for the Erdos problem.
+    Each construction type is a hypothesis about what optimal h might look like.
+  body: |
+    # Construction-Based Search for Erdos Problem
+    
+    ## Construction Types to Explore
+    1. **bimodal_tight**: Two narrow peaks at symmetric locations (0.25, 0.75)
+       - Good for reducing overlap between h and shifted versions
+       - Total integral ≈ 1 by adjusting peak widths
+    
+    2. **periodic_step**: Alternating step function with 1:2:1 ratio
+       - h(x) = 1 on [0.25, 0.75), h(x) = 0 elsewhere
+    
+    3. **golomb_ruler**: Peaks at optimal Golomb ruler positions
+       - Marks at [0, 0.25, 0.625, 0.9375, 1.0] scaled
+       - Maximizes minimum distance between peaks
+    
+    4. **triangular_wave**: Piecewise constant with 3 levels
+       - Hierarchy: 0 < 0.5 < 1.0
+       - Creates structured correlation patterns
+    
+    ## Execution Plan
+    For each construction:
+    1. Use probe_construction tool (zero cost)
+    2. EDIT _get_best_initialization to use that construction directly
+    3. CALL evaluate_solution (1 eval each)
+    4. Track best combined_score
+    
+    ## Key Insight
+    The seed's 12 init patterns are all sigmoid of random latents.
+    Optimal h might be a SHARP step function, not a smooth sigmoid.
+    Replace the sigmoid initialization with direct step function construction.

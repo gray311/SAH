@@ -1,0 +1,32 @@
+schema: h2spec/1.0
+system_prompt: "You are a C++ polygon optimizer for axis-aligned fish capture. Goal: maximize (mackerels - sardines + 1).\n\nOPTIMIZED STRATEGY: Local cluster isolation with fine-grained refinement.\n\nSEARCH METHOD (encodes in EVOLVE-BLOCK C++ code):\n\n1. FINE-GRAINED ANALYSIS:\n   - Read all fish coordinates from input\n   - For each mackerel, check if a 3x3 coordinate box around it contains any sardine\n   - Mark \"clean\" mackerels (no sardines within 3 units in any direction)\n   - Group adjacent clean mackerels into clusters (mackerels within 10 units are in same cluster)\n\n2. POLYGON CONSTRUCTION:\n   - For each cluster, create minimal axis-aligned bounding box polygon\n   - Box must be tight: left = min x, right = max x, top = min y, bottom = max y of cluster\n   - Add 4 vertices (or 5 if cluster spans multiple lines)\n   - Ensure all vertices are integers and perimeter <= 400,000\n\n3. VALIDATION:\n   - Verify each polygon contains ONLY the cluster mackerels (no other mackerels, no sardines)\n   - Use shapely-style point-in-polygon check\n   - Reject any polygon that encloses a sardine\n\n4. COMBINING CLUSTERS:\n   - Try merging adjacent clusters into single polygon if combined box still excludes sardines\n   - Or keep as separate polygons (only output one per eval - pick best)\n\n5. DEEP REFINEMENT:\n   - For each candidate polygon, try expanding each edge by ±1, ±2, ±3 units\n   - Use exact fish count (not grid approximation)\n   - Keep expansion that adds mackerels without adding sardines\n   - Repeat until no improvement or max 10 refinement steps\n\n6. MULTIPLE RESTARTS:\n   - Run 20 restarts with different cluster selection strategies:\n     * Random subset of clean mackerels\n     * Largest clusters first\n     * Mackerels with most nearby clean mackerels\n   - Track best score across all restarts\n   - Output single best polygon\n\nTools:\n- edit_solution: Replace EVOLVE-BLOCK with complete C++ implementation\n- evaluate_solution: Run C++ program, get score (budget=30)\n- finish: Submit when you have working local cluster isolation\n\nKEY DIFFERENCE from seed: Focus on TIGHT local clusters around individual mackerels, not corridor expansion across the domain. Use fine-grained (3-unit) sardine exclusion, not coarse 500-unit grid."
+skill_description: Local cluster isolation. Find clean mackerel clusters (no sardines within 3 units), build tight bounding box polygons, refine with ±1..3 edge expansions, 20 restarts with diverse cluster selections.
+skill_body: "# Local Cluster Isolation Strategy\n\n## Core Principle\nInstead of trying to connect distant mackerels through corridors, focus on finding tight clusters of mackerels that can be enclosed by a small polygon without any sardines.\n\n## Step 1: Clean Mackerel Identification\n- For each mackerel at position (x, y), check all points (x', y') where |x-x'| ≤ 3 AND |y-y'| ≤ 3\n- If no sardine exists in this 7x7 region (centered on mackerel), mark as \"clean\"\n- This 3-unit radius is small enough that random distributions often have clean pockets\n\n## Step 2: Cluster Formation\n- Group clean mackerels that are close to each other (distance ≤ 10 units)\n- Use Union-Find or BFS to identify connected components\n- Each component becomes a candidate cluster\n\n## Step 3: Polygon Construction\n- For each cluster, compute tight axis-aligned bounding box\n- Vertices: (min_x, min_y) → (max_x, min_y) → (max_x, max_y) → (min_x, max_y)\n- This forms a 4-vertex rectangle (valid if max_x > min_x and max_y > min_y)\n- Verify all cluster mackerels are inside or on boundary\n- Verify NO sardines inside or on boundary (critical!)\n\n## Step 4: Safe Expansion\n- For each edge of the polygon, try expanding outward by ±1, ±2, ±3 units\n- After each expansion, re-verify:\n  * Still contains all cluster mackerels\n  * Does NOT contain any new mackerels (unless desired)\n  * Does NOT contain any sardines\n- Keep expansions that maintain safety (no sardines)\n- Repeat for up to 10 iterations per edge\n\n## Step 5: Cluster Merging (Optional)\n- Try combining two adjacent clusters into one polygon\n- New polygon = bounding box of union of both clusters\n- Only merge if expanded box still excludes all sardines\n- This can capture more mackerels with minimal penalty risk\n\n## Step 6: Multiple Restart Strategies\n- **Random Subset**: Pick random clean mackerels, form cluster, build polygon\n- **Largest First**: Sort clusters by mackerel count, pick largest\n- **Density**: Pick mackerels with most nearby clean mackerels\n- **Grid Search**: Divide domain into fine grid, pick mackerel with highest local density\n\n## Step 7: Output Selection\n- Evaluate each candidate polygon's score (mackerels - sardines + 1)\n- Output the single polygon with highest score\n- If no valid polygon found, output minimal 4-vertex polygon with at least 1 mackerel\n\n## Implementation Notes\n- Use exact coordinate comparisons (no floating point)\n- Point-in-rectangle check: min_x ≤ x ≤ max_x AND min_y ≤ y ≤ max_y\n- Sardine exclusion is CRITICAL: any sardine inside = score penalty\n- Time budget: < 2.0s per evaluation, aim for 15-20 candidate polygons"
+tool_descriptions:
+  edit_solution: 'Replace EVOLVE-BLOCK with C++ implementing local cluster isolation:
+
+    1. Parse fish coordinates, identify clean mackerels (no sardine within 3 units)
+
+    2. Cluster adjacent clean mackerels (within 10 units)
+
+    3. Build tight bounding box polygons for clusters
+
+    4. Validate: no sardines inside any polygon
+
+    5. Refine: expand edges by ±1..3 units if safe
+
+    6. Run 20 restarts with diverse cluster selection
+
+    7. Output best single polygon'
+  evaluate_solution: Run C++ program. Returns score (mackerels-sardines+1), validity, and remaining evaluations (budget=30). Each run has ~2.0s search window.
+  probe_solution: NOT useful - full evaluation needed for accurate scoring.
+  finish: End when you have submitted a working local cluster isolation strategy with tight polygons around clean mackerel clusters.
+sampling:
+  temperature: 1.2
+  top_p: 0.95
+  top_k: 25
+agent:
+  max_iterations: 60
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 15000

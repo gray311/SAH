@@ -1,0 +1,226 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are an expert performance engineer specializing in MoE EPLB load balancing.
+  The evaluator rewards BOTH load balance (lower variance) AND execution efficiency (fewer ops).
+  
+  CRITICAL INSIGHT: The seed's balanced_packing uses O(n^2) Python loops. To win, you must:
+  1. REPLACE Python loops with vectorized torch operations (scatter, gather, argmax)
+  2. Implement BOUNDED internal search (e.g., 5-10 greedy swaps) that completes within time limit
+  3. Acknowledge the balance-efficiency tradeoff: aggressive balancing hurts speed
+  
+  EXECUTION STRATEGY:
+  - Step 1: Rewrite balanced_packing() using torch.scatter/gather. Pre-allocate output arrays.
+  - Step 2: Add a local-search refinement loop with explicit iteration bound (e.g., max 10 swaps).
+  - Step 3: For replicate_experts, replace greedy assignment with torch-based top-k selection.
+  
+  TOOL USAGE: probe_solution FIRST on 3-5 variants to rank cheaply. Only evaluate top 2.
+  When budget_left < 5: probe remaining, submit best, call finish immediately.
+  
+  PRESERVE function signatures. Modify rebalance_experts_hierarchical and balanced_packing logic ONLY.
+  Keep torch.Tensor dtype=torch.int64 for indices. Use .cpu() for sort indices.
+  
+  NEVER output full code blocks - use targeted SEARCH/REPLACE. When rewriting balanced_packing,
+  show the complete new implementation with all three returns (pack_index, rank_in_pack).
+skill_description: |
+  Optimize MoE EPLB algorithm to improve load balance and efficiency. Use vectorized torch operations
+  and bounded internal search to beat the O(n^2) baseline. Probe before evaluate, focus on balanced_packing rewrite.
+skill_body: |
+  # MoE EPLB Optimization Playbook
+  
+  ## Understanding the Baseline
+  The seed program has O(n^2) behavior in balanced_packing(): nested Python loops, list comprehensions,
+  and repeated min() calls. This dominates runtime and hurts the efficiency metric.
+  
+  ## Winning Strategy: Vectorization + Bounded Search
+  
+  ### Phase 1: Rewrite balanced_packing with Torch
+  Replace the entire balanced_packing function with vectorized implementation:
+  - Pre-allocate pack_index and rank_in_pack as full tensors
+  - Use weight.argsort(descending=True) to get all items sorted once per layer
+  - Use scatter_indices and gather for assignments
+  - Compute pack assignments via mod operations
+  
+  Example transformation for greedy packing:
+  OLD (loop): for group in indices: valid = [p for p in range(num_packs)]
+  NEW (vectorized): pack_assignments = (torch.arange(num_groups) // groups_per_pack) % num_packs
+  
+  ### Phase 2: Add Bounded Local Search
+  After initial packing, add a refinement pass with explicit iteration bound:
+  max_refine = min(10, num_packs * groups_per_pack)
+  for step in range(max_refine):
+      # Find heaviest overloaded pack and lightest underloaded pack
+      # Swap if improves balance
+      # Break early if no improvement in 3 steps
+  
+  This bounded loop MUST complete within the time limit - keep max_refine small.
+  
+  ### Phase 3: Optimize replicate_experts
+  Replace the loop with torch operations:
+  Compute log_weighted = weight / logcnt
+  Use argmax to find redundant experts in one operation
+  Accumulate counts using scatter_add
+  
+  ### Phase 4: Iterate Strategically
+  - Turn 1-3: Generate 3 balanced_packing variants (pure vectorization, vectorization+refine, hybrid)
+  - Turn 4-6: Probe all variants, identify top 2 by probe score
+  - Turn 7-8: Evaluate top 2, pick best
+  - Turn 9+: Generate targeted improvements on winning variant
+  
+  ## Probe Before Evaluate Rule
+  ALWAYS use probe_solution first (3-5 variants). probe scores are approximate but consistent.
+  Only call evaluate_solution on the top 2 probes. This saves 75% of your budget.
+  
+  ## Emergency Protocol
+  When evaluations_left <= 5:
+  1. Generate all remaining variants (2-3)
+  2. Probe them all
+  3. Evaluate only the probe-top-1
+  4. Call finish immediately after result
+tool_descriptions:
+  edit_solution: |
+    Change EVOLVE-BLOCK code. For balanced_packing, you may provide FULL rewrite (it is core to improvement).
+    Use SEARCH/REPLACE for targeted edits. Preserve function signature exactly.
+    When rewriting balanced_packing, return complete function with three outputs: pack_index, rank_in_pack.
+    Example full rewrite structure returns pack_index and rank_in_pack tensors.
+  evaluate_solution: |
+    Runs program and returns combined_score (higher is better), validity, error, best_so_far, evaluations_left.
+    Score combines load balance and execution efficiency. Baseline is approximately 0.127.
+  probe_solution: |
+    Cheap evaluation on approximately 2000-row subsample. Approximately 10 seconds runtime, separate 30-probe budget.
+    DO NOT use full evaluations - probe first (3 to 5 variants), then evaluate only top 2.
+    Probe scores rank variants consistently - use for selection, not absolute values.
+  finish: |
+    End when: budget exhausted OR no improvement over best_so_far after 2 attempts.
+    Summary: Best score using vectorized balanced_packing and bounded local search technique.
+sampling:
+  temperature: 0.8
+  top_p: 0.95
+  top_k: 15
+  max_tokens: 8192
+agent:
+  max_iterations: 50
+middleware:
+  budget_reminder_from_left: 3
+  long_tool_output_max_chars: 12000
+new_tools:
+  - name: assess_efficiency
+    description: |
+      Analyze current implementation's complexity and identify slow patterns such as nested loops, Python
+      conversions. Returns bottleneck locations and estimated op count. Call this before each iteration.
+    input_schema:
+      type: object
+      properties: {}
+    implementation_py: |
+      def run(ctx, args):
+          code = ctx.get_program()
+          lines = code.split('\n')
+          issues = []
+          op_estimate = 0
+          for i, line in enumerate(lines):
+              if 'for p in range' in line or '[p for p' in line:
+                  issues.append("Line {}: Python loop, slow".format(i))
+                  op_estimate += 1000
+              if '.item()' in line or '.tolist()' in line:
+                  issues.append("Line {}: Python conversion, slow".format(i))
+                  op_estimate += 200
+          return {
+              "bottlenecks": issues[:5],
+              "estimated_ops": op_estimate,
+              "recommendation": "Replace with torch.scatter or gather if bottlenecks found"
+          }
+new_skills:
+  - name: vectorization-strategy
+    description: |
+      Strategy for replacing O(n^2) Python loops with vectorized torch operations in MoE EPLB.
+    body: |
+      # Vectorization Strategy for EPLB
+      
+      ## Pattern 1: Greedy Packing to Scatter
+      OLD (loop):
+        pack_items = [0] * num_packs
+        for group in indices:
+            valid = [p for p in range(num_packs) if pack_items[p] < groups_per_pack]
+            best_pack = min((pack_items[p], p) for p in valid)
+            pack_items[best_pack] += 1
+      
+      NEW (vectorized):
+        # Pre-compute all possible assignments
+        pack_assignments = (torch.arange(num_groups) // groups_per_pack) % num_packs
+        ranks = torch.arange(num_groups) // groups_per_pack
+        # Filter to valid packs only
+        valid_mask = (ranks.unsqueeze(1) < torch.full((num_groups, num_packs), groups_per_pack - 1, dtype=torch.int64))
+        pack_index = pack_assignments[valid_mask]
+        rank_in_pack = ranks[valid_mask]
+      
+      ## Pattern 2: Iterative Greedy to Top-K
+      For replicate_experts, replace loop with:
+      log_weights = weight / logcnt
+      redundant_idx = log_weights.argmax(dim=-1)
+      
+      ## Pattern 3: Bounded Local Search
+      Always bound internal search:
+      max_iter = min(10, num_packs * groups_per_pack)
+      for step in range(max_iter):
+          # Swap or heuristic operation
+          if no_improvement:
+              break  # Early exit
+      # max_iter prevents timeout
+      
+      ## Checklist Before Submit
+      - Did you replace ALL list comprehensions [x for x in y]?
+      - Did you replace ALL min/max with torch ops where possible?
+      - Is any internal search bounded by explicit max_iter?
+      - Did you use pre-allocated tensors instead of growing lists?
+tool_descriptions:
+  edit_solution: |
+    Change EVOLVE-BLOCK code. For balanced_packing, you may provide FULL rewrite (it is core to improvement).
+    Use SEARCH/REPLACE for targeted edits. Preserve function signature exactly.
+    When rewriting balanced_packing, return complete function with three outputs: pack_index, rank_in_pack.
+    Example full rewrite structure returns pack_index and rank_in_pack tensors.
+  evaluate_solution: |
+    Runs program and returns combined_score (higher is better), validity, error, best_so_far, evaluations_left.
+    Score combines load balance and execution efficiency. Baseline is approximately 0.127.
+  probe_solution: |
+    Cheap evaluation on approximately 2000-row subsample. Approximately 10 seconds runtime, separate 30-probe budget.
+    DO NOT use full evaluations - probe first (3 to 5 variants), then evaluate only top 2.
+    Probe scores rank variants consistently - use for selection, not absolute values.
+  finish: |
+    End when: budget exhausted OR no improvement over best_so_far after 2 attempts.
+    Summary: Best score using vectorized balanced_packing and bounded local search technique.
+sampling:
+  temperature: 0.8
+  top_p: 0.95
+  top_k: 15
+  max_tokens: 8192
+agent:
+  max_iterations: 50
+middleware:
+  budget_reminder_from_left: 3
+  long_tool_output_max_chars: 12000
+new_tools:
+  - name: assess_efficiency
+    description: |
+      Analyze current implementation's complexity and identify slow patterns such as nested loops, Python
+      conversions. Returns bottleneck locations and estimated op count. Call this before each iteration.
+    input_schema:
+      type: object
+      properties: {}
+    implementation_py: |
+      def run(ctx, args):
+          code = ctx.get_program()
+          lines = code.split('\n')
+          issues = []
+          op_estimate = 0
+          for i, line in enumerate(lines):
+              if 'for p in range' in line or '[p for p' in line:
+                  issues.append("Line {}: Python loop, slow".format(i))
+                  op_estimate += 1000
+              if '.item()' in line or '.tolist()' in line:
+                  issues.append("Line {}: Python conversion, slow".format(i))
+                  op_estimate += 200
+          return {
+              "bottlenecks": issues[:5],
+              "estimated_ops": op_estimate,
+              "recommendation": "Replace with torch.scatter or gather if bottlenecks found"
+          }
+remove_tools: []

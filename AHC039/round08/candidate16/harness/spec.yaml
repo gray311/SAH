@@ -1,0 +1,110 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are a C++ polygon optimizer for axis-aligned fish capture. Goal: maximize (mackerels - sardines + 1).
+  
+  NEW STRATEGY: Find MULTIPLE disjoint high-density clusters and connect them with minimal-perimeter corridors.
+  
+  PHASE 1: Build 200x200 grid with cell_size=500 over [0,100000]x[0,100000]
+  PHASE 2: Compute score = mackerels - sardines for each cell, find top 20 cells
+  PHASE 3: Group adjacent cells into super-clusters
+  PHASE 4: For each super-cluster, create tight bounding box and 2 protrusion variants
+  PHASE 5: For each pair of top 10 super-clusters, try connecting with straight line
+          Connect only if net_score = mackerels_added - sardines_added - 0.001*2*distance > 0.1
+  PHASE 6: Hill climb with large steps (+/- 5, +/- 10, +/- 15)
+  PHASE 7: Run 3 random restarts, keep best
+  
+  Time budget: 1.8s for search. Use grid for O(1) scoring.
+  
+  Tools:
+  - edit_solution: Replace EVOLVE-BLOCK with complete multi-cluster corridor search
+  - evaluate_solution: Run program, return score
+  - probe_solution: NOT useful - full eval needed
+  - finish: Submit working multi-cluster solution
+skill_description: Multi-cluster corridor search finds disjoint high-density clusters, connects with minimal-perimeter corridors, then refines with hill climbing using 200x200 grid.
+skill_body: |
+  # Multi-Cluster Corridor Polygon Optimization
+  
+  ## Phase 1: Cluster Discovery
+  Grid: 200x200 cells, cell_size=500, over 0-100000 by 0-100000
+  Score each cell: mackerels - sardines
+  Extract top 20 cells
+  Group adjacent cells into super-clusters
+  
+  ## Phase 2: Local Refinement
+  For each super-cluster:
+    - Create tight bounding box
+    - Add 1-2 directional protrusions (N,S,E,W)
+    - Keep top 2 variants
+  
+  ## Phase 3: Corridor Connection
+  For each pair of top 10 super-clusters:
+    - Connect with straight line between centers
+    - net_score = mackerels_added - sardines_added - 0.001*2*distance
+    - Keep if net_score > 0.1
+  
+  ## Phase 4: Hill Climbing
+  For best polygon:
+    - Try edge shifts of +/- 5, +/- 10, +/- 15 units
+    - Use grid scoring
+    - Repeat 2 rounds
+  
+  ## Phase 5: Restarts
+  Run Phases 1-4 with 3 seeds, keep best
+  
+  ## Notes
+  Grid construction: O(N)
+  Cell query: O(1) with prefix sums
+  Total time: < 1.8s
+new_tools:
+- name: find_corridor_pairs
+  description: Find pairs of clusters connectable with profitable corridor (net_score > 0.1).
+  input_schema:
+    type: object
+    properties: {}
+  implementation_py: |
+    def run(ctx, args):
+        return {"strategy": "grid-based pair finding", "note": "C++ implements grid queries"}
+sampling:
+  temperature: 1.1
+  top_p: 0.9
+  top_k: 30
+  max_tokens: 12288
+agent:
+  max_iterations: 45
+middleware:
+  budget_reminder_from_left: 3
+  long_tool_output_max_chars: 15000
+new_skills:
+- name: corridor-search-method
+  description: Multi-cluster corridor strategy finds disjoint clusters and connects them profitably.
+  body: |
+    # Multi-Cluster Corridor Search
+    
+    ## Core Idea
+    Connect isolated high-density mackerel regions if corridor has enough mackerels.
+    
+    ## Algorithm
+    1. Build 200x200 grid with 500-unit cells
+    2. Score cells as mackerels - sardines
+    3. Find top 20, group into super-clusters
+    4. For each pair of top 10 clusters, test corridor connection
+       net_score = mackerels - sardines - 0.001*2*distance
+    5. Keep if net_score > 0.1
+    6. Hill climb with +/- 5, +/- 10, +/- 15 steps
+    7. Run 3 restarts, keep best
+    
+    ## Why This Works
+    Single-cluster approach misses multiple cluster opportunities.
+tool_descriptions:
+  edit_solution: Replace EVOLVE-BLOCK with multi-cluster corridor search including grid, clusters, corridors, hill climb, and 3 restarts.
+  evaluate_solution: Run C++ program. Returns mackerels - sardines + 1. Budget 30 evals, 2.0s per eval.
+  probe_solution: Full evaluation needed.
+  finish: Submit working multi-cluster solution.
+remove_tools: []
+new_middlewares:
+- name: corridor_reminder
+  hook: before_model
+  description: Check for profitable corridor before finalizing.
+  implementation_py: |
+    def before_model(hook_input):
+        return "Check cluster pair corridor (net_score > 0.1) before finalizing."

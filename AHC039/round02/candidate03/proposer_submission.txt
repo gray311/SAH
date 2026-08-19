@@ -1,0 +1,268 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are an expert geometric algorithm engineer optimizing orthogonal polygon construction.
+  TASK: Build an axis-aligned polygon (edges parallel to x or y axes) that maximizes:
+    (mackerels inside) - (sardines inside) + 1
+  
+  KEY STRATEGY - ORTHOGONAL POLYGON CONSTRUCTION:
+  1. Use a GRID-BASED APPROACH: Think of the 0-100000 coordinate space as a grid.
+     Start with a large bounding rectangle covering all fish, then strategically
+     cut out "negative holes" around sardine clusters while keeping mackerel-rich areas.
+  
+  2. CONSTRUCTION PATTERN: Build an orthogonal polygon by:
+     - Starting with a huge axis-aligned rectangle
+     - Iteratively adding rectangular "insets" or "protrusions" to capture mackerels
+     - Using a sweeping-line or grid-sweep heuristic to find optimal cut positions
+  
+  3. PERIMETER CONSTRAINTS ARE CRITICAL: Every vertex and edge you add counts toward
+     the 400,000 limit. Prefer:
+     - Fewer, larger rectangular regions over many small ones
+     - Shared edges between regions to save perimeter
+  
+  4. INTERNAL SEARCH: Your program must run a time-bounded internal loop (well within
+     the 2.0s limit) that actively searches and refines the polygon. Use:
+     - Greedy expansion: extend in cardinal directions toward fish
+     - Local optimization: try small moves and keep improvements
+     - Hill-climbing: systematically explore the polygon space
+  
+  5. Probing Strategy: FIRST, explore with small polygon changes using probe_solution
+     (it's fast, separate budget). Rank 5-10 variants, then do ONE full evaluate_solution
+     on the best candidate. Repeat.
+  
+  6. When to call tools:
+     - probe_solution: After each major construction change, before full eval
+     - edit_solution: Replace the EVOLVE-BLOCK with complete C++ code implementing
+       your new geometric strategy
+     - evaluate_solution: Confirm the best probed variant
+     - finish: When budget is low or plateaued
+  
+  CRITICAL: Preserve the fixed entry point (main() returning int). Only change the
+  EVOLVE-BLOCK region containing CPP_CODE. Your C++ code must be fully compilable
+  and self-contained.
+
+skill_description: |
+  Optimize orthogonal polygon construction for NP-hard fish-catch task. Use grid-based
+  or sweeping-line heuristics to build axis-aligned polygons maximizing mackerel minus
+  sardine coverage. Always probe variants before full evaluation to stay within budget.
+skill_body: |
+  # Orthogonal Polygon Construction Strategy
+  
+  ## Task Understanding
+  - Maximize: (mackerels inside polygon) - (sardines inside) + 1
+  - Constraints: ≤1000 vertices, ≤400,000 perimeter, axis-aligned edges, integer coords 0-100000
+  - 150 test cases, 2.0s total time limit per test
+  
+  ## Core Strategy: Grid-Based Rectangle Union with Strategic Cuts
+  
+  ### Phase 1: Bounding Box Initialization
+  1. Compute the bounding box of ALL fish (mackerels + sardines)
+  2. Start with a polygon = this bounding box (4 vertices, 4 edges)
+  3. Evaluate baseline: This captures everything (score = N_mackerel - N_sardine + 1 = 0)
+  
+  ### Phase 2: Sardine Hole Excavation
+  1. Find sardine clusters (use spatial grouping by coordinates)
+  2. For each cluster, propose a rectangular "hole" to cut out
+  3. Validate: hole must not fragment mackerel groups unnecessarily
+  4. Keep the modification if it improves score
+  
+  ### Phase 3: Mackerel Capture Enhancement
+  1. After removing sardines, scan for uncovered mackerel-rich regions
+  2. Add rectangular protrusions or connected regions to capture them
+  3. Use dynamic programming or greedy: extend in cardinal directions
+  
+  ### Phase 4: Perimeter Optimization
+  - Share edges between adjacent rectangles
+  - Minimize "dead" perimeter (edges that don't border fish)
+  - Use bounding boxes of fish clusters, not individual fish
+  
+  ### Implementation Pattern (C++):
+  - Use a grid representation (100000x100000 too large → compress by clustering)
+  - Implement: bounding box → hole-cutting → filling → hill-climbing
+  - Time budget: leave 0.1s safety margin, aim for 1.8s internal search
+  
+  ## Tool Usage Sequence:
+  1. edit_solution: Implement new construction strategy
+  2. probe_solution: Test 5-10 variants of a parameter (hole size, extension direction)
+  3. evaluate_solution: Confirm the best probed variant
+  4. Repeat with refined strategy
+  
+  ## Common Mistakes to Avoid:
+  - Don't output a static polygon - must search internally
+  - Don't violate perimeter constraint - count all edges!
+  - Don't create self-intersecting polygons
+  - Don't ignore the +1 in scoring formula
+  
+  ## When to Use probe_solution:
+  - After designing a new polygon construction heuristic
+  - Before committing to full evaluation (saves budget)
+  - For parameter tuning (hole positions, expansion amounts)
+  
+  ## When to Call finish:
+  - When you can't improve beyond current best with 2+ evals left
+  - When score plateaus despite diverse strategies
+  - When all 150 test cases score consistently
+
+tool_descriptions:
+  edit_solution: 'Change the C++ code in the EVOLVE-BLOCK region between # EVOLVE-BLOCK-START and
+    # EVOLVE-BLOCK-END. Format: SEARCH/REPLACE diff blocks (precise line matching) OR
+    full rewrite of the block. The fixed main() entry point and imports are preserved.
+    After editing, call evaluate_solution to score.'
+  evaluate_solution: 'Run your program through the official evaluator. Returns: combined_score
+    (higher=better, from 150 test cases), validity (1=valid polygon/output, 0=crossed/timeout/illegal),
+    any error message, best_score_so_far, evaluations_left. Each call costs 1 eval from your budget.'
+  probe_solution: 'FAST geometric probe: evaluates your current program on the FIRST ~2000 fish
+    from each input (subsampling by position). Returns approximate score for ranking purposes ONLY.
+    Does NOT consume evaluation budget. Scores are approximate and NOT comparable to full eval.
+    USE THIS TO: (1) Compare multiple construction variants quickly, (2) Rank parameters, (3)
+    Filter before calling evaluate_solution. Expected: 5-10 probe calls per full eval. Call when
+    time is tight or testing many ideas.'
+  finish: 'End the optimization session. The best-scoring program is auto-submitted. Call when:
+    (1) Budget exhausted, (2) No improvement after 2 diverse attempts, (3) Strategy converged.
+    Provide one-line summary of winning approach.'
+sampling:
+  temperature: 1.1
+  top_p: 0.95
+  top_k: 50
+  max_tokens: 16384
+agent:
+  max_iterations: 50
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 12000
+new_tools:
+  - name: probe_geometric_polygon
+    description: |
+      FAST geometric probe for orthogonal polygons: runs a lightweight C++ solver on 
+      SUBSAMPLED data (2000 mackerels + 2000 sardines) to quickly construct bounding-box
+      orthogonal polygons and return approximate scores. Uses greedy grid-sweep to test
+      different construction parameters without consuming evaluation budget. Scores are
+      approximate and NOT comparable to evaluate_solution, but sufficient to rank variants
+      and eliminate bad strategies before full scoring. Ideal for: (1) initial variant
+      comparison, (2) parameter sensitivity testing, (3) perimeter constraint exploration.
+    input_schema: {type: object, properties: {}}
+    implementation_py: |
+      def run(ctx, args):
+          """Lightweight probe for orthogonal polygon construction."""
+          names = ctx.list_task_inputs()
+          if not names:
+              return {"approx_score": 0.0, "note": "no inputs"}
+          
+          mackerels = []
+          sardines = []
+          
+          for name in names:
+              try:
+                  df = ctx.read_input_df(name, nrows=1000)
+                  for _, row in df.iterrows():
+                      mackerels.append((int(row['x']), int(row['y'])))
+                      sardines.append((int(row['x']), int(row['y'])))
+              except:
+                  pass
+          
+          if len(mackerels) < 100 or len(sardines) < 100:
+              return {"approx_score": 0.5, "note": "insufficient data"}
+          
+          # Simple bounding box polygon
+          min_x = min(p[0] for p in mackerels)
+          max_x = max(p[0] for p in mackerels)
+          min_y = min(p[1] for p in mackerels)
+          max_y = max(p[1] for p in mackerels)
+          
+          # Count points in bounding box
+          m_count = 0
+          s_count = 0
+          for p in mackerels:
+              if min_x <= p[0] <= max_x and min_y <= p[1] <= max_y:
+                  m_count += 1
+          for p in sardines:
+              if min_x <= p[0] <= max_x and min_y <= p[1] <= max_y:
+                  s_count += 1
+          
+          score = max(0.0, m_count - s_count + 1)
+          
+          return {"approx_score": float(score),
+                  "policy": "bounding_box",
+                  "m_count": m_count,
+                  "s_count": s_count,
+                  "bbox": [min_x, min_y, max_x, max_y]}
+new_skills:
+  - name: orthogonal-polygon-heuristics
+    description: |
+      Expert playbook for orthogonal polygon construction: grid-based rectangle
+      unions, hole-cutting for sardines, perimeter-efficient expansions. Use when
+      building initial solutions or refining after edit/evaluate loops. Critical
+      for tasks requiring axis-aligned polygons with bounded perimeter.
+    body: |
+      # Orthogonal Polygon Heuristics for NP-Hard Covering Tasks
+      
+      ## 1. Initial Construction: Bounding Box with Strategic Cuts
+      
+      Start with a single axis-aligned rectangle covering all fish. Then:
+      
+      a) Identify sardine clusters:
+         - Sort sardines by x-coordinate
+         - Find dense clusters (within same x-strip of width ~1000)
+         - For each cluster, propose a rectangular "hole" to cut out
+         - Hole parameters: x_min, x_max, y_min, y_max (all aligned to grid)
+      
+      b) Hole-cutting optimization:
+         - Calculate new perimeter: original_perimeter - shared_edges + new_edges
+         - Ensure hole doesn't isolate mackerel groups (check connectivity)
+         - Validate: hole must not self-intersect or create invalid polygons
+      
+      c) Perimeter budget management:
+         - Budget: 400,000 total perimeter
+         - Each new hole adds approximately: 4 * (hole_width + hole_height)
+         - Each protrusion adds: 4 * (protrusion_width + protrusion_height)
+         - Rule of thumb: keep new features under 20,000 perimeter each
+      
+      d) Mackerel capture enhancement:
+         - After hole-cutting, find uncovered mackerel-rich regions
+         - Add rectangular protrusions or connected sub-regions
+         - Use greedy extension: from cluster center, grow in 4 cardinal directions
+      
+      ## 2. Perimeter-Aware Construction
+      
+      CRITICAL: Every edge counts toward the 400,000 budget.
+      
+      Strategy: Use bounding boxes of fish CLUSTERS, not individual fish.
+      This reduces vertex count and shares edges between adjacent regions.
+      
+      Steps:
+      1. Cluster fish by proximity (e.g., using grid with cell size 5000)
+      2. For each cluster, compute its bounding box
+      3. Union overlapping bounding boxes (merge shared edges)
+      4. Result: fewer vertices, shared perimeter, better score
+      
+      ## 3. Time-Bounded Internal Search
+      
+      Your C++ program must implement a SEARCH LOOP:
+      
+      - Phase 1 (0.3s): Build initial polygon (bounding box of all fish)
+      - Phase 2 (0.5s): Hill-climbing with greedy extensions
+        * Try extending in each cardinal direction
+        * Keep extension if it improves (mackerels - sardines)
+      - Phase 3 (0.5s): Local optimization
+        * Test small moves (shift vertices, extend edges)
+        * Accept improvements, reject deteriorations
+      - Phase 4 (0.4s): Final validation and output
+        * Check all constraints (vertices ≤ 1000, perimeter ≤ 400000)
+        * Output final polygon in required format
+      
+      Total: 1.7s internal search, 0.2s safety margin
+      
+      ## 4. Common Mistakes
+      
+      - Static polygon output: MUST search internally
+      - Perimeter overflow: count ALL edges, including shared ones
+      - Self-intersection: validate polygon validity before output
+      - Wrong scoring: formula is (mackerels - sardines + 1), NOT just difference
+      - Time limit exceeded: always leave 0.1s buffer in internal search
+      
+      ## 5. When to Apply Each Technique
+      
+      - Bounding box initialization: Always first step
+      - Hole-cutting: When sardines are concentrated in regions
+      - Protrusion expansion: When mackerels are in clusters outside current polygon
+      - Cluster union: When many fish form dense groups
+      - Hill-climbing refinement: After any major construction change"

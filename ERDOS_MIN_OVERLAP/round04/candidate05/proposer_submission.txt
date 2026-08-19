@@ -1,0 +1,227 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are an expert in harmonic analysis and the Erdős minimum overlap problem.
+
+  Target: Find a step function h: [0,2]→[0,1] with integral(h)=1 that minimizes
+  max_k ∫ h(x)(1-h(x+k)) dx.
+
+  CRITICAL INSIGHT: The optimal solution is a DISCRETE STEP FUNCTION with sharp transitions.
+  Smooth/Gaussian constructions are INCORRECT for this problem.
+
+  The seed program already has good initialization patterns - you need to:
+  1. USE HEAVISIDE/RECTANGULAR STEPS, not smoothed Gaussians
+  2. Enforce integral constraint MORE strictly during optimization
+  3. Try BROAD bimodal patterns (mass split evenly between two wide bands)
+
+  Strategy:
+
+  Phase 1 - Generate HARD step function initializations:
+  - Use Heaviside steps at strategic positions
+  - Create bimodal rectangles with TWO flat regions (high h) and TWO flat regions (low h=0)
+  - Ensure integral exactly equals 1 by adjusting widths/heights
+
+  Phase 2 - Optimize with AGGRESSIVE constraint enforcement:
+  - Phase 1: 10000 steps, lr=0.01, penalty=100000 (tight constraint)
+  - Phase 2: 20000 steps, lr=0.005, penalty=500000 (very tight)
+  - Monitor constraint violation and adjust if > 0.001
+
+  Phase 3 - Quick probe then confirm:
+  - Use probe_solution to rank all candidates
+  - Only full evaluate on top 2 that beat seed score
+
+  EVOLVE-BLOCK changes needed:
+  - Replace Gaussian constructions with sharp Heaviside/rectangular steps
+  - Add phase-based training loop with adaptive penalty
+  - Add constraint enforcement checks after each phase
+  - Start with a "wide bimodal" initialization: h=1 on [0,a] ∪ [b,2] with appropriate widths
+
+  Target: combined_score > 1.0 (c5_bound < 0.380923)
+skill_description: |
+  Erdos minimum overlap solver using discrete step function constructions.
+  Generates sharp Heaviside/rectangular initializations instead of smooth Gaussians,
+  with aggressive constraint enforcement in multi-phase optimization.
+skill_body: |
+  # Erdos Minimum Overlap - Discrete Step Function Strategy
+  
+  ## Core Principle
+  The optimal h(x) is a DISCRETE STEP FUNCTION with sharp transitions, NOT a smooth Gaussian.
+  Use Heaviside steps and rectangular pulses.
+  
+  ## Step Function Constructions
+  
+  ### Type 1: Wide Bimodal Rectangular
+  - Two rectangular pulses: h=1 on [0, w1] ∪ [2-w2, 2], h=0 elsewhere
+  - Choose w1, w2 so integral = 1
+  - Example: w1 = w2 = 0.25, middle region h=0
+  
+  ### Type 2: Trimmed Bimodal (lapped by h=0.5)
+  - h=1 on [0, a], h=0.5 on [a, b], h=0 on [b, 2]
+  - Solve: a*1 + (b-a)*0.5 = 1 for integral constraint
+  
+  ### Type 3: Three-Pulse Pattern
+  - Three rectangular regions of height 1, separated by zeros
+  - Total width of high regions = 1 (for integral=1)
+  
+  ### Type 4: Golomb-Style Spaced Pulses
+  - Optimal spacing from Golomb ruler: marks at positions that minimize overlaps
+  - Each mark becomes a narrow rectangle of width 1/num_marks
+  
+  ## Optimization Protocol
+  
+  ### Phase 1: Constraint Enforcement
+  - Steps: 8000
+  - Learning rate: 0.01
+  - Penalty: 200000 (very high to force integral=1)
+  - Monitor: integral violation must drop below 0.001
+  
+  ### Phase 2: Fine Tuning
+  - Steps: 20000
+  - Learning rate: 0.003
+  - Penalty: 1000000 (extremely tight)
+  - Goal: reduce c5_bound while maintaining integral≈1
+  
+  ### Phase 3: Sharpens
+  - Add small regularization to encourage sharper transitions
+  
+  ## Implementation Notes
+  
+  - Represent h as latent, pass through sigmoid for [0,1] constraint
+  - BUT initialization should be VERY step-like (use step functions, not sin/cos)
+  - Use rectangular pulses: h(x) = 1 if x in [a,b], else 0
+  - Convert to latent using: latent = log(h/(1-h)) which for h≈0 or h≈1 is extreme
+  
+  ## Quick Verification
+  
+  After any edit, CHECK:
+  1. Does h have integral exactly 1?
+  2. Is c5_bound < 0.380923?
+  3. If not, adjust the construction parameters
+  
+  Save only programs that beat the seed score.
+tool_descriptions:
+  edit_solution: Modify the EVOLVE-BLOCK region. Replace Gaussian constructions with discrete step functions (rectangular pulses, Heaviside steps). Implement multi-phase optimizer with aggressive penalty=200000+.
+  evaluate_solution: Run and return combined_score.
+  probe_solution: Quick approximate evaluation.
+  finish: End when no c5_bound < 0.380923 found after exhaustive search.
+sampling:
+  temperature: 1.1
+  top_p: 0.98
+  top_k: 30
+  max_tokens: 16000
+agent:
+  max_iterations: 70
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 12000
+new_tools:
+- name: generate_step_init
+  description: |
+    Generate hard step function initializations using rectangular pulses.
+    Returns multiple construction types: bimodal_rect, trimmed_bimodal, three_pulse, golomb_pulse.
+    Each is a latent vector where sigmoid gives a sharp step function.
+  input_schema:
+    type: object
+    properties: {}
+  implementation_py: |
+    def run(ctx, args):
+        import numpy as np
+        N = 800
+        domain = 2.0
+        dx = domain / N
+        rng = np.random.default_rng(123)
+        
+        constructions = {}
+        
+        # Type 1: Bimodal rectangles (h=1 on two bands)
+        x = np.linspace(0, domain, N)
+        w1, w2 = 0.22, 0.22
+        # High regions at [0, w1] and [2-w2, 2]
+        in_high1 = (x < w1)
+        in_high2 = (x > 2 - w2)
+        h_vals = np.zeros(N)
+        h_vals[in_high1 | in_high2] = 1.0
+        h_vals[in_high1 & in_high2] = 0.8  # small overlap region
+        # Latent for sigmoid to produce these values
+        latent = np.log(h_vals / (1.0 - h_vals + 1e-10))
+        constructions['bimodal_rect'] = latent
+        
+        # Type 2: Trimmed bimodal (three-level)
+        # h=1 on [0, a], h=0.5 on [a, b], h=0 on [b, 2]
+        # Solve: a*1 + (b-a)*0.5 = 1 with a=0.2, b=0.6
+        a, b = 0.2, 0.6
+        h_vals = np.zeros(N)
+        h_vals[(x < a)] = 1.0
+        h_vals[(x >= a) & (x < b)] = 0.5
+        h_vals[(x >= b)] = 0.0
+        latent = np.log(h_vals / (1.0 - h_vals + 1e-10))
+        constructions['trimmed_bimodal'] = latent
+        
+        # Type 3: Three equal pulses
+        # Three pulses of width 1/3, h=1 each, separated by zeros
+        w = 1.0 / 3.0
+        h_vals = np.zeros(N)
+        h_vals[(x < w)] = 1.0
+        h_vals[(x >= w) & (x < 2*w)] = 0.0
+        h_vals[(x >= 2*w)] = 1.0
+        latent = np.log(h_vals / (1.0 - h_vals + 1e-10))
+        constructions['three_pulse'] = latent
+        
+        # Type 4: Golomb ruler spacing (optimal marks: [0, 0.25, 0.625, 1.125, 2.0])
+        marks = [0.0, 0.25, 0.625, 1.125, 2.0]
+        widths = [0.08, 0.08, 0.08, 0.08, 0.08]
+        h_vals = np.zeros(N)
+        for m, wd in zip(marks, widths):
+            region = (x >= m) & (x < m + wd)
+            h_vals[region] = 1.0
+        latent = np.log(h_vals / (1.0 - h_vals + 1e-10))
+        constructions['golomb_pulse'] = latent
+        
+        return {"constructions": constructions, "keys": list(constructions.keys())}
+new_skills:
+- name: step-function-strategy
+  description: |
+    Use discrete step functions (rectangular pulses, Heaviside) instead of smooth Gaussians.
+    Enforce integral=1 strictly with high penalties. Multi-phase optimization.
+  body: |
+    # Step Function Strategy for Erdos Minimum Overlap
+    
+    ## Why Step Functions?
+    The optimal h(x) is a DISCRETE STEP FUNCTION, not a smooth curve.
+    Use rectangular pulses and sharp transitions.
+    
+    ## Construction Templates
+    
+    ### Bimodal Rectangular
+    h(x) = 1 for x in [0, w1] ∪ [2-w2, 2], h=0 elsewhere
+    Choose w1=w2=0.22, with small overlap adjustment
+    
+    ### Trimmed Bimodal
+    h=1 on [0, 0.2], h=0.5 on [0.2, 0.6], h=0 on [0.6, 2]
+    Integral = 0.2 + 0.4 = 0.6 + 0.4 = 1.0
+    
+    ### Three Equal Pulses
+    Three pulses of width 1/3 each, h=1
+    Total width = 1, integral = 1
+    
+    ## Optimization Protocol
+    
+    ### Phase 1: 8000 steps
+    - lr = 0.01
+    - penalty = 200000
+    - Target: reduce integral error to < 0.001
+    
+    ### Phase 2: 20000 steps
+    - lr = 0.003
+    - penalty = 1000000
+    - Target: minimize c5_bound
+    
+    ### Phase 3: Optional fine-tune
+    - 5000 steps
+    - lr = 0.001
+    - penalty = 2000000
+    
+    ## Before Submitting
+    ALWAYS verify:
+    1. integral(h) is within 0.001 of 1.0
+    2. c5_bound < 0.380923
+    3. combined_score > 1.0

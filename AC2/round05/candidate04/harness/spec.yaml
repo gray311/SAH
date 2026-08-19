@@ -1,0 +1,223 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are an expert software developer tasked with iteratively improving a program to MAXIMIZE
+  the performance metrics reported by an automatic evaluator. Analyze the current program and the feedback
+  from previous attempts, and make targeted changes that increase the score.
+
+
+  THE TASK: Maximize C2 = ||f * f||₂² / ((∫f)² ||f * f||_∞) for the second autocorrelation inequality.
+
+  - Theoretical upper bound: 1.0 (Young''s inequality)
+
+  - Current best lower bound in literature: 0.8963 (achieved by step functions)
+
+  - Current program''s combined_score: ~1.026 (this is your baseline!)
+
+  - Your goal: Push combined_score > 1.026 to set a new record
+
+
+  CRITICAL STRATEGY:
+
+  The seed program uses piecewise-constant (step) functions on a grid with 400 intervals and achieves 1.026 via optimization. 
+  DO NOT start fresh - you MUST start from the seed and systematically explore:
+  1. Different step function configurations (more levels, asymmetric steps)
+  2. More intervals for finer discretization
+  3. Alternative function families (Gaussian mixtures, splines)
+
+
+  WORKFLOW (FOLLOW THIS EXACTLY):
+
+  1. Call generate_variants to get concrete function mutations based on your current approach
+
+  2. Examine the returned variants and their descriptions
+
+  3. Select 1-2 promising variants and use edit_solution to apply them
+
+  4. Use probe_solution to quickly test each variant (target: 3-5 probes per edit)
+
+  5. Call evaluate_solution on the TOP 2 candidates with best probe scores
+
+  6. If no improvement after 2 evals: call generate_variants with a NEW strategy and repeat
+
+
+  FUNCTION STRATEGIES TO EXPLORE:
+
+  1. STEP FUNCTION IMPROVEMENTS (Priority #1):
+     - Try more step levels (2-level, 3-level, multi-level)
+     - Vary step widths and heights systematically
+     - Test asymmetric step configurations
+     - Experiment with different support regions
+
+  2. DISCRETIZATION OPTIMIZATION:
+     - Increase num_intervals to 800, 1000, or 1500 for finer resolution
+     - Test different padding strategies in convolution
+
+  3. FUNCTION FAMILY DIVERSIFICATION:
+     - Gaussian mixtures: sum of Gaussians with varied means/sigmas
+     - B-spline based functions: smooth transitions between plateaus
+     - Multi-modal functions: multiple separated peaks
+
+
+  MAKE EXACTLY ONE TOOL CALL PER TURN:
+
+  - generate_variants() — Generate concrete function mutations for exploration
+  - edit_solution() — Apply the best mutation from generate_variants
+  - probe_solution() — Cheap score on subsampled data (rank variants)
+  - evaluate_solution() — Full evaluation (limited budget, ~20 total)
+  - finish() — End session
+
+
+  PROBE-BEFORE-EVAL RULE: After each edit, call probe_solution 3-5 times before evaluate_solution.
+  Only spend eval budget on top-ranked variants.
+
+
+  DIVERSIFICATION: If stuck at same score for 3+ probes, call generate_variants and switch strategies.
+tool_descriptions:
+  edit_solution: Change the code inside the # EVOLVE-BLOCK region. Two accepted formats: (1) PREFERRED — one or more targeted SEARCH/REPLACE diff blocks, each matching the current program exactly. (2) A full rewrite — the complete new EVOLVE-BLOCK body as plain code. The fixed entry function and imports outside the block are preserved automatically. After editing, call evaluate_solution to score it.
+  evaluate_solution: Run the current program through the task evaluator and report its score. Returns combined_score (higher is better), validity, any error, your best score so far, and how many evaluations remain. Use the feedback to improve the code, then evaluate again. The best-scoring version is kept automatically. Your number of evaluations is limited.
+  probe_solution: Cheaply score the CURRENT program on SUBSAMPLED data (~10s vs minutes). Fast (~10s per probe), separate budget (e.g., 30 probes available), NOT evaluated through full evaluation budget. Scores are approximate and NOT directly comparable to full evaluation scores — use this to rapidly rank multiple variants, then confirm the top 3-5 candidates with evaluate_solution.
+  finish: End the session. Call this when your evaluation budget is exhausted or you cannot improve the best score further. The best-scoring program is submitted automatically.
+sampling:
+  temperature: 0.8
+  top_p: 0.9
+  top_k: 15
+  max_tokens: 16384
+agent:
+  max_iterations: 40
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 8000
+new_tools:
+  - name: generate_variants
+    description: |
+      Generate 3-5 concrete function mutation variants based on current approach.
+      Each variant includes: (1) description, (2) specific parameter changes needed.
+      Called before every edit to get actionable suggestions.
+    input_schema:
+      type: object
+      properties: {}
+    implementation_py: |
+      def run(ctx, args):
+          variants = []
+          
+          # Variant 1: Finer discretization
+          variants.append({
+              "id": 0,
+              "description": "Increase discretization for finer function representation",
+              "changes": "num_intervals: 400 -> 1000, learning_rate: 0.25 -> 0.15, num_steps: 30000 -> 50000",
+              "rationale": "Finer grid captures step functions more accurately",
+              "code_mod": "num_intervals=1000, learning_rate=0.15, num_steps=50000"
+          })
+          
+          # Variant 2: 3-level step function
+          variants.append({
+              "id": 1,
+              "description": "Try 3-level step function with asymmetric plateaus",
+              "changes": "Add multi-level plateau support in _create_exponential_initializer",
+              "rationale": "3-level steps can better approximate optimal C2 functions",
+              "code_mod": "Support 3 height levels in _create_exponential_initializer"
+          })
+          
+          # Variant 3: Gaussian mixture
+          variants.append({
+              "id": 2,
+              "description": "Gaussian mixture initialization",
+              "changes": "Replace step function init with sum of 3 Gaussians",
+              "rationale": "Gaussian mixtures may concentrate better in convolution",
+              "code_mod": "Add _create_gaussian_mixture_initializer with 3 Gaussians"
+          })
+          
+          # Variant 4: Multi-modal function
+          variants.append({
+              "id": 3,
+              "description": "Multi-modal function with separated peaks",
+              "changes": "Create function with multiple separated high-value regions",
+              "rationale": "Separated peaks may reduce ||f★f||_∞ while maintaining ||f★f||₂",
+              "code_mod": "Create multiple separated plateau regions"
+          })
+          
+          # Variant 5: Adaptive discretization
+          variants.append({
+              "id": 4,
+              "description": "Adaptive refinement in high-gradient regions",
+              "changes": "Add adaptive refinement after coarse optimization",
+              "rationale": "Adaptive discretization may find better local optima",
+              "code_mod": "Add _refine_adaptive_intervals for high-gradient regions"
+          })
+          
+          return {"variants": variants, "recommendation": "Start with VARIANT_0 or VARIANT_1"}
+new_skills:
+  - name: c2-step-function-focus
+    description: Playbook for step function improvements and discretization refinements for C2 optimization.
+    body: |
+      # C2 Step Function Optimization Playbook
+
+      ## Objective
+      Maximize C2 > 1.026 by improving step function representations.
+
+      ## Why Step Functions?
+      Literature shows step functions achieve C2 = 0.8963. The seed uses 1-level steps; we can improve with:
+      - Multi-level steps (2-level, 3-level)
+      - Asymmetric configurations
+      - Finer discretization
+
+      ## Core Strategy: Generate → Edit → Probe → Eval
+
+      1. Call generate_variants → Get 3-5 mutation suggestions
+      2. Pick 1-2 most promising (prefer step function improvements)
+      3. Use edit_solution to apply changes
+      4. Probe 3-5 times to rank variants
+      5. Evaluate only TOP 2
+      6. Switch strategy after 2 failed evals
+
+      ## Priority Mutations
+
+      ### 1. Finer Discretization (Highest Priority)
+      - num_intervals: 400 → 800 → 1000 → 1500
+      - learning_rate: 0.25 → 0.15 (slower, stable optimization)
+      - num_steps: 30000 → 50000 (more iterations needed)
+
+      ### 2. Multi-Level Step Functions
+      - 2-level: high + low plateau (asymmetric)
+      - 3-level: three height levels
+      - Try different plateau widths and positions
+
+      ### 3. Multi-Modal Functions
+      - 2-3 separated peaks
+      - Reduce ||f★f||_∞ by separating high-value regions
+
+      ## Critical Rules
+
+      - ALWAYS call generate_variants before editing
+      - Probe 3-5 times per edit (never evaluate before probing)
+      - Evaluate only TOP 2 candidates (max 4 evals/strategy)
+      - Switch strategy after 2 failed evals
+
+new_middlewares:
+  - name: step_function_focus
+    hook: before_model
+    description: Hook reminding solver to focus on step function improvements and enforce probe discipline.
+    implementation_py: |
+      def before_model(hook_input):
+          state = hook_input.get("state", {})
+          iteration = state.get("iteration", 0)
+          evals_done = state.get("evals_done", 0)
+          probes_since_eval = state.get("probes_since_eval", 0)
+          
+          # Enforce generate_variants before edit
+          if iteration > 0 and "edit_solution" in str(hook_input.get("action", "")):
+              return "REMINDER: Call generate_variants before edit_solution to get concrete mutation suggestions."
+          
+          # Enforce probe before eval discipline
+          if evals_done >= 2 and probes_since_eval < 3:
+              return "WARNING: You've done evals without probing. Call probe_solution 3-5 times per edit to properly rank variants."
+          
+          # Encourage step function focus early
+          if iteration <= 5:
+              return "STRATEGY HINT: Start with finer discretization (400->1000 intervals) or 3-level step functions. These are theoretically promising for C2."
+          
+          # Encourage strategy rotation
+          if evals_done >= 4 and probes_since_eval >= 5:
+              return "STALLED AFTER 4 EVALS: Call generate_variants and switch to a NEW strategy."
+          
+          return None

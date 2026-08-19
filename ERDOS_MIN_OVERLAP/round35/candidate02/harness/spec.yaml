@@ -1,0 +1,145 @@
+schema: h2spec/1.0
+system_prompt: |
+  Erdos C5 Problem: Find a step function h: [0,2] -> [0,1] such that integral(h) = 1 and h values are in [0,1].
+  Goal: Minimize max_k integral(h(x)(1-h(x+k)) dx) to get c5_bound < 0.38092303510845016.
+  
+  CRITICAL INSIGHT: The seed program uses sigmoid(latent) which is a smooth, non-step function. This violates the "step function" spirit and makes correlation structure hard to control.
+  
+  STRATEGY:
+  1. FIRST generate PURELY STEP-FUNCTION candidates using search_step_functions tool (binary arrays with controlled transitions).
+  2. Generate 5-10 diverse step functions with integral = 1 exactly (fixed number of ON intervals).
+  3. Use probe_solution to quickly score these (cheap analytical check).
+  4. Only call evaluate_solution if probe suggests c5_bound < 0.385.
+  
+  DO NOT start with sigmoid optimization. Step functions have simpler, more predictable correlation structure.
+new_tools:
+- name: search_step_functions
+  description: |
+    Generate diverse step function candidates with integral(h) = 1 exactly.
+    Creates binary arrays (0 or 1) on [0,2] with exactly 1.0 total measure.
+    
+    Strategy options:
+    - uniform_k_widths: N evenly spaced intervals, each with value 0 or 1, exactly N_ON intervals = 1.0
+    - clustered_peaks: Concentrate ON intervals in specific regions
+    - alternating: Short on/off patterns
+    
+    Use parameter "strategy" to choose generation mode. Call this ONCE at start to generate diverse initializations.
+  input_schema:
+    type: object
+    properties:
+      strategy:
+        type: string
+        enum: [uniform_k_widths, clustered_peaks, alternating]
+      num_samples:
+        type: integer
+        default: 5
+      num_on_intervals:
+        type: integer
+        default: 400
+  implementation_py: |
+    def run(ctx, args):
+        import random
+        import numpy as np
+        
+        N = 800
+        domain = 2.0
+        dx = domain / N
+        
+        # Ensure integral = 1: need exactly 2.0/N * num_on_intervals = 1.0
+        # So num_on_intervals * dx = 1.0 => num_on_intervals = N/2 = 400
+        num_on = int(args.get('num_on_intervals', N/2))
+        num_samples = args.get('num_samples', 5)
+        strategy = args.get('strategy', 'uniform_k_widths')
+        
+        candidates = []
+        
+        if strategy == 'uniform_k_widths':
+            # Select num_on random positions out of N
+            for _ in range(num_samples):
+                on_positions = set(random.sample(range(N), num_on))
+                h = np.zeros(N)
+                for i in on_positions:
+                    h[i] = 1.0
+                candidates.append(h)
+                
+        elif strategy == 'clustered_peaks':
+            # Concentrate on intervals in few regions
+            for _ in range(num_samples):
+                # Pick 2-4 clusters, each with 100-200 intervals
+                num_clusters = random.randint(2, 4)
+                total_needed = num_on
+                cluster_sizes = np.random.randint(50, 200, size=num_clusters)
+                # Adjust to hit exact count
+                if cluster_sizes.sum() != total_needed:
+                    diff = total_needed - cluster_sizes.sum()
+                    cluster_sizes[0] += diff
+                sizes = cluster_sizes.tolist()
+                
+                h = np.zeros(N)
+                for j, size in enumerate(sizes):
+                    center = random.randint(0, N-1)
+                    start = max(0, center - size//2)
+                    end = min(N, center + size//2 + 1)
+                    h[start:end] = 1.0
+                candidates.append(h)
+                
+        else:  # alternating
+            # Short alternating on/off pattern
+            for _ in range(num_samples):
+                pattern_len = random.randint(20, 100)
+                pattern = []
+                for _ in range(N // pattern_len):
+                    pattern.extend([1] * (num_on // (N // pattern_len) // 2))
+                    pattern.extend([0] * (num_on // (N // pattern_len) // 2))
+                
+                h = np.zeros(N)
+                for i, val in enumerate(pattern):
+                    if i < N:
+                        h[i] = val
+                # Pad or trim to exactly N
+                if len(pattern) < N:
+                    while len(pattern) < N:
+                        pattern.extend([0])
+                h = h[:N]
+                candidates.append(h)
+        
+        # Convert to string format for solver
+        h_strings = [", ".join([str(int(x)) for x in c]) for c in candidates]
+        return {"candidates": h_strings, "num_generated": len(candidates)}
+new_skills:
+- name: step-function-first
+  description: Generate pure step functions (binary arrays) with exact integral constraint before attempting sigmoid optimization.
+  body: |
+    # Step-Function-First Strategy for Erdos C5
+    
+    ## Why this works:
+    The seed program uses sigmoid(latent) which creates smooth transitions. 
+    Step functions have sharp, predictable correlation peaks that are easier to manipulate.
+    
+    ## Step-by-step:
+    1. CALL search_step_functions ONCE at the start
+       - Generate 5-10 diverse binary candidates with integral = 1
+       - Use strategy="uniform_k_widths" for balanced candidates
+    2. CALL probe_solution on each candidate
+       - Quickly filter to find those with c5_bound < 0.385
+    3. SELECT the best 1-2 candidates from probe results
+    4. CALL evaluate_solution on the best candidates
+       - Full evaluation only on promising step functions
+    5. IF combined_score > 1.0, finish immediately
+    6. ONLY if all step functions fail, consider sigmoid approaches
+    
+    ## Key rules:
+    - STEP FUNCTIONS FIRST: Binary arrays are easier to reason about
+    - EXACT INTEGRAL: search_step_functions guarantees integral(h) = 1
+    - PROBE THEN EVAL: Use cheap probe to filter before expensive full eval
+    - FINISH EARLY: Don't waste evaluations on sigmoid if step functions work
+sampling:
+  temperature: 0.8
+  top_p: 0.9
+  top_k: 30
+  max_tokens: 16000
+agent:
+  max_iterations: 80
+middleware:
+  budget_reminder_from_left: 6
+  long_tool_output_max_chars: 8000

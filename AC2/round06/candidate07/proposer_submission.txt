@@ -1,0 +1,252 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are an expert in functional analysis and mathematical optimization. Your mission: maximize C2 = ||f * f||_2^2 / ((integral(f)^2) ||f * f||_infty) to beat the record of 0.8963.
+
+  The seed program uses piecewise-linear optimization with 9 random initializations. THIS IS WEAK. Step functions (piecewise-constant) are the theoretical champions.
+
+  YOUR STRATEGY:
+
+  1. REPLACE THE SEED'S INITIALIZATION with TRUE step functions. Use jnp.piecewise or manual array construction to create flat regions at specific heights.
+
+  2. EXPLORE STEP CONFIGURATIONS systematically:
+     - Symmetric: single peak, bimodal, three-step pyramid
+     - Asymmetric: shifted peaks, uneven distributions
+     - Multi-step: 3, 4, 5, 7 steps with varying heights
+
+  3. USE THE step_function_builder TOOL to get concrete interval/height specifications. Then edit_solution to implement them.
+
+  4. PROBE-BEFORE-EVAL: Generate 5-10 step variants, probe each (cheap), rank, then evaluate only TOP 2.
+
+  5. IF STUCK: Try polynomial decay functions: f(x) = exp(-alpha * |x|^beta) with alpha, beta as parameters.
+
+  CRITICAL: Maximum 4 full evaluations. Use probes to filter. Always prefer step functions over gradient-based optimization.
+
+  TOOL USAGE:
+  - step_function_builder: Get concrete step function parameters (intervals, heights)
+  - edit_solution: Implement step functions using jnp.piecewise or manual array assignment
+  - probe_solution: Test variants cheaply (~10s)
+  - evaluate_solution: Confirm only top 2-3 candidates
+  - finish: When done
+
+  WORKFLOW:
+  1. Call step_function_builder to get a step configuration
+  2. Edit the seed to implement TRUE step functions (not linear ramps)
+  3. Probe the variant
+  4. Repeat 5-8 times to build a ranked list
+  5. Evaluate top 2-3
+  6. If no improvement, try polynomial decay
+skill_description: |
+  Optimize C2 using step functions. Generate step configurations via step_function_builder, implement true piecewise-constant functions, probe before eval. Avoid gradient-based optimization.
+skill_body: |
+  # C2 Maximization: Step Function Strategy
+
+  ## Objective
+  Maximize C2 = ||f * f||_2^2 / ((integral(f)^2) ||f * f||_infty). Record: 0.8963 (step functions). Seed baseline: 1.02665. Target: > 1.02872.
+
+  ## Why Step Functions Win
+  Step functions (piecewise-constant) achieve the best known lower bounds. The seed's piecewise-linear approach with gradient descent is suboptimal.
+
+  ## Strategy
+
+  ### Phase 1: Symmetric Step Functions
+  Use jnp.piecewise to create functions like:
+  - f(x) = h1 for |x| < w1, h2 for w1 < |x| < w2, 0 otherwise
+  - Try heights: [1.0, 1.5], [1.2, 1.0, 1.3], [0.8, 1.0, 1.2]
+
+  ### Phase 2: Asymmetric Step Functions
+  Create shifted peaks:
+  - Single peak at x = c: f(x) = h if |x - c| < w, else 0
+  - Two peaks at +c and -c: bimodal
+
+  ### Phase 3: Multi-step Functions
+  3-5 steps with varying heights and widths:
+  - Left wing < center > right wing
+  - Multiple clusters
+
+  ### Phase 4: Polynomial Decay (fallback)
+  f(x) = exp(-alpha * |x|^beta). Optimize alpha, beta via grid search.
+
+  ## Execution Protocol
+
+  1. Call step_function_builder - get concrete intervals and heights
+  2. Edit the seed: Replace _create_step_initializer with jnp.piecewise that creates TRUE step functions (constant over intervals)
+  3. Probe: Call probe_solution on the edited code
+  4. Repeat: 5-8 variants, building a ranked list
+  5. Evaluate: Top 2-3 only with evaluate_solution
+  6. Fallback: If stuck, use polynomial decay
+
+  ## Critical Rules
+  - MAX 4 full evaluations
+  - ALWAYS probe 5+ variants before any eval
+  - Use step_function_builder for structured exploration
+  - True step functions = constant over intervals, NOT linear ramps
+  - If stuck: switch to polynomial decay or Gaussian mixtures
+tool_descriptions:
+  edit_solution: |
+    Edit the EVOLVE-BLOCK to create TRUE step functions (piecewise-constant). Use jnp.piecewise:
+
+    Example: f = jnp.piecewise(x, [x < -1, (-1) <= x < 1, x >= 1], [0.0, 1.5, 0.0])
+
+    Or manual construction: f = jnp.zeros(n); f = f.at[start:end].set(1.0)
+
+    Key: FLAT regions (constant), not linear ramps. Avoid jax.nn.relu which creates non-linearities.
+  evaluate_solution: |
+    Run the full evaluator. Returns combined_score. Use MAX 4 times total. Only after probing.
+  probe_solution: |
+    Cheap score on subsampled data (~10s, separate budget of 30 probes). Use for ranking variants. Call 5-8 times before any evaluate.
+  finish: |
+    End the session. Call when budget exhausted or score > 1.02872 achieved.
+sampling:
+  temperature: 1.1
+  top_p: 0.9
+  top_k: 30
+  max_tokens: 16384
+agent:
+  max_iterations: 50
+middleware:
+  budget_reminder_from_left: 2
+  long_tool_output_max_chars: 10000
+new_tools:
+- name: step_function_builder
+  description: |
+    Build TRUE step functions programmatically. Returns JAX code that creates piecewise-constant functions with specified intervals and heights. Essential for replacing the seed's weak piecewise-linear initialization.
+  input_schema:
+    type: object
+    properties:
+      num_steps:
+        type: integer
+        description: Number of steps (2-10)
+      symmetric:
+        type: boolean
+        description: Symmetric around 0?
+      heights:
+        type: array
+        description: Heights for each step
+      widths:
+        type: array
+        description: Widths for each step
+  implementation_py: |
+    def run(ctx, args):
+        import random
+        config = args
+        num_steps = config.get("num_steps", random.randint(3, 6))
+        symmetric = config.get("symmetric", True)
+        heights = config.get("heights", [random.uniform(0.8, 1.5) for _ in range(num_steps)])
+        widths = config.get("widths", [1.0 / num_steps] * num_steps)
+        
+        # Generate cleaner code using jnp.piecewise
+        if symmetric:
+            # Symmetric configuration
+            if num_steps == 2:
+                return {
+                    "type": "symmetric_2step",
+                    "code": "f = jnp.piecewise(x, [x < 0, abs(x) < 0.5], [0.0, 1.0])",
+                    "num_steps": num_steps,
+                    "note": "Single central peak"
+                }
+            elif num_steps == 3:
+                return {
+                    "type": "symmetric_3step",
+                    "code": "f = jnp.piecewise(x, [x < -0.33, abs(x) < 0.33, abs(x) < 0.66, x >= 0.66], [0.0, 0.8, 1.2, 0.0])",
+                    "num_steps": num_steps,
+                    "note": "Bimodal with higher center"
+                }
+            else:
+                # Generic multi-step
+                code = "f = jnp.zeros(n)\n"
+                total_width = 1.0
+                for i in range(num_steps):
+                    start_pos = i / num_steps
+                    end_pos = (i + 1) / num_steps
+                    height = heights[i]
+                    code += f"  f = f.at[int({start_pos * n}):int({end_pos * n})].set({height})\n"
+                return {"type": "symmetric_multistep", "code": code, "num_steps": num_steps}
+        else:
+            # Asymmetric configuration
+            code = "f = jnp.zeros(n)\n"
+            for i in range(num_steps):
+                start_pos = i / num_steps
+                end_pos = (i + 1) / num_steps
+                height = heights[i]
+                code += f"  f = f.at[int({start_pos * n}):int({end_pos * n})].set({height})\n"
+            return {"type": "asymmetric", "code": code, "num_steps": num_steps}
+new_skills:
+- name: step-function-combinatorics
+  description: |
+    Method playbook for C2 optimization using step function combinatorics. Systematic exploration of symmetric/asymmetric configurations. Probe before eval discipline.
+  body: |
+    # Step Function Combinatorics for C2 Maximization
+
+    ## Objective
+    Maximize C2 > 0.8963. Record: 0.8963. Seed: 1.02665. Target: > 1.02872.
+
+    ## Core Principle: TRUE STEP FUNCTIONS
+    The seed's piecewise-linear optimization is weak. Use jnp.piecewise to create piecewise-CONSTANT functions (flat regions, not ramps).
+
+    ## Symmetric Configurations
+
+    ### 2-Step (Single Peak)
+    f(x) = h for |x| < w, 0 otherwise
+    Code: f = jnp.piecewise(x, [x < -w, abs(x) < w, x > w], [0.0, h, 0.0])
+
+    ### 3-Step (Bimodal)
+    f(x) = h1 for |x| < w1, h2 for w1 < |x| < w2, h1 for |x| > w2
+    Code: f = jnp.piecewise(x, [x < -w2, abs(x) < w1, w1 <= abs(x) <= w2, abs(x) > w2], [0.0, h1, h2, 0.0])
+
+    ### 4-Step (Four peaks)
+    Two on each side of 0: left_outer < left_inner < center < right_inner < right_outer
+
+    ## Asymmetric Configurations
+
+    ### Shifted Peak
+    f(x) = h if c - w < x < c + w, else 0
+    Code: f = jnp.piecewise(x, [x < c - w, abs(x - c) < w, x > c + w], [0.0, h, 0.0])
+
+    ### Multiple Clusters
+    Three separate peaks at positions p1, p2, p3
+
+    ## Implementation Pattern
+
+    1. Use step_function_builder tool for code generation
+    2. Edit seed to replace _create_step_initializer with jnp.piecewise
+    3. Remove jax.nn.relu - it destroys the step structure
+    4. Probe variants, evaluate top 2-3
+
+    ## Probe-Before-Eval Discipline
+    - Generate 5-8 step configurations
+    - Probe each (call probe_solution)
+    - Rank by probe score
+    - Evaluate ONLY top 2-3
+    - MAX 4 full evaluations total
+
+    ## Fallback Strategies
+    If step functions stall:
+    1. Polynomial decay: f(x) = exp(-alpha * |x|^beta)
+    2. Gaussian mixture: sum of Gaussians
+    3. Seed's multi-start with different initializations
+new_middlewares:
+- name: enforce_step_function
+  hook: before_model
+  description: |
+    Enforce step function strategy. Warn if executor uses gradient-based optimization or piecewise-linear approaches.
+  implementation_py: |
+    def before_model(hook_input):
+        state = hook_input.get("state", {})
+        iteration = state.get("iteration", 0)
+        
+        # Check if we're still using the seed's weak optimization
+        recent_edits = state.get("recent_edits", [])
+        
+        if iteration > 5 and len(recent_edits) > 0:
+            last_edit = recent_edits[-1].get("edit_type", "")
+            if "relu" in last_edit.lower() or "gradient" in last_edit.lower() or "linear" in last_edit.lower():
+                return "WARNING: Avoid jax.nn.relu and gradient-based optimization. Use TRUE step functions with jnp.piecewise. Call step_function_builder for code."
+        
+        # Probe before eval discipline
+        evals_done = state.get("evals_done", 0)
+        probes_since_last_eval = state.get("probes_since_eval", 0)
+        
+        if evals_done > 0 and probes_since_last_eval < 5:
+            return f"REMINDER: You've done {evals_done} full evaluations but less than 5 probes since the last eval. Call probe_solution 5+ times before evaluating again."
+        
+        return None

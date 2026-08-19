@@ -1,0 +1,136 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are optimizing for the Erdos minimum overlap problem.
+
+  Current best bound: C5 <= 0.38092303510845016 (combined_score > 1.0 means improvement)
+
+  Your strategy:
+  1. START WITH SEED OR CONSTRUCT structurally sound initial h
+  2. USE mutate_solution TO systematically explore the space AROUND promising solutions
+  3. Use PROBE_solution to quickly rank 5-10 perturbations
+  4. Evaluate TOP 2 perturbations with evaluate_solution
+  5. Iterate: take best improved h, mutate it again
+  6. Keep track of best program
+
+  Key insight: The seed solution is already quite good. You need FINER-GRAINED mutations
+  (not entirely new constructions) to find improvements.
+
+  Mutation approaches:
+  - Add/remove small Gaussian noise to latent values
+  - Shift/scale the function horizontally or vertically
+  - Introduce new peaks or flatten existing ones
+  - Modify the logistic sigmoid mapping parameters
+
+  Remember: integral(h) must equal 1, and h(x) in [0,1]. Use the mutation tool
+  to preserve structure while exploring improvements.
+skill_description: |
+  Fine-grained mutation and hill-climbing for Erdos optimization. Focus on perturbations around good solutions.
+skill_body: |
+  # Hill-Climbing for Erdos Minimum Overlap
+
+  ## Why this works
+  The seed solution is ALREADY very good (combined_score ~0.9996).
+  Large structural changes are unlikely to help. We need FINE-TUNING.
+
+  ## The Protocol
+  1. Start with seed program (or previous best)
+  2. Call mutate_solution with 10 variants
+  3. Score all 10 variants using probe_solution (cheap!)
+  4. Pick top 2 by probe score
+  5. Run FULL evaluation on those 2
+  6. Take winner, call mutate_solution AGAIN on it
+  7. Repeat until budget exhausted or no improvement
+
+  ## Budget Management
+  - You have 30 evaluations total
+  - Use ~20 probes (2-3 per mutation round)
+  - Use ~10 full evaluations (top 2 each round)
+  - This gives you 10-15 mutation rounds
+
+  ## Key Principle
+  IMPROVE incrementally. Small changes to a good solution are more likely to beat the seed
+  than entirely new constructions from scratch.
+
+  ## What to watch for
+  - If all probe scores are worse than seed, STOP - no improvement possible
+  - If probe scores are flat (all similar), the landscape is smooth
+  - Always preserve the good structure from the base solution
+tool_descriptions:
+  edit_solution: Modify EVOLVE-BLOCK. Implement mutate_solution() and integrate hill-climbing.
+  evaluate_solution: Full evaluation. Only use on top candidates.
+  probe_solution: Cheap approximate evaluation. Rank mutations quickly.
+  finish: Stop when no improvement found.
+sampling:
+  temperature: 1.1
+  top_p: 0.9
+  top_k: 30
+  max_tokens: 12000
+agent:
+  max_iterations: 40
+middleware:
+  budget_reminder_from_left: 6
+  long_tool_output_max_chars: 12000
+new_tools:
+  - name: mutate_solution
+    description: |
+      Generate N (default 10) perturbed versions of a given step function h.
+      Each perturbation applies a different mutation strategy to explore
+      the local space. Returns dict with keys mut_0 to mut_9.
+    input_schema:
+      type: object
+      properties:
+        base_latent:
+          type: array
+          items:
+            type: number
+        num_variants:
+          type: integer
+          default: 10
+    implementation_py: |
+      def run(ctx, args):
+          import numpy as np
+          base = np.array(args["base_latent"], dtype=np.float64)
+          N = len(base)
+          rng = np.random.default_rng(123)
+          variants = {}
+          strategies = [
+              ("gaussian_noise", lambda b: b + rng.normal(size=N) * 0.05),
+              ("gaussian_noise_large", lambda b: b + rng.normal(size=N) * 0.15),
+              ("peak_shift", lambda b: b + 0.3 * rng.normal(size=N)),
+              ("amplitude_modify", lambda b: b + 0.2 * rng.randn(N) + 0.1 * np.sin(rng.uniform(0, 4*np.pi, N))),
+              ("plateau_cut", lambda b: b - 0.1 * np.exp(-((np.linspace(0.2, 1.8, N) - 0.5)/0.3)**2 * 5)),
+              ("binary_split", lambda b: b + rng.choice([-0.15, 0.15], size=N) * (rng.random(N) > 0.5).astype(float)),
+              ("mix_sin", lambda b: b + 0.25 * np.sin(2*np.pi * rng.random(N))),
+              ("local_spike", lambda b: b + 0.3 * np.exp(-((np.linspace(0.3, 1.7, N)[::2] - np.linspace(0.3, 1.7, N)[::2])/0.2)**2 * 8)),
+              ("flatten_center", lambda b: b - 0.1 * np.where(np.abs(np.linspace(0, 2, N) - 1.0) < 0.5, 1.0, 0.0)),
+              ("bimodal_shift", lambda b: b + 0.2 * (np.exp(-((np.linspace(0, 2, N) - 0.25)/0.2)**2 * 10) + np.exp(-((np.linspace(0, 2, N) - 0.75)/0.2)**2 * 10) - 1.0)),
+          ]
+          for i, (name, mutate_fn) in enumerate(strategies[:min(10, args.get("num_variants", 10))]):
+              mutated = mutate_fn(base)
+              mutated = np.clip(mutated, -10, 10)
+              variants[f"mut_{i}"] = mutated
+          return {"variants": variants, "num_created": len(variants)}
+new_skills:
+  - name: hill-climbing-eval
+    description: |
+      Hill-climbing: probe many mutations, evaluate best, repeat.
+    body: |
+      Hill-Climbing Protocol for Erdos:
+
+      The seed achieves ~0.9996. We need fine-tuning, not new constructions.
+
+      Protocol:
+      1. Start with seed or previous best h
+      2. Call mutate_solution(h, num_variants=10)
+      3. Score all 10 with probe_solution (cheap!)
+      4. Pick top 2 by probe score
+      5. Run evaluate_solution on those 2
+      6. Take winner, mutate AGAIN
+      7. Repeat until no improvement
+
+      Budget: ~20 probes + ~10 full evals = 10-15 rounds
+
+      Watch for:
+      - All probes worse than seed? STOP
+      - Flat scores? Landscape is smooth
+      - Preserve good structure from base

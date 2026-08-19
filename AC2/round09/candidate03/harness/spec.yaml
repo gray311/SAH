@@ -1,0 +1,138 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are optimizing Python code to maximize C₂ = ||f★f||₂² / ((∫f)² ||f★f||_∞) for a non-negative function f.
+  The seed program already discovered high-quality multi-level step functions with C₂ ≈ 1.034.
+  Your goal: IMPROVE on this starting point, not break it.
+  
+  CRITICAL RULES:
+  1. The seed program's step-function templates are ALREADY OPTIMIZED (heights like 1.42, 1.52, 1.62, 1.92, 2.12).
+     DO NOT randomly change these heights. Instead, EXPERIMENTALLY PERTURB THEM.
+  2. Before full evaluation, ALWAYS use probe_solution to cheaply rank your variants.
+     With 30 probes available and expensive full evals (budget of 30), use probes to find promising directions.
+  3. Make TARGETED, SMALL CHANGES: vary one parameter at a time (one height value, one interval width).
+     The seed program's structure is valuable - don't rewrite it wholesale.
+  4. If your edit degrades performance, the seed's best version is automatically preserved.
+     Try a DIFFERENT parameter variation, not a refinement of the failed one.
+  5. Use SEARCH/REPLACE diffs that modify ONLY the numeric parameters in the step-function definitions.
+  
+  Strategy: The space of step-function parameters (heights, positions, widths) is continuous.
+  Use systematic exploration: perturb heights by ±0.05, shift positions by ±2 intervals, etc.
+  After each probe, decide whether to commit to full eval or explore another variant.
+  Call finish when probes show diminishing returns or you've exhausted promising directions.
+new_tools:
+  - name: parameter_scanner
+    description: |
+      Systematically test parameter variations around current settings. Given base parameters
+      (heights, positions, widths), generate N variants with small perturbations (-10% to +10%).
+      Returns scores for all variants to identify promising directions without full evals.
+      Use this when you have a working base but want to explore nearby configurations.
+    input_schema:
+      type: object
+      properties:
+        base_heights:
+          type: array
+          items:
+            type: number
+        base_positions:
+          type: array
+          items:
+            type: number
+        n_variants:
+          type: integer
+          default: 5
+    implementation_py: |
+      def run(ctx, args):
+          import random
+          random.seed(42)
+          base_heights = args.get('base_heights', [])
+          base_positions = args.get('base_positions', [])
+          n_variants = args.get('n_variants', 5)
+          
+          if not base_heights:
+              return {"note": "no base heights provided"}
+          
+          var_results = []
+          for i in range(n_variants):
+              perturbed = []
+              for h in base_heights:
+                  perturbation = (random.random() - 0.5) * 0.1
+                  new_h = max(0.1, h * (1 + perturbation))
+                  perturbed.append(round(new_h, 3))
+              
+              result = {
+                  "variant": i,
+                  "perturbed_heights": perturbed,
+                  "perturbation_range": f"±{0.05:.2f} from base"
+              }
+              # Use ctx to actually test - probe the variant
+              ctx.scratch_write("current_heights", str(perturbed))
+              score = ctx.probe() if hasattr(ctx, 'probe') else 0.0
+              result["probe_score"] = score
+              var_results.append(result)
+          
+          return {
+              "n_variants": n_variants,
+              "variants": var_results,
+              "best_probe_idx": max(range(len(var_results)), key=lambda i: var_results[i].get("probe_score", 0))
+          }
+skill_description: |
+  Step-function C₂ optimizer. The seed already found high-quality multi-level step functions.
+  Your job: systematically perturb heights and positions, use probes to rank variants,
+  commit promising ones to full eval. Preserve working structures - don't rewrite templates.
+skill_body: |
+  # Step-function C₂ Optimization Skill
+  
+  ## Objective
+  Maximize C₂ = ||f★f||₂² / ((∫f)² ||f★f||_∞) starting from seed's multi-level step functions.
+  
+  ## Core Strategy: Parameter Perturbation
+  The seed program has optimized step-function templates with specific heights (0.62, 0.72, 0.82, 0.92, 1.02, 1.12, 1.32, 1.42, 1.52, 1.62, 1.66, 1.72, 1.92, 2.02, 2.12).
+  These are NOT random - they represent discovered optima. Your job is to PERTURB THEM systematically.
+  
+  ## Method
+  1. IDENTIFY THE BASE PARAMETERS: Locate the heights and positions in the seed code.
+     Example: f = f.at[int(0.1*n):int(0.2*n)].set(1.12) means position [0.1n, 0.2n) has height 1.12.
+  
+  2. USE probe_solution BEFORE evaluate_solution:
+     - Create 5-10 variants with small perturbations (±0.02 to ±0.05 to heights)
+     - Score them all with probe_solution (cheap, ~10s each)
+     - Pick the top 2-3 for full evaluation
+  
+  3. PERTURBATION TYPES:
+     - Height perturbation: h → h × (1 ± 0.05)
+     - Position perturbation: shift interval boundaries by ±2 intervals
+     - Width perturbation: narrow or widen intervals by ±5%
+  
+  4. SEARCH/REPLACE YOUR EDITS:
+     Find exact lines like `f = f.at[int(0.1*n):int(0.2*n)].set(1.12)`
+     Replace ONLY the numeric value: `f = f.at[int(0.1*n):int(0.2*n)].set(1.17)`
+  
+  5. MONITOR AND ADAPT:
+     - If probe_score improves → full eval → decide whether to iterate or try new direction
+     - If probe_score degrades → discard, try different perturbation
+     - If full eval degrades → reset to seed's best, try a different template (pattern_idx 0-12 in seed)
+  
+  ## Tool Usage
+  - probe_solution: Your PRIMARY exploration tool. Use for all variant ranking.
+  - evaluate_solution: Confirm promising variants from probe screening.
+  - parameter_scanner (NEW TOOL): Generate and score multiple perturbations at once.
+  - edit_solution: Make targeted SEARCH/REPLACE diffs on numeric parameters only.
+  
+  ## Golden Rules
+  - NEVER rewrite a whole step-function template - only perturb its parameters
+  - ALWAYS probe before full eval (30 evals = budget; 30 probes = free exploration)
+  - If stuck at same score, try a DIFFERENT template (pattern_idx 0-12 in seed)
+  - Budget warning: when evals < 5, only pursue your single best probe variant
+new_skills: []
+new_middlewares: []
+remove_tools: []
+sampling:
+  temperature: 0.3
+  top_p: 0.85
+  top_k: 15
+  max_tokens: 12288
+agent:
+  max_iterations: 36
+middleware:
+  budget_reminder_from_left: 2
+  long_tool_output_max_chars: 12000

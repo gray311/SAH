@@ -1,0 +1,147 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are solving the Erdős minimum overlap problem: minimize max_k ∫ h(x)(1-h(x+k)) dx
+  for a step function h: [0,2]→[0,1] with integral(h)=1.
+  
+  Current best bound: C₅ ≤ 0.38092303510845016
+  Goal: Achieve combined_score > 1.0 (c5_bound < 0.380923).
+  
+  CRITICAL INSIGHT: The seed program uses 12 initialization patterns all based on sigmoid(latent),
+  which creates smooth, gradient-based functions. This approach is fundamentally limited for
+  the Erdős problem which benefits from SHARP, piecewise-constant step functions with
+  carefully chosen transition points.
+  
+  STRATEGY: 
+  1. FIRST, use construct_piecewise to directly build diverse step function structures
+     (not latent-space transformations). Test these structures directly with evaluate_solution.
+  2. For promising structures, systematically vary TRANSITION POINTS and PEAK WIDTHS, not hyperparameters.
+  3. Use probe_solution ONLY to check if integral(h)≈1; skip full probes for ranking.
+  4. If piecewise strategies stall, edit the EVOLVE-BLOCK to add NEW construction methods
+     to _get_best_initialization() that CREATE SHARPER STEPS (e.g., using sigmoid with large coeffs,
+     or direct step specifications).
+  5. Try DIFFERENT representations: latent vectors scaled by LARGE factors (5-20) to force sharp steps,
+     or directly specify step locations and heights.
+  
+  Focus: STRUCTURAL INNOVATION first (new function shapes), NOT hyperparameter tuning.
+skill_description: Direct step function construction for Erdős overlap minimization with structural innovation.
+skill_body: |
+  # Erdős Minimum Overlap - Structural Innovation Strategy
+  
+  ## Problem
+  Minimize max_k ∫ h(x)(1-h(x+k)) dx for h: [0,2]→[0,1], ∫h=1.
+  
+  ## Key Insight
+  The optimal solution likely involves SHARP step functions with specific transition points,
+  not smooth sigmoidal functions. The seed's 12 patterns all use sigmoid(latent) which creates
+  overly smooth transitions.
+  
+  ## Phase 1: Direct Step Function Construction
+  1. Use construct_piecewise to directly build step functions with:
+     - Varying numbers of steps (2, 3, 4, 5, 6)
+     - Different step locations (based on mathematical intuition: 0.25, 0.5, 0.75, etc.)
+     - Different step heights (not all from sigmoid of uniform latent)
+  
+  2. Test each construction DIRECTLY with evaluate_solution (probe for constraint only).
+  
+  ## Phase 2: Sharp Sigmoid Variants
+  If direct construction fails, modify the EVOLVE-BLOCK to:
+  - Replace sigmoid(latent) with sigmoid(latent * SCALE) where SCALE ∈ {5, 10, 20}
+  - This creates SHARPER transitions while keeping the same optimizer structure
+  
+  ## Phase 3: Transition Point Optimization
+  For the best structures:
+  - Edit step locations: try [0.2, 0.5, 0.8], [0.25, 0.75], [1/3, 2/3], etc.
+  - Optimize peak widths: [0.1, 0.9], [0.15, 0.15, 0.7], etc.
+  
+  ## Phase 4: Multi-restart with NEW Patterns
+  Add to _get_best_initialization():
+  - Step-function pattern: direct specification of steps at mathematical points
+  - Large-scale sigmoid: latent with coefficient 10-20 to force sharp transitions
+  - Asymmetric patterns: peaks not centered at 0.5
+  
+  ## Budget Management
+  - Use all 30 evals efficiently: test 3-5 diverse structures first
+  - Deep dive into promising structure (5-10 iterations refining transitions)
+  - Finish with best structure even if score≈1.0
+tool_descriptions:
+  edit_solution: Modify EVOLVE-BLOCK to change function construction methods (sharp sigmoid, direct step specs, new initialization patterns).
+  evaluate_solution: Full evaluation returning combined_score.
+  probe_solution: Check only constraint satisfaction (∫h≈1). Do NOT use for ranking - results are approximate.
+  finish: Submit when combined_score > 1.0 or after exhausting structural strategies.
+sampling:
+  temperature: 1.4
+  top_p: 0.95
+  top_k: 30
+  max_tokens: 12000
+agent:
+  max_iterations: 50
+middleware:
+  budget_reminder_from_left: 3
+  long_tool_output_max_chars: 8000
+new_tools:
+  - name: construct_piecewise
+    description: |
+      Directly construct diverse step functions for the Erdős problem by specifying
+      step locations, heights, and widths. Returns 3-4 constructions with different
+      structures (bimodal, trichotomous, tri-peaked, asymmetric). Each construction
+      is ready to use as an initial h for the optimizer.
+    input_schema:
+      type: object
+      properties: {}
+    implementation_py: |
+      def run(ctx, args):
+          import numpy as np
+          N = 800
+          domain = 2.0
+          dx = domain / N
+          x = np.linspace(0, domain, N)[1:]
+          constructions = {}
+          
+          # Construction 1: Bimodal sharp - two narrow peaks at 0.25, 0.75
+          h1 = np.zeros(N)
+          a1, a2 = 0.25, 0.75
+          w1, w2 = 0.15, 0.15
+          h1[(x >= a1) & (x < a1 + w1)] = 0.95
+          h1[(x >= a2) & (x < a2 + w2)] = 0.95
+          integral = h1.sum() * dx
+          if integral > 0:
+              h1 = h1 / integral
+          constructions['bimodal_sharp'] = h1
+          
+          # Construction 2: Trichotomous - three-level pattern
+          h2 = np.zeros(N)
+          phases = [0.0, 1/3, 2/3]
+          heights = [0.0, 1.0, 0.5]
+          h2[(x >= phases[0]) & (x < phases[1])] = heights[0]
+          h2[(x >= phases[1]) & (x < phases[2])] = heights[1]
+          h2[(x >= phases[2])] = heights[2]
+          integral = h2.sum() * dx
+          if integral > 0:
+              h2 = h2 / integral
+          constructions['trichotomous'] = h2
+          
+          # Construction 3: Tri-peaked - three narrow peaks
+          h3 = np.zeros(N)
+          peaks = [0.2, 0.5, 0.8]
+          widths = [0.12, 0.12, 0.12]
+          for p, w in zip(peaks, widths):
+              h3[(x >= p) & (x < p + w)] = 0.95
+          integral = h3.sum() * dx
+          if integral > 0:
+              h3 = h3 / integral
+          constructions['tri_peaked'] = h3
+          
+          # Construction 4: Asymmetric - wide left, narrow right
+          h4 = np.zeros(N)
+          h4[(x >= 0.0) & (x < 0.4)] = 0.85
+          h4[(x >= 0.6) & (x < 1.0)] = 0.90
+          integral = h4.sum() * dx
+          if integral > 0:
+              h4 = h4 / integral
+          constructions['asymmetric'] = h4
+          
+          # Clip to [0,1]
+          for k in constructions:
+              constructions[k] = np.clip(constructions[k], 0, 1)
+          
+          return {"constructions": {k: v.tolist() for k, v in constructions.items()}}

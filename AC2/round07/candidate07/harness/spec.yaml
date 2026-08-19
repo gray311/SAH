@@ -1,0 +1,245 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are an expert in functional analysis and mathematical optimization. Your task: maximize C2 = ||f * f||_2^2 / ((int_f)^2 ||f * f||_inf) for the second autocorrelation inequality.
+
+  Theoretical upper bound: 1.0 (Young's inequality)
+  Current best in literature: 0.8963 (achieved by step functions)
+  Current program's combined_score: 1.026 (your baseline)
+  Target: surpass 1.026
+
+  CRITICAL INSIGHT: The seed program uses an INTERNAL gradient-based optimizer (35000 steps) that searches for piecewise-LINEAR functions. This is INEFFICIENT for discovering step functions.
+
+  NEW STRATEGY: You must COMPLETELY REPLACE the seed's optimization approach:
+
+  1. Use generate_complete_step_function to create a SELF-CONTAINED step function definition
+  2. The generated function should use jnp.piecewise with explicit interval and height pairs
+  3. Call evaluate_solution directly on the complete function definition (no need for the seed's internal optimizer)
+  4. Try 5-10 different step function configurations
+  5. Call evaluate_solution on the best 2-3 candidates
+
+  Step functions work by:
+  - Defining constant heights over intervals
+  - Using jnp.piecewise: f = jnp.piecewise(x, [cond1, cond2, cond3], [h1, h2, h3])
+  - Typical configurations: 3-7 intervals with varying heights from 0.5 to 2.0
+
+  EXAMPLE: A 5-interval step function:
+    def create_step(x):
+        f = jnp.piecewise(x, [
+            (x < -0.6),
+            (-0.6 <= x < -0.3),
+            (-0.3 <= x < 0.3),
+            (0.3 <= x < 0.6),
+            (x >= 0.6)
+        ], [0.0, 0.7, 1.5, 0.7, 0.0])
+        return f
+
+  WORKFLOW: generate_complete_step_function -> evaluate -> repeat 5-10 times -> submit best
+
+  TOOLS:
+  - generate_complete_step_function: Creates a complete ready to evaluate step function definition
+  - evaluate_solution: Run the full evaluator on your complete function
+  - finish: End when you have 2-3 evaluations and reasonable confidence
+skill_description: Step function optimization. Use generate_complete_step_function to create complete step function definitions with jnp.piecewise. Evaluate directly without the seed's internal optimizer. Try 5-10 configurations, evaluate top 2-3. Target >1.026.
+skill_body: |
+  # Step Function Optimization for C2 Maximization
+
+  The seed uses a 35000-step gradient optimizer for piecewise-LINEAR functions. This is too slow and does not naturally discover step functions.
+
+  Step functions are piecewise-CONSTANT (flat, not sloped). Create them directly with jnp.piecewise.
+
+  Method:
+  1. Use generate_complete_step_function to get a COMPLETE function definition
+  2. The output should be ready to paste into your solution (or use directly)
+  3. Call evaluate_solution on the complete definition
+  4. Try 5-10 different configurations (vary intervals and heights)
+  5. Evaluate the 2-3 best ones
+  6. finish
+
+  Step Function Design Principles:
+  - Heights typically range from 0.5 to 2.0
+  - 3-7 intervals work well
+  - Symmetric functions (3-5 intervals centered at 0) are promising
+  - Asymmetric functions with varying heights can also work
+  - Avoid too many intervals (slower convolution)
+
+  Example Configurations to Try:
+  1. Simple 3-interval symmetric: [0.0, 1.2, 0.0]
+  2. 5-interval symmetric plateau: [0.0, 0.7, 1.5, 0.7, 0.0]
+  3. Multi-peaked asymmetric: varying heights from 0.5 to 2.0
+  4. Pyramid shapes: low-high-low pattern
+
+  Probe/Eval Strategy:
+  - NO need for probe_solution - evaluate directly on complete step functions
+  - Try 5-10 different step functions
+  - Evaluate the 2-3 that look most promising (based on configuration complexity)
+  - finish when you have 2-3 evaluations
+
+  Remember: step functions beat linear functions for this problem. Use generate_complete_step_function to create TRUE constant step functions.
+tool_descriptions:
+  edit_solution: |
+    Change the code inside the EVOLVE-BLOCK region. The seed's approach is too slow.
+    Instead of optimizing with 35000 gradient steps, completely replace the solution
+    with a step function created by generate_complete_step_function.
+
+    Generate a complete function using jnp.piecewise:
+    f = jnp.piecewise(x, [cond1, cond2, cond3, ...], [h1, h2, h3, ...])
+
+    The conditions define intervals, heights are constant over each interval.
+  evaluate_solution: Run the full evaluator on your step function definition. Try 2-3 different step functions, evaluate each, and finish with the best result.
+  probe_solution: Approximate score on subsampled data. You may use this to quickly filter candidates before full evaluation, but direct evaluation is recommended.
+  finish: End the session when you have evaluated 2-3 different step function configurations.
+sampling:
+  temperature: 1.2
+  top_p: 0.95
+  top_k: 30
+  max_tokens: 16384
+agent:
+  max_iterations: 50
+middleware:
+  budget_reminder_from_left: 0
+  long_tool_output_max_chars: 10000
+new_tools:
+  - name: generate_complete_step_function
+    description: |
+      Generate a COMPLETE ready to evaluate step function definition using jnp.piecewise.
+      Returns the full function code that can be pasted into the EVOLVE-BLOCK.
+      The function should use explicit interval and height pairs and be ready for immediate evaluation.
+    input_schema:
+      type: object
+      properties:
+        num_intervals:
+          type: integer
+          description: Number of intervals. Typical range is three to seven.
+        symmetric:
+          type: boolean
+          description: Whether function is symmetric around 0.
+        peak_height:
+          type: number
+          description: Target peak height from 0.5 to 2.0.
+        base_height:
+          type: number
+          description: Base or outer height value.
+    implementation_py: |
+      def run(ctx, args):
+          import random
+          config = args
+          
+          num_intervals = config.get("num_intervals", random.choice([3, 5, 7]))
+          symmetric = config.get("symmetric", True)
+          peak_height = config.get("peak_height", random.uniform(1.2, 1.8))
+          base_height = config.get("base_height", random.uniform(0.5, 0.9))
+          
+          intervals = []
+          heights = []
+          
+          if symmetric:
+              if num_intervals == 3:
+                  intervals = [(-0.5, -0.2), (-0.2, 0.2), (0.2, 0.5)]
+                  heights = [base_height, peak_height, base_height]
+              elif num_intervals == 5:
+                  intervals = [(-0.5, -0.4), (-0.4, -0.2), (-0.2, 0.2), (0.2, 0.4), (0.4, 0.5)]
+                  heights = [base_height, base_height * 0.8, peak_height, base_height * 0.8, base_height]
+              elif num_intervals == 7:
+                  intervals = [(-0.5, -0.4), (-0.4, -0.3), (-0.3, -0.2), (-0.2, 0.2), (0.2, 0.3), (0.3, 0.4), (0.4, 0.5)]
+                  heights = [base_height, base_height * 0.7, base_height * 0.9, peak_height, base_height * 0.9, base_height * 0.7, base_height]
+              else:
+                  center = 0.0
+                  step_size = 0.5 / ((num_intervals - 1) / 2)
+                  for i in range(num_intervals // 2):
+                      left = -0.5 + i * step_size
+                      right = left + step_size
+                      intervals.append((left, right))
+                      if i == num_intervals // 2 - 1:
+                          heights.append(peak_height)
+                      else:
+                          heights.append(base_height + (peak_height - base_height) * 0.5)
+                  if num_intervals > 3:
+                      for i in range(num_intervals // 2 - 1, -1, -1):
+                          intervals.append((-intervals[i][1], -intervals[i][0]))
+                          heights.append(heights[i])
+              
+              f_code = "def create_step_function(x):\n    f = jnp.piecewise(x, [\n"
+              for i, (start, end) in enumerate(intervals[:len(intervals) // 2 + (1 if num_intervals % 2 == 1 else 0)]):
+                  f_code += "        " + str(start) + " < x < " + str(end) + ",\n"
+              f_code += "\n    ], [" + ", ".join([str(h) for h in heights[:len(intervals) // 2 + (1 if num_intervals % 2 == 1 else 0)]]) + ", 0.0])\n    return f\n"
+          else:
+              intervals = []
+              heights = []
+              num_peaks = min(num_intervals, 4)
+              for i in range(num_peaks):
+                  center = random.uniform(-0.3, 0.3)
+                  width = random.uniform(0.15, 0.25)
+                  height = base_height + peak_height * random.uniform(0.3, 0.8)
+                  intervals.append((center - width / 2, center + width / 2))
+                  heights.append(height)
+              
+              while len(intervals) < num_intervals:
+                  if len(intervals) == 0:
+                      intervals.append((-0.5, -0.4))
+                      heights.append(0.0)
+                  else:
+                      intervals.append((intervals[-1][1], intervals[-1][1] + 0.1))
+                      heights.append(0.0)
+              
+              f_code = "def create_step_function(x):\n    f = jnp.piecewise(x, [\n"
+              for i, (start, end) in enumerate(intervals):
+                  if i < len(intervals) - 1:
+                      f_code += "        " + str(start) + " < x < " + str(end) + ",\n"
+                  else:
+                      f_code += "        " + str(start) + " < x,\n"
+              f_code += "\n    ], [" + ", ".join([str(h) for h in heights]) + ", 0.0])\n    return f\n"
+          
+          return {"type": "symmetric" if symmetric else "asymmetric", "num_intervals": num_intervals, "peak_height": peak_height, "function_code": f_code}
+new_skills:
+  - name: direct-step-function-optimization
+    description: Playbook for discovering step functions by direct generation and evaluation. Bypass the seed's slow optimizer.
+    body: |
+      # Direct Step Function Optimization
+
+      The seed's 35000-step gradient optimizer is designed for piecewise-LINEAR functions.
+      Step functions are piecewise-CONSTANT and can be discovered much more efficiently
+      by direct generation.
+
+      Method:
+      1. Use generate_complete_step_function to create a complete step function definition
+      2. The output contains ready-to-use jnp.piecewise code
+      3. Evaluate directly without running the seed's internal optimizer
+      4. Try 5-10 different configurations (vary num_intervals, symmetry, heights)
+      5. Evaluate the 2-3 best candidates
+      6. finish
+
+      Configuration Space to Explore:
+      - Symmetric 3-interval: [low, high, low]
+      - Symmetric 5-interval: [low, med, high, med, low]
+      - Symmetric 7-interval: more gradual peaks
+      - Asymmetric multi-peak: varying heights across the domain
+
+      Height Guidelines:
+      - Peak heights: 1.2 to 1.8 (higher than baseline)
+      - Base heights: 0.5 to 0.9 (lower than peak)
+      - Try combinations that create contrast
+
+      Evaluation Strategy:
+      - NO gradient optimizer needed - the step function is complete
+      - Try 5-10 different step function definitions
+      - Evaluate each directly with evaluate_solution
+      - submit_spec with the best result
+
+      Remember: step functions beat linear functions for this problem. Generate complete step functions directly!
+new_middlewares:
+  - name: enforce_direct_evaluation
+    hook: before_model
+    description: middleware to enforce direct evaluation of complete step functions
+    implementation_py: |
+      def before_model(hook_input):
+          state = hook_input.get("state", {})
+          iteration = state.get("iteration", 0)
+          
+          last_code_change = state.get("last_tool", "")
+          if iteration < 3 and last_code_change == "edit_solution":
+              return "WARNING: Do not optimize the seed's 35000-step loop. Generate complete step functions using generate_complete_step_function instead. The seed's gradient optimizer is too slow and does not find step functions well."
+          
+          if last_code_change == "generate_complete_step_function":
+              state["used_step_generator"] = True
+          
+          return None

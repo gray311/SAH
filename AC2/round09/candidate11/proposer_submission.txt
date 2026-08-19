@@ -1,0 +1,153 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are an expert in functional analysis and numerical optimization, tasked with improving a Python program that discovers functions maximizing the second autocorrelation inequality constant C₂.
+  
+  The program has an editable EVOLVE-BLOCK region. You have access to:
+  - `edit_solution()` — modify the EVOLVE-BLOCK code with targeted SEARCH/REPLACE diffs
+  - `evaluate_solution()` — full evaluation; returns combined_score (higher is better)
+  - `finish(summary)` — end session
+  
+  Method:
+  1. Use a mathematical approach to explore step function parameter space systematically
+  2. Create targeted edits: modify heights in _create_step_initializer by small amounts (0.02-0.15)
+  3. Vary positions by ±2%: try s-0.02, s-0.01, s, s+0.01, s+0.02
+  4. Evaluate variants, keeping track of the best C₂
+  5. If stuck, try different base patterns from the predefined patterns 0-12
+  6. Remember: C₂ = ||f ★ f||₂² / ((∫f)² ||f ★ f||_{∞}), maximize this ratio
+  7. Always use jnp.pad(f, (0, n)) for convolution via FFT
+  8. Keep edits small and targeted; don't rewrite the whole block
+  
+  Focus on the mathematical structure: step function heights should balance the L², L¹, and L∞ norms of the convolution. High peaks need to be positioned to maximize the L² norm relative to L∞.
+skill_description: |
+  Optimize step function patterns for the second autocorrelation inequality. Systematically explore heights and positions, refine promising variants. Budget: 30 evals.
+skill_body: |
+  # Step Function Discovery for C₂ Maximization
+  
+  ## Strategy
+  
+  1. **Seed exploration**: Start with the seed's 13 patterns (0-12)
+  2. **Systematic variation**: For each pattern:
+     - Vary heights by 5-20%: try h*0.90, h*0.95, h*1.0, h*1.05, h*1.1, h*1.15, h*1.2
+     - Shift positions by 1-2%: try s-0.02, s-0.01, s, s+0.01, s+0.02
+     - For multi-level: vary each level's height independently
+  3. **Pattern diversity**: Try different base patterns (0-12)
+     - Pattern 0-2: Simple single steps
+     - Pattern 3-4: Multi-level with high middle
+     - Pattern 5-8: Asymmetric patterns
+     - Pattern 9-10: Very high central peaks
+     - Pattern 11-12: Pyramid shapes
+  4. **Evaluate and refine**: Score each variant. Keep best. Deepen search on promising patterns.
+  5. **Mathematical intuition**: 
+     - C₂ = ||f★f||₂² / ((∫f)² ||f★f||_{∞})
+     - High, narrow peaks increase L² while keeping L∞ moderate
+     - Multiple levels create interference effects
+     - Width ~30-40% of domain works well for current best
+  
+  ## Edits
+  
+  - Use SEARCH/REPLACE diffs for parameter changes
+  - Modify heights in _create_step_initializer method
+  - Adjust interval positions (int(0.XX * n))
+  
+  ## When to finish
+  
+  Call finish when exhausted or budget depleted. Report best C₂ achieved.
+tool_descriptions:
+  edit_solution: |
+    Change the EVOLVE-BLOCK code. Preferred format: SEARCH/REPLACE diffs. For step function edits, modify heights and interval positions in _create_step_initializer. Call evaluate_solution to score changes.
+  evaluate_solution: |
+    Run the program and return combined_score (higher is better). You have 30 evaluations. Keep track of best_so_far and only submit if you can't improve it.
+  probe_solution: |
+    Cheaply score the current program on subsampled data. Fast but approximate - not comparable to full evaluate_solution scores. Use to rank variants when full evals are slow.
+  finish: |
+    End the session. Call this when you've exhausted promising patterns or run out of budget. The best-scoring program is submitted automatically.
+sampling:
+  temperature: 0.5
+  top_p: 0.9
+  top_k: 15
+  max_tokens: 10240
+agent:
+  max_iterations: 50
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 10000
+new_tools:
+  - name: generate_step_patterns
+    description: |
+      Generate n step function variants from a base pattern (0-12). Each variant has different heights and interval positions optimized for C₂ maximization. Use at the start to seed exploration, then refine promising variants with evaluate_solution.
+    input_schema: {type: object, properties: {n_patterns: {type: integer, minimum: 1, maximum: 10}, base_pattern_idx: {type: integer, minimum: 0, maximum: 12}}}
+    implementation_py: |
+      def run(ctx, args):
+          import jax
+          import jax.numpy as jnp
+          n_patterns = args.get('n_patterns', 5)
+          base_idx = args.get('base_pattern_idx', 0)
+          n = 400
+          
+          patterns = {
+              0: {'h': 1.42, 's': 0.25, 'e': 0.75},
+              1: {'h': 1.52, 's': 0.28, 'e': 0.72},
+              2: {'h': 1.62, 's': 0.30, 'e': 0.70},
+              3: {'h': [0.92, 1.92, 0.92], 's': [0.15, 0.25, 0.75], 'e': [0.25, 0.75, 0.85]},
+              4: {'h': [1.12, 2.32, 1.42], 's': [0.1, 0.2, 0.5], 'e': [0.2, 0.5, 0.7]},
+              5: {'h': 1.52, 's': [0.2, 0.5], 'e': [0.4, 0.8]},
+              6: {'h': [0.72, 1.32, 1.72, 1.02], 's': [0.05, 0.2, 0.35, 0.65], 'e': [0.2, 0.35, 0.65, 0.95]},
+              7: {'h': [0.82, 2.02, 0.82], 's': [0.1, 0.3, 0.7], 'e': [0.3, 0.7, 0.9]},
+              8: {'h': [0.62, 1.02, 1.52, 1.22], 's': [0.05, 0.25, 0.45, 0.65], 'e': [0.25, 0.45, 0.65, 0.95]},
+              9: {'h': 1.72, 's': 0.22, 'e': 0.78},
+              10: {'h': 1.66, 's': 0.24, 'e': 0.76},
+              11: {'h': [0.72, 1.52, 2.12, 1.52, 0.72], 's': [0.05, 0.2, 0.4, 0.6, 0.8], 'e': [0.2, 0.4, 0.6, 0.8, 0.95]},
+              12: {'h': [0.62, 1.32, 2.02, 1.32, 0.62], 's': [0.03, 0.18, 0.38, 0.62], 'e': [0.18, 0.38, 0.62, 0.95]},
+          }
+          
+          height_mods = [0.90, 0.95, 1.0, 1.05, 1.1, 1.15, 1.2, 1.25, 1.3, 1.35]
+          pos_shifts = [-0.02, -0.01, 0.0, 0.01, 0.02]
+          
+          base = patterns[base_idx]
+          variations = []
+          i = 0
+          
+          while len(variations) < n_patterns:
+              f = jnp.zeros(n)
+              
+              if isinstance(base['h'], list):
+                  h_list = base['h']
+                  s_list = base['s']
+                  e_list = base['e']
+                  
+                  for h_mod in height_mods:
+                      h_new = [round(h * h_mod, 2) for h in h_list]
+                      for p_mod in pos_shifts:
+                          s_new = [max(0, min(1, s + p_mod)) for s in s_list]
+                          e_new = [max(0, min(1, e + p_mod)) for e in e_list]
+                          if all(s < e for s, e in zip(s_new, e_new)):
+                              f = f.at[int(s_new[0]*n):int(e_new[0]*n)].set(h_new[0])
+                              for j in range(1, len(e_new)):
+                                  f = f.at[int(s_new[j]*n):int(e_new[j]*n)].set(h_new[j])
+                              variations.append({'index': i, 'f': f, 'pattern_id': base_idx, 'h': h_new, 's': s_new, 'e': e_new})
+                              break
+                      if len(variations) >= n_patterns:
+                          break
+                  if len(variations) >= n_patterns:
+                      break
+              else:
+                  for h_mod in height_mods:
+                      h_new = round(base['h'] * h_mod, 2)
+                      for p_mod in pos_shifts:
+                          s_new = max(0.05, min(0.95, base['s'] + p_mod))
+                          e_new = max(0.05, min(0.95, base['e'] + p_mod))
+                          if s_new < e_new:
+                              f = f.at[int(s_new*n):int(e_new*n)].set(h_new)
+                              variations.append({'index': i, 'f': f, 'pattern_id': base_idx, 'h': h_new, 's': s_new, 'e': e_new})
+                              break
+                      if len(variations) >= n_patterns:
+                          break
+                  if len(variations) >= n_patterns:
+                      break
+              
+              i += 1
+          
+          return variations
+remove_tools: []
+new_skills: []
+new_middlewares: []

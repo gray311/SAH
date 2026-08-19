@@ -1,0 +1,60 @@
+---
+name: discovery-optimization
+description: "Iteratively optimize a C++ program that constructs an axis-aligned polygon for a\ncombinatorial fish-catching task. Maximize score via edit_solution/evaluate_solution.\nFocus on density-aware construction and bounded local search."
+---
+
+# Polygon Construction for Fish Catching
+
+## Step 1: Parse and Index Fish
+- Read all 2N points (first N are mackerels with type=1, next N are sardines with type=-1).
+- Store them in a 2D structure for efficient rectangle queries (e.g., grid bucketing).
+
+## Step 2: Build Initial Polygon
+- Compute global bounding box of all fish.
+- Start with a minimal rectangle (e.g., 4×4 cells).
+- Greedily expand by 1 unit in each cardinal direction if it increases net score.
+
+## Step 3: Density-Aware Expansion
+- For each potential expansion step, estimate the gain:
+  - Count fish in the new area using your grid structure.
+  - Accept if (mackerels_gained - sardines_gained) > threshold (e.g., 0.3).
+- Continue until no beneficial expansion is possible.
+
+## Step 4: Local Optimization Loop
+- Run 150-200 iterations, each trying to improve the polygon:
+  - For each vertex, try displacing it by ±1, ±2, ±3 units in both axes.
+  - Keep the move if it increases score and maintains validity.
+  - Track best score seen.
+- Use deterministic random seed (e.g., from chrono) for reproducibility.
+
+## Step 5: Output
+- Output vertex count m, then m vertices (x y pairs).
+- Ensure m ≥ 4, coordinates in [0, 100000], no self-intersections.
+
+## Time Budget
+- Leave 0.1s safety margin; aim to complete all steps in ≤ 1.9s.
+- Use fast I/O (std::ios::sync_with_stdio(false)) and efficient data structures.
+tool_descriptions:
+  edit_solution: |
+    Edit the EVOLVE-BLOCK region. For small changes, use SEARCH/REPLACE diffs.
+    For large rewrites, provide the full new code. Preserve the fixed entry
+    function and imports. Focus on algorithmic improvements for polygon construction.
+  evaluate_solution: |
+    Run the program and get combined_score (higher is better). Budget: 20 evaluations.
+    Read the score to decide next move. Do not fabricate scores.
+  probe_solution: |
+    Cheap approximate evaluation on first 2000 rows only. Use to quickly rank
+    construction variants before full evaluation, but probe scores don't translate
+    to final scores.
+  finish: |
+    End the session when you can't improve. Your best-scoring program is submitted.
+sampling:
+  temperature: 0.5
+  top_p: 0.85
+  top_k: 15
+  max_tokens: 8192
+agent:
+  max_iterations: 40
+middleware:
+  budget_reminder_from_left: 2
+  long_tool_output_max_chars: 8000

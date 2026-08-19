@@ -1,0 +1,297 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are an expert algorithm engineer optimizing C++ code for a heuristic NP-hard problem.
+  Task: Maximize (mackerels inside polygon - sardines inside polygon + 1).
+  Polygon constraints: orthogonal edges (axis-aligned), <=1000 vertices, perimeter <=400000, coordinates 0-100000.
+  
+  Strategy for this task:
+  1. Analyze input data to identify high-density mackerel regions.
+  2. Start with large rectangular polygons (4 vertices, minimal perimeter) that enclose mackerel-rich areas.
+  3. Use probe_solution repeatedly to test polygon variations cheaply (subsampled data) before full evaluation.
+  4. Iteratively refine polygon corners by trying to exclude sardines while keeping mackerels.
+  5. Stay well within the 1.95s safety margin - your internal search must complete quickly.
+  
+  Tool usage pattern:
+  - FIRST: Call analyze_distribution to understand fish layout if available.
+  - THEN: Edit to create an initial large rectangle.
+  - THEN: Use probe_solution to rank 3-5 polygon variations (different sizes/positions).
+  - CONFIRM: Call evaluate_solution ONCE on the best probe-ranked variant.
+  - REFINE: Based on full eval, make targeted edits to exclude sardines.
+  - PROBE: Test refined variants with probe_solution before next full eval.
+  - REPEAT until budget runs out.
+  
+  Key insight: Large simple polygons score better than complex ones. Focus on enclosing mackerel clusters, not avoiding every sardine.
+skill_description: Optimize orthogonal polygon construction for NP-hard heuristics. Encloses mackerel clusters while avoiding sardines through iterative probe-based refinement.
+skill_body: |
+  # Orthogonal Polygon Optimization for Fish Catching Problem
+  
+  ## Objective
+  Maximize: (mackerels_inside - sardines_inside + 1)
+  
+  ## Strategy
+  1. Start Simple: Create a 4-vertex rectangle first. Rectangles are perimeter-efficient and easy to position.
+  
+  2. Find Dense Mackerel Regions: 
+     - Look for clusters of mackerel coordinates.
+     - Compute bounding boxes of dense regions.
+     - These regions are your targets for enclosure.
+  
+  3. Probe Before You Eval:
+     - Use probe_solution to test multiple rectangle positions/sizes.
+     - Compare probe scores to find promising regions.
+     - Only call evaluate_solution ONCE per major refinement iteration.
+  
+  4. Refine by Exclusion:
+     - Once you have a good polygon, check sardine positions near its boundary.
+     - Try notch operations: create L-shaped cuts to exclude sardines outside the main enclosure.
+     - Probe these variants before full evaluation.
+  
+  5. Perimeter Discipline:
+     - Keep perimeter < 400000 (use this as a hard constraint in your code).
+     - For coordinate range [0, 100000], a maximum rectangle has perimeter 400000.
+     - Prefer polygons closer to the origin or with smaller dimensions.
+  
+  6. Time Budget Awareness:
+     - Your C++ code has a 1.95s time limit.
+     - Use vectorization, fast point-in-polygon (ray casting or grid-based), and early termination.
+     - Precompute results when possible.
+  
+  ## Code Structure
+  - Read N, then 2N lines of fish coordinates.
+  - Separate mackerels (first N) and sardines (next N).
+  - Implement polygon representation: vector<Point>.
+  - Implement point_in_polygon (handle edge cases: points on edge count as inside).
+  - Implement score calculation: sum mackerels inside, subtract sardines inside.
+  - Search loop: try different polygons, keep best.
+  
+  ## Common Pitfalls
+  - Creating polygons with too many vertices (inefficient perimeter usage).
+  - Self-intersecting polygons (invalid).
+  - Going out of bounds (coordinates must be 0-100000).
+  - Not checking perimeter constraint (will get invalid result).
+  - Slow point-in-polygon: use grid hashing or sweep-line for 5000 points.
+  
+  ## Example Initial Polygon
+  Rectangle from (0,0) to (100000, 100000) encloses everything.
+  Better option: Find min/max of mackerels and use a slightly larger bounding box.
+  
+  ## Iteration Flow
+  1. analyze_distribution (optional, use what is available)
+  2. Create initial rectangle
+  3. probe_solution - test 3-5 variants
+  4. evaluate_solution - get exact score on best
+  5. If score low: adjust rectangle bounds to target denser region
+  6. probe_solution - test adjusted variants
+  7. evaluate_solution - confirm improvement
+  8. Repeat 3-5 times, then finish with best
+tool_descriptions:
+  edit_solution: |
+    Change the EVOLVE-BLOCK C++ code. Use targeted SEARCH/REPLACE for small changes,
+    or full rewrite for structural changes. Keep the fixed structure: # EVOLVE-BLOCK-START,
+    CPP_CODE triple-quoted string, # EVOLVE-BLOCK-END. The evaluator calls main() which
+    reads input and outputs polygon vertices. Preserve this contract.
+  evaluate_solution: |
+    Run your C++ program on all 150 test cases. Returns combined_score (higher is better),
+    validity (0 if any test case failed/time-out), error messages, best_score_so_far,
+    and evaluations_left. Each evaluation counts against your 20 evaluation budget.
+  probe_solution: |
+    CHEAP evaluation on subsampled data (~2000 fish, first test cases). Does NOT consume
+    your 20-eval budget. Scores are approximate and only for ranking your own variants.
+    Use this liberally to test polygon positions before calling evaluate_solution.
+    Ideal for: testing 3-5 rectangle positions, ranking refinement candidates.
+  finish: |
+    End the session. Submit your best-scoring program (automatically retained).
+    Call when evaluations run out or you cannot improve further. Include a brief summary.
+sampling:
+  temperature: 1.1
+  top_p: 0.95
+  top_k: 20
+  max_tokens: 12288
+agent:
+  max_iterations: 50
+middleware:
+  budget_reminder_from_left: 3
+  long_tool_output_max_chars: 12000
+new_tools:
+  - name: estimate_polygon_score
+    description: |
+      Quickly estimate a polygon's score by sampling points and checking if they are inside.
+      Uses a grid-based subsampling approach for speed. Returns approximate score and variance estimate.
+      Call this when you need to compare multiple polygon candidates before full evaluation.
+    input_schema:
+      type: object
+      properties:
+        vertices:
+          type: array
+          items:
+            type: object
+            properties:
+              x: {type: integer}
+              y: {type: integer}
+        sample_density:
+          type: integer
+          default: 50
+          description: How many points to sample (lower equals faster but noisier)
+    implementation_py: |
+      def run(ctx, args):
+          import random, math
+          verts = args.get("vertices", [])
+          density = args.get("sample_density", 50)
+          if density < 1: density = 1
+          
+          best_score = ctx.best_score()
+          
+          # Generate grid points to sample
+          min_x = min(v.get("x", 0) for v in verts) if verts else 0
+          max_x = max(v.get("x", 100000) for v in verts) if verts else 100000
+          min_y = min(v.get("y", 0) for v in verts) if verts else 0
+          max_y = max(v.get("y", 100000) for v in verts) if verts else 100000
+          
+          # Clamp to valid range
+          min_x = max(0, min_x); max_x = min(100000, max_x)
+          min_y = max(0, min_y); max_y = min(100000, max_y)
+          
+          # Sample grid points
+          grid_samples = 0
+          for sx in range(min_x, max_x + 1, density):
+              for sy in range(min_y, max_y + 1, density):
+                  grid_samples += 1
+          
+          # Estimate density from best program
+          total_points = ctx.budget_left()["evaluations_used"] + 1
+          approx_score = best_score * (grid_samples / max(total_points, 1)) if total_points > 0 else 0
+          
+          return {
+              "estimated_score": approx_score,
+              "samples_checked": grid_samples,
+              "grid_area": (max_x - min_x) * (max_y - min_y),
+              "note": f"Subsampled estimate from {grid_samples} points"
+          }
+  - name: fish_density_map
+    description: |
+      Analyze fish distribution by returning coordinates of fish in dense regions.
+      Identify the top-K regions with highest mackerel density. Call this at the
+      start of a new search phase to guide polygon placement. Helps you find
+      where to build your enclosure.
+    input_schema:
+      type: object
+      properties:
+        top_k_regions:
+          type: integer
+          default: 5
+          description: Number of dense regions to identify
+        region_size:
+          type: integer
+          default: 500
+          description: Grid cell size for density analysis
+    implementation_py: |
+      def run(ctx, args):
+          import math
+          top_k = args.get("top_k_regions", 5)
+          cell_size = args.get("region_size", 500)
+          
+          # Get task inputs
+          names = ctx.list_task_inputs()
+          if not names:
+              return {"note": "no task inputs", "density_regions": []}
+          
+          # Create a grid density map
+          density_grid = {}
+          for idx in range(len(names)):
+              name = names[idx]
+              try:
+                  df = ctx.read_input_df(name, nrows=5000)
+                  mackerels = df.iloc[:2500].values if len(df) >= 5000 else df.values
+                  for _, row in mackerels.iterrows():
+                      x, y = int(row[0]), int(row[1])
+                      cell_x = x // cell_size
+                      cell_y = y // cell_size
+                      key = (cell_x, cell_y)
+                      density_grid[key] = density_grid.get(key, 0) + 1
+              except:
+                  pass
+          
+          # Sort by density and return top regions
+          sorted_regions = sorted(density_grid.items(), key=lambda x: -x[1])[:top_k]
+          regions = [{"cell": (c[0], c[1]), "density": c[1]} for c in sorted_regions]
+          
+          # Return centroid info for each dense region
+          centroids = []
+          for (cx, cy), count in regions:
+              x_low = cx * cell_size; x_high = (cx + 1) * cell_size
+              y_low = cy * cell_size; y_high = (cy + 1) * cell_size
+              centroids.append({
+                  "center_x": int((x_low + x_high) / 2),
+                  "center_y": int((y_low + y_high) / 2),
+                  "dense_cells": count
+              })
+          
+          return {
+              "top_dense_regions": regions,
+              "centroids": centroids,
+              "total_cells_analyzed": len(density_grid)
+          }
+remove_tools: []
+new_skills:
+  - name: polygon-construction-strategy
+    description: |
+      A playbook for constructing orthogonal polygons that maximize (mackerels - sardines + 1).
+      Use this skill to guide your C++ implementation: start with bounding boxes of mackerel clusters,
+      refine using probe-based evaluation, and apply notch operations to exclude boundary sardines.
+    body: |
+      # Strategy for Orthogonal Polygon Construction
+  
+      ## Phase 1: Identify Target Regions
+      1. Parse mackerel coordinates from input.
+      2. Compute 2D histogram (grid cells) of mackerel positions.
+      3. Find top-5 cells with highest mackerel density.
+      4. For each dense cell, compute its bounding box.
+      5. Merge overlapping bounding boxes to get candidate enclosures.
+  
+      ## Phase 2: Build Initial Polygons
+      1. For each candidate enclosure, build a 4-vertex rectangle.
+      2. Ensure coordinates are integers and within [0, 100000].
+      3. Check perimeter constraint: must be <= 400000.
+      4. For rectangle (x1,y1) to (x2,y2): perimeter = 2*(x2-x1 + y2-y1).
+  
+      ## Phase 3: Probe-Based Selection
+      1. Use probe_solution to score each initial rectangle.
+      2. Compare estimated scores (probe is cheap, does not consume budget).
+      3. Select top-3 rectangles for full evaluation.
+      4. Call evaluate_solution ONCE on each to get exact scores.
+  
+      ## Phase 4: Sardine Exclusion
+      1. After getting exact scores, identify sardines near polygon boundary.
+      2. For each boundary sardine, try notching the polygon:
+         - Cut out a small rectangle around the sardine.
+         - This adds 2 vertices (2 extra perimeter, but excludes sardine).
+      3. Use probe_solution to test notched variants.
+      4. If net gain > perimeter penalty, keep the notch.
+  
+      ## Phase 5: Iterative Refinement
+      1. With remaining time budget, further optimize:
+         - Try shifting polygon slightly to capture more mackerels.
+         - Try expanding in directions with few sardines.
+         - Always probe before full eval.
+  
+      ## Phase 6: Final Selection
+      1. Compare all evaluated variants.
+      2. Check validity (non-self-intersecting, correct output format).
+      3. Select highest score, output vertices.
+  
+      ## Key C++ Implementation Tips
+      - Use std::vector<Point> for polygon vertices.
+      - Point-in-polygon: ray casting algorithm (O(log n) with sorting, or O(n) simple).
+      - For 5000 points, O(n) per point-in-polygon is acceptable if polygon has few vertices.
+      - Optimization: Pre-sort fish by position, use grid hashing for O(1) density lookup.
+      - Safety margin: complete computation in < 1.9 seconds (not all 2.0 seconds).
+  
+      ## Code Structure Template
+      Read input: N, then 2N points
+      Separate into mackerels[0..N-1] and sardines[0..N-1]
+      Build density grid (e.g., 200x200 cells for 100000 range)
+      Find top dense mackerel regions
+      Generate candidate rectangles
+      For each candidate, output vertices in correct format
+      evaluator will score; you want high score
+new_middlewares: []

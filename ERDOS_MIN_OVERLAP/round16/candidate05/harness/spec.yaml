@@ -1,0 +1,83 @@
+schema: h2spec/1.0
+system_prompt: 'Solve the Erdos minimum overlap problem: minimize max_k integral h(x)(1-h(x+k)) dx for a step function h: [0,2]->[0,1] with integral(h)=1.
+
+Current best bound: C5 <= 0.38092303510845016. Your goal: beat this bound.
+
+STRATEGY: Replace the seed''s _get_best_initialization method with a DIRECT piecewise constant construction. The seed uses latent vectors and sigmoid, but we can directly encode h(x) as a step function.
+
+STEP 1: Edit _get_best_initialization to return a hard-coded step function with 3-4 levels at specific breakpoints.
+
+STEP 2: Design a step function that separates h=1 regions from h=0 regions to minimize overlap.
+
+A simple candidate: h(x)=1 on [0,a], h(x)=b on [a,2-a], h(x)=0 on [2-a,2]. Solve for a,b so integral=1.
+
+Example: a=0.4, b=0.5 gives integral = 0.4 + 0.5*(1.2) = 1.0
+
+STEP 3: Call evaluate_solution on this edited program. If combined_score <= 1.0, try different breakpoints.
+
+STEP 4: Success is combined_score > 1.0 (meaning c5_bound < 0.380923).
+
+Key: Direct step function construction, no latent vectors, no sigmoid.'
+skill_description: Direct piecewise constant initialization to beat the seed''s latent-based approach.
+skill_body: '# Direct Step Function Construction for Erdos Optimizer
+
+## Core Strategy
+
+Replace the seed''s _get_best_initialization with a DIRECT step function construction. The seed uses latents + sigmoid, but we can encode h(x) directly as a piecewise constant function.
+
+## Step 1: Define the Pattern
+
+Use a 3-level step function:
+- Region 1: [0, a] where h=1
+- Region 2: [a, 2-a] where h=b (0 < b < 1)
+- Region 3: [2-a, 2] where h=0
+
+Constraint: integral(h) = a + b*(2-2a) = 1
+
+## Step 2: Choose Parameters
+
+Try a=0.4, solve for b:
+0.4 + 2b - 0.8b = 1
+0.4 + 1.2b = 1
+b = 0.5
+
+So: h=1 on [0,0.4], h=0.5 on [0.4,1.6], h=0 on [1.6,2]
+
+## Step 3: Edit the Seed
+
+Replace _get_best_initialization to directly return the discretized step function (no latent, no sigmoid).
+
+## Step 4: Evaluate
+
+Call evaluate_solution. If combined_score > 1.0, success!
+'
+tool_descriptions:
+  edit_solution: 'Replace the ENTIRE _get_best_initialization method with a direct step function return. Delete all latent/sigmoid code. Return a jnp.array directly computed from breakpoints.
+
+  Structure:
+
+  def _get_best_initialization(self, seed):
+      N = self.hypers.num_intervals
+      h = jnp.zeros(N)
+      a = 0.4
+      b = 0.5
+      a_idx = int(N * a)
+      mid_idx = int(N * (2 - a))
+      h[:a_idx] = 1.0
+      h[a_idx:mid_idx] = b
+      return h
+
+  No latent, no sigmoid, no FFT computation.'
+  evaluate_solution: 'Full evaluation. Call only after editing to a concrete step function.'
+  probe_solution: 'Skip probe for this strategy - we only need 1-2 evaluations with direct step functions.'
+  finish: 'Submit when combined_score > 1.0.'
+sampling:
+  temperature: 0.3
+  top_p: 0.8
+  top_k: 10
+  max_tokens: 8000
+agent:
+  max_iterations: 30
+middleware:
+  budget_reminder_from_left: 3
+  long_tool_output_max_chars: 5000

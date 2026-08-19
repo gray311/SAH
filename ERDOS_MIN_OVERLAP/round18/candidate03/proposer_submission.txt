@@ -1,0 +1,253 @@
+schema: h2spec/1.0
+system_prompt: |
+  Erdos minimum overlap: find step function h: [0,2]->[0,1] minimizing max_k integral h(x)(1-h(x+k))dx.
+
+  Constraint: integral(h) = 1 exactly.
+
+  Current best: C5 <= 0.38092303510845016.
+
+  The seed optimizer already has 15 initialization patterns and 3 restarts. 
+
+  Your job: GENERATE MORE DIVERSE RESTART POINTS using generate_extra_restarts.
+
+  Strategy:
+
+  1. Call generate_extra_restarts(temperature=0.8) to get 10 NEW diverse patterns
+  2. Merge with seed's patterns (keep the best 15 initializations total)
+  3. Run optimizer with num_restarts=5 on the merged set
+  4. Evaluate the BEST 1 candidate (lowest analytical c5_bound < 0.365)
+  5. If no improvement, regenerate with temperature=1.0
+
+  Why this works:
+  - Seed patterns: sine/cosine, Golomb, bipartite, tri-modal, Gaussian bumps
+  - Extra patterns: piecewise constant, piecewise linear, random block patterns, 
+    delta-like constructions - patterns the seed's optimizer might miss
+  - More restarts = better exploration of high-dimensional search space
+  - Analytical screening still saves evals, but MORE lenient threshold
+skill_description: Create diverse restarts beyond seed's 15 patterns. Merge with seed, optimize with more restarts.
+tool_descriptions:
+  edit_solution: |
+    Modify Hyperparameters. For best results: set num_restarts=5, num_intervals=800, num_steps=50000. Use generate_extra_restarts to get diverse patterns.
+  evaluate_solution: |
+    Run full 59000-step optimizer on best candidate. Returns combined_score = 0.38092303510845016 / c5_bound. Higher > 1 is new record.
+  probe_solution: |
+    Fast approximate eval (500 intervals). Use to quickly rank variants.
+  finish: |
+    Submit when combined_score > 1.0 (c5_bound < 0.38092303510845016).
+new_tools:
+  - name: generate_extra_restarts
+    description: |
+      Generate 10 diverse initializations for Erdos optimization. Extends seed's 15 patterns with additional construction types.
+
+      Each candidate has: h (latent), integral (should be ~1.0), c5_bound (analytical, no training).
+
+      Pattern types: piecewise-constant, piecewise-linear, random-blocks, delta-bumps, checkerboard, sparse-Golomb, extended-tri-modal, plateau, valley, and mixed patterns.
+
+      Usage: Call once with temperature=0.8. Merge with seed's best 15, then run optimizer with num_restarts=5. Only evaluate candidates with c5_bound < 0.365.
+    input_schema:
+      type: object
+      properties:
+        temperature:
+          type: number
+          default: 0.8
+        num_patterns:
+          type: integer
+          default: 10
+    implementation_py: |
+      def run(ctx, args):
+          import numpy as np
+          N = 800
+          domain = 2.0
+          dx = domain / N
+          
+          candidates = []
+          key = np.random.RandomState(42)
+          
+          # Pattern 1: Piecewise constant (2 blocks)
+          x = np.linspace(0, 2, N)
+          h = np.where(x < 1.0, 5.0, -1.0)
+          h = np.exp(h) / (np.sum(np.exp(h)) + 1e-10)
+          h = h / (np.sum(h) * dx)
+          h = np.clip(h, 0.001, 1.0)
+          h = h / (np.sum(h) * dx)
+          j = 1.0 - h
+          corr = np.fft.ifft(np.fft.fft(h, N) * np.conj(np.fft.fft(j, N))).real[:N] * dx
+          candidates.append({"h": h.tolist(), "integral": float(np.sum(h) * dx), "c5_bound": float(np.max(corr)), "pattern": "piecewise_const_2"})
+          
+          # Pattern 2: Piecewise constant (3 blocks)
+          h = np.zeros(N)
+          h[:int(0.3*N)] = 4.0
+          h[int(0.3*N):int(0.7*N)] = -1.0
+          h[int(0.7*N):] = 3.0
+          h = np.exp(h) / (np.sum(np.exp(h)) + 1e-10)
+          h = h / (np.sum(h) * dx)
+          h = np.clip(h, 0.001, 1.0)
+          h = h / (np.sum(h) * dx)
+          j = 1.0 - h
+          corr = np.fft.ifft(np.fft.fft(h, N) * np.conj(np.fft.fft(j, N))).real[:N] * dx
+          candidates.append({"h": h.tolist(), "integral": float(np.sum(h) * dx), "c5_bound": float(np.max(corr)), "pattern": "piecewise_const_3"})
+          
+          # Pattern 3: Piecewise linear ramp
+          h = np.linspace(0.1, 1.0, N)
+          h = h / (np.sum(h) * dx)
+          h = np.clip(h, 0.001, 1.0)
+          j = 1.0 - h
+          corr = np.fft.ifft(np.fft.fft(h, N) * np.conj(np.fft.fft(j, N))).real[:N] * dx
+          candidates.append({"h": h.tolist(), "integral": float(np.sum(h) * dx), "c5_bound": float(np.max(corr)), "pattern": "piecewise_linear"})
+          
+          # Pattern 4: Random block placement
+          num_blocks = 5
+          positions = key.randint(0, N, num_blocks)
+          h = np.zeros(N)
+          block_size = int(N / num_blocks)
+          for pos in positions:
+              h[pos:pos+block_size] += 6.0
+          h = np.exp(h) / (np.sum(np.exp(h)) + 1e-10)
+          h = h / (np.sum(h) * dx)
+          h = np.clip(h, 0.001, 1.0)
+          h = h / (np.sum(h) * dx)
+          j = 1.0 - h
+          corr = np.fft.ifft(np.fft.fft(h, N) * np.conj(np.fft.fft(j, N))).real[:N] * dx
+          candidates.append({"h": h.tolist(), "integral": float(np.sum(h) * dx), "c5_bound": float(np.max(corr)), "pattern": "random_blocks"})
+          
+          # Pattern 5: Delta-like bumps (narrow peaks)
+          num_peaks = 4
+          bump_centers = key.randint(50, N-50, num_peaks)
+          h = np.zeros(N)
+          for center in bump_centers:
+              h = h + 15.0 * np.exp(-((np.arange(N) - center) / 10)**2)
+          h = np.exp(h) / (np.sum(np.exp(h)) + 1e-10)
+          h = h / (np.sum(h) * dx)
+          h = np.clip(h, 0.001, 1.0)
+          h = h / (np.sum(h) * dx)
+          j = 1.0 - h
+          corr = np.fft.ifft(np.fft.fft(h, N) * np.conj(np.fft.fft(j, N))).real[:N] * dx
+          candidates.append({"h": h.tolist(), "integral": float(np.sum(h) * dx), "c5_bound": float(np.max(corr)), "pattern": "delta_bumps"})
+          
+          # Pattern 6: Checkerboard (spaced blocks)
+          h = np.zeros(N)
+          for i in range(0, N, 100):
+              h[i:i+20] = 4.0
+          h = np.exp(h) / (np.sum(np.exp(h)) + 1e-10)
+          h = h / (np.sum(h) * dx)
+          h = np.clip(h, 0.001, 1.0)
+          h = h / (np.sum(h) * dx)
+          j = 1.0 - h
+          corr = np.fft.ifft(np.fft.fft(h, N) * np.conj(np.fft.fft(j, N))).real[:N] * dx
+          candidates.append({"h": h.tolist(), "integral": float(np.sum(h) * dx), "c5_bound": float(np.max(corr)), "pattern": "checkerboard"})
+          
+          # Pattern 7: Sparse Golomb variant (7 marks)
+          marks = np.array([0.0, 0.35, 0.70, 1.05, 1.40, 1.75, 0.18])
+          h = np.zeros(N)
+          for m in marks:
+              idx = int(m * N)
+              h = h + 8.0 * np.exp(-((np.arange(N) - idx) / 8)**2)
+          h = np.exp(h) / (np.sum(np.exp(h)) + 1e-10)
+          h = h / (np.sum(h) * dx)
+          h = np.clip(h, 0.001, 1.0)
+          h = h / (np.sum(h) * dx)
+          j = 1.0 - h
+          corr = np.fft.ifft(np.fft.fft(h, N) * np.conj(np.fft.fft(j, N))).real[:N] * dx
+          candidates.append({"h": h.tolist(), "integral": float(np.sum(h) * dx), "c5_bound": float(np.max(corr)), "pattern": "sparse_golomb_7"})
+          
+          # Pattern 8: Extended tri-modal (4 peaks)
+          peaks = np.array([0.25, 0.5, 1.0, 1.75])
+          h = np.zeros(N)
+          for p in peaks:
+              idx = int(p * N)
+              h = h + 6.0 * np.exp(-((np.arange(N) - idx) / 15)**2)
+          h = np.exp(h) / (np.sum(np.exp(h)) + 1e-10)
+          h = h / (np.sum(h) * dx)
+          h = np.clip(h, 0.001, 1.0)
+          h = h / (np.sum(h) * dx)
+          j = 1.0 - h
+          corr = np.fft.ifft(np.fft.fft(h, N) * np.conj(np.fft.fft(j, N))).real[:N] * dx
+          candidates.append({"h": h.tolist(), "integral": float(np.sum(h) * dx), "c5_bound": float(np.max(corr)), "pattern": "quad_modal"})
+          
+          # Pattern 9: Plateau with dips
+          h = np.ones(N) * 2.0
+          h[100:200] = -3.0
+          h[500:600] = -3.0
+          h = np.exp(h) / (np.sum(np.exp(h)) + 1e-10)
+          h = h / (np.sum(h) * dx)
+          h = np.clip(h, 0.001, 1.0)
+          h = h / (np.sum(h) * dx)
+          j = 1.0 - h
+          corr = np.fft.ifft(np.fft.fft(h, N) * np.conj(np.fft.fft(j, N))).real[:N] * dx
+          candidates.append({"h": h.tolist(), "integral": float(np.sum(h) * dx), "c5_bound": float(np.max(corr)), "pattern": "plateau_dips"})
+          
+          # Pattern 10: Valley pattern (high sides, low center)
+          h = np.ones(N) * 3.0
+          h[150:650] = -4.0
+          h = np.exp(h) / (np.sum(np.exp(h)) + 1e-10)
+          h = h / (np.sum(h) * dx)
+          h = np.clip(h, 0.001, 1.0)
+          h = h / (np.sum(h) * dx)
+          j = 1.0 - h
+          corr = np.fft.ifft(np.fft.fft(h, N) * np.conj(np.fft.fft(j, N))).real[:N] * dx
+          candidates.append({"h": h.tolist(), "integral": float(np.sum(h) * dx), "c5_bound": float(np.max(corr)), "pattern": "valley"})
+          
+          return {"candidates": candidates, "num_candidates": len(candidates), "note": "Extra patterns to complement seed's 15 patterns. Merge and re-optimize with num_restarts=5."}
+sampling:
+  temperature: 0.8
+  top_p: 0.95
+  top_k: 30
+  max_tokens: 14000
+agent:
+  max_iterations: 40
+middleware:
+  budget_reminder_from_left: 3
+  long_tool_output_max_chars: 8000
+new_skills:
+  - name: extended-restart-strategy
+    description: Generate diverse restarts beyond seed patterns. Merge, optimize with more restarts.
+    body: |
+      # Extended Restart Strategy for Erdos Problem
+
+      ## Problem
+      The seed optimizer has 15 patterns and 3 restarts. But the search space is vast.
+
+      ## Solution: generate_extra_restarts Tool
+
+      This tool generates 10 ADDITIONAL patterns beyond the seed's 15:
+      - Piecewise constant (2-3 blocks)
+      - Piecewise linear ramps
+      - Random block placements
+      - Delta-like narrow peaks
+      - Checkerboard patterns
+      - Sparse Golomb variants
+      - Quadruple-modal patterns
+      - Plateau with dips
+      - Valley patterns
+
+      ## Workflow
+
+      1. CALL generate_extra_restarts(temperature=0.8, num_patterns=10)
+
+      2. Analyze the 10 new candidates:
+         - Check integral: should be ~1.0 (may vary slightly)
+         - Check c5_bound: analytical estimate (may differ from full eval)
+         - ACCEPT all candidates for merging
+
+      3. Merge with seed's best 15 initializations:
+         - Run seed's _get_best_initialization for 15 seeds
+         - Combine with the 10 new candidates
+         - Take the BEST 15 by analytical c5_bound
+
+      4. EDIT solution with num_restarts=5, num_steps=50000
+
+      5. CALL evaluate_solution on the SINGLE BEST candidate (lowest c5_bound < 0.365)
+
+      6. If no improvement after 1-2 evals, repeat with temperature=1.0
+
+      ## Why Extended Restarts Work
+
+      - Seed patterns: sine/cosine modulations, classic Golomb, bipartite, tri-modal
+      - Extra patterns: piecewise constructions, random placements, delta bumps, checkerboards
+      - Different "geometry" of h(x) explores different correlation structures
+      - More restarts = better chance of escaping local minima
+      - Analytical screening still saves budget
+
+      ## Expected Outcome
+
+      With 25+ diverse initializations and 5 restarts, we can find better C5 bounds than seed's 15 patterns + 3 restarts.

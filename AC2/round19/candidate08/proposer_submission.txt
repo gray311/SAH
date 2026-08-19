@@ -1,0 +1,219 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are a C2 constant optimizer. Current best: 0.8962799441554086 (step functions).
+  
+  CRITICAL: The seed's step-function patterns are under-explored, not trapped. 
+  STEP FUNCTIONS CAN STILL IMPROVE C2! Do NOT jump to smooth functions until after exhaustive step search.
+  
+  STRATEGY - STEP FUNCTION OPTIMIZATION FIRST:
+  
+  PHASE 1 (iterations 1-20): STEP FUNCTION DIVERSITY
+  1. Analyze current best's convolution profile (using existing methods)
+  2. Generate 8 step-function variants: vary level count (3-7 levels), heights (0.5-3.0), positions (asymmetric)
+  3. Use probe_solution on ALL 8 (accept approximate scores for steps)
+  4. Evaluate TOP 2 by probe score (max 2 evals per phase)
+  5. If neither beats record: generate NEW step families (fractal, mirror-symmetric, clustered peaks)
+  
+  PHASE 2 (iterations 21-30): REFINEMENT OR SMOOTH FUNCTIONS
+  - If step functions beat record: refine with small mutations (+/-3% width, +/-0.03 height)
+  - If no improvement after 15 iterations: THEN try smooth functions (Gaussian mixtures) with 3 evals
+  
+  RULES:
+  - NEVER call generate_candidates for smooth functions until iteration 20+ with no step improvements
+  - Always ensure f >= 0 with jax.nn.softplus or max(0, ·)
+  - For steps: use f = f.at[start:end].set(value) for mutability
+  - Use existing probe_solution (approximate but good enough for relative ranking)
+skill_description: |
+  Step-function-first optimization for C2. Exhaustive step pattern search before trying smooth functions. Uses existing probe_solution for rapid ranking.
+skill_body: |
+  # C2 Maximizer: Step-Function First Protocol
+  
+  ## Core Principle
+  Step functions are NOT trapped! The seed's 5 patterns are just starting points. 
+  Systematically explore step-function space before abandoning this class.
+  
+  ## Phase 1: Step Function Exploration (iterations 1-20)
+  
+  Step 1: Analyze Current Best
+  - Use existing analysis methods to understand current best's structure
+  - Note: Where is L2 concentrated? Where is sup norm?
+  - For step functions: check if levels are too uniform, peaks too narrow
+  
+  Step 2: Generate Step Variants (NOT smooth functions!)
+  - Generate 8 step-function candidates with diverse structures:
+    * Vary level count: 3 levels, 4 levels, 5 levels, 6 levels, 7 levels
+    * Vary height ranges: [0.5, 1.0], [1.0, 2.0], [1.5, 3.0]
+    * Vary asymmetry: left-heavy, right-heavy, centered
+    * Try "clustered" patterns: 2-3 high peaks with low valleys
+    * Try "fractal-like" patterns: self-similar multi-scale steps
+  
+  Step 3: Probe-Based Ranking
+  - Call probe_solution on ALL 8 candidates
+  - This is approximate but good for relative ranking of steps
+  - Call evaluate_solution on TOP 2 by probe score
+  
+  Step 4: Iterate
+  - If neither full eval beats record: generate NEW step families
+  - Continue until iteration 20 or a candidate beats record
+  
+  ## Phase 2: Refinement or Smooth Functions (iterations 21-30)
+  
+  Only if step functions beat record:
+  1. Refine best step with small mutations (+/-3% width, +/-0.03 height)
+  2. Probe all, evaluate top 1
+  
+  If NO improvement after 15 iterations with steps:
+  1. THEN try smooth functions (Gaussian mixtures) with probe_solution
+  2. Only spend 3-5 evals on smooth functions
+  
+  ## Key Rules
+  - STEP FUNCTIONS FIRST: exhaustive search before trying smooth functions
+  - Use probe_solution for rapid ranking (approximate but sufficient)
+  - Smooth functions use probe_solution (approximate)
+  - If stuck at iteration 15: try NEW step families (fractal, mirror, clustered)
+  - Always analyze structure to guide step design
+tool_descriptions:
+  edit_solution: |
+    Edit the EVOLVE-BLOCK. For step functions: create piecewise-constant functions.
+    Use f = jnp.zeros(n); f = f.at[start:end].set(value). Ensure f >= 0.
+    For mutations: small changes (+/-3% width, +/-0.03 height). For new families: 
+    vary level count (3-7), heights (0.5-3.0), asymmetry.
+  evaluate_solution: |
+    Full evaluation. Budget: 30 total. Call ONLY after probe_solution ranking.
+    For step functions, call after probe_solution. For smooth functions, call after probe_solution.
+  probe_solution: |
+    Approximate score on 10% subsample. FAST. Use for ALL candidates (steps and smooth).
+    For steps, approximate scores are still useful for relative ranking among similar architectures.
+    Call on ALL candidates before any full evaluation.
+  finish: |
+    Report best combined_score, whether steps or smooth functions won, and key step-pattern insights.
+sampling:
+  temperature: 0.8
+  top_p: 0.95
+  top_k: 30
+  max_tokens: 16384
+agent:
+  max_iterations: 35
+middleware:
+  budget_reminder_from_left: 3
+  long_tool_output_max_chars: 12000
+new_tools:
+  - name: generate_step_variants
+    description: |
+      Generate 8 diverse step-function variants. Vary level count (3-7 levels), 
+      heights (0.5-3.0), positions (asymmetric), and patterns (clustered, fractal).
+      Returns ready-to-edit code for step functions only.
+      Call this at iteration 0, after failed evals, or at iteration 15 for new families.
+    input_schema:
+      type: object
+      properties: {}
+    implementation_py: |
+      def run(ctx, args):
+          import random
+          random.seed(42)
+          n = 600
+          proposals = []
+          
+          # Family A: Level count variation
+          for levels in [3, 4, 5, 6, 7]:
+              heights = [0.8, 1.5, 2.2] if levels <= 4 else [0.6, 1.2, 1.8, 2.5]
+              positions = [0.1 + i * (0.9 - 0.1) / levels for i in range(levels)]
+              proposals.append({
+                  'family': 'levels_' + str(levels),
+                  'code': 'nf = jnp.zeros(n)\nfor pos, h in zip([' + str(positions) + ']:\n' +
+                          '    nf = nf.at[int(pos*n):int((pos+0.15)*n)].set(h)\n' +
+                          'nf = jnp.maximum(nf, 0.0)',
+                  'rationale': 'Test ' + str(levels) + ' level patterns'
+              })
+          
+          # Family B: Asymmetric clusters
+          code_left = 'nf = jnp.zeros(n)\nnf = nf.at[int(0.1*n):int(0.35*n)].set(1.5)\nnf = nf.at[int(0.35*n):int(0.55*n)].set(2.2)\nnf = nf.at[int(0.55*n):int(0.85*n)].set(1.0)\nnf = jnp.maximum(nf, 0.0)'
+          proposals.append({'family': 'clustered_left', 'code': code_left, 'rationale': 'Left-heavy cluster'})
+          
+          code_right = 'nf = jnp.zeros(n)\nnf = nf.at[int(0.15*n):int(0.45*n)].set(1.8)\nnf = nf.at[int(0.45*n):int(0.65*n)].set(2.5)\nnf = nf.at[int(0.65*n):int(0.95*n)].set(1.2)\nnf = jnp.maximum(nf, 0.0)'
+          proposals.append({'family': 'clustered_right', 'code': code_right, 'rationale': 'Right-heavy cluster'})
+          
+          code_multi = 'nf = jnp.zeros(n)\nnf = nf.at[int(0.1*n):int(0.25*n)].set(1.2)\nnf = nf.at[int(0.25*n):int(0.40*n)].set(2.0)\nnf = nf.at[int(0.40*n):int(0.55*n)].set(1.8)\nnf = nf.at[int(0.55*n):int(0.70*n)].set(2.0)\nnf = nf.at[int(0.70*n):int(0.9*n)].set(1.2)\nnf = jnp.maximum(nf, 0.0)'
+          proposals.append({'family': 'clustered_multi', 'code': code_multi, 'rationale': 'Multi-peak cluster'})
+          
+          code_fractal = 'nf = jnp.zeros(n)\nnf = nf.at[int(0.1*n):int(0.35*n)].set(0.7)\nnf = nf.at[int(0.35*n):int(0.65*n)].set(2.0)\nnf = nf.at[int(0.65*n):int(0.9*n)].set(0.7)\nmid_start = int(0.35 * n)\nmid_end = int(0.65 * n)\nfor i in range(0, mid_end - mid_start, n // 20):\n    nf = nf.at[mid_start + i:mid_start + min(i + 15, mid_end)].set(2.3)\nnf = jnp.maximum(nf, 0.0)'
+          proposals.append({'family': 'fractal', 'code': code_fractal, 'rationale': 'Fractal-like pattern'})
+          
+          return {'proposals': proposals, 'note': 'Use probe_solution to rank before full eval'}
+new_skills:
+  - name: step-function-exploration
+    description: Systematically explore step-function space before trying smooth functions.
+    body: |
+      # Step-Function Exploration Protocol for C2 Maximization
+      
+      ## Core Principle
+      Step functions are NOT trapped! The seed's 5 patterns are just starting points.
+      Exhaustively explore step-function space (3-7 levels, various heights, asymmetries)
+      BEFORE trying smooth functions.
+      
+      ## When to Generate Step Variants
+      1. At iteration 0: generate initial diverse step patterns using generate_step_variants
+      2. After each full eval: if no improvement, generate NEW step families
+      3. At iteration 15: if no improvement, try FRACTAL/MIRROR/CLUSTERED patterns
+      4. ONLY at iteration 20+ with no step improvements: try smooth functions
+      
+      ## Step Pattern Families (rotate through these)
+      
+      Family A: Level Count Variation
+      - 3 levels: low-high-low (asymmetric)
+      - 4 levels: low-medium-high-low
+      - 5 levels: low-medium-high-medium-low
+      - 6-7 levels: fine-grained multi-level
+      
+      Family B: Height Range Variation
+      - Heights [0.5, 1.0]: conservative, smooth transitions
+      - Heights [1.0, 2.0]: moderate peaks
+      - Heights [1.5, 3.0]: aggressive peaks (test limits)
+      
+      Family C: Asymmetry
+      - Left-heavy: high levels on left side
+      - Right-heavy: high levels on right side
+      - Centered: symmetric around middle
+      - Biased-center: slight offset from center
+      
+      Family D: Clustered Peaks
+      - 2-3 high peaks with low valleys between
+      - Mimics multi-modal distributions
+      - Test with 2 peaks, 3 peaks, 4 peaks
+      
+      Family E: Fractal-like Patterns
+      - Self-similar: large-scale steps with fine-scale sub-steps
+      - Multiple scales: 10% intervals at coarse scale, 1% at fine scale
+      
+      ## Execution Flow
+      1. Call generate_step_variants at iteration 0 for diverse patterns
+      2. Call probe_solution on ALL candidates (5-8 variants)
+      3. Call evaluate_solution on TOP 2 by probe score
+      4. If no improvement: call generate_step_variants again with new families
+      5. Continue until iteration 15 or improvement
+      6. Only at iteration 20+ with no improvements: try smooth functions
+      
+      ## Key Rule
+      STEP FUNCTIONS FIRST: exhaustive search before trying smooth functions.
+      Smooth functions have higher numerical error and should be last resort.
+new_middlewares:
+  - name: enforce_step_first
+    hook: before_model
+    description: Prevent premature switching to smooth functions
+    implementation_py: |
+      def before_model(hook_input):
+          iteration = hook_input.get("iteration", 0)
+          if iteration < 20:
+              return "WARNING: Stay in step-function mode! Only 20 iterations used for steps. Generate more step variants with generate_step_variants."
+          return None
+  - name: probe_before_eval
+    hook: before_tool
+    description: Enforce probing before full eval
+    implementation_py: |
+      def before_tool(hook_input):
+          tool_name = hook_input.get("tool_name", "")
+          if tool_name == "evaluate_solution":
+              probes_used = hook_input.get("probes_this_iter", 0)
+              if probes_used == 0:
+                  return "ERROR: Must call probe_solution before evaluate_solution. Use probes to rank candidates first."
+          return None

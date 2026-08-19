@@ -1,0 +1,247 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are a C++ polygon optimizer for axis-aligned fish capture. Goal: maximize (mackerels - sardines + 1).
+  
+  KEY INSIGHT: The optimal solution likely uses small, tight axis-aligned rectangles around dense mackerel clusters.
+  
+  SEARCH STRATEGY (encodes in EVOLVE-BLOCK C++ code):
+  
+  1. READ INPUT: Parse all fish positions (5000 mackerels, 5000 sardines).
+  
+  2. BRUTE-FORCE SMALL RECTANGLES (most promising):
+     - Try all rectangles of size 1x1, 1x2, 2x1, 2x2, 3x3 around each mackerel
+     - For each rectangle, count enclosed mackerels (M) and sardines (S)
+     - Score = M - S + 1 (only if M >= S)
+     - Track best rectangle
+  
+  3. EXPAND SUCCESSFUL RECTANGLES:
+     - If a rectangle scores well, try expanding it by 1 unit in each direction
+     - Continue expansion while score improves
+  
+  4. TRY MULTI-RECTANGLE SOLUTIONS:
+     - Try combining 2-3 non-overlapping rectangles
+     - Score as sum of individual rectangle scores
+  
+  5. LARGE RECTANGLE SEARCH (fallback):
+     - If small rectangles don't beat the seed, try larger rectangles (up to 100x100)
+     - Sample 100 random center points, expand to capture nearby fish
+  
+  6. VALIDATION:
+     - Ensure 4 <= vertices <= 1000, perimeter <= 400,000, integer coords in [0,100000]
+     - Output valid polygon
+  
+  Tools:
+  - edit_solution: Replace EVOLVE-BLOCK with complete C++ implementing rectangle search
+  - evaluate_solution: Run C++ program, get score
+  - probe_solution: Use for quick testing of candidate rectangles before full eval
+  - finish: Submit when you have a working rectangle search
+  
+  CONSTRAINTS: Total time < 2.0s per evaluation. Prioritize small rectangles (O(1) counting) over large ones.
+skill_description: Axis-aligned rectangle brute-force search. Try all small rectangles around mackerels, expand successful ones, combine multiple rectangles.
+skill_body: |
+  # Rectangle Search Strategy for Polygon Optimization
+  
+  ## Problem Understanding
+  - We need axis-aligned polygons (edges parallel to x or y axes)
+  - Score = (mackerels inside) - (sardines inside) + 1
+  - Maximum 1000 vertices, perimeter <= 400,000
+  
+  ## Strategy: Small Rectangle Brute Force
+  
+  ### Phase 1: Try 1x1, 1x2, 2x1, 2x2 Rectangles
+  For each mackerel position (x, y):
+  - Try rectangles with bottom-left corners at (x, y), (x-1, y), (x, y-1), (x-1, y-1)
+  - For each rectangle, count fish inside using KD-tree (O(log N) per rectangle)
+  - Keep rectangles where M >= S
+  
+  ### Phase 2: Expand Successful Rectangles
+  For each rectangle with score > 0:
+  - Try expanding right by 1 unit
+  - Try expanding left by 1 unit  
+  - Try expanding up by 1 unit
+  - Try expanding down by 1 unit
+  - Keep expansions that improve score
+  
+  ### Phase 3: Combine Multiple Rectangles
+  - Try pairing non-overlapping rectangles
+  - Total score = sum of individual scores
+  - Convert union to polygon vertices
+  
+  ### Phase 4: Fallback Large Rectangle
+  - If no small rectangle beats seed, sample 100 random points
+  - For each, try rectangle of size up to 100x100
+  - Pick best
+  
+  ### Phase 5: Output
+  - Ensure valid polygon format (4-1000 vertices)
+  - Integer coordinates in [0, 100000]
+  - Perimeter <= 400,000
+  
+  ## C++ Implementation Notes
+  - Use KD-tree for O(log N) rectangle counting
+  - Prioritize small rectangles (most likely to be optimal)
+  - Total evaluations < 2.0 seconds
+tool_descriptions:
+  edit_solution: 'Replace EVOLVE-BLOCK with C++ implementing rectangle brute-force search:
+  
+  1. Read all fish positions
+  
+  2. Try all 1x1, 1x2, 2x1, 2x2, 3x3 rectangles around each mackerel
+  
+  3. For each candidate, count M and S using KD-tree
+  
+  4. Expand successful rectangles in 4 directions
+  
+  5. Try combining 2-3 non-overlapping rectangles
+  
+  6. Fallback: sample 100 random centers, try large rectangles
+  
+  7. Output best valid polygon (< 2.0s)'
+  evaluate_solution: Run C++ program. Returns score (mackerels-sardines+1), validity, and remaining evaluations (budget=30). Each run has ~2.0s search window.
+  probe_solution: Test candidate rectangles cheaply - useful for ranking before full evaluation.
+  finish: End when you have a working rectangle brute-force search.
+sampling:
+  temperature: 0.9
+  top_p: 0.95
+  top_k: 30
+  max_tokens: 10240
+agent:
+  max_iterations: 60
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 15000
+new_tools:
+- name: count_rect
+  description: Count mackerels and sardines inside an axis-aligned rectangle [x1, x2] x [y1, y2]. Returns (mackerel_count, sardine_count).
+  input_schema:
+    type: object
+    properties:
+      x1:
+        type: integer
+      y1:
+        type: integer
+      x2:
+        type: integer
+      y2:
+        type: integer
+  implementation_py: |
+    def run(ctx, args):
+        x1 = args.get("x1", 0)
+        y1 = args.get("y1", 0)
+        x2 = args.get("x2", 100000)
+        y2 = args.get("y2", 100000)
+        
+        # Ensure valid bounds
+        x1, x2 = min(x1, x2), max(x1, x2)
+        y1, y2 = min(y1, y2), max(y1, y2)
+        
+        if x1 >= x2 or y1 >= y2:
+            return {"mackerel_count": 0, "sardine_count": 0}
+        
+        # Use KD-tree to count fish in rectangle
+        indices = []
+        query_rect_indices_cache_kdtree = []
+        query_kdtree_rectangle(fish_kdtree_root, x1, x2, y1, y2, indices)
+        
+        m_count = 0
+        s_count = 0
+        for idx in indices:
+            fish = all_fish_structs[idx]
+            if fish.type == 1:
+                m_count += 1
+            else:
+                s_count += 1
+        
+        return {"mackerel_count": m_count, "sardine_count": s_count}
+- name: try_small_rect
+  description: Try all small rectangles (1x1 to 3x3) around a given mackerel position and return the best scoring rectangle.
+  input_schema:
+    type: object
+    properties:
+      mx:
+        type: integer
+      my:
+        type: integer
+  implementation_py: |
+    def run(ctx, args):
+        mx = args.get("mx", 0)
+        my = args.get("my", 0)
+        
+        best_rect = None
+        best_score = -float('inf')
+        
+        # Try rectangles of size up to 3x3 centered near (mx, my)
+        for size in [1, 2, 3]:
+            for dx in range(-size+1, size):
+                for dy in range(-size+1, size):
+                    x1 = max(0, mx + dx - size + 1)
+                    x2 = min(100000, mx + dx + size)
+                    y1 = max(0, my + dy - size + 1)
+                    y2 = min(100000, my + dy + size)
+                    
+                    if x1 >= x2 or y1 >= y2:
+                        continue
+                    
+                    result = ctx.call_tool("count_rect", {"x1": x1, "y1": y1, "x2": x2, "y2": y2})
+                    m, s = result.get("mackerel_count", 0), result.get("sardine_count", 0)
+                    score = m - s + 1 if m >= s else -float('inf')
+                    
+                    if score > best_score:
+                        best_score = score
+                        best_rect = {"x1": x1, "y2": x2, "y3": y2, "y4": y1}
+        
+        return {"best_score": best_score, "best_rect": best_rect}
+new_skills:
+- name: rectangle-search-playbook
+  description: Brute-force small axis-aligned rectangles around mackerels, expand successful ones, combine multiple rectangles.
+  body: |
+    # Rectangle Search Playbook for Fish Capture Optimization
+    
+    ## Core Strategy
+    - The optimal solution likely uses small, tight rectangles around dense mackerel clusters
+    - Avoid large rectangles that capture many sardines
+    
+    ## Step 1: Try Small Rectangles (1x1 to 3x3)
+    For each mackerel position (mx, my):
+    - Try rectangles with bottom-left corners offset by -size+1 to +size in each direction
+    - For each candidate, use count_rect tool to get (M, S)
+    - Score = M - S + 1 (only consider M >= S)
+    - Track the best rectangle found
+    
+    ## Step 2: Expand Best Rectangles
+    For each promising rectangle (M >= S):
+    - Try expanding right by 1 unit: x2_new = x2 + 1
+    - Try expanding left by 1 unit: x1_new = x1 - 1
+    - Try expanding up by 1 unit: y2_new = y2 + 1
+    - Try expanding down by 1 unit: y1_new = y1 - 1
+    - Use count_rect to score each expansion
+    - Keep expansions that improve score
+    
+    ## Step 3: Combine Multiple Rectangles
+    - If you found 2+ non-overlapping rectangles with good scores
+    - Try combining them into one polygon
+    - Total score = sum of individual scores
+    
+    ## Step 4: Fallback Large Rectangle
+    - If no small rectangle beats the seed
+    - Sample 100 random points in [0, 100000]
+    - For each, try rectangles of size up to 50x50
+    - Pick the best one
+    
+    ## Step 5: Output Valid Polygon
+    - Convert rectangle(s) to polygon vertices
+    - Ensure: 4 <= vertices <= 1000, perimeter <= 400,000, coords in [0, 100000]
+    - Output in format: m then m lines of "x y"
+    
+    ## Key Success Factors
+    - Small rectangles = fewer sardines captured
+    - Focus on mackerel-rich regions first
+    - Use count_rect for fast scoring (O(log N) via KD-tree)
+    - Limit total search time to < 2.0 seconds
+new_middlewares:
+- name: rectangle_focus
+  hook: before_model
+  description: Remind solver to focus on small axis-aligned rectangles around mackerels
+  implementation_py: |
+    def before_model(hook_input):
+        return "Focus on small axis-aligned rectangles (1x1 to 5x5) around mackerel positions. Use count_rect to quickly score candidates. Expand successful rectangles. Combine non-overlapping rectangles."

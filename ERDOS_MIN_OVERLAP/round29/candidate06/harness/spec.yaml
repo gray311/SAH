@@ -1,0 +1,222 @@
+schema: h2spec/1.0
+system_prompt: |
+  Erdos C5 problem: Find h: [0,2]->[0,1] minimizing max_k integral h(x)(1-h(x+k))dx.
+  
+  Current best: C5 <= 0.38092303510845016 (combined_score = 1.0).
+  GOAL: combined_score > 1.0.
+  
+  ROOT CAUSE: The seed optimizer's hyperparameter search is insufficient. The optimizer needs STRUCTURAL CHANGES to the step function h, not just hyperparameter tuning.
+  
+  STRATEGY:
+  1. FIRST: Call mutate_h_structure to generate structurally different step functions (shift peaks, split intervals, merge regions).
+  2. Use probe_solution to screen candidates (cheap, ~10s per candidate).
+  3. Call evaluate_solution on top 2-3 candidates with c5_bound < 0.375.
+  4. ONLY if no improvement after 2 structural searches, THEN tune hyperparameters (num_intervals, learning_rate, penalty_strength).
+  
+  KEY: Structural search (changing h's shape) is MORE important than hyperparameter tuning.
+skill_description: |
+  Focus on structural mutations of h (shift peaks, split/merge regions). Use mutate_h_structure to generate diverse step functions, screen with probe, evaluate top candidates.
+skill_body: |
+  # Structural Search for Erdos C5
+  
+  ## Phase 1: Structural Mutation (PRIMARY STRATEGY)
+  
+  1. CALL mutate_h_structure(original_h) - this creates NEW step functions by:
+     - Shifting existing peaks left/right
+     - Splitting wide peaks into narrower peaks
+     - Merging nearby peaks
+     - Adding/removing peaks
+  
+  2. CALL probe_solution on each new h to get approximate c5_bound
+  
+  3. Keep candidates with c5_bound < 0.375
+  
+  4. CALL evaluate_solution on BEST 2 candidates
+  
+  5. If no improvement: Repeat Phase 1 with different mutation types
+  
+  ## Phase 2: Hyperparameter Tuning (LAST RESORT)
+  
+  Only if Phase 1 fails 2x:
+  - Vary num_intervals: 400, 800, 1600
+  - Vary penalty_strength: 40, 80, 120
+  - Vary learning_rate: 0.001, 0.005, 0.01
+  
+  ## Critical Rules
+  - ALWAYS try structural mutations FIRST
+  - NEVER waste evals on hyperparameter tuning before trying 2x structural search
+  - Use probe_solution to screen before full evaluation
+  - Track all c5_bound values to avoid redundant searches
+tool_descriptions:
+  edit_solution: |
+    Modify optimizer hyperparameters: num_intervals (400-3200), base_learning_rate (0.001-0.02), 
+    penalty_strength (40-120), num_steps (30000-60000). Only use after structural search fails.
+  evaluate_solution: |
+    Full 59000-step optimization. Returns combined_score = 0.38092303510845016 / c5_bound.
+    combined_score > 1.0 means new record. Use probe_solution first to filter.
+  probe_solution: |
+    Fast approximate evaluation (500 intervals). Cheap (~10s), separate budget (30 probes).
+    Use to screen candidates before full evaluation. Keep those with c5_bound < 0.375.
+  finish: |
+    Submit when combined_score > 1.0 (c5_bound < 0.38092303510845016).
+sampling:
+  temperature: 0.9
+  top_p: 0.95
+  top_k: 30
+agent:
+  max_iterations: 60
+middleware:
+  budget_reminder_from_left: 10
+  long_tool_output_max_chars: 10000
+new_tools:
+  - name: mutate_h_structure
+    description: |
+      Generate structurally different step functions by mutating an input h. Operations:
+      - shift: move all values left/right by delta
+      - split: divide a wide peak region into two narrower peaks
+      - merge: combine two nearby peaks
+      - add_peak: insert a new narrow peak
+      - remove_peak: eliminate a peak region
+      
+      All outputs satisfy integral(h)=1 and h in [0,1]. Use probe_solution to screen.
+    input_schema:
+      type: object
+      properties:
+        original_h:
+          type: array
+          items:
+            type: number
+        mutation_type:
+          type: string
+          enum: [shift, split, merge, add_peak, remove_peak, random_mixture]
+        mutation_param:
+          type: number
+          default: 0.1
+      required:
+        - original_h
+    implementation_py: |
+      def run(ctx, args):
+          import numpy as np
+          original_h = np.array(args['original_h'])
+          N = len(original_h)
+          dx = 2.0 / N
+          
+          def normalize_and_clip(h_arr):
+              h_sum = np.sum(h_arr) * dx
+              if h_sum < 1e-8:
+                  h_sum = 1e-8
+              h_norm = h_arr / (h_sum * dx)
+              h_norm = np.clip(h_norm, 0.001, 1.0)
+              h_norm = h_norm / (np.sum(h_norm) * dx)
+              return h_norm
+          
+          def compute_c5(h_arr):
+              h_padded = np.pad(h_arr, (0, N))
+              j_padded = np.pad(1.0 - h_arr, (0, N))
+              corr = np.fft.ifft(np.fft.fft(h_padded) * np.conj(np.fft.fft(j_padded))).real
+              return float(np.max(corr * dx))
+          
+          candidates = []
+          
+          # Shift mutations (3 variants)
+          for delta in [args['mutation_param'], -args['mutation_param'], 0.5]:
+              h_shifted = original_h.copy()
+              h_shifted = np.roll(h_shifted, -int(delta * N))
+              h_shifted = normalize_and_clip(h_shifted)
+              c5 = compute_c5(h_shifted)
+              candidates.append({'h': h_shifted.tolist(), 'c5_bound': c5, 'type': f'shift_{delta:.2f}'})
+          
+          # Split mutation (split at 50% width)
+          if np.sum(original_h > 0.1) > 10:
+              nonzero = original_h > 0.1
+              indices = np.where(nonzero)[0]
+              if len(indices) > 1:
+                  mid = (indices[0] + indices[-1]) // 2
+                  h_split = original_h.copy()
+                  h_split[mid-5:mid+5] = 0.0
+                  h_split = normalize_and_clip(h_split)
+                  c5 = compute_c5(h_split)
+                  candidates.append({'h': h_split.tolist(), 'c5_bound': c5, 'type': 'split'})
+          
+          # Add peak mutation
+          h_add = original_h.copy()
+          center = N // 2
+          width = 5
+          h_add[center-3:center+4] += 3.0
+          h_add = normalize_and_clip(h_add)
+          c5 = compute_c5(h_add)
+          candidates.append({'h': h_add.tolist(), 'c5_bound': c5, 'type': 'add_peak'})
+          
+          # Remove peak mutation
+          h_remove = original_h.copy()
+          peak_idx = np.argmax(original_h)
+          h_remove[peak_idx-3:peak_idx+4] *= 0.5
+          h_remove = normalize_and_clip(h_remove)
+          c5 = compute_c5(h_remove)
+          candidates.append({'h': h_remove.tolist(), 'c5_bound': c5, 'type': 'remove_peak'})
+          
+          return {'candidates': candidates, 'num_candidates': len(candidates)}
+new_skills:
+  - name: structural-mutation-strategy
+    description: |
+      Prioritize structural mutations over hyperparameter tuning. Generate diverse step functions by transforming existing ones.
+    body: |
+      # Structural Mutation Strategy for Erdos C5
+      
+      ## Core Principle
+      The optimizer's initial configurations and hyperparameters are likely near a local optimum.
+      STRUCTURAL CHANGES to h (shift, split, merge, add/remove peaks) can escape this optimum.
+      
+      ## Workflow
+      
+      1. START: Get the current best h (from seed or previous iterations)
+      
+      2. MUTATE: Call mutate_h_structure with different mutation types:
+         - shift: Move the entire function left/right
+         - split: Divide wide peaks into narrower ones
+         - add_peak: Insert a new peak
+         - remove_peak: Eliminate a suboptimal peak
+      
+      3. SCREEN: Use probe_solution on each mutated h (cheap, ~10s each)
+      
+      4. EVALUATE: Call evaluate_solution on the BEST 2 candidates (lowest c5_bound)
+      
+      5. ITERATE: If no improvement, repeat with different mutation types
+      
+      6. LAST RESORT: Only after 2 failed structural searches, tune hyperparameters
+      
+      ## Why This Works
+      - Structural changes can escape local optima that hyperparameter tuning cannot
+      - The C5 objective is non-convex; different peak arrangements yield very different results
+      - The seed optimizer's 15 patterns are limited; structural mutation generates truly new configurations
+new_middlewares:
+  - name: structural_first
+    hook: before_model
+    description: |
+      Middleware that enforces structural mutation-first strategy. Reminds executor to try structural mutations before hyperparameter tuning.
+    implementation_py: |
+      def before_model(hook_input):
+          history = hook_input.get('history', [])
+          
+          # Count how many times we've tried structural mutation vs hyperparameter tuning
+          structural_count = 0
+          hp_count = 0
+          
+          for turn in history:
+              tools_used = turn.get('tools_used', [])
+              if 'mutate_h_structure' in str(tools_used):
+                  structural_count += 1
+              if 'edit_solution' in str(tools_used):
+                  hp_count += 1
+          
+          # If we've done hyperparameter tuning but not structural mutation, remind
+          if hp_count > structural_count:
+              return 'WARNING: You have tuned hyperparameters but haven\'t tried structural mutations yet. Structural changes are more likely to escape local optima. Call mutate_h_structure first.'
+          
+          # If we've done 2 structural searches but no evaluation, remind
+          if structural_count >= 2:
+              eval_count = sum(1 for turn in history if 'evaluate_solution' in str(turn.get('tools_used', [])))
+              if eval_count == 0:
+                  return 'You have called mutate_h_structure twice but haven\'t evaluated any candidates. Call evaluate_solution on the best candidates from mutate_h_structure results.'
+          
+          return None

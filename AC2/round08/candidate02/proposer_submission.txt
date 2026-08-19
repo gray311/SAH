@@ -1,0 +1,263 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are an expert in functional analysis, harmonic analysis, and numerical optimization. Your task: maximize C2 = ||f ★ f||_2^2 / ((∫f)^2 ||f ★ f||_∞) for the second autocorrelation inequality.
+  
+  - Theoretical upper bound: 1.0 (Young's inequality)
+  - Current best in literature: 0.8963 (step functions)
+  - Target: surpass 0.8963
+  
+  CRITICAL INSIGHTS:
+  
+  1. The seed uses 400 intervals for FFT-based convolution. Higher resolution = more accurate but slower.
+  2. Step functions are not the only path to improvement. Consider:
+     - Finer discretization (1000+ intervals)
+     - Different function families (splines, mixtures, Fourier bases)
+     - Multi-scale optimization (coarse-to-fine)
+     - Symmetry exploitation (even functions reduce complexity)
+  
+  3. NUMERICAL STABILITY:
+     - Convolution via FFT: O(n log n) but discretization error scales with n
+     - Use padding: pad f to 2n points before FFT to avoid boundary artifacts
+     - Normalization: ensure ∫f > 0 and f ≥ 0 (use softplus or exp transformations)
+  
+  4. OPTIMIZATION STRATEGY:
+     - Start with coarse discretization (200-400 intervals)
+     - Refine promising solutions with finer discretization (800-1600 intervals)
+     - Use analytical gradients when possible (symmetry, even functions)
+     - Try multiple initialization strategies (not just hardcoded patterns)
+  
+  WORKFLOW:
+  1. CALL analyze_discretization_quality to assess current numerical setup
+  2. Edit to improve discretization or try new function representation
+  3. CALL analyze_discretization_quality AGAIN to verify improvements
+  4. Probe variants to rank
+  5. Evaluate top 1-2 candidates
+  
+  TOOLS:
+  - analyze_discretization_quality: Analyze numerical properties of current discretization
+  - pattern_mutator: Generate mutated function patterns with mathematical awareness
+  - edit_solution: Create new function implementations
+  - probe_solution: Cheap ranking (~10s, separate budget)
+  - evaluate_solution: Full score (~100s)
+  - finish: End when done
+skill_description: C2 maximization via improved discretization and diverse function representations. Use analyze_discretization_quality to guide resolution choices, not just step-verification.
+skill_body: |
+  # C2 Maximization: Beyond Step Functions
+  
+  ## Critical Realizations
+  
+  The seed program already creates valid step functions. The issue is NOT verification - it's NUMERICAL OPTIMIZATION.
+  
+  ## Key Strategies
+  
+  ### 1. Discretization Resolution
+  
+  - SEED uses 400 intervals: moderate accuracy
+  - Try 800-1600 intervals: better accuracy, slower
+  - Use analyze_discretization_quality to decide optimal resolution
+  
+  ### 2. Function Representation Diversity
+  
+  Don't just tweak step patterns. Explore:
+  - Gaussian mixtures
+  - Spline-based functions
+  - Fourier coefficient optimization
+  - Piecewise polynomial (not linear!)
+  
+  ### 3. Optimization Techniques
+  
+  - **Multi-scale**: Optimize on coarse grid, refine on fine grid
+  - **Symmetry**: Use even functions f(x) = f(-x) to reduce parameters
+  - **Normalization**: Scale f so ∫f = 1 for fair comparison
+  
+  ## Workflow
+  
+  1. Call analyze_discretization_quality FIRST
+  2. Based on feedback, edit discretization or function representation
+  3. Call analyze_discretization_quality to verify changes
+  4. Probe 3-5 variants
+  5. Evaluate best 1-2
+  
+  ## Common Pitfalls
+  
+  - Wasting evaluations on same discretization
+  - Not trying different function families
+  - Ignoring numerical stability (padding, normalization)
+  - Over-optimizing coarse discretization (local minima)
+tool_descriptions:
+  edit_solution: |
+    Change code in EVOLVE-BLOCK. You can modify:
+    - Discretization: num_intervals (200-2000)
+    - Learning rate and steps: lr (0.01-1.0), num_steps (1000-100000)
+    - Initialization: _create_step_initializer, or entirely new function representations
+    - Optimization strategy: gradient steps, annealing schedules
+    
+    For new function representations:
+    - Gaussian: f = jnp.exp(-((x - mu)/sigma)**2)
+    - Spline: Use B-spline basis with optimized coefficients
+    - Piecewise polynomial: f = jnp.piecewise(x, [xids], [poly1, poly2, ...])
+    
+    Always ensure f(x) >= 0 and use numerical stability practices (padding, normalization).
+  evaluate_solution: |
+    Run full evaluator. Returns combined_score. Use sparingly (max ~20 total). Only evaluate after probing and ensuring good discretization.
+  probe_solution: |
+    Cheap score on subsampled data (~10s). Separate budget (~30). Use for ranking variants. NOT comparable to full scores.
+  finish: |
+    End the session. Call when budget exhausted or no improvement possible.
+sampling:
+  temperature: 1.1
+  top_p: 0.95
+  top_k: 30
+  max_tokens: 16000
+agent:
+  max_iterations: 80
+middleware:
+  budget_reminder_from_left: 2
+  long_tool_output_max_chars: 18000
+new_tools:
+- name: analyze_discretization_quality
+  description: |
+    Analyze the current discretization setup and provide numerical quality assessment.
+    Extracts num_intervals from code, checks for padding/normalization, and recommends improvements.
+    Returns current_intervals, recommended_intervals, has_padding (bool), has_normalization (bool),
+    discretization_quality_score (0-10). Use this BEFORE edits to ensure numerical accuracy.
+    This tool helps decide whether to increase/decrease resolution and whether to add stability fixes.
+    Very cheap to run - call multiple times during exploration.
+  input_schema:
+    type: object
+    properties: {}
+  implementation_py: |
+    def run(ctx, args):
+        code = ctx.get_program()
+        import re
+        
+        # Extract num_intervals
+        interval_match = re.search(r'num_intervals:\s*(\d+)', code)
+        current_intervals = int(interval_match.group(1)) if interval_match else 400
+        
+        # Check for padding
+        has_padding = 'pad' in code.lower() and ('fft' in code.lower() or 'convolution' in code.lower())
+        
+        # Check for normalization
+        has_normalization = ('int_f' in code or 'sum(f' in code) and ('scale' in code.lower() or 'norm' in code.lower())
+        
+        # Check interval adequacy based on pattern complexity
+        pattern_complexity = 0
+        if '1.42' in code or '1.52' in code or '1.62' in code:
+            pattern_complexity += 1
+        if 'piecewise' in code.lower() or 'where' in code:
+            pattern_complexity += 2
+        if 'gaussian' in code.lower() or 'exp' in code:
+            pattern_complexity += 1
+        
+        # Recommended intervals: more complex = more intervals
+        if pattern_complexity >= 3:
+            recommended_intervals = 1200
+        elif pattern_complexity >= 2:
+            recommended_intervals = 800
+        elif current_intervals < 400:
+            recommended_intervals = max(400, current_intervals * 2)
+        else:
+            recommended_intervals = 600
+        
+        # Quality score: better if intervals match complexity and has stability
+        stability_bonus = 1.0 if has_padding else 0.6
+        resolution_bonus = 1.0 if recommended_intervals <= current_intervals <= recommended_intervals * 1.5 else 0.7
+        
+        quality_score = min(1.0, stability_bonus * resolution_bonus)
+        
+        return {
+            'current_intervals': current_intervals,
+            'recommended_intervals': recommended_intervals,
+            'has_padding': has_padding,
+            'has_normalization': has_normalization,
+            'discretization_quality_score': quality_score,
+            'pattern_complexity': pattern_complexity,
+            'recommendation': f"Consider {recommended_intervals} intervals" + ("" if has_padding else " and add FFT padding"),
+            'action': "increase_resolution" if current_intervals < recommended_intervals * 0.8 else "decrease_resolution" if current_intervals > recommended_intervals * 1.2 else "fine-tune"
+        }
+new_skills:
+- name: discretization-guide
+  description: Playbook for numerical optimization and discretization choices in C2 maximization. Focus on resolution, stability, and function diversity.
+  body: |
+    # Discretization and Numerical Optimization Guide
+    
+    ## Understanding the Trade-offs
+    
+    Discretization resolution (num_intervals) affects:
+    - **Accuracy**: More intervals = more accurate convolution via FFT
+    - **Speed**: O(n log n) but constant factor grows with n
+    - **Local minima**: Coarse discretization traps optimization in suboptimal solutions
+    
+    ## Guidelines by Strategy
+    
+    ### Simple Step Functions
+    - 400-600 intervals sufficient
+    - Focus on pattern diversity, not resolution
+    
+    ### Complex Piecewise Functions
+    - 800-1000 intervals recommended
+    - Each region needs adequate sampling
+    
+    ### Continuous/Differentiable Functions
+    - 1200+ intervals for accurate derivatives
+    - Consider analytic solutions where possible
+    
+    ### Multi-scale Approach
+    1. Start: 200-400 intervals, many iterations
+    2. Transition: 600-800 intervals
+    3. Refine: 1000-1600 intervals, local search
+    
+    ## Stability Checklist
+    
+    - [ ] FFT padding: pad to 2× natural size before FFT
+    - [ ] Non-negativity: f(x) >= 0 (use softmax, exp, or abs+epsilon)
+    - [ ] Normalization: scale so ∫f = 1 for fair C2 comparison
+    - [ ] Boundary handling: convolution boundary artifacts
+    - [ ] Numerical precision: use jnp.float64 for critical computations
+    
+    ## Common Errors to Avoid
+    
+    - Using 200 intervals for complex functions (inaccurate)
+    - Forgetting FFT padding (boundary artifacts)
+    - Not normalizing (scaling effects on C2)
+    - Staying too long on coarse discretization (local minima)
+    
+    ## When to Call analyze_discretization_quality
+    
+    - Before every major edit
+    - When probes show unexpected behavior
+    - When switching function representations
+    - To decide next resolution level in multi-scale approach
+new_middlewares:
+- name: nudge_toward_diversity
+  hook: before_model
+  description: |
+    Middleware that encourages exploring different function representations and discretizations.
+    Fires after a few iterations without improvement to push the solver out of local patterns.
+  implementation_py: |
+    def before_model(hook_input):
+        state = hook_input.get("state", {})
+        iteration = state.get("iteration", 0)
+        num_intervals_history = state.get("num_intervals_history", [])
+        function_types_history = state.get("function_types_history", [])
+        
+        # After 15 iterations without interval diversity, suggest change
+        if iteration >= 15 and len(num_intervals_history) >= 3:
+            unique_intervals = len(set(num_intervals_history))
+            if unique_intervals < 2:
+                return "Consider trying a different discretization resolution. Current patterns may be stuck in local minima."
+        
+        # After 10 iterations without function diversity, suggest new representation
+        if iteration >= 10 and len(function_types_history) >= 2:
+            unique_types = len(set(function_types_history))
+            if unique_types == 1 and "step" in function_types_history[0].lower():
+                return "Try a completely different function representation: Gaussian mixture, spline, or Fourier basis."
+        
+        # Nudge toward higher resolution after successful initial optimization
+        if iteration >= 30 and num_intervals_history:
+            avg_intervals = sum(num_intervals_history) / len(num_intervals_history)
+            if avg_intervals < 600:
+                return f"Current resolution is low (~{int(avg_intervals)}). Consider increasing to 800-1200 intervals for better accuracy."
+        
+        return None

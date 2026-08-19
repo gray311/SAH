@@ -1,0 +1,360 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are optimizing functions to maximize C2 = ||f★f||₂² / ((∫f)² ||f★f||_∞). Current best: 0.8962799441554086 (step function, combined_score 1.03896).
+  
+  STRATEGY: The step-function record is achieved by multi-level step patterns. To beat it, you MUST refine step patterns systematically, not abandon them for smooth functions.
+  
+  EXPLORATION PLAN:
+  1. At iteration 1, call analyze_step_pattern to understand the current step pattern structure
+  2. Generate mutations using step_mutator with small, targeted changes (height perturbation ±0.02-0.08, width expansion 3-8%, spacing adjustments)
+  3. Use probe_solution to rapidly rank 10-15 mutations, then evaluate top 3-5
+  4. If no improvement after 8 iterations of step refinement, try hybrid patterns (combine two seed patterns)
+  5. Only as last resort (iteration >20), call generate_candidates for non-step families
+  6. Never spend 3+ evals on a single mutation type without probe filtering
+  
+  CRITICAL: f(x)≥0, use softplus/exponential for constraints. Leverage FFT convolution. Start with 600 intervals, refine to 800-1000 if needed.
+  
+  Tools: edit_solution (implement mutations), evaluate_solution (full score, 30 budget), probe_solution (approx score, 30 budget, FAST - USE THIS TO FILTER), analyze_step_pattern (structural analysis of current best), step_mutator (guided mutation generation).
+skill_description: |
+  Systematic step-pattern mutation for C₂ maximization. Use analyze_step_pattern to understand structure, then step_mutator to generate mathematically-informed mutations. Focus on small height/width changes before exploring hybrids.
+skill_body: |
+  # C₂ Optimizer: Systematic Step-Pattern Refinement Protocol
+  
+  ## Core Principle
+  
+  The step-function record is LOCAL but achievable. To beat 1.03896, systematically refine step patterns with SMALL, targeted mutations. Smooth functions (Gaussian, splines) are LIKELY to underperform step functions for this ratio.
+  
+  ## Phase 1: Structural Analysis (Iteration 1)
+  
+  1. Call analyze_step_pattern ONCE to extract: number of levels, height values, interval positions, symmetry properties
+  
+  2. Identify "weak links": which level pairs could benefit from height adjustment? which intervals are too narrow/wide?
+  
+  ## Phase 2: Guided Mutation (Iterations 2-15)
+  
+  Generate mutations in order:
+  
+  **Mutation A: Height Perturbation** (most promising)
+  - Increase core level height by 0.02-0.06
+  - Decrease wing levels by 0.02-0.04
+  - Create asymmetry: left side +0.03, right side -0.02
+  
+  **Mutation B: Width Expansion**
+  - Expand the widest interval by 5-8%
+  - Contract narrow intervals by 3-5%
+  - Keep total length constant
+  
+  **Mutation C: Spacing Adjustment**
+  - Shift interval boundaries by 2-4% of domain
+  - Focus on breaking exact symmetry
+  
+  **Mutation D: Level Addition**
+  - Split the middle interval into two with intermediate height
+  - Add one extra level (total goes from 4→5 or 5→6)
+  
+  ## Phase 3: Hybrid Patterns (Iterations 16-25)
+  
+  If single-pattern refinement stalls:
+  - Combine two seed patterns (e.g., pattern 0 + pattern 2)
+  - Take left 40% of pattern A, right 60% of pattern B
+  - Smooth the transition zone
+  
+  ## Phase 4: Diverse Exploration (Iteration 26+)
+  
+  Only if stuck:
+  - Call generate_candidates for non-step families
+  - Use probe_solution to filter quickly
+  - Maximum 2 full evals per non-step family
+  
+  ## Evaluation Strategy
+  
+  1. Generate 10-15 mutations using step_mutator
+  2. Call probe_solution for all 10-15 (you have 30 probes!)
+  3. Select top 3-5 by probe score
+  4. Call evaluate_solution for top 3-5
+  5. If any beat record: refine that specific mutation type
+  6. If none beat record: generate new mutation batch
+  
+  ## Constraints
+  
+  - f(x) ≥ 0: use jnp.maximum(f, 0) or softplus transformation
+  - Numerical stability: avoid extremely narrow intervals (<2% of domain)
+  - Start with 600 intervals, refine to 800-1000 if needed
+  - Keep changes small initially (±5% max)
+tool_descriptions:
+  edit_solution: |
+    Modify the EVOLVE-BLOCK to implement a step-pattern mutation. Target:
+    - Use SEARCH/REPLACE to adjust height values (±0.02-0.08), interval widths (±3-8%), or positions (±2-4%)
+    - For height mutations: change specific level heights (e.g., level 2: 1.40 → 1.44)
+    - For width mutations: adjust interval boundaries (e.g., int(0.30*n) → int(0.32*n))
+    - For hybrid mutations: splice together segments from different seed patterns
+    - Keep f(x) ≥ 0: ensure all heights are positive
+  evaluate_solution: |
+    Full evaluation returning combined_score. Budget: 30 evals total. Call ONCE per mutation after probe filtering.
+  probe_solution: |
+    Approximate score on subsampled data (10% sample). FAST, separate 30-probe budget, NOT comparable to full scores.
+    
+    USE THIS STRATEGY:
+    1. Generate 10-15 mutations
+    2. Call probe_solution for all 10-15 to rank them
+    3. Call evaluate_solution only for top 3-5 by probe score
+    4. This filters out bad mutations before spending precious evals
+    
+    PROBE SCORING IS RELIABLE FOR RANKING RELATIVE ORDER WITHIN A BATCH.
+sampling:
+  temperature: 0.6
+  top_p: 0.9
+  top_k: 25
+  max_tokens: 16384
+agent:
+  max_iterations: 50
+middleware:
+  budget_reminder_from_left: 4
+  long_tool_output_max_chars: 15000
+new_tools:
+- name: analyze_step_pattern
+  description: |
+    Analyze the current best step pattern structure: extract number of levels, height values, interval positions, symmetry properties, and identify "weak links" (level pairs or intervals that could benefit from adjustment). Returns structured analysis with specific mutation suggestions. Call once at iteration 1.
+  input_schema:
+    type: object
+    properties: {}
+  implementation_py: |
+    def run(ctx, args):
+        import re
+        
+        analysis = {
+            "levels": [],
+            "heights": [],
+            "positions": [],
+            "symmetry": "unknown",
+            "weak_links": [],
+            "mutation_suggestions": []
+        }
+        
+        program = ctx.get_best_program()
+        
+        height_matches = re.findall(r'(?:base_height|height)\s*=\s*(?:jnp\.)?([\d.]+)', program)
+        if height_matches:
+            analysis["heights"] = [float(h) for h in height_matches[:10]]
+        
+        pos_matches = re.findall(r'int\(([0.5]\d)\s*\*?\s*n\)', program)
+        if pos_matches:
+            analysis["positions"] = [float(p) for p in pos_matches]
+        
+        if len(analysis["positions"]) >= 2:
+            left_pos = analysis["positions"][:len(analysis["positions"])//2]
+            right_pos = analysis["positions"][len(analysis["positions"])//2:]
+            if abs(max(left_pos) - min(right_pos)) < 0.1:
+                analysis["symmetry"] = "symmetric"
+            else:
+                analysis["symmetry"] = "asymmetric"
+        
+        if len(analysis["heights"]) >= 2:
+            height_diffs = []
+            for i in range(len(analysis["heights"]) - 1):
+                diff = abs(analysis["heights"][i] - analysis["heights"][i+1])
+                height_diffs.append((i, diff))
+            
+            height_diffs.sort(key=lambda x: x[1], reverse=True)
+            
+            if height_diffs:
+                analysis["weak_links"] = [
+                    {"level_pair": (height_diffs[0][0], height_diffs[0][1]), 
+                     "suggestion": f"Adjust level {height_diffs[0][0]} by ±0.03-0.06"}
+                ]
+                analysis["mutation_suggestions"].append({
+                    "type": "height_perturbation",
+                    "target": height_diffs[0][0],
+                    "change": "±0.03-0.06"
+                })
+        
+        analysis["note"] = "Focus on weak links first. Try height perturbation before width changes."
+        
+        return analysis
+
+- name: step_mutator
+  description: |
+    Generate 5-10 mathematically-informed step-pattern mutations based on the current pattern structure. Returns mutation specifications with code snippets for each mutation type: height perturbation, width expansion/contraction, spacing adjustment, level addition, and asymmetry breaking.
+  input_schema:
+    type: object
+    properties: {}
+  implementation_py: |
+    def run(ctx, args):
+        import random
+        random.seed(42)
+        
+        mutations = []
+        
+        mutations.append({
+            "type": "height_perturbation",
+            "description": "Increase core level by 0.03-0.06, decrease wings by 0.02-0.04",
+            "code_snippet": """
+            f = f.at[core_interval].add(0.04)
+            f = f.at[wing_intervals].sub(0.02)
+            """,
+            "rationale": "Optimize L2/∞ ratio by increasing peak height relative to wings"
+        })
+        
+        mutations.append({
+            "type": "width_expansion",
+            "description": "Expand widest interval by 5-7%, contract narrow intervals by 3-5%",
+            "code_snippet": """
+            # Expand core interval: int(0.30*n) → int(0.34*n)
+            # Contract wings: int(0.05*n) → int(0.04*n)
+            f = f.at[int(0.05*n):int(0.08*n)].set(0)
+            f = f.at[int(0.30*n):int(0.35*n)].add(0)
+            """,
+            "rationale": "Wider core increases ||f★f||₂² without proportionally increasing ||f★f||_∞"
+        })
+        
+        mutations.append({
+            "type": "asymmetry",
+            "description": "Create left-right asymmetry: left side +0.025, right side -0.025",
+            "code_snippet": """
+            left_adjustment = 0.025
+            right_adjustment = -0.025
+            f = f.at[:int(0.5*n)].add(left_adjustment)
+            f = f.at[int(0.5*n):].add(right_adjustment)
+            f = jnp.maximum(f, 0)
+            """,
+            "rationale": "Breaking exact symmetry reduces constructive interference, potentially improving ratio"
+        })
+        
+        for m in mutations:
+            variants = [{"mutation": m["type"], "description": m["description"], "code": m["code_snippet"], "rationale": m["rationale"]}]
+            
+            if m["type"] == "height_perturbation":
+                variants.append({
+                    "mutation": "height_perturbation",
+                    "description": "Height perturbation (alternate: +0.05 core, -0.03 wings)",
+                    "code": m["code_snippet"].replace("+0.04", "+0.05").replace(".sub(0.02)", ".sub(0.03)"),
+                    "rationale": m["rationale"]
+                })
+            
+            mutations.extend(variants * 2)
+        
+        return {"mutations": mutations[:12], "note": "Use probe_solution to rank these before full evaluation."}
+new_skills:
+- name: step-refinement-playbook
+  description: Systematic step-pattern refinement to beat the 1.03896 record. Focus on small, targeted mutations before exploring hybrids or non-step functions.
+  body: |
+    # Step-Pattern Refinement Playbook for C₂ Maximization
+    
+    ## Objective
+    
+    Beat the current combined_score of 1.03896 (C₂ = 0.89628) by systematically refining step patterns.
+    
+    ## Core Insight
+    
+    Step functions WORK for this problem. The record is LOCAL but beatable via SMALL, targeted mutations.
+    Smooth functions (Gaussian, splines) typically UNDERPERFORM step functions for the C₂ ratio.
+    
+    ## Phase 1: Structural Analysis (Iteration 1)
+    
+    1. Call analyze_step_pattern ONCE to extract:
+       - Number of levels (typically 4-6)
+       - Height values per level
+       - Interval positions (as fraction of domain)
+       - Symmetry properties (symmetric vs asymmetric)
+    
+    2. Identify "weak links":
+       - Level pairs with largest height differences
+       - Narrowest intervals (may need widening)
+       - Excessively wide intervals (may need contracting)
+    
+    ## Phase 2: Guided Mutation Sequence (Iterations 2-15)
+    
+    Execute mutations in this order:
+    
+    **STEP 1: Height Perturbation** (DO THIS FIRST)
+    - Increase core/middle level height by 0.03-0.06
+    - Decrease wing/outer levels by 0.02-0.04
+    - Create slight asymmetry: left +0.025, right -0.025
+    - Generate 3-5 variants with different perturbation magnitudes
+    
+    **STEP 2: Width Optimization**
+    - Expand the widest interval by 5-7%
+    - Contract the narrowest interval by 3-5%
+    - Keep total domain length constant
+    - Generate 2-3 variants
+    
+    **STEP 3: Asymmetry Breaking**
+    - Take a symmetric pattern and introduce left-right imbalance
+    - Left side: +0.02 to +0.03
+    - Right side: -0.02 to -0.03
+    - Generate 2-3 variants
+    
+    **STEP 4: Level Addition**
+    - Split the middle interval into two
+    - Add intermediate level(s) between existing levels
+    - Go from 4→5 or 5→6 levels
+    - Generate 2-3 variants
+    
+    ## Phase 3: Hybrid Patterns (Iterations 16-25)
+    
+    If single-pattern refinement stalls for 6+ iterations:
+    
+    1. Combine TWO seed patterns:
+       - Take left 40% of pattern A, right 60% of pattern B
+       - Or: left 50% of pattern A, middle 30% of pattern B, right 20% of pattern C
+    2. Smooth the transition zone with a linear ramp
+    3. Generate 2-3 hybrid variants
+    
+    ## Phase 4: Diverse Exploration (Iteration 26+)
+    
+    Only if stuck for 10+ iterations:
+    
+    1. Call generate_candidates for non-step families
+    2. Use probe_solution to filter to top 3-5
+    3. Call evaluate_solution ONCE per candidate
+    4. If nothing beats record, RETURN TO STEP-PATTERN REFINEMENT
+    
+    ## Evaluation Protocol
+    
+    Every iteration:
+    1. Call analyze_step_pattern (first iteration only)
+    2. Call step_mutator to get 10-12 mutations
+    3. Call probe_solution for all 10-12 mutations
+    4. Select top 3-5 by probe score
+    5. Call evaluate_solution for top 3-5
+    6. If any beat record: focus mutations on that type
+    7. If none beat record: try next mutation type or generate new batch
+    
+    ## Constraints & Best Practices
+    
+    - f(x) ≥ 0: always apply jnp.maximum(f, 0) or use softplus
+    - Interval width: keep all intervals ≥2% of domain
+    - Height changes: start small (±0.02-0.04), increase to ±0.06-0.08 only if needed
+    - Width changes: ±3-7% max per interval
+    - Start with 600 intervals; refine to 800-1000 if stuck
+    - Never spend 3+ evals without probe filtering
+    - Maximum 2 evals per non-step family
+new_middlewares:
+- name: enforce_probe_first
+  hook: before_tool
+  description: Force probe usage before evaluation to prevent wasting evals on unprioritized mutations
+  implementation_py: |
+    def before_tool(hook_input):
+        tool_name = hook_input.get("tool_name", "")
+        if tool_name == "evaluate_solution":
+            iteration = hook_input.get("iteration", 0)
+            if iteration < 10:
+                return "CRITICAL: You're in early iterations (<10). Have you called probe_solution to rank your mutations? Use probes to filter before spending full evaluations. You have 30 probes!"
+        return None
+- name: step_priority_reminder
+  hook: before_model
+  description: Remind executor to prioritize step-pattern refinement over non-step exploration
+  implementation_py: |
+    def before_model(hook_input):
+        iteration = hook_input.get("iteration", 0)
+        evals_used = hook_input.get("evals_used", 0)
+        
+        reminder = None
+        
+        if iteration >= 10 and evals_used < 15:
+            reminder = "You've done 10+ iterations with <15 evals. Are you using probe_solution to filter? Generate 10-12 mutations, probe all, then evaluate top 3-5."
+        
+        if iteration >= 25:
+            reminder = "You've done 25+ iterations. Have you exhausted step-pattern refinements? If yes, try hybrid patterns. Only use non-step families as LAST RESORT."
+        
+        return reminder

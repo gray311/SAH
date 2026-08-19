@@ -1,0 +1,146 @@
+schema: h2spec/1.0
+new_tools:
+  - name: analyze_fish_layout
+    description: |
+      Analyze the fish positions in the first ~2000 input rows to identify mackerel clusters
+      and return coordinate ranges that form valid orthogonal polygon candidates.
+      Returns tight bounding boxes and their mackerel density scores.
+      Call once at start to anchor search to actual fish positions.
+    input_schema: {type: object, properties: {}}
+    implementation_py: |
+      def run(ctx, args):
+          names = ctx.list_task_inputs()
+          if not names:
+              return {"note": "no inputs"}
+          df = ctx.read_input_df(names[0], nrows=2000)
+          
+          mackerels = df[df['type'] == 1]
+          sardines = df[df['type'] == -1]
+          
+          if len(mackerels) == 0:
+              return {"boxes": []}
+          
+          # Tight bounding box of all mackerels in sample
+          boxes = []
+          boxes.append({
+              "label": "all_mackerels",
+              "min_x": int(mackerels['x'].min()),
+              "max_x": int(mackerels['x'].max()),
+              "min_y": int(mackerels['y'].min()),
+              "max_y": int(mackerels['y'].max()),
+              "mackerel_count": len(mackerels),
+              "perimeter_estimate": 2 * ((mackerels['x'].max() - mackerels['x'].min()) + (mackerels['y'].max() - mackerels['y'].min())),
+              "type": "box"
+          })
+          
+          # Split by x-median
+          mid_x = int(mackerels['x'].median())
+          left_m = mackerels[mackerels['x'] <= mid_x]
+          right_m = mackerels[mackerels['x'] > mid_x]
+          
+          if len(left_m) > 0:
+              boxes.append({
+                  "label": "mackerels_left",
+                  "min_x": int(left_m['x'].min()),
+                  "max_x": int(left_m['x'].max()),
+                  "min_y": int(left_m['y'].min()),
+                  "max_y": int(left_m['y'].max()),
+                  "mackerel_count": len(left_m),
+                  "perimeter_estimate": 2 * ((left_m['x'].max() - left_m['x'].min()) + (left_m['y'].max() - left_m['y'].min())),
+                  "type": "box"
+              })
+          if len(right_m) > 0:
+              boxes.append({
+                  "label": "mackerels_right",
+                  "min_x": int(right_m['x'].min()),
+                  "max_x": int(right_m['x'].max()),
+                  "min_y": int(right_m['y'].min()),
+                  "max_y": int(right_m['y'].max()),
+                  "mackerel_count": len(right_m),
+                  "perimeter_estimate": 2 * ((right_m['x'].max() - right_m['x'].min()) + (right_m['y'].max() - right_m['y'].min())),
+                  "type": "box"
+              })
+          
+          return {"num_fish_analyzed": len(mackerels) + len(sardines), "mackerel_count": len(mackerels), "boxes": boxes}
+system_prompt: |
+  You are an expert C++ developer. Task: Build an orthogonal polygon enclosing mackerels while avoiding sardines.
+  Score = max(0, mackerels_inside - sardines_inside + 1). Maximize this.
+  
+  KEY STRATEGY: Anchored coordinate construction. The problem has structure - mackerels form spatial patterns.
+  Use the analyze_fish_layout tool at START to get bounding box candidates from actual data.
+  These boxes are high-quality anchors: they enclose real mackerels and have low perimeter.
+  
+  Search paradigm:
+  1. ANCHOR: Call analyze_fish_layout ONCE. Study its boxes - they're promising candidates
+  2. EXPAND: For each box, try extending by 5-20 units in each direction (stays orthogonal)
+  3. COMBINE: Consider unions of adjacent boxes (e.g., left and right boxes make an L-shape)
+  4. REFINE: Use probe_solution to compare shapes cheaply, then evaluate for final score
+  5. VERIFY: Ensure perimeter ≤400000, vertices ≤1000, coords 0-100000
+  
+  The seed program likely uses random search - this fails because it doesn't exploit the
+  geometric structure. Your improvements must be coordinate-anchored.
+
+skill_description: Build orthogonal polygons anchored to actual fish coordinates using analyze_fish_layout analysis.
+skill_body: |
+  # C++ Polygon Construction Strategy
+
+  ## Overview
+  The task wants an orthogonal polygon maximizing (mackerels - sardines + 1).
+  Random search is ineffective. Use data-driven coordinate anchors.
+
+  ## Step 1: Analysis (analyze_fish_layout)
+  - Call ONCE at the beginning
+  - Study the returned boxes: each has min_x, max_x, min_y, max_y
+  - These boxes enclose actual mackerels from the sample - excellent starting shapes!
+  - Note the perimeter estimates - ensure they stay ≤400000
+
+  ## Step 2: Generate Candidates (in C++)
+  From each box [x1,x2]×[y1,y2]:
+  - Base polygon: vertices (x1,y1)→(x2,y1)→(x2,y2)→(x1,y2)
+  - Perimeter = 2*(x2-x1 + y2-y1) - must be ≤400000
+  - Try expanding: [x1-5,x2+5]×[y1-5,y2+5] to catch more mackerels
+
+  ## Step 3: Multi-box strategies
+  - Combine left/right boxes horizontally: creates larger L-shape
+  - Check perimeter constraint when combining
+  - Consider vertical splits too
+
+  ## Step 4: Evaluation workflow
+  - Use probe_solution for quick comparison of multiple candidates
+  - Each probe costs nothing - exhaustively test variants
+  - Only call evaluate_solution for the top 2-3 candidates per iteration
+  - Keep track of best score
+
+  ## Step 5: Implementation tips
+  - Use fast coordinate hashing to count fish in O(1) per polygon
+  - Build a KD-tree or hash map of fish positions for O(log n) range queries
+  - Precompute all candidate boxes, then search within a tight time budget
+
+tool_descriptions:
+  edit_solution: |
+    Modify the C++ EVOLVE-BLOCK. For this task, changes should implement:
+    1. Pre-call analyze_fish_layout in main
+    2. Generate polygon candidates from its bounding boxes
+    3. Use KD-tree for efficient range queries
+    4. Score all candidates, output the best
+  evaluate_solution: |
+    Run the C++ program on the task evaluator. Returns combined_score (higher-is-better),
+    validity, errors, and evaluations remaining. Budget is limited (~20 evals).
+  probe_solution: |
+    Fast scoring on ~2000 rows of input. Does NOT consume evaluation budget.
+    Useful for comparing multiple polygon candidates quickly. Use it to narrow down
+    which full evaluations deserve to run.
+  finish: |
+    End when you've used most evaluations or exhausted ideas. Report the best polygon
+    construction approach and its score.
+
+sampling:
+  temperature: 0.4
+  top_p: 0.9
+  top_k: 15
+  max_tokens: 12000
+agent:
+  max_iterations: 40
+middleware:
+  budget_reminder_from_left: 4
+  long_tool_output_max_chars: 8000

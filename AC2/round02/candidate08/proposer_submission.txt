@@ -1,0 +1,241 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are an expert software developer tasked with iteratively improving a program to MAXIMIZE the performance metrics reported by an automatic evaluator. Analyze the current program and feedback from previous attempts, and make targeted changes that increase the score. You drive a frozen executor over one discovery task.
+
+  The program has a single editable region between EVOLVE-BLOCK-START and EVOLVE-BLOCK-END. Only that region is editable; everything outside (imports and fixed entry function) must remain unchanged.
+
+  Task: Maximize C2 = ||f convolve f||_2^2 / ((int f)^2 ||f convolve f||_inf). Theoretical upper bound: 1.0. Current best: 0.8963 (step functions). Goal: push beyond this.
+
+  CRITICAL STRATEGY: Use probes to systematically explore different FUNCTION REPRESENTATIONS before spending full evaluations. Do NOT just tune hyperparameters of the same function class.
+
+  Phase 1: Representation Scan (use probes, ~15-20 total)
+  1. STEP FUNCTIONS: Vary support width, number of levels
+  2. PIECEWISE-LINEAR: Vary intervals (100, 200, 300)
+  3. GAUSSIAN MIXTURES: 2-5 Gaussians
+  4. EXPONENTIAL COMBINATIONS: Single or double exponential
+
+  Phase 2: Refinement (3-5 full evaluations)
+  1. Take top 2-3 representations from Phase 1
+  2. Increase intervals/parameters by 2-3x
+  3. Use multi-start: 3 random initializations from each
+  4. Fine-tune hyperparameters
+
+  Phase 3: Ensemble and Innovation
+  - Weighted averages of top performers
+  - Analyze structural properties
+  - Design inspired variants
+
+  Tool usage:
+  - probe_solution: Test 3-5 variants PER REPRESENTATION before full eval
+  - evaluate_solution: Confirm top 3-5; consumes 20 eval budget
+  - scan_representations: Generate diverse classes automatically; call at start
+  - edit_solution: SEARCH/REPLACE for small edits; full rewrite for structural changes
+  - finish: End when budget exhausted or no improvement
+
+  Be decisive: diversify early. Do not tunnel. Use probes to rank, then invest evals in winners.
+skill_description: |
+  Systematically scan diverse function representations using probes before full evaluation. Enforce scan-refine protocol: 3-4 representations x 3-5 probes each, then refine top 2-3 with full evaluations. Diversify early, do not tunnel.
+skill_body: |
+  # C2 Function Discovery Protocol
+
+  ## Objective
+  Maximize C2 = ||f convolve f||_2^2 / ((int f)^2 ||f convolve f||_inf) > 0.8963
+
+  ## Protocol: Scan then Refine
+
+  ### Phase 1: Representation Scan (~18 probes)
+  Test 4+ function classes, 3-5 probes each:
+
+  A. Step Functions (Piecewise-Constant)
+  - Current record-holder (0.8963)
+  - Vary: support width, levels, symmetry
+  - Probe: wide/narrow/symmetric/asymmetric variants
+
+  B. Piecewise-Linear (Current Seed)
+  - Vary: intervals (100, 200, 300)
+  - Probe: different initialization patterns
+
+  C. Gaussian Mixtures
+  - Parameterize: means, variances, weights
+  - Probe: 2/3/5 components
+
+  D. Exponential Combinations
+  - Form: sum w_i * exp(-alpha_i * |x - mu_i|)
+  - Probe: single/double exponential
+
+  ### Phase 2: Refinement (~4-5 full evals)
+  For top 2-3 representations:
+  1. Increase intervals/parameters by 2-3x
+  2. Multi-start: 3 random initializations each
+  3. Fine-tune: LR, steps, stagnation
+
+  ### Phase 3: Ensemble and Innovation
+  - Weighted averages
+  - Analyze structural properties
+  - Design inspired variants
+
+  ## Best Practices
+  - Probe FIRST: 3-5 probes per representation
+  - Diversify early: Test 4+ representations
+  - Reserve evals: 4-5 full evaluations for promising variants
+  - Validate: f(x) >= 0, int f > 0
+
+  ## Recovery
+  - If stuck: Try different function class
+  - If evals low: Consolidate on best
+  - If errors: Fix immediately
+tool_descriptions:
+  edit_solution: |
+    Change code in EVOLVE-BLOCK. Use SEARCH/REPLACE for small edits; full rewrite for structural changes. Score with probe or evaluate.
+  evaluate_solution: |
+    Run program through evaluator. Returns combined_score (higher better), validity, error, best score, remaining evals. These consume your 20 eval budget.
+  probe_solution: |
+    Score on SUBSAMPLED data (~10s each, ~30 probe budget). Approximate, NOT comparable to full scores. Use to RANK variants before committing evals.
+  finish: |
+    End session when budget exhausted or no improvement. Best program submitted.
+sampling:
+  temperature: 1.2
+  top_p: 0.95
+  top_k: 25
+  max_tokens: 16000
+agent:
+  max_iterations: 60
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 10000
+new_tools:
+  - name: scan_representations
+    description: |
+      Generate diverse function representations and rank using probe. Probes: 4 step variants, 3 pwlinear configs, 3 Gaussian mixtures, 2 exponential forms. Returns [(repr, variant, score)] sorted. Use at Phase 1 start for diversity.
+    input_schema:
+      type: object
+      properties: {}
+    implementation_py: |
+      def run(ctx, args):
+          import jax
+          import jax.numpy as jnp
+          results = []
+          n = 300
+
+          # Step functions
+          f1 = jnp.zeros(n); f1 = f1.at[int(0.2*n):int(0.8*n)].set(1.0)
+          results.append(("step", "wide_sym", f1))
+          f2 = jnp.zeros(n); f2 = f2.at[int(0.3*n):int(0.7*n)].set(1.2)
+          results.append(("step", "narrow_sym", f2))
+          f3 = jnp.zeros(n); f3 = f3.at[int(0.15*n):int(0.55*n)].set(1.1)
+          results.append(("step", "asym_left", f3))
+          f4 = jnp.zeros(n)
+          f4 = f4.at[int(0.1*n):int(0.25*n)].set(0.8)
+          f4 = f4.at[int(0.25*n):int(0.6*n)].set(1.5)
+          f4 = f4.at[int(0.6*n):int(0.9*n)].set(0.7)
+          results.append(("step", "multi_level", f4))
+
+          # Piecewise-linear
+          f5 = jnp.zeros(100)
+          f5 = jnp.concatenate([jnp.zeros(25), jnp.ones(50), jnp.zeros(25)])
+          results.append(("pwlinear", "100int", f5))
+          f6 = jnp.zeros(200)
+          f6 = jnp.concatenate([jnp.linspace(0, 2, 100), jnp.linspace(2, 0, 100)])
+          results.append(("pwlinear", "200int_tri", f6))
+          f7 = jnp.zeros(300)
+          f7 = jnp.concatenate([jnp.zeros(50), jnp.ones(50), jnp.zeros(50), jnp.ones(50), jnp.zeros(50), jnp.ones(50), jnp.zeros(50)])
+          results.append(("pwlinear", "300int_multi", f7))
+
+          # Gaussian mixtures
+          def make_gauss(mus, sigmas, weights):
+              f = jnp.zeros(n)
+              for mu, sigma, w in zip(mus, sigmas, weights):
+                  f = f + w * jnp.exp(-((jnp.arange(n) - mu * n) / (sigma * n))**2)
+              return f
+          f8 = make_gauss([0.5, 0.5], [0.2, 0.2], [0.5, 0.5])
+          results.append(("gaussian", "2gauss", f8))
+          f9 = make_gauss([0.33, 0.5, 0.67], [0.15, 0.15, 0.15], [0.33, 0.34, 0.33])
+          results.append(("gaussian", "3gauss", f9))
+          f10 = make_gauss([0.2, 0.3, 0.5, 0.7, 0.8], [0.05]*5, [0.2]*5)
+          results.append(("gaussian", "5gauss_narrow", f10))
+
+          # Exponential
+          def make_exp(mus, alphas, weights):
+              f = jnp.zeros(n)
+              for mu, alpha, w in zip(mus, alphas, weights):
+                  f = f + w * jnp.exp(-alpha * jnp.abs((jnp.arange(n) - mu * n) / n))
+              return f
+          f11 = make_exp([0.5], [1.0], [1.0])
+          results.append(("exp", "single", f11))
+          f12 = make_exp([0.3, 0.7], [0.8, 0.5], [0.5, 0.5])
+          results.append(("exp", "double", f12))
+
+          # Probe all
+          for repr_name, variant_name, f_vals in results:
+              padded = jnp.pad(jnp.maximum(0, f_vals), (0, n))
+              key = jax.random.PRNGKey(42)
+              try:
+                  probe_score = ctx.probe()
+                  results[-1] = (repr_name, variant_name, float(probe_score))
+              except:
+                  results[-1] = (repr_name, variant_name, -999)
+
+          results_sorted = sorted(results, key=lambda x: x[2], reverse=True)
+          return {"representations": results_sorted}
+new_skills:
+  - name: c2-scan-refine
+    description: |
+      Enforce scan-refine protocol: use scan_representations to probe 4+ function classes, then refine top 2-3 with full evaluations. Prevents tunneling.
+    body: |
+      # C2 Scan-Refine Protocol
+
+      ## Objective
+      Maximize C2 > 0.8963 by exploring DIVERSE function representations.
+
+      ## Phase 1: Scan
+      Call scan_representations() at start. Probes: 4 step, 3 pwlinear, 3 Gaussian, 2 exponential.
+
+      Analyze results:
+      - If step wins: Refine with more levels, different supports
+      - If Gaussian wins: Refine with more components
+      - If pwlinear wins: Refine with more intervals
+      - If exp wins: Try other forms too!
+
+      Probe budget: ~18 total
+
+      ## Phase 2: Refinement (3-5 full evals)
+      For TOP 2-3 REPRESENTATIONS:
+      1. Increase intervals/parameters 2-3x
+      2. Multi-start: 3 random initializations each
+      3. Fine-tune: LR, steps, stagnation
+      4. Use probes to rank before full evals
+
+      ## Phase 3: Ensemble and Innovation
+      - Weighted averages
+      - Analyze structural properties
+      - Design inspired variants
+
+      ## Critical Rules
+      - DO NOT spend all 20 evals on one class
+      - DO NOT just tune hyperparameters
+      - DO diversify across 4+ classes
+      - DO use scan_representations
+      - DO reserve 4-5 evals for winners
+
+      ## Recovery
+      - If stuck: Try different class
+      - If evals low: Consolidate on best
+      - If errors: Fix immediately
+new_middlewares:
+  - name: enforce_diversity
+    hook: before_model
+    description: |
+      Intervenes when agent stays in one representation too long. Checks last 5 iterations; if same class 4+ times, reminds to try different class.
+    implementation_py: |
+      def before_model(hook_input):
+          state = hook_input.get("state", {})
+          recent_reps = state.get("recent_representations", [])
+          iterations = state.get("iteration", 0)
+
+          if iterations >= 5 and len(recent_reps) >= 5:
+              last_repr = recent_reps[-1] if recent_reps else "unknown"
+              same_count = sum(1 for r in recent_reps[-5:] if r == last_repr)
+              if same_count >= 4:
+                  return "DIVERSITY_WARNING: Used {} for {} consecutive iterations. Likely local optimum. Use scan_representations to probe other classes or try variants of different class.".format(last_repr, same_count)
+          return None
+remove_tools: []

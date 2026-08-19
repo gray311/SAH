@@ -1,0 +1,227 @@
+schema: h2spec/1.0
+system_prompt: |
+  Erdos minimum overlap problem (C5): Find h: [0,2]->[0,1] minimizing max_k integral h(x)(1-h(x+k))dx.
+
+  CONSTRAINT: integral(h) = 1 exactly. h values in [0,1].
+
+  Current best: C5 <= 0.38092303510845016 (combined_score = 1.0).
+
+  GOAL: Find h achieving c5_bound < 0.38092303510845016 (combined_score > 1.0).
+
+  WHY THE CURRENT HARNESS FAILS:
+  The current harness tries hyperparameter tuning of gradient descent, but for this
+  mathematical constant problem, gradient descent gets stuck because:
+  1. The landscape is complex with many local minima
+  2. 59000 steps per candidate is too slow to explore diverse patterns
+  3. Only 3 restarts limit initialization diversity
+
+  CORE STRATEGY: Analytical pattern screening + targeted structural refinement.
+
+  WORKFLOW:
+  1. CALL generate_ready_candidates (temperature=0.5) - inherited tool, returns 3 candidates
+  2. Find candidate with LOWEST analytical c5_bound (computed via FFT, exact)
+  3. CALL modify_best_pattern on that candidate to get refined variants
+  4. Find the best refined variant, CALL evaluate_solution
+  5. If combined_score > 1.0: CALL finish
+  6. If no improvement: repeat with temperature=0.8, then 1.2
+
+  DO NOT:
+  - Tune hyperparameters - waste of iterations
+  - Run gradient descent multiple times per candidate
+  - Use probe_solution instead of generate_ready_candidates (already has analytical scores)
+skill_description: |
+  Two-stage pattern search: generate_ready_candidates for initial patterns (analytical
+  screening), modify_best_pattern for structural refinement. Evaluate best candidates.
+  Temperature controls pattern diversity. Target: analytical c5_bound < 0.37.
+skill_body: |
+  # Two-Stage Pattern Search for Erdos C5
+  
+  ## Why This Strategy
+  The seed optimizer uses 59000-step gradient descent with 3 restarts, achieving
+  only c5_bound ≈ 0.3809 (combined_score=0.999945). The problem needs BETTER
+  structural patterns, not more optimization iterations.
+  
+  ## Stage 1: generate_ready_candidates (INHERITED TOOL)
+  Call with temperature=0.5:
+  - Returns 3 candidates with integral=1.0 by construction
+  - Each has analytical c5_bound computed via FFT (exact, no training)
+  - Patterns: Golomb ruler, Bipartite, Tri-modal
+  
+  ## Stage 2: modify_best_pattern (NEW TOOL - See tool_descriptions)
+  Call on the candidate with LOWEST c5_bound from Stage 1:
+  - Generates 3 refined variants:
+    1. Gaussian smoothing: convolves with Gaussian kernel
+    2. Peak sharpening: amplifies high regions
+    3. Phase modulation: sinusoidal interference
+  - Each variant has analytical c5_bound computed via FFT
+  
+  ## Evaluation
+  - Find the best refined candidate (lowest c5_bound)
+  - If c5_bound < 0.37: CALL evaluate_solution for full test
+  - If combined_score > 1.0: SUCCESS, call finish
+  
+  ## Temperature Strategy
+  - Start: temperature=0.5 (standard patterns)
+  - If no improvement: temperature=0.8 (more varied)
+  - If still stuck: temperature=1.2 (exploratory)
+  
+  ## Budget Use
+  - 60 eval budget total
+  - Per iteration: 1 generate_ready_candidates + 1 evaluate_solution + 1 modify_best_pattern
+  - Expect 10-15 iterations to find improvement
+  
+  ## Expected Outcome
+  With modify_best_pattern refinement, we should find patterns with
+  c5_bound < 0.37, beat the seed, and achieve new record bound.
+tool_descriptions:
+  edit_solution: |
+    Rarely needed. Use generate_ready_candidates + modify_best_pattern instead.
+    Only use for extreme cases: changing num_intervals to 1000/1600/2560.
+  evaluate_solution: |
+    Full optimization on ONE candidate. combined_score = 0.38092303510845016 / c5_bound.
+    > 1.0 is a new record. Call once per iteration on the best candidate.
+    After analytical screening shows c5_bound < 0.37, call evaluate_solution to confirm.
+  probe_solution: |
+    Fast approximate evaluation. generate_ready_candidates already computes
+    analytical c5_bound via FFT - use that instead of probe_solution for screening.
+  finish: |
+    Submit when combined_score > 1.0 (c5_bound < 0.38092303510845016).
+    Your solution beat the current best known bound for the Erdos minimum overlap constant C5!
+sampling:
+  temperature: 1.2
+  top_p: 0.9
+  top_k: 30
+  max_tokens: 12000
+agent:
+  max_iterations: 25
+middleware:
+  budget_reminder_from_left: 3
+  long_tool_output_max_chars: 8000
+new_tools:
+- name: modify_best_pattern
+  description: |
+    Take a candidate h and generate 3 refined variants with improved pattern structure.
+    
+    Input: candidate h (latent vector)
+    
+    Modifications:
+    - Gaussian smoothing: convolve h with Gaussian to smooth peaks
+    - Peak sharpening: narrow the high-value regions
+    - Phase modulation: apply sinusoidal modulation
+    
+    Returns 3 new candidates with h values, integral, analytical c5_bound (via FFT),
+    and modification_type label.
+    
+    Call this on the candidate with LOWEST c5_bound from generate_ready_candidates.
+    Analytical c5_bound < 0.37 after modification is worth full evaluation.
+  input_schema:
+    type: object
+    properties:
+      h:
+        type: array
+        description: Latent vector (values in [0,1])
+      temperature:
+        type: number
+        description: Exploration level (0.3-1.5)
+        default: 0.5
+  implementation_py: |
+    def run(ctx, args):
+        import numpy as np
+        
+        h_input = np.array(args.get('h', []))
+        N = len(h_input)
+        domain = 2.0
+        dx = domain / N
+        
+        temp = float(args.get('temperature', 0.5))
+        
+        # Variant 1: Gaussian smoothing
+        sigma = N * 0.15
+        kernel = np.exp(-0.5 * ((np.arange(N)[:,None] - np.arange(N)[None,:]) / sigma)**2)
+        kernel = kernel / kernel.sum(axis=1, keepdims=True)
+        h_gaussian = np.zeros(N)
+        for i in range(N):
+            h_gaussian += h_input[i] * kernel[i]
+        h_gaussian = np.clip(h_gaussian, 0.01, 1.0)
+        h_gaussian = h_gaussian / np.sum(h_gaussian) * (1.0 / dx)
+        h_gaussian = np.clip(h_gaussian, 0.01, 1.0)
+        h_gaussian = h_gaussian / np.sum(h_gaussian) * (1.0 / dx)
+        
+        # Variant 2: Peak sharpening
+        h_sharp = h_input.copy()
+        h_sharp[1:N-1] = 1.5 * h_sharp[1:N-1] + 0.1 * h_input[0:N-2] - 0.1 * h_input[2:N]
+        h_sharp = np.clip(h_sharp, 0.01, 5.0)
+        h_sharp = np.exp(h_sharp) / (np.sum(np.exp(h_sharp)) + 1e-10)
+        h_sharp = h_sharp / np.sum(h_sharp) * (1.0 / dx)
+        h_sharp = np.clip(h_sharp, 0.01, 1.0)
+        h_sharp = h_sharp / np.sum(h_sharp) * (1.0 / dx)
+        
+        # Variant 3: Phase modulation
+        h_phase = h_input + 0.3 * (np.sin(2 * np.pi * np.arange(N) / N * 3) + 
+                                   np.sin(2 * np.pi * np.arange(N) / N * 5))
+        h_phase = np.clip(h_phase, -1.0, 5.0)
+        h_phase = np.exp(h_phase) / (np.sum(np.exp(h_phase)) + 1e-10)
+        h_phase = h_phase / np.sum(h_phase) * (1.0 / dx)
+        h_phase = np.clip(h_phase, 0.01, 1.0)
+        h_phase = h_phase / np.sum(h_phase) * (1.0 / dx)
+        
+        # Compute analytical c5_bound for each
+        def compute_c5(h_arr):
+            j_val = 1.0 - h_arr
+            h_padded = np.pad(h_arr, (0, N))
+            j_padded = np.pad(j_val, (0, N))
+            corr_fft = np.fft.fft(h_padded) * np.conj(np.fft.fft(j_padded))
+            correlation = np.fft.ifft(corr_fft).real
+            c5 = np.max(correlation * dx)
+            return float(c5)
+        
+        results = [
+            {"h": h_gaussian.tolist(), "integral": float(np.sum(h_gaussian) * dx),
+             "c5_bound": compute_c5(h_gaussian), "modification_type": "gaussian_smoothing"},
+            {"h": h_sharp.tolist(), "integral": float(np.sum(h_sharp) * dx),
+             "c5_bound": compute_c5(h_sharp), "modification_type": "peak_sharpening"},
+            {"h": h_phase.tolist(), "integral": float(np.sum(h_phase) * dx),
+             "c5_bound": compute_c5(h_phase), "modification_type": "phase_modulation"}
+        ]
+        
+        return {"candidates": results, "num_candidates": 3}
+new_skills:
+- name: pattern-analysis-refinement
+  description: |
+    Two-stage pattern search: generate_ready_candidates for initial patterns,
+    modify_best_pattern for refinement. Evaluate best candidates. Target:
+    analytical c5_bound < 0.37.
+  body: |
+    # Two-Stage Pattern Search for Erdos C5
+    
+    ## Overview
+    The seed optimizer uses gradient descent but achieves only c5_bound ≈ 0.3809.
+    We need BETTER structural patterns. Strategy: analytical screening + targeted refinement.
+    
+    ## Stage 1: generate_ready_candidates
+    Call with temperature=0.5 (or 0.8/1.2 for diversity):
+    - Returns 3 candidates with integral=1.0 and analytical c5_bound
+    - Patterns: Golomb ruler, Bipartite, Tri-modal
+    
+    ## Stage 2: modify_best_pattern
+    Call on the candidate with LOWEST c5_bound from Stage 1:
+    - Generates 3 variants:
+      1. Gaussian smoothing (blurs peaks, may reduce overlap)
+      2. Peak sharpening (narrow high regions, concentrate mass)
+      3. Phase modulation (sinusoidal interference patterns)
+    - Each variant has analytical c5_bound computed via FFT
+    
+    ## Evaluation
+    - Find the best refined candidate (lowest c5_bound)
+    - If c5_bound < 0.37: CALL evaluate_solution for full test
+    - If combined_score > 1.0: SUCCESS, call finish
+    
+    ## Temperature Strategy
+    - Start: temperature=0.5 (standard patterns)
+    - If no improvement: temperature=0.8 (more varied)
+    - If still stuck: temperature=1.2 (exploratory)
+    - Repeat until improvement or budget exhausted
+    
+    ## Expected Outcome
+    With modify_best_pattern refinement, we should find patterns with
+    c5_bound < 0.37, beat the seed, and achieve new record bound.

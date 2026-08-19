@@ -1,0 +1,196 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are optimizing a C++ program to solve a geometric fish-packing problem.
+  The program has an editable EVOLVE-BLOCK region. Everything outside is frozen.
+  
+  TASK: Construct an axis-aligned polygon maximizing (mackerels_inside - sardines_inside + 1),
+  subject to: vertices ≤ 1000, perimeter ≤ 400,000, integer coordinates [0, 100000].
+  
+  METHOD - FOR THIS GEOMETRIC PROBLEM:
+  1. Use `probe_solution` to quickly rank polygon variants on subsampled data (30 probes available, doesn't consume eval budget).
+  2. When probe scores diverge significantly, confirm with `evaluate_solution` on the top 2-3 candidates.
+  3. Focus search on: (a) starting from bounding boxes of high-density mackerel regions, (b) iteratively trimming corners that capture sardines, (c) using KD-tree structures if already present in the code.
+  4. Keep internal C++ search loops efficient (< 1.5s total) to leave margin for evaluator overhead.
+  5. Never restart from scratch; build on the best prior working solution.
+  
+  Tools:
+  - edit_solution: Modify the EVOLVE-BLOCK region. Prefer targeted SEARCH/REPLACE diffs.
+  - evaluate_solution: Full evaluation on all 150 test cases. Expensive, use sparingly.
+  - probe_solution: Fast subsampled evaluation (~2000 rows). Use to rank variants before full eval.
+  - finish: Submit when done.
+  
+  Key: Probe → Rank → Evaluate top candidates → Repeat. Don't waste evals on unproven ideas.
+skill_description: |
+  Optimizing C++ geometric construction programs. Use probe_solution for rapid variant ranking, then confirm promising candidates with evaluate_solution. Focus on bounding boxes, iterative refinement, and efficient internal search loops.
+skill_body: |
+  # Geometric Packing Optimization Strategy
+  
+  ## Phase 1: Understand the Data
+  - The task has N=5000 mackerels and N=5000 sardines at integer coordinates [0, 100000].
+  - Score = max(0, mackerels_in_polygon - sardines_in_polygon + 1).
+  - Polygon must be axis-aligned, non-self-intersecting, ≤ 1000 vertices, perimeter ≤ 400,000.
+  
+  ## Phase 2: Strategy Selection
+  Start with a bounding box strategy:
+  1. Find the bounding box of mackerels with high density.
+  2. Compute initial polygon (likely a rectangle or L-shape).
+  3. Use probe_solution to test variants quickly.
+  4. Iteratively refine: cut off corners that contain sardines, expand where mackerels are dense.
+  
+  ## Phase 3: Iterative Refinement
+  For each refinement step:
+  1. Generate 3-5 variants (small shifts, corner cuts, different orientations).
+  2. Use probe_solution to rank them on subsampled data.
+  3. Evaluate top 1-2 variants with evaluate_solution.
+  4. Keep the best, repeat.
+  
+  ## Phase 4: Time Management
+  - Per-evaluation time limit is ~1.95 seconds (safety margin 0.05s from 2.0s).
+  - Ensure C++ code's internal search completes well within this limit.
+  - If approaching timeout, reduce search iterations or switch to simpler construction.
+  
+  ## Phase 5: Validation
+  - Check polygon validity: non-self-intersecting, correct vertex count, perimeter within budget.
+  - A score of 0 likely means invalid polygon or timeout.
+  
+  ## Tool Usage
+  - Always call probe_solution FIRST when testing new construction ideas.
+  - Only call evaluate_solution when probe scores suggest a candidate is promising.
+  - When evaluations_left is low, make each count: refine only the best direction.
+tool_descriptions:
+  edit_solution: |
+    Change the EVOLVE-BLOCK region. Use SEARCH/REPLACE diffs for targeted edits, or full rewrite for major changes.
+    Keep the fixed entry point (main()) and preserve program structure.
+  evaluate_solution: |
+    Full evaluation on all 150 test cases. Returns combined_score (higher better), validity, errors, best_so_far, and evaluations_left.
+    Use only when probe_solution indicates a promising direction.
+  probe_solution: |
+    Fast evaluation on ~2000 rows of test data. Separate budget (30 probes total). Scores are approximate but use this to rank variants.
+    Call probe_solution multiple times to compare construction strategies before spending full evals.
+  finish: |
+    End the session. The best-scoring valid program is submitted automatically.
+sampling:
+  temperature: 0.9
+  top_p: 0.98
+  top_k: 30
+  max_tokens: 12288
+agent:
+  max_iterations: 50
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 12000
+new_tools:
+  - name: analyze_fish_distribution
+    description: |
+      Analyze the mackerel/sardine distribution to identify high-value regions. Computes bounding boxes, density estimates, and suggests promising polygon constructions. Call once at the start to guide initial polygon design.
+    input_schema: {type: object, properties: {}}
+    implementation_py: |
+      def run(ctx, args):
+          mackerel_pts = []
+          sardine_pts = []
+          names = ctx.list_task_inputs()
+          if not names:
+              return {"note": "no task inputs", "mackerel_box": None, "sardine_box": None, "density_zones": []}
+          
+          # Read mackerels (first N points, assuming CSV-like format or get_program parsing)
+          try:
+              prog = ctx.get_program()
+              # Look for fish coordinates in the program (they're in all_fish_structs or similar)
+              # Since we can't easily parse the program, use the task inputs
+              df = ctx.read_input_df(names[0], nrows=10000)
+              mackerel_box = {"x_min": float("inf"), "x_max": float("-inf"),
+                            "y_min": float("inf"), "y_max": float("-inf")}
+              sardine_box = {"x_min": float("inf"), "x_max": float("-inf"),
+                           "y_min": float("inf"), "y_max": float("-inf")}
+              
+              for idx, row in df.iterrows():
+                  x, y = int(row['x']), int(row['y'])
+                  # Assume even indices are mackerels, odd are sardines (or vice versa)
+                  # Actually, we need to know the exact format. Let's assume the first column
+                  # is x, second is y, and we alternate types.
+                  if idx % 2 == 0:
+                      mackerel_box["x_min"] = min(mackerel_box["x_min"], x)
+                      mackerel_box["x_max"] = max(mackerel_box["x_max"], x)
+                      mackerel_box["y_min"] = min(mackerel_box["y_min"], y)
+                      mackerel_box["y_max"] = max(mackerel_box["y_max"], y)
+                  else:
+                      sardine_box["x_min"] = min(sardine_box["x_min"], x)
+                      sardine_box["x_max"] = max(sardine_box["x_max"], x)
+                      sardine_box["y_min"] = min(sardine_box["y_min"], y)
+                      sardine_box["y_max"] = max(sardine_box["y_max"], y)
+              
+              # Calculate perimeters for candidate rectangles
+              mk_perim = 2 * (mackerel_box["x_max"] - mackerel_box["x_min"] +
+                             mackerel_box["y_max"] - mackerel_box["y_min"])
+              sdr_perim = 2 * (sardine_box["x_max"] - sardine_box["x_min"] +
+                              sardine_box["y_max"] - sardine_box["y_min"])
+              
+              return {
+                  "mackerel_box": mackerel_box if mackerel_box["x_min"] != float("inf") else None,
+                  "sardine_box": sardine_box if sardine_box["x_min"] != float("inf") else None,
+                  "mackerel_perimeter": mk_perim,
+                  "sardine_perimeter": sdr_perim,
+                  "recommendation": "Consider starting with mackerel bounding box if perimeter < 400000"
+              }
+          except Exception as e:
+              return {"error": str(e), "mackerel_box": None, "sardine_box": None, "density_zones": []}
+new_skills:
+  - name: geometric-refinement-playbook
+    description: |
+      A step-by-step method for refining axis-aligned polygons to maximize mackerel capture while avoiding sardines. Uses probe-driven iteration and bounding-box strategies.
+    body: |
+      # Geometric Refinement Playbook for Fish Packing
+      
+      ## Core Principle
+      Start with a simple polygon (bounding box), then iteratively refine by cutting off low-value corners and expanding high-value regions.
+      
+      ## Step 1: Initial Construction
+      1. Compute the bounding box of all mackerels.
+      2. If perimeter ≤ 400,000, use this as initial polygon.
+      3. If too large, find a subset of dense mackerel regions.
+      
+      ## Step 2: Evaluate Baseline
+      Use probe_solution to score the initial polygon on subsampled data.
+      
+      ## Step 3: Corner Analysis
+      For each corner of the polygon:
+      1. Check if it contains sardines but few mackerels.
+      2. If so, try cutting the corner inward.
+      3. Probe the modified polygon to compare scores.
+      
+      ## Step 4: Expansion Opportunities
+      1. Find regions adjacent to the polygon with high mackerel density.
+      2. Try extending the polygon into these regions (staying within perimeter budget).
+      3. Probe each extension variant.
+      
+      ## Step 5: Iteration
+      1. After each modification, use probe_solution to rank 3-5 variants.
+      2. Confirm top 1-2 with evaluate_solution.
+      3. Keep the best, repeat.
+      
+      ## Tips
+      - Always stay within vertex count (≤ 1000) and perimeter (≤ 400,000) constraints.
+      - Use C++ KD-tree structures if available for fast point-in-polygon queries.
+      - When time is tight, use simpler constructions (single rectangle, L-shape).
+      - Probe before full evaluation: 30 probes = many quick comparisons at zero eval cost.
+tool_descriptions:
+  edit_solution: |
+    Change the EVOLVE-BLOCK region. Use SEARCH/REPLACE diffs for targeted edits, or full rewrite for major changes.
+    Keep the fixed entry point (main()) and preserve program structure.
+  evaluate_solution: |
+    Full evaluation on all 150 test cases. Returns combined_score (higher better), validity, errors, best_so_far, and evaluations_left.
+    Use only when probe_solution indicates a promising direction.
+  probe_solution: |
+    Fast evaluation on ~2000 rows of test data. Separate budget (30 probes total). Scores are approximate but use this to rank variants.
+    Call probe_solution multiple times to compare construction strategies before spending full evals.
+  finish: |
+    End the session. The best-scoring valid program is submitted automatically.
+new_middlewares:
+  - name: probe_before_full_eval
+    hook: before_model
+    description: |
+      Remind the executor to use probe_solution before calling evaluate_solution, and to track the best score across iterations.
+    implementation_py: |
+      def before_model(hook_input):
+          return "Remember: Use probe_solution to quickly rank polygon variants before calling evaluate_solution. You have 30 probes and limited evals. Track best_so_far and only confirm top candidates with full evaluation."
+remove_tools: []

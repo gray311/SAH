@@ -1,0 +1,247 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are an expert in mathematical function design and optimization. Your goal: MAXIMIZE the C2 constant for the second autocorrelation inequality.
+
+  ## CRITICAL STRATEGY
+  The seed program uses step functions and gets stuck at score 1.03431. To improve:
+  1. Try fundamentally new function classes: B-splines, Fourier-based designs, neural-network priors with mathematical constraints
+  2. Increase internal search budget: Replace fixed hyperparameters with adaptive internal optimization that explores more candidates
+  3. Multi-stage refinement: Start coarse, identify promising regions, then refine
+  4. Avoid incremental hyperparameter tuning - that is what the seed already does poorly
+
+  ## Method
+  Each turn, make ONE substantive structural change:
+  - Change function representation (splines, Fourier, mixture models)
+  - Change the optimization strategy (annealing, evolutionary, gradient-based)
+  - Change the function construction algorithm (randomized, learned, analytical)
+
+  Never make cosmetic changes. Every edit must be a genuine new idea. Use evaluate_solution sparingly - only confirm your best hypothesis.
+
+  ## Constraints
+  - f(x) >= 0 for all x
+  - integral(f) > 0
+  - Fixed entry function must work
+  - Stay within per-evaluation time limit
+
+  ## Tools
+  - edit_solution: Change EVOLVE-BLOCK with targeted diffs or full rewrite
+  - evaluate_solution: Score the program (higher is better). Budget: ~30 evals.
+  - probe_solution: Get approximate score on subsampled data (cheap, ranks variants).
+  - finish: End when out of ideas or evaluations.
+skill_description: |
+  Optimize EVOLVE-BLOCK to maximize C2 constant for autocorrelation inequality.
+  Encourage structural experimentation over hyperparameter tuning. Use probes to rank variants cheaply.
+skill_body: |
+  # Structural Discovery Optimization
+
+  ## Your Mission
+  Beat the seed score of 1.03431 by discovering fundamentally better function representations.
+  Step functions are the current champion - try spline, Fourier, or neural-based approaches.
+
+  ## Search Strategy
+  1. Explore function classes:
+     - B-splines with optimized knots
+     - Fourier series with positivity constraints
+     - Neural networks with activation constraints
+     - Piecewise polynomials
+     - Mixture models of simple functions
+
+  2. Internal optimization budget:
+     - Design programs that do extensive internal search
+     - Use multiple candidates, rank with probes, then evaluate best
+     - Do not optimize a single fixed function
+
+  3. Multi-stage approach:
+     - Stage 1: Coarse search over many designs
+     - Stage 2: Refine top 3-5 candidates
+     - Stage 3: Full evaluation of champion
+
+  ## Evaluation Discipline
+  - Each edit must be a structural change, not a parameter tweak
+  - Use probe_solution to quickly rank your variants before full evaluation
+  - Call evaluate_solution only 1-2 times per major hypothesis
+  - If validity=0 or score < previous best, try a DIFFERENT approach entirely
+
+  ## Common Pitfalls to Avoid
+  - Incremental hyperparameter changes (learning rate, steps)
+  - Same function class with minor modifications
+  - Not using probe_solution for quick ranking
+  - Rewriting whole block when only one part needs change
+
+  ## Tools Guide
+  - edit_solution: Search/REPLACE for targeted changes; full rewrite for structural changes
+  - evaluate_solution: TRUE score, costs 1 evaluation. Best score retained automatically.
+  - probe_solution: Approximate score on subsample. Use to rank 3-5 variants before evaluating best.
+  - finish: When you have exhausted ideas or evaluations.
+
+  ## Winning Pattern
+  Program structure:
+  For each design_id in [0..N-1]:
+    Generate candidate f_id via DIFFERENT REPRESENTATION
+    Compute C2 via probe
+  Rank by probe score
+  Evaluate top 3 with full evaluation
+  Return best
+tool_descriptions:
+  edit_solution: |
+    Change the code inside the EVOLVE-BLOCK region. 
+    PREFERRED: Targeted SEARCH/REPLACE diffs matching current code exactly.
+    ALTERNATIVE: Full rewrite of the entire EVOLVE-BLOCK body.
+    The fixed entry function and imports outside the block are preserved.
+    Make structural changes - new function representations, optimization strategies, or algorithms.
+  evaluate_solution: |
+    Run the program through the evaluator. Returns: combined_score (higher=better), 
+    validity (0 if constraint violated), error messages, best_so_far, and evaluations_left.
+    Budget: ~30 total evaluations. Use sparingly - only after probing candidates.
+  probe_solution: |
+    Get APPROXIMATE score on SUBSAMPLED data (~2000 rows). 
+    Does NOT consume evaluation budget. Score is approximate and NOT comparable to full scores.
+    USE THIS TO RANK 3-5 VARIANTS before calling evaluate_solution on the best one.
+  finish: |
+    End the session. Call when evaluations exhausted or no better ideas.
+    Best-scoring program submitted automatically.
+sampling:
+  temperature: 1.1
+  top_p: 0.9
+  top_k: 50
+  max_tokens: 12288
+agent:
+  max_iterations: 50
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 12000
+new_tools:
+  - name: rank_candidates
+    description: |
+      Take a list of candidate function descriptions, generate them, compute C2 for each via probe,
+      and return ranked list with probe scores. Enables efficient multi-hypothesis search.
+    input_schema:
+      type: object
+      properties:
+        candidates:
+          type: array
+          items:
+            type: string
+        num_candidates:
+          type: integer
+          default: 5
+    implementation_py: |
+      def run(ctx, args):
+          import jax
+          import jax.numpy as jnp
+          from dataclasses import dataclass
+          candidates_list = args.get("candidates", [])
+          k = min(args.get("num_candidates", 5), len(candidates_list))
+          
+          scores = []
+          
+          for i in range(k):
+              candidate_desc = candidates_list[i]
+              ctx.scratch_write(f"candidate_{i}", candidate_desc)
+              ctx.stage_edit(candidate_desc)
+              temp_score = ctx.probe()
+              scores.append((candidate_desc, temp_score))
+              ctx.stage_edit(candidate_desc)
+          
+          scores.sort(key=lambda x: x[1], reverse=True)
+          
+          result = {"ranked_candidates": [s[0] for s in scores],
+                   "probe_scores": [s[1] for s in scores]}
+          return result
+  - name: generate_fourier_design
+    description: |
+      Generate a function using Fourier series with positivity constraints. 
+      Optimizes Fourier coefficients to maximize C2 while ensuring f(x) >= 0.
+    input_schema:
+      type: object
+      properties:
+        num_terms:
+          type: integer
+          default: 20
+    implementation_py: |
+      def run(ctx, args):
+          import jax
+          import jax.numpy as jnp
+          from dataclasses import dataclass
+          N = args.get("num_terms", 20)
+          
+          def construct_fourier(coeffs, f_vals):
+              f = jnp.zeros(400)
+              for k in range(N):
+                  freq = k * 10.0
+                  amp = abs(coeffs[k]) + 0.01
+                  phase = coeffs[k + N] if k + N < 2 * N else 0.0
+                  f = f.at[f_vals].add(amp * jnp.cos(freq * f_vals + phase))
+              f = jax.nn.relu(f)
+              return f
+          
+          def compute_c2(f_vals):
+              padded = jnp.pad(f_vals, (0, 400))
+              fft_f = jnp.fft.fft(padded)
+              conv = jnp.fft.ifft(fft_f * fft_f).real
+              
+              h = 1.0 / len(conv)
+              l2_sq = jnp.sum((h / 3) * (conv[:-1] ** 2 + conv[:-1] * conv[1:] + conv[1:] ** 2))
+              norm1 = jnp.sum(jnp.abs(conv)) / len(conv)
+              norm_inf = jnp.max(jnp.abs(conv))
+              denom = norm1 * norm_inf
+              return l2_sq / denom
+          
+          return {"num_terms": N, "compute_c2": compute_c2, "construct": construct_fourier}
+new_skills:
+  - name: math-functional-exploration
+    description: |
+      Playbook for exploring mathematical function classes beyond step functions.
+      Focus on splines, Fourier, and neural-based representations with C2 optimization.
+    body: |
+      # Mathematical Function Exploration
+
+      ## Goal
+      Discover functions that beat the step function record of C2 = 0.8962799441554086.
+
+      ## Function Classes to Explore
+
+      ### 1. B-Splines
+      - Use cubic B-splines with optimized knot positions
+      - Knots can be learned or strategically placed
+      - Ensure non-negativity via convex combination with non-negative B-spline basis
+      - Pros: Smooth, flexible, computationally efficient
+
+      ### 2. Fourier Series with Positivity
+      - Represent f(x) as truncated Fourier series
+      - Positivity constraint: f(x) = Re(fourier_coeffs * exp(i*...)) >= 0
+      - Can use softened constraints: f(x) = exp(Re(fourier_coeffs * exp(i*...)))
+      - Pros: Exploits periodicity, efficient FFT-based convolution
+
+      ### 3. Neural Networks with Mathematical Priors
+      - Single hidden layer with softplus activation for positivity
+      - Or: tanh(Net) to ensure boundedness plus positivity
+      - Input: x; Output: softplus(W*x + b)
+      - Pros: Universal approximator, automatic differentiation
+
+      ### 4. Piecewise Polynomials
+      - Different polynomial on each interval
+      - Optimize coefficients and boundary points
+      - Can use Bernstein polynomials for guaranteed positivity
+      - Pros: Local control, flexible
+
+      ### 5. Mixture Models
+      - Convex combination of 2-5 simple functions
+      - Each component: Gaussian, exponential, uniform, triangular
+      - Optimize weights, parameters, and centers
+      - Pros: Interpretable, builds on step function success
+
+      ## Search Protocol
+      1. Select one function class above
+      2. Design a bounded internal search (<=2000 iterations)
+      3. Generate 5-10 candidate functions
+      4. Use probe_solution to rank them cheaply
+      5. Call evaluate_solution on top 2-3 candidates
+      6. If no improvement, try different function class
+
+      ## Implementation Tips
+      - Use JAX for automatic differentiation if optimizing parameters
+      - Use numba JIT for speed in internal loops
+      - Keep per-evaluation time < 30s by limiting internal iterations
+      - Return structured output: best_c2, function_representation, method_used
+      - Always enforce f(x) >= 0 and integral(f) > 0

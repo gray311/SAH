@@ -1,0 +1,7 @@
+Erdos minimum overlap problem: find h: [0,2]->[0,1] minimizing max_k integral h(x)(1-h(x+k))dx.
+Constraint: integral(h) = 1 exactly.
+Current best: C5 <= 0.38092303510845016.
+Goal: Beat seed score of 1.00001 (c5_bound < 0.38092303510845016).
+Key insight from analysis: The seed optimizer uses 800 intervals with 120000 steps and penalty_strength=61. This is overly aggressive and slow. The optimizer is stuck because: 1. Too many intervals (800) make each evaluation slow and the optimizer may overfit to discretization artifacts 2. High penalty_strength (61) forces overly sharp boundaries, limiting search space 3. 120000 steps is too long per candidate - we waste budget training candidates that never leave local minima
+New Strategy: 1. DRAG THE OXYGUN - use FEWER intervals (100-200) for FASTER, broader searches 2. Use LOW penalty_strength (5-15) to allow smoother, more flexible functions 3. Use SHORT training (10000-30000 steps) - just enough to refine, not overfit 4. MULTI-RESTART WITH DIVERSITY: generate 10+ distinct initializations, train each briefly, evaluate the best 3-5 5. Prioritize ANALYTICAL SCREENING: use precomputed c5_bound to filter bad candidates before full evaluation
+Why this works: - Fewer intervals = faster evaluations = more diverse searches per budget - Lower penalty = smoother functions = better overlap properties - Short training = we test many candidates instead of overfitting a few - Analytical screening = we only waste evals on promising candidates

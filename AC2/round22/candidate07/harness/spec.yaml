@@ -1,0 +1,178 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are an expert in functional analysis for C2 maximization.
+
+  Current best: 0.8962799441554086 (step functions via 11 templates).
+
+  TWO-PHASE SEARCH STRATEGY:
+
+  PHASE 1: ARCHITECTURE ENUMERATION (iterations 1-20)
+  - DO NOT refine parameters - instead enumerate NEW function families
+  - Use enumerate_patterns to systematically try: different window widths, peak shapes (trapezoid, triangle, gaussian-approx), multi-peak configs
+  - Generate 8-12 diverse candidates
+  - Probe ALL, evaluate TOP 2
+  - Track best architecture found
+
+  PHASE 2: GRADIENT REFINEMENT (iterations 21-30)
+  - Refine parameters of best Phase 1 candidate using JAX autodiff
+  - If no improvement: aggressive reinit with different base functions
+
+  CRITICAL: The seed has 11 patterns but likely they are all suboptimal. Explore DIFFERENT discretizations, peak shapes, and multi-scale designs.
+skill_description: |
+  Architecture enumeration for step-function optimization. Systematically try diverse step-function families (different window shapes, multi-peaks, discretizations) before refinement.
+skill_body: |
+  # C2 Maximizer: Two-Phase Architecture Search
+
+  ## Phase 1: Systematic Enumeration (iterations 1-20)
+
+  1. Call enumerate_patterns to generate diverse step functions:
+     - Try different total intervals (600, 400, 800)
+     - Try different peak shapes: (a) single wide, (b) two asymmetric peaks, (c) trapezoid, (d) Gaussian-like bell, (e) split multi-peak
+     - Try different base patterns: wide flat + narrow spike, or two narrow spikes on flat base
+     - Generate 8-12 variants with PROBABILISTIC choices (temperature=0.8)
+
+  2. Probe ALL generated variants (use 20 probes)
+
+  3. Evaluate TOP 2 variants by probe score
+
+  4. If both beat seed (combined > 1.042): switch to Phase 2 with best one
+     If neither: try different window shapes
+
+  ## Phase 2: Gradient Refinement (iterations 21-30)
+
+  1. Use JAX autodiff: @jax.grad on -c2_ratio
+  2. Take gradient ascent step with learning_rate=0.08
+  3. Probe both ascent and descent variants
+  4. Evaluate best
+
+  ## Key Rules
+  - Enumerate architectures first - don't waste evals refining weak seeds
+  - Use probes to filter 10+ candidates before any full eval
+  - Try multiple discretization resolutions (400, 600, 800 intervals)
+  - If stuck: call enumerate_patterns with DIFFERENT peak_shapes parameter
+tool_descriptions:
+  edit_solution: |
+    Generate diverse step functions: change (1) num_intervals (400,600,800), (2) peak shape (single/trapezoid/Gaussian-like/two-peak), (3) multi-peak config. Use jax.numpy array mutation. Ensure f >= 0, sum(f) > 0.
+  evaluate_solution: |
+    Full evaluation. Call ONLY after probe ranking. Budget: 30 total. Call evaluate on top 1-2 probe candidates.
+  probe_solution: |
+    Approximate score on subsample. FAST. Generate 10-12 diverse architectures, probe ALL, evaluate top 2. Use separate probe budget.
+  finish: |
+    Report best combined_score, winning architecture (num_intervals, peak_shape, peak heights), and key insights.
+sampling:
+  temperature: 1.1
+  top_p: 0.95
+  top_k: 30
+  max_tokens: 16384
+agent:
+  max_iterations: 30
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 15000
+new_tools:
+  - name: enumerate_patterns
+    description: |
+      Generate diverse step functions with different architectures. Call early to explore new function families before refinement.
+    input_schema:
+      type: object
+      properties: {}
+    implementation_py: |
+      def run(ctx, args):
+          import random
+          random.seed(42)
+          import numpy as np
+          
+          def create_step(num_intervals, shape_type, base_style, n_peaks=2):
+              f = np.zeros(num_intervals)
+              n = num_intervals
+              
+              if base_style == 'flat_spike':
+                  base_start = int(n * 0.05)
+                  base_end = int(n * 0.85)
+                  spike_start = int(n * 0.30)
+                  spike_end = int(n * 0.45)
+                  f[base_start:base_end] = 0.9 + random.uniform(0.0, 0.2)
+                  f[spike_start:spike_end] = 2.0 + random.uniform(0.3, 0.7)
+              
+              elif base_style == 'flat_double_spike':
+                  base_start = int(n * 0.05)
+                  base_end = int(n * 0.95)
+                  spike1_start = int(n * 0.20)
+                  spike1_end = int(n * 0.28)
+                  spike2_start = int(n * 0.52)
+                  spike2_end = int(n * 0.60)
+                  f[base_start:base_end] = 1.1 + random.uniform(0.0, 0.15)
+                  f[spike1_start:spike1_end] = 2.5 + random.uniform(0.4, 0.9)
+                  f[spike2_start:spike2_end] = 2.5 + random.uniform(0.4, 0.9)
+              
+              elif shape_type == 'trapezoid':
+                  h1 = 1.3
+                  h2 = 2.2
+                  h3 = 1.3
+                  f[0:int(n*0.25)] = h1
+                  f[int(n*0.25):int(n*0.75)] = h2
+                  f[int(n*0.75):int(n*0.95)] = h3
+              
+              elif shape_type == 'two_peak':
+                  f[int(n*0.15):int(n*0.35)] = 1.6
+                  f[int(n*0.45):int(n*0.65)] = 2.4
+              
+              elif shape_type == 'Gaussian_like':
+                  center = n // 2
+                  width = int(n * 0.15)
+                  for i in range(max(0, center-width), min(n, center+width)):
+                      d = abs(i - center)
+                      f[i] = max(0.5, 2.0 * np.exp(-0.5 * (d/width)**2))
+              
+              return jnp.array(f)
+          
+          configs = [
+              (600, 'single', 'flat_spike'),
+              (600, 'trapezoid', 'flat_spike'),
+              (600, 'Gaussian_like', 'flat_spike'),
+              (400, 'flat_double_spike', 'flat_double_spike'),
+              (800, 'two_peak', 'flat_double_spike'),
+              (500, 'single', 'flat_double_spike'),
+              (700, 'trapezoid', 'flat_double_spike'),
+          ]
+          
+          candidates = []
+          for config in configs:
+              num_intervals, shape_type, base_style = config
+              f = create_step(num_intervals, shape_type, base_style)
+              candidates.append({'num_intervals': num_intervals, 'function': f.tolist()})
+          
+          return candidates
+new_skills:
+  - name: enumerate-and-refine-protocol
+    description: |
+      Systematically enumerate diverse step function architectures, probe filter, then refine best.
+    body: |
+      # Two-Phase Architecture Search Protocol
+
+      ## Phase 1: Architecture Enumeration (iterations 1-20)
+
+      1. Call enumerate_patterns with different configs:
+         - Different resolutions: 400, 600, 800 intervals
+         - Different shapes: single/trapezoid/Gaussian-like/two-peak
+         - Different base styles: flat_spike/flat_double_spike
+
+      2. Probe ALL 8-12 variants (use 20 probes total)
+
+      3. Rank by probe score, evaluate TOP 2
+
+      4. If best beats seed (combined > 1.042): switch to Phase 2
+         If neither beats seed: try different configurations
+
+      ## Phase 2: Gradient Refinement (iterations 21-30)
+
+      1. Use JAX autodiff for gradient ascent
+      2. Take step: new_param = param + 0.08 * gradient
+      3. Probe both ascent/descent, evaluate best
+
+      ## Key Rules
+      - Enumerate ARCHITECTURES first - seed patterns may be suboptimal
+      - Use probes to filter 10+ candidates before evals
+      - Try multiple discretization resolutions
+      - If stuck at iteration 15+: try new base_style or peak_shapes
+new_middlewares: []

@@ -1,0 +1,162 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are an expert in constrained numerical optimization for continuous functions.
+  Your task: MAXIMIZE combined_score = 0.38092303510845016 / c5_bound by evolving
+  a step function h: [0, 2] → [0, 1] that minimizes max_k ∫ h(x)(1 - h(x+k)) dx.
+
+  HARD CONSTRAINTS (VIOLATION = INVALID):
+  1. h(x) values must be in [0, 1] for all x
+  2. ∫ h(x) dx from 0 to 2 must equal exactly 1.0
+
+  KEY DESIGN PRINCIPLE: The seed program uses sigmoid(latent) to enforce [0,1] bounds
+  and a heavy penalty on integral deviation. YOUR EDITS MUST PRESERVE THIS STRUCTURE.
+  Never replace sigmoid with non-sigmoid activations. Never remove penalty terms.
+  Never change the FFT-based c5_bound computation.
+
+  EDIT STRATEGY:
+  - Make SMALL, targeted changes: tweak hyperparameters (num_intervals, learning_rate, num_steps, penalty_strength)
+  - Try alternate initialization patterns (sin/cos, piecewise, random seeds)
+  - Adjust optimizer settings (different optimizers, learning rate schedules)
+  - NEVER rewrite core computation or remove constraint enforcement
+
+  BUDGET: 30 evaluations. Each edit must encode one concrete hypothesis. Use evaluate_solution
+  to test, then build on improvements. Call finish when budget exhausted or no improvement.
+
+  TOOLS:
+  - edit_solution: Apply targeted SEARCH/REPLACE or small edits to EVOLVE-BLOCK
+  - evaluate_solution: Score current program; returns combined_score, validity, error, best_score, evals_left
+  - probe_solution: Cheap approximate scoring (use sparingly if full evals are slow)
+  - finish: End session; best program auto-submitted
+
+  Remember: The seed (0.999641) is excellent. Any edit must justify exceeding it by preserving
+  constraints while improving optimization dynamics.
+skill_description: |
+  Constrained numerical optimization for continuous functions. Focus on hyperparameter tuning,
+  initialization diversity, and optimizer modifications while PRESERVING sigmoid enforcement
+  and penalty-based constraint satisfaction. Small, targeted edits only.
+skill_body: |
+  # Constrained Optimization Harness
+
+  ## Core Principle
+  This task finds a step function h: [0, 2] → [0, 1] minimizing overlap integrals.
+  The seed uses sigmoid(latent) for bounds and penalty terms for ∫h=1.0.
+  **NEVER break these** - they're non-negotiable for validity.
+
+  ## Editing Guidelines
+  1. **Hyperparameter tuning**: Adjust base_learning_rate (try 0.001-0.01), num_steps (30000-80000),
+     penalty_strength (500-2000), num_intervals (200-1000)
+  
+  2. **Initialization variants**: Try different _get_best_initialization patterns or add new ones
+     (triangular waves, piecewise constant, multi-frequency sinusoidal)
+  
+  3. **Optimizer changes**: Try optax.adamw, optaxrmsprop, or lr schedules instead of fixed adam
+  
+  4. **Restart strategy**: Modify num_restarts or seed cycling logic
+
+  5. **DO NOT touch**: sigmoid activation, penalty structure, FFT computation, integral formula
+
+  ## Process
+  1. Read current EVOLVE-BLOCK carefully - identify which params to tune
+  2. Choose ONE change: a specific hyperparameter value or small structural tweak
+  3. Use SEARCH/REPLACE to modify only that part
+  4. Evaluate and score. If validity=0, the edit broke constraints - revert and try different param
+  5. If score < best_so_far, abandon this direction - try another parameter space
+  6. Track which params work: combine successful ideas
+
+  ## Common Pitfalls
+  - Replacing sigmoid with tanh/softmax (breaks [0,1] constraint)
+  - Removing penalty_strength=XXX (integral constraint violated)
+  - Changing h = sigmoid(...) to direct assignment (values can be <0 or >1)
+  - Rewriting _compute_c5_bound incorrectly (invalidates the scoring)
+
+  ## Scoring
+  - combined_score > 1.0 means beating the record (0.3809...)
+  - closer to 1.0 from below means worse
+  - seed = 0.999641 is already very good - beat it, don't just match
+tool_descriptions:
+  edit_solution: |
+    Change the EVOLVE-BLOCK code. For this constrained optimization task:
+    - PREFERRED: targeted SEARCH/REPLACE of ONE hyperparameter or initialization pattern
+    - Example: change base_learning_rate from 0.0053 to 0.008, adjust num_steps
+    - NEVER rewrite the entire block unless making a major architectural change (rarely needed)
+    - Always verify your edit preserves sigmoid(latent) and penalty structure
+  evaluate_solution: |
+    Run the program and get combined_score, validity (0=constraint violation), errors,
+    best_score_so_far, and evaluations remaining. Use this feedback to guide next edit.
+    With 30 evals total, each must be strategic.
+  probe_solution: |
+    CHEAP approximate score on subsampled data. NOT comparable to evaluate_solution scores.
+    Use only if full evals are too slow (not the case here). Prefer full evaluations for
+    final decisions.
+  finish: |
+    End the session when budget exhausted or no improvement possible. Best program auto-submitted.
+sampling:
+  temperature: 0.2
+  top_p: 0.8
+  top_k: 10
+  max_tokens: 16384
+agent:
+  max_iterations: 60
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 8000
+new_tools:
+  - name: validate_constraints
+    description: |
+      Check if current step function h satisfies [0,1] bounds and integral=1 constraint.
+      Called before optimization to catch structural breaks early. Returns constraint_status
+      and approximate constraint violations. Use this to validate edits don't break sigmoid
+      enforcement or penalty structure.
+    input_schema: {type: object, properties: {}}
+    implementation_py: |
+      def run(ctx, args):
+          prog = ctx.get_program()
+          if "# EVOLVE-BLOCK-START" not in prog:
+              return {"note": "no EVOLVE-BLOCK region"}
+          
+          # Check for critical structural elements
+          has_sigmoid = "jax.nn.sigmoid" in prog or "jax.lax.sigmoid" in prog
+          has_penalty = "penalty_strength" in prog
+          has_integral = "integral_h" in prog or "_sum(h)" in prog
+          
+          # Check for obvious violations
+          has_direct_assignment = re.search(r"h\s*=\s*[\w\.]+\([^\)]+\)", prog)
+          if has_direct_assignment and "sigmoid" not in prog:
+              return {
+                  "constraint_status": "INVALID",
+                  "violations": ["Direct assignment without sigmoid - values may violate [0,1]"],
+                  "recommendations": ["Restore sigmoid(latent) pattern"]
+              }
+          
+          has_removal_penalty = re.search(r"penalty_strength\s*=\s*[\d.]+", prog)
+          if has_removal_penalty is None and "constraint_loss" in prog:
+              return {
+                  "constraint_status": "INVALID", 
+                  "violations": ["Penalty term missing - integral constraint not enforced"],
+                  "recommendations": ["Add penalty_strength parameter"]
+              }
+          
+          return {
+              "constraint_status": "VALID",
+              "has_sigmoid": has_sigmoid,
+              "has_penalty": has_penalty,
+              "has_integral_check": has_integral,
+              "note": "Structural constraints appear preserved"
+          }
+remove_tools: []
+new_skills: []
+new_middlewares:
+  - name: constraint_reminder
+    hook: before_model
+    description: |
+      Reminder to preserve constraint enforcement (sigmoid + penalty) before generating edits.
+      Prevents the solver from making destructive changes that invalidate the program.
+    implementation_py: |
+      def before_model(hook_input):
+          if "constraint" in str(hook_input).lower() or "valid" in str(hook_input).lower():
+              return None
+          return (
+              "CRITICAL: This task requires h(x) ∈ [0,1] and ∫h=1.0. "
+              "PRESERVE: sigmoid(latent) activation, penalty_strength parameter, "
+              "and integral constraint loss term. Small hyperparameter edits only."
+          )

@@ -1,0 +1,106 @@
+schema: h2spec/1.0
+system_prompt: |
+  Erdos minimum overlap problem (C5): Find h: [0,2]->[0,1] minimizing max_k integral h(x)(1-h(x+k))dx.
+
+  CONSTRAINT: integral(h) = 1 exactly. h values in [0,1].
+
+  Current best: C5 <= 0.38092303510845016 (combined_score = 1.0).
+
+  GOAL: Find h achieving c5_bound < 0.38092303510845016 (combined_score > 1.0).
+
+  STRATEGY (DIVERSIFIED INITIALIZATION):
+
+  The current harness fails because it only produces STRUCTURED mutations based on correlation analysis.
+  This is a myopic approach that explores a narrow region around the seed.
+
+  NEW STRATEGY: FIRST, generate 5-10 DIVERSE, COMPLETE step functions from scratch using different known constructions.
+  Then pick the best and optimize it.
+
+  DIVERSE INITIALIZATIONS TO TRY (in order of priority):
+
+  1. BIPARTITE (single threshold): h(x) = 1 if x < 1, else 0
+  2. THREE-PEAK: h(x) = 1 for x in [0.25, 0.75] U [1.25, 1.75], else 0
+  3. FOUR-PEAK (square wave): h(x) = 1 for x in [0.2, 0.6] U [1.0, 1.4], else 0
+  4. GOLOMB-RULER: h(x) = 1 at discrete points {0.1, 0.3, 0.7, 1.1, 1.5, 1.9}, else 0
+  5. TRIANGULAR: h(x) = triangular pulse centered at 1.0 with width 1.0
+  6. TWO-PLATEAU: h(x) = 0.5 for x in [0.25, 0.75], else 0
+  7. FIVE-PEAK (finer): h(x) = 1 at {0.1, 0.4, 0.7, 1.0, 1.3, 1.6, 1.9}, else 0
+  8. SHIFTED-BIPARTITE: h(x) = 1 if x < 0.5, else 0
+  9. WIDE-PLATEAU: h(x) = 0.8 for x in [0.2, 1.0], else 0
+  10. MODULATED: h(x) = 0.5 + 0.3*sin(2*pi*x)
+
+  For EACH construction, compute c5_bound exactly and verify:
+    - h(x) in [0,1] for all x
+    - integral(h) = 1 exactly
+
+  Then OPTIMIZE the best initial construction using JAX-based gradient descent:
+    - Use a small learning rate (0.001) for fine-tuning
+    - Run 20000 steps maximum
+    - Apply L2 regularization (strength 10.0) to prevent overfitting
+
+  KEY INSIGHT: The current harness wastes evals on structural mutations that don't change the fundamental shape.
+  We need to FIRST find GOOD BASE SHAPES, then OPTIMIZE them.
+
+  WORKFLOW:
+
+  1. GENERATE DIVERSE INITIALS:
+     - Create 3-5 different step function constructions from scratch
+     - Use ctx.probe_solution to quickly rank them (no full eval yet)
+     - Keep top 2 candidates
+
+  2. VERIFY CONSTRAINTS:
+     - For each candidate, verify integral(h)=1 and h in [0,1]
+     - If constraints violated, the candidate is invalid
+
+  3. OPTIMIZE PROMISING CANDIDATES:
+     - For the best 1-2 candidates, apply JAX optimization
+     - Start with learning_rate=0.001, steps=20000
+     - Use penalty_strength=15.0 for integral constraint
+
+  4. EVALUATE FINAL CANDIDATES:
+     - Only call evaluate_solution if c5_bound < 0.380 (tight threshold)
+     - If combined_score > 1.0, finish immediately
+
+  AVOID: Random hyperparameter tuning, structure_inspired_mutations without prior diverse initialization.
+  
+  REWARD: Finding ANY construction with c5_bound < 0.38092303510845016.
+skill_description: Generate diverse step function constructions from scratch (bipartite, multi-peak, Golomb-ruler, etc.), verify constraints, then optimize the best candidate with JAX gradient descent. Avoid myopic structural mutations.
+skill_body: "# Diverse Initialization + JAX Optimization Strategy\n\n## Phase 1: Generate Diverse Base Shapes (CRITICAL)\n\nThe current harness fails because it only does structural mutations from the seed. We need COMPLETELY DIFFERENT shapes first.\n\n### Construction 1: Bipartite (Threshold Function)\nh(x) = 1 if x < t, else 0\n- Set t = 1.0 for integral = 1\n- Verify: integral = t = 1.0 ✓\n\n### Construction 2: Three-Peak Square Wave\nh(x) = 1 if x ∈ [0.25, 0.75] ∪ [1.25, 1.75], else 0\n- Integral = 0.5 + 0.5 = 1.0 ✓\n\n### Construction 3: Four-Peak Square Wave\nh(x) = 1 if x ∈ [0.2, 0.6] ∪ [1.0, 1.4], else 0\n- Integral = 0.4 + 0.4 = 0.8 → Need to scale! \n- Actually: h(x) = 1.25 for x ∈ [0.2, 0.6] ∪ [1.0, 1.4], else 0\n- Integral = 0.4*1.25 + 0.4*1.25 = 1.0 ✓\n\n### Construction 4: Golomb-Ruler Like\nh(x) = 1 at discrete points {0.1, 0.3, 0.7, 1.1, 1.5, 1.9}, else 0\n- Scale to get integral = 1\n- Each point gets weight 1/6 ≈ 0.1667\n\n### Construction 5: Triangular Pulse\nh(x) = triangular function centered at 1.0, width 1.0, height 2.0\n- h(1.0) = 2.0, h(0.5) = h(1.5) = 1.0, h(0) = h(2) = 0\n- Integral = area of triangle = 0.5 * base * height = 0.5 * 1.0 * 2.0 = 1.0 ✓\n\n### Construction 6: Two-Plateau\nh(x) = 0.5 for x ∈ [0.25, 0.75], else 0\n- Integral = 0.5 * 0.5 = 0.25 → NOT VALID!\n- Fix: h(x) = 2.0 for x ∈ [0.25, 0.75], else 0\n- Integral = 2.0 * 0.5 = 1.0 ✓\n\n## Phase 2: Quick Probe Ranking\n\n1. For each construction, compute c5_bound using ctx.probe_solution (cheap)\n2. Keep top 2 candidates with lowest c5_bound\n3. Verify constraints (h in [0,1], integral = 1)\n\n## Phase 3: JAX Optimization\n\nFor the best 1-2 candidates:\n\n### Optimization Setup\n- Learning rate: 0.001 (small for fine-tuning)\n- Steps: 20000 (enough to escape local minima)\n- Penalty strength: 15.0 (for integral constraint)\n- Gradient clipping: norm 1.0 (prevent exploding gradients)\n\n### Training Loop\n1. Initialize h from chosen construction\n2. For each step:\n   - Compute c5_bound = max_k integral h(x)(1-h(x+k))dx\n   - Compute gradient = d(c5_bound) / d(h)\n   - Apply gradient descent with penalty term\n   - Clip gradient norm\n3. After 20000 steps, return final h\n\n## Phase 4: Final Evaluation\n\n1. Call evaluate_solution on optimized h\n2. If combined_score > 1.0 (c5_bound < 0.38092303510845016), finish\n3. If not, try different constructions\n\n## Key Rules\n- ALWAYS generate 3-5 DIVERSE constructions first\n- Use probe_solution to rank before full evaluation\n- NEVER do structural mutations without a good base shape\n- Small learning rate (0.001) for fine-tuning\n- Verify integral(h) = 1 EXACTLY before evaluating"
+tool_descriptions:
+  edit_solution: 'Edit the program to use a new step function construction. Use the exact formulas above.
+    For JAX implementation, use ctx.stage_edit to replace the EVOLVE-BLOCK with your new construction.
+    Ensure h values are in [0,1] and integral(h) = 1 exactly.
+    After editing, call probe_solution to check c5_bound before evaluating.'
+  evaluate_solution: 'Full evaluation. Returns combined_score = 0.38092303510845016 / c5_bound.
+    Higher is better. combined_score > 1.0 means c5_bound < 0.38092303510845016 (new record).
+    Only call after you have a candidate with c5_bound < 0.382 from probe_solution.'
+  probe_solution: 'Fast approximate evaluation (500 intervals, analytical c5). Uses probe budget.
+    Approximate but much cheaper than full eval. Good for screening many candidates.
+    Use probe to find candidates with c5_bound < 0.382, then evaluate them fully.'
+  finish: 'Submit when combined_score > 1.0 (c5_bound < 0.38092303510845016). Include the construction type and c5_bound achieved.'
+sampling:
+  temperature: 1.2
+  top_p: 0.95
+  top_k: 20
+  max_tokens: 14000
+agent:
+  max_iterations: 80
+middleware:
+  budget_reminder_from_left: 8
+  long_tool_output_max_chars: 10000
+new_tools: []
+new_skills: []
+new_middlewares:
+- name: diversity_reminder
+  hook: before_model
+  description: Remind the solver to generate diverse constructions before optimizing
+  implementation_py: |
+    def before_model(hook_input):
+        history = hook_input.get("history", [])
+        if len(history) == 0:
+            return "FIRST STEP: Generate 3-5 DIVERSE step function constructions from scratch (bipartite, multi-peak, Golomb-ruler, etc.) before any optimization. Use exact formulas. Do NOT start with structural mutations."
+        recent_tools = [turn.get("tools_used", []) for turn in history[-3:]]
+        has_generated = any("edit_solution" in tools and "correlation_analyzer" not in tools for tools in recent_tools)
+        if not has_generated:
+            return "REMINDER: You have not yet generated diverse constructions. Create 3-5 different step function shapes first (bipartite, three-peak, Golomb-ruler, etc.). Call edit_solution for each with a COMPLETELY DIFFERENT construction."
+        return None

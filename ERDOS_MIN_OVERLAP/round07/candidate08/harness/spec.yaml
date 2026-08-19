@@ -1,0 +1,169 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are a mathematical construction expert optimizing for C5 bound.
+  
+  **GOAL**: Find C5 < 0.380923 (score > 1.0) by constructing EXPLICIT step functions h: [0,2]→[0,1] with ∫h=1.
+  
+  **CRITICAL INSIGHT**: The seed program uses gradient descent on 800 intervals - this is WRONG. It optimizes too much detail and gets stuck.
+  
+  **YOUR APPROACH**:
+  1. Use FEW intervals: 10-50 (not 800!). Coarse discretization lets you reason about step structure.
+  2. CONSTRUCT h DIRECTLY: Create piecewise constant array (no latent→sigmoid transformation).
+  3. Try SIMPLE PATTERNS:
+     - Single block: h=2 on [0,0.5], h=0 elsewhere (∫h=1)
+     - Two blocks: h=1 on [0,0.5]∪[1,1.5], h=0 elsewhere (∫h=1)
+     - Uniform: h=0.5 everywhere (∫h=1)
+     - Three blocks: symmetric patterns with few steps
+  
+  **EDIT THE EVOLVE-BLOCK** to:
+  - Replace num_intervals=800 with num_intervals=30
+  - Replace latent→sigmoid construction with direct step function creation
+  - Implement 3-5 explicit candidate patterns
+  - Evaluate each and report best C5
+  
+  **BUDGET**: ~30 evaluations. Don't waste them on 59000-step optimization. Test 2-3 concrete constructions per evaluation.
+skill_description: |
+  C5 optimization via explicit step construction. Avoid gradient descent. Use 10-50 intervals. Test single/two/three block patterns. Target score > 1.0.
+tool_descriptions:
+  edit_solution: |
+    Rewrite to use few intervals (10-50), direct step function construction. No latent optimization. Test 2-5 explicit patterns.
+  evaluate_solution: |
+    Get combined_score. Target > 1.0. Each eval should test a different construction strategy.
+  probe_solution: |
+    Available for rapid testing. Use to verify candidates before full evaluation.
+sampling:
+  temperature: 0.7
+  top_p: 0.9
+  top_k: 12
+  max_tokens: 10240
+agent:
+  max_iterations: 35
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 6000
+new_tools:
+  - name: quick_pattern_test
+    description: |
+      Test 3-5 predefined step function patterns and return their C5 values.
+      Patterns: single block, two blocks, uniform, biphasic, concentrated.
+      Ensures ∫h=1 for each.
+    input_schema: {type: object, properties: {}}
+    implementation_py: |
+      def run(ctx, args):
+          import numpy as np
+          import jax
+          import jax.numpy as jnp
+          
+          N = 40
+          dx = 2.0 / N
+          
+          def compute_c5(h):
+              j = 1.0 - h
+              h_p = jnp.pad(h, (0, N))
+              j_p = jnp.pad(j, (0, N))
+              corr = jnp.fft.ifft(jnp.fft.fft(h_p) * jnp.conj(jnp.fft.fft(j_p))).real
+              return float(jnp.max(corr) * dx)
+          
+          def make_single_block(width_frac=0.5):
+              width = 2.0 * width_frac
+              h = jnp.zeros(N)
+              start_idx = 0
+              end_idx = int(width / dx + 0.5)
+              h[start_idx:end_idx] = 1.0 / width
+              return h
+          
+          def make_two_blocks(w1=0.5, w2=0.5, offset=1.0):
+              h = jnp.zeros(N)
+              n1 = int(w1 / dx)
+              h[0:n1] = 1.0 / w1
+              start2 = int(offset * N / 2.0)
+              end2 = start2 + int(w2 / dx + 0.5)
+              h[start2:end2] = 1.0 / w2
+              return h
+          
+          def make_uniform():
+              return jnp.ones(N) * 0.5
+          
+          def make_biphasic(w=0.5, gap=0.5):
+              h = jnp.zeros(N)
+              n_per = int(w / dx)
+              h[0:n_per] = 1.0 / w
+              h_gap = int(gap * N / 2.0)
+              h[h_gap:h_gap+n_per] = 1.0 / w
+              return h
+          
+          def make_concentrated(w=1.0, pos=0.25):
+              h = jnp.zeros(N)
+              start = int(pos * N / 2.0)
+              end = start + int(w * N / 2.0)
+              h[start:end] = 1.0 / w
+              return h
+          
+          c1 = make_single_block(width_frac=0.5)
+          c2 = make_two_blocks(w1=0.5, w2=0.5, offset=1.0)
+          c3 = make_uniform()
+          c4 = make_biphasic(w=0.5, gap=0.5)
+          c5 = make_concentrated(w=1.0, pos=0.25)
+          
+          results = []
+          for i, h_arr in enumerate([c1, c2, c3, c4, c5], 1):
+              c5_val = compute_c5(h_arr)
+              combined = 0.38092303510845016 / c5_val
+              results.append({"pattern": i, "c5": c5_val, "combined": combined})
+          
+          return {"patterns_tested": 5, "results": results}
+remove_tools: []
+new_skills:
+  - name: step-construction-playbook
+    description: |
+      Construct explicit step functions. Use N=10-50 intervals. Direct array creation. Test simple patterns.
+    body: |
+      # Explicit Step Function Construction
+      
+      ## Problem
+      Minimize C5 = max_k ∫ h(x)(1-h(x+k))dx over h:[0,2]→[0,1] with ∫h=1.
+      
+      ## Why Gradient Descent Fails
+      The seed program uses 800 intervals and 59000 optimization steps. This is too much - it gets trapped in local optima on high-dimensional space.
+      
+      ## Solution: Explicit Construction
+      Build h as a piecewise constant function with FEW breakpoints (2-10).
+      
+      ## Core Patterns (Implement These)
+      
+      ### Pattern 1: Single Block
+      h = 2.0 on [0, 0.5], h = 0 elsewhere
+      ∫h = 2.0 × 0.5 = 1.0 ✓
+      
+      ### Pattern 2: Two Separated Blocks
+      h = 1.0 on [0, 0.5] and [1.0, 1.5], h = 0 elsewhere
+      ∫h = 1.0 × 0.5 + 1.0 × 0.5 = 1.0 ✓
+      
+      ### Pattern 3: Uniform
+      h = 0.5 everywhere
+      ∫h = 0.5 × 2.0 = 1.0 ✓
+      
+      ### Pattern 4: Concentrated
+      h = 2.0 on [0.25, 0.75], h = 0 elsewhere
+      ∫h = 2.0 × 0.5 = 1.0 ✓
+      
+      ## Implementation Steps
+      
+      1. Set num_intervals = 30 (not 800!)
+      2. Define h as direct array: h[i] = height of i-th interval
+      3. Ensure sum(h) × dx = 1.0
+      4. Compute C5 via FFT (already in seed)
+      5. Test each pattern, report best
+      
+      ## Key Insight
+      Simple patterns with few steps often outperform optimized complex functions.
+      Start with 2-5 patterns, evaluate, then refine the best one.
+new_middlewares:
+  - name: focus_on_construction
+    hook: before_model
+    description: |
+      Force the agent to construct explicit step functions with few intervals.
+      Prevent reverts to gradient descent on 800 intervals.
+    implementation_py: |
+      def before_model(hook_input):
+          return "CONSTRUCT EXPLICIT step functions: N=10-50 intervals, direct array (no latent). Patterns: single block, two blocks, uniform. Ensure ∫h=1. Avoid 800 intervals and gradient descent. Each evaluation should test 2-5 concrete constructions. Target C5 < 0.380923."

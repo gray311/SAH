@@ -1,0 +1,221 @@
+schema: h2spec/1.0
+system_prompt: |
+  Erdos minimum overlap: find h: [0,2]->[0,1] minimizing max_k integral h(x)(1-h(x+k))dx.
+  
+  Goal: Beat C5=0.380923 (score > 1.0).
+  
+  Strategy:
+  1. CALL jump_to_pattern to create diverse VALID candidates (integral=1 guaranteed).
+  2. Analyze c5_bound from the tool output.
+  3. CALL evaluate_solution on best candidates (c5 < 0.36).
+  4. Iterate 10-15 times, using 2 evals per iteration.
+  5. If stuck, try temperature=0.9 for more exploration.
+
+  Key insight: The seed optimizer trains for 59000 steps on ONE candidate. We need to try MANY different starting points - structural patterns like two-level, three-level, Golomb-like, sinusoidal that are guaranteed valid.
+skill_description: |
+  Generate structurally diverse, valid initializations for Erdos optimization. Use jump_to_pattern tool to create candidates with integral=1 and varied structures.
+skill_body: |
+  # Jump-to-Pattern Strategy
+  
+  The seed optimizer trains for 59000 steps on a single latent vector.
+  To find improvements, we need to try MANY different structural patterns.
+  
+  ## Tool: jump_to_pattern
+  
+  This tool creates valid step functions (integral=1) with specific structures:
+  - Two-level (bipartite): h takes two values, heights adjusted for integral=1
+  - Three-level: three regions, heights adjusted for integral=1  
+  - Golomb-like: peaks at specific marks, heights adjusted for integral=1
+  - Sinusoidal-modulated: sin/cos waves + noise, heights adjusted for integral=1
+  
+  Each candidate returns c5_bound (analytical, no training needed).
+  
+  ## Workflow
+  
+  1. CALL jump_to_pattern(structure="two-level", seed=0)
+  2. CALL jump_to_pattern(structure="three-level", seed=1)
+  3. CALL jump_to_pattern(structure="golomb", seed=2)
+  4. CALL jump_to_pattern(structure="sinusoidal", seed=3)
+  
+  5. Analyze c5_bound from each candidate
+  6. CALL evaluate_solution on all candidates with c5 < 0.36
+  
+  7. If no improvement, try different structures or higher temperature
+  
+  ## Why this works
+  
+  - Guarantees integral=1 (validity constraint satisfied by construction)
+  - Structural diversity: different patterns may be optimal
+  - Precomputed c5: fast screening, no training needed
+  - Budget-efficient: 4 tool calls, 3-6 full evals
+tool_descriptions:
+  edit_solution: |
+    Modify EVOLVE-BLOCK to change hyperparameters or code structure.
+    
+    For single-candidate testing: set num_restarts=1, seed_start=0.
+    
+    For multi-candidate testing: keep num_restarts=3.
+  evaluate_solution: |
+    Run full 59000-step optimization on a candidate. Returns combined_score = 0.38092303510845016 / c5_bound.
+    
+    Higher is better. combined_score > 1.0 means a new record.
+  probe_solution: |
+    Fast approximate evaluation (500 intervals, analytical c5). Uses probe budget.
+  finish: |
+    Submit when combined_score > 1.0 (c5_bound < 0.38092303510845016).
+sampling:
+  temperature: 0.9
+  top_p: 0.95
+  top_k: 30
+  max_tokens: 16000
+agent:
+  max_iterations: 40
+middleware:
+  budget_reminder_from_left: 3
+  long_tool_output_max_chars: 8000
+new_tools:
+  - name: jump_to_pattern
+    description: |
+      Generate a VALID step function with a specific structural pattern.
+      Integral is guaranteed to be 1.0 by construction (heights are normalized).
+      
+      Structures: two-level, three-level, golomb, sinusoidal
+      
+      Returns: h (array), c5_bound (analytical score), integral (should be 1.0).
+    input_schema:
+      type: object
+      properties:
+        structure:
+          type: string
+          enum: [two-level, three-level, golomb, sinusoidal]
+          default: two-level
+        seed:
+          type: integer
+          default: 0
+    implementation_py: |
+      def run(ctx, args):
+          import numpy as np
+          N = 800
+          domain = 2.0
+          dx = domain / N
+          
+          x = np.linspace(0, 2, N)
+          seed = args.get("seed", 0)
+          np.random.seed(seed)
+          
+          def normalize_to_integral_1(h):
+              integral = np.sum(h) * dx
+              if integral == 0:
+                  return h
+              return h / integral
+          
+          h_raw = np.zeros(N)
+          c5_val = np.inf
+          
+          structure = args.get("structure", "two-level")
+          
+          if structure == "two-level":
+              a = 0.3 + np.random.rand() * 0.4  # left edge
+              b = 1.7 + np.random.rand() * 0.4  # right edge
+              h_raw = np.zeros(N)
+              h_raw[x > a] = 0.0
+              h_raw[x <= a] = 2.0  # will normalize to integral=1
+              
+              # Normalize
+              h_raw = normalize_to_integral_1(h_raw)
+              
+          elif structure == "three-level":
+              a = 0.3 + np.random.rand() * 0.4
+              b = 0.7 + np.random.rand() * 0.4
+              h_raw = np.zeros(N)
+              h_raw[x > b] = 0.0
+              h_raw[(a, b)] = 2.0  # middle region higher
+              h_raw[x <= a] = 1.0  # left region lower
+              
+              h_raw = normalize_to_integral_1(h_raw)
+              
+          elif structure == "golomb":
+              marks = np.array([0.2, 0.6, 1.0, 1.4, 1.8])
+              h_raw = np.zeros(N)
+              for m in marks:
+                  h_raw += 3.0 * np.exp(-((x - m) / 0.15)**2)
+              h_raw = normalize_to_integral_1(h_raw)
+              
+          elif structure == "sinusoidal":
+              x_local = x * np.pi
+              h_raw = 0.5 + 0.3 * np.sin(x_local) + 0.2 * np.sin(2 * x_local)
+              h_raw = np.clip(h_raw, 0.01, 5.0)
+              h_raw = normalize_to_integral_1(h_raw)
+          
+          # Compute c5 bound
+          h_padded = np.pad(h_raw, (0, N))
+          j_raw = 1.0 - h_raw
+          j_padded = np.pad(j_raw, (0, N))
+          corr_fft = np.fft.fft(h_padded) * np.conj(np.fft.fft(j_padded))
+          correlation = np.fft.ifft(corr_fft).real
+          c5_bound = float(np.max(correlation * dx))
+          
+          return {
+              "h": h_raw.tolist(),
+              "c5_bound": c5_bound,
+              "integral": float(np.sum(h_raw) * dx),
+              "structure": structure
+          }
+new_skills:
+  - name: jump-pattern-search
+    description: |
+      Generate multiple structurally diverse candidates using jump_to_pattern and evaluate the best.
+    body: |
+      # Jump-to-Pattern Search Strategy
+      
+      The seed optimizer trains on ONE candidate for 59000 steps.
+      To improve, we need to try MANY different starting structures.
+      
+      ## Workflow
+      
+      1. Generate 4-6 candidates with different structures:
+         - two-level: simple bipartite split
+         - three-level: three regions with varying heights
+         - golomb: peaks at specific marks
+         - sinusoidal: wave-like modulation
+      
+      2. Analyze c5_bound from each candidate (precomputed, no training)
+      
+      3. Filter: keep candidates with c5_bound < 0.36
+      
+      4. CALL evaluate_solution on all kept candidates
+      
+      5. If no improvement, try different seeds or structures
+      
+      ## Example Output
+      
+      Candidate 0 (two-level): integral=1.00, c5=0.358 -> EVALUATE
+      Candidate 1 (three-level): integral=1.00, c5=0.362 -> EVALUATE
+      Candidate 2 (golomb): integral=1.00, c5=0.371 -> SKIP
+      Candidate 3 (sinusoidal): integral=1.00, c5=0.365 -> EVALUATE
+      
+      This gives us 3-4 full evaluations per batch.
+new_middlewares:
+  - name: eval_reminder
+    hook: before_model
+    description: |
+      Middleware to remind solver to evaluate candidates from jump_to_pattern.
+    implementation_py: |
+      def before_model(hook_input):
+          state = hook_input.get("state", {})
+          evals_left = state.get("evals_left", 0)
+          probes_used = state.get("probes_used", 0)
+          last_tool = state.get("last_tool", "")
+          
+          if probes_used < 2 and evals_left >= 3:
+              return (
+                  "You have 3+ evals left and only used 1-2 probes.\n"
+                  "CALL jump_to_pattern with different structures (two-level, three-level, golomb).\n"
+                  "Evaluate 3-4 candidates with c5 < 0.36.\n"
+              )
+          elif evals_left >= 2:
+              return (
+                  f"{evals_left} evals left. Use them to evaluate jump_to_pattern results.\n"
+                  "Look for c5 < 0.35 for full evaluation.\n"
+              )
+          return None

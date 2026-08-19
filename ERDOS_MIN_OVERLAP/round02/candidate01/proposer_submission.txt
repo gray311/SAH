@@ -1,0 +1,110 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are an expert in harmonic analysis and the Erdős minimum overlap problem.
+  Your goal: beat the current best bound C5 <= 0.38092303510845016 by finding a step function h: [0,2]->[0,1]
+  with integral(h)=1 that minimizes max_k integral h(x)(1-h(x+k))dx.
+  
+  Key insight: This problem benefits from structured mathematical constructions, not random initialization.
+  The landscape is non-convex, but known constructions (periodic step functions, Golomb ruler patterns)
+  provide good starting points.
+  
+  Strategy:
+  1. Use construct_structured_init() to generate mathematically principled initial functions
+  2. Call this tool FIRST to get 3-4 constructions of different types
+  3. For each construction, run optimization with adaptive hyperparameters
+  4. Use probe_solution to compare c5 bounds quickly
+  5. Run full evaluation on top 2-3 candidates
+  
+  What to edit:
+  - Add a function to generate structured initializations (bimodal, periodic, Golomb-like)
+  - Modify the optimizer to use these constructions as starting points
+  - Keep the evaluation logic unchanged
+  
+  Target: combined_score > 1.0 (c5_bound < 0.380923)
+
+skill_description: Structured mathematical initialization for Erdos minimum overlap optimization using principled constructions.
+skill_body: "# Erdos Minimum Overlap - Structured Initialization\n\n## Problem\nMinimize max_k integral h(x)(1 - h(x+k)) dx for h: [0,2]->[0,1] with integral(h)=1.\n\n## Why Structured Constructions Work\nThe Erdos problem has known good constructions from combinatorial design theory.\nRandom initialization often misses these structured optima.\n\n## Use construct_structured_init()\nCall this tool FIRST to get 3-4 diverse, mathematically principled initializations:\n\n### Types of Constructions:\n1. **bimodal_tight**: Two narrow peaks at positions 1/4 and 3/4 with equal mass\n2. **triangular_3step**: Linear ramps creating 3-level step function\n3. **periodic_2**: Alternating pattern with period 1 (high on [0,0.5], low on [0.5,1])\n4. **Golomb_5**: Construction inspired by Golomb ruler optimal spacing\n\n### Optimization Workflow:\n1. Generate 3-4 constructions from construct_structured_init()\n2. For each, run optimization with:\n   - Phase 1: 15000 steps, lr=0.02, penalty=5000\n   - Phase 2: 20000 steps, lr=0.003, penalty=15000\n3. Extract final h and compute c5_bound\n4. Use probe_solution to rank candidates\n5. Evaluate top 2 with evaluate_solution\n\n## Key Principles\n- Use structure, not randomness, for initialization\n- Intensity of peaks should be balanced for integral=1 constraint\n- Periodicity in the domain [0,2] matters for the correlation integral\n- Save best program across iterations"
+
+tool_descriptions:
+  edit_solution: Modify the EVOLVE-BLOCK region. Implement construct_structured_init() and integrate it with the optimizer.
+  evaluate_solution: Run and return combined_score (higher=success).
+  probe_solution: Quick approximate evaluation on subsampled data.
+  finish: End when no improvement possible.
+
+sampling:
+  temperature: 0.85
+  top_p: 0.95
+  top_k: 15
+  max_tokens: 14000
+agent:
+  max_iterations: 55
+middleware:
+  budget_reminder_from_left: 4
+  long_tool_output_max_chars: 10000
+
+new_tools:
+  - name: construct_structured_init
+    description: |
+      Generate 3-4 mathematically principled step function initializations for the Erdos problem.
+      Returns dict with keys: bimodal_tight, triangular_3step, periodic_2, golomb_5.
+      Each value is a latent vector h such that sigmoid(h) is a valid initial step function.
+    input_schema: {type: object, properties: {}}
+    implementation_py: |
+      def run(ctx, args):
+          import jax
+          import jax.numpy as jnp
+          import jax.random as jr
+          N = 800
+          domain = 2.0
+          dx = domain / N
+          key = jr.PRNGKey(42)
+          constructions = {}
+          
+          # bimodal_tight: Two narrow peaks at 0.25 and 0.75
+          key, subk = jr.split(key)
+          x = jnp.linspace(0, domain, N)
+          a1, a2 = 0.25, 0.75
+          bw1, bw2 = 0.15, 0.15
+          latent = jnp.exp(-((x-a1)/bw1)**2 * 20) + jnp.exp(-((x-a2)/bw2)**2 * 20)
+          latent = (latent - jnp.min(latent)) / (jnp.max(latent) - jnp.min(latent) + 1e-10)
+          constructions['bimodal_tight'] = latent
+          
+          # triangular_3step: Three-level triangular pattern
+          key, subk = jr.split(key)
+          x = jnp.linspace(0, domain, N)
+          phases = jnp.array([0.0, 0.333, 0.666])
+          levels = jnp.array([-5, -2, 5])
+          latent = jnp.zeros(N)
+          for p, l in zip(phases, levels):
+              in_range = (x >= p) & (x < p + 0.333)
+              latent = latent + l * in_range
+          latent = latent + jr.normal(key, (N,)) * 0.2
+          key, subk = jr.split(key)
+          constructions['triangular_3step'] = latent
+          
+          # periodic_2: Simple alternating pattern
+          key, subk = jr.split(key)
+          x = jnp.linspace(0, domain, N)
+          periodic = 2.0 * (x < 0.5) - 1.0
+          latent = periodic * 4.0
+          latent = latent + jr.normal(key, (N,)) * 0.3
+          key, subk = jr.split(key)
+          constructions['periodic_2'] = latent
+          
+          # golomb_5: Construct from optimal spacing pattern
+          key, subk = jr.split(key)
+          # Optimal Golomb ruler for 5 marks: [0, 1, 4, 9, 11] scaled to [0,2]
+          marks = jnp.array([0.0, 2*0.25, 2*0.625, 2*0.9375, 2*1.0])
+          kernel_widths = jnp.array([0.08, 0.1, 0.09, 0.09, 0.1])
+          latent = jnp.zeros(N)
+          for mark, kw in zip(marks, kernel_widths):
+              latent = latent + 6.0 * jnp.exp(-((x-mark)/kw)**2 * 15)
+          latent = latent + jr.normal(key, (N,)) * 0.2
+          key, subk = jr.split(key)
+          constructions['golomb_5'] = latent
+          
+          return {"constructions": constructions, "keys_used": [k for k, _ in [("", subk) for _ in range(4)]]}
+
+remove_tools: []
+new_skills: []
+new_middlewares: []

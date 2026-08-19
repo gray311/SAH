@@ -1,0 +1,233 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are a C++ polygon optimizer for axis-aligned fish capture.
+  
+  GOAL: Maximize (mackerels - sardines + 1) by constructing valid axis-aligned polygons.
+  
+  CONSTRAINTS:
+  - 4-1000 vertices, all coordinates integers in [0,100000]
+  - Perimeter <= 400,000
+  - No self-intersection
+  - Edge must be parallel to x or y axis
+  
+  STRATEGY (encodes in EVOLVE-BLOCK):
+  
+  1. LEVERAGE KD-TREE FOR FAST QUERIES:
+     The seed includes a KD-tree that can quickly report all fish in any rectangle.
+     Use this for ALL scoring - never rely on grid approximations.
+  
+  2. RECTANGLE SEARCH (Primary approach):
+     - Generate candidate rectangles by sampling random corner pairs
+     - Query rectangle for fish count using KD-tree
+     - Score = mackerels - sardines
+     - Track best rectangle found
+  
+  3. UNION OF RECTANGLES (Advanced):
+     - Generate 2-4 rectangles whose union forms a valid polygon
+     - Carefully merge to avoid overlaps or ensure overlaps are handled correctly
+     - Score the union by inclusion-exclusion principle
+  
+  4. ITERATIVE REFINEMENT:
+     - From best rectangle(s), try edge shifts ±5, ±10, ±20, ±50 units
+     - Expand outward if adjacent cell has more mackerels than sardines
+     - Use KD-tree to verify each expansion step
+  
+  5. RANDOM SHAPES:
+     - Occasionally generate non-rectangular polygons (L-shapes, U-shapes)
+     - Build from seed points and gradually add/remove vertices
+  
+  6. VALIDATION:
+     - Always verify: perimeter constraint, vertex count, coordinate bounds, no self-intersection
+     - Output ONLY valid polygons
+  
+  TOOLS AVAILABLE:
+  - edit_solution: Replace EVOLVE-BLOCK with complete C++ implementation
+  - evaluate_solution: Run program, get score (mackerels-sardines+1)
+  - probe_solution: NOT needed - use KD-tree directly in code
+  - finish: Submit when you have working code
+  
+  KEY PRINCIPLE: The KD-tree is your most valuable asset. Use it for every score estimation.
+  Avoid grid-based approximations that lose spatial precision.
+skill_description: |
+  KD-tree powered rectangle search with union-of-rectangles support. Use KD-tree for fast O(log N) rectangle queries, generate candidate rectangles, try unions of 2-4 rectangles, refine edges with ±5..50 shifts, validate constraints strictly.
+skill_body: |
+  # KD-Tree Powered Rectangle Optimization
+  
+  ## Core Strategy
+  
+  The problem requires finding an axis-aligned polygon that maximizes (mackerels - sardines + 1). The seed program includes a KD-tree for efficient spatial queries - this is your primary tool.
+  
+  ## Method: Rectangle-Based Search
+  
+  ### Phase 1: Rectangle Generation
+  1. Sample random corner pairs (x1,y1) and (x2,y2) where x1≤x2, y1≤y2
+  2. Ensure resulting rectangle is valid: perimeter = 2*(width+height) ≤ 400,000
+  3. Query the rectangle using KD-tree for fish counts
+  4. Score = mackerels - sardines
+  5. Keep best rectangle found
+  
+  ### Phase 2: Union of Rectangles (Advanced)
+  1. Generate 2-4 rectangles with good individual scores
+  2. Merge them carefully:
+     - If rectangles overlap, use inclusion-exclusion to count fish
+     - Ensure union forms a valid simple polygon
+  3. Score the merged region
+  4. This can capture fish in disjoint clusters more effectively than single rectangles
+  
+  ### Phase 3: Edge Refinement
+  1. For each edge of best polygon, try shifts: ±5, ±10, ±20, ±50 units
+  2. Use KD-tree to query new rectangle
+  3. Keep shifts that improve score
+  4. Repeat 2-3 rounds
+  
+  ### Phase 4: Random Polygon Generation
+  1. Generate non-rectangular polygons (L-shapes, U-shapes, etc.)
+  2. Build from seed points
+  3. Validate constraints
+  4. Score using KD-tree
+  
+  ### Phase 5: Multiple Restarts
+  1. Run 20-30 restarts with different random seeds
+  2. Each restart: generate candidate polygons, refine, track best
+  3. Output single best polygon
+  
+  ## Implementation Notes
+  
+  - KD-tree query complexity: O(k + log N) where k = fish in rectangle
+  - Rectangle generation: sample corners uniformly or bias toward high-density regions
+  - Edge refinement: only shift if it doesn't violate constraints
+  - Always validate: perimeter, vertices, bounds, self-intersection
+  - Total time per eval: < 2.0s
+  
+  ## Success Criteria
+  - Average score > 5000 (target from task description)
+  - Valid output for all 150 test cases
+  - No self-intersecting polygons
+  - Perimeter constraint respected
+tool_descriptions:
+  edit_solution: |
+    Replace EVOLVE-BLOCK with C++ implementing KD-tree rectangle search:
+    
+    1. Use existing KD-tree for O(log N) rectangle queries
+    2. Generate candidate rectangles via random corner sampling
+    3. Score rectangles: mackerels - sardines
+    4. Try unions of 2-4 rectangles to capture multiple clusters
+    5. Refine edges with ±5..50 shifts using KD-tree
+    6. Validate: perimeter<=400000, 4-1000 vertices, bounds, no self-intersection
+    7. 20-30 restarts, output best polygon
+    
+    Keep the KD-tree infrastructure - do not replace with grid approximations.
+  evaluate_solution: |
+    Run C++ program. Returns score (mackerels-sardines+1), validity, and remaining evaluations (budget=30). Each run has ~2.0s search window.
+  probe_solution: |
+    NOT useful - use KD-tree directly in code for exact scoring.
+  finish: |
+    End when you have a working KD-tree based rectangle/union searcher with 20-30 restarts.
+sampling:
+  temperature: 0.9
+  top_p: 0.95
+  top_k: 30
+  max_tokens: 16384
+agent:
+  max_iterations: 40
+middleware:
+  budget_reminder_from_left: 3
+  long_tool_output_max_chars: 18000
+new_tools:
+  - name: analyze_fish_clusters
+    description: |
+      Analyze fish distribution using KD-tree to find high-mackerel low-sardine regions.
+      Returns candidate rectangle corners and their estimated scores.
+      Use this tool once at startup to understand spatial distribution.
+    input_schema:
+      type: object
+      properties:
+        region_focus:
+          type: string
+          enum:
+          - global
+          - local
+          - dense
+          default: "global"
+        num_candidates:
+          type: integer
+          default: 10
+    implementation_py: |
+      def run(ctx, args):
+          import math
+          
+          region_focus = args.get("region_focus", "global")
+          num_candidates = args.get("num_candidates", 10)
+          
+          # Get program to access program state
+          program = ctx.get_program()
+          
+          result = {
+              "analysis": "KD-tree query-based analysis recommended",
+              "candidates": [],
+              "method": "rect_random_sampling"
+          }
+          
+          # Suggest rectangle corners based on coordinate ranges
+          # The solver should use actual KD-tree queries for exact scoring
+          result["note"] = "Use this for initial candidate generation only. Score candidates with KD-tree queries."
+          
+          return result
+new_skills:
+  - name: rectangle-search-playbook
+    description: |
+      Rectangle and union-of-rectangles search using KD-tree. Generate candidates, score with exact queries, refine edges.
+    body: |
+      # Rectangle Search Using KD-Tree
+      
+      ## Why This Works
+      
+      The KD-tree provides O(log N) rectangle queries. Instead of grid approximations that lose precision, use exact counting.
+      
+      ## Method
+      
+      ### Step 1: Generate Candidate Rectangles
+      - Sample random corner pairs (x1,y1), (x2,y2)
+      - Constraint: x1≤x2, y1≤y2, perimeter=2*(width+height)≤400,000
+      - Generate 100-200 candidates per restart
+      
+      ### Step 2: Score with KD-Tree
+      - Query each rectangle: get (m, s) counts
+      - Score = m - s
+      - Track best rectangle
+      
+      ### Step 3: Union of Rectangles (Optional)
+      - Generate 2-4 rectangles
+      - Merge carefully, handling overlaps
+      - Use inclusion-exclusion for fish counts
+      - Can capture disjoint clusters
+      
+      ### Step 4: Edge Refinement
+      - For best rectangle, try edge shifts ±5, ±10, ±20, ±50
+      - Query each variant with KD-tree
+      - Keep improvements
+      - 2-3 refinement rounds
+      
+      ### Step 5: Random Polygon Variants
+      - Generate L-shapes, U-shapes from best rectangle
+      - Build by cutting/expanding rectangle
+      - Validate all constraints
+      
+      ### Step 6: Multiple Restarts
+      - 20-30 restarts with fresh random seeds
+      - Track global best across all
+      
+      ## Key Points
+      - NEVER use grid approximations - KD-tree is exact and fast
+      - Rectangle is the simplest valid polygon; master this first
+      - Unions enable capturing multiple clusters
+      - Edge refinement gets incremental gains
+      - Always validate constraints
+new_middlewares:
+  - name: kd_tree_reminder
+    hook: before_model
+    description: |
+      Remind solver to use KD-tree for exact rectangle queries instead of grid approximations
+    implementation_py: |
+      def before_model(hook_input):
+          return "Use KD-tree for exact O(log N) rectangle queries. Avoid grid approximations. Generate 100-200 candidate rectangles per restart, score with exact counts, try unions of 2-4 rectangles, refine edges ±5..50, 20-30 restarts."

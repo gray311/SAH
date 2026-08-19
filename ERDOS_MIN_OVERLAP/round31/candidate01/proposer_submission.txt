@@ -1,0 +1,131 @@
+schema: h2spec/1.0
+system_prompt: |
+  Erdos minimum overlap problem (C5): Find h: [0,2]->[0,1] minimizing max_k integral h(x)(1-h(x+k))dx.
+  
+  CONSTRAINT: integral(h) = 1 exactly. h values in [0,1].
+  
+  Current best: C5 <= 0.38092303510845016 (combined_score = 1.0).
+  
+  GOAL: Find h achieving c5_bound < 0.38092303510845016 (combined_score > 1.0).
+  
+  STRATEGY:
+  
+  1. FIRST, use step_function_generator to create valid step functions with integral=1
+     - This tool creates guaranteed constraint-satisfying functions
+     - Call it to generate diverse candidates directly
+     - Don't rely on the seed's optimizer which has flaws
+  
+  2. Generate 3-5 diverse step function candidates
+  3. CALL probe_solution on each to screen (c5_bound < 0.381)
+  4. Evaluate the best 1-2 candidates
+  5. If no improvement, try different step function patterns from the generator
+  
+  KEY INSIGHT: The seed program's optimizer has broken initialization code and may not explore effective regions.
+  Use step_function_generator to create valid candidates from scratch.
+skill_description: Use step_function_generator to create valid step functions with integral=1, then probe and evaluate.
+skill_body: "# Step Function Generation for Erdos C5\n\n## Core Principle\nCreate valid step functions directly with integral(h)=1, bypassing the flawed optimizer.\n\n## Step 1: Generate Candidates\n1. CALL step_function_generator to create 3-5 diverse step functions\n   - Each will satisfy integral(h)=1 exactly\n   - Values in [0,1] guaranteed\n   - Different patterns: bipartite, multi-modal, sparse\n\n2. EXAMINE the generated functions\n   - Check the number of steps\n   - Note the pattern type\n\n## Step 2: Screen with Probe\n1. CALL probe_solution on each candidate\n2. Keep those with c5_bound < 0.381\n3. Select best 1-2 for full evaluation\n\n## Step 3: Evaluate\n1. CALL evaluate_solution on selected candidates\n2. If combined_score > 1.0, finish\n\n## Step 4: Iterate\nIf no improvement:\n- Call step_function_generator again with different parameters\n- Try bipartite, then multi-modal, then sparse patterns\n- Always probe before full eval\n\n## Key Rules\n- ALWAYS start with step_function_generator\n- Use integral=1 constraint to guide generation\n- NEVER trust the seed's optimizer - it has bugs\n- Evaluate only candidates with c5_bound < 0.381"
+tool_descriptions:
+  edit_solution: 'Modify the step_function_generator parameters. Use step_positions to specify where jumps occur, and step_heights to set the values. The generator ensures integral=1.'
+  evaluate_solution: 'Full optimization. Returns combined_score = 0.38092303510845016 / c5_bound. Higher is better. combined_score > 1.0 means new record. Use probe_solution first.'
+  probe_solution: 'Fast approximate evaluation (500 intervals). Use to screen candidates with c5_bound < 0.381 before full evaluation. Budget: 30 probes.'
+  finish: 'Submit when combined_score > 1.0 (c5_bound < 0.38092303510845016).'
+sampling:
+  temperature: 0.9
+  top_p: 0.95
+  top_k: 50
+  max_tokens: 16000
+agent:
+  max_iterations: 80
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 8000
+new_tools:
+- name: step_function_generator
+  description: |
+    Generate a valid step function h: [0,2]->[0,1] with integral(h)=1 exactly.
+    Creates diverse patterns: bipartite (single threshold), multi-modal (multiple peaks), or sparse (few steps).
+    Each function satisfies the integral constraint by construction.
+    Use this to create candidates from scratch, bypassing the seed's broken optimizer.
+  input_schema:
+    type: object
+    properties:
+      pattern_type:
+        type: string
+        enum: [bipartite, multi_modal, sparse]
+      threshold_or_peaks:
+        type: array
+        items:
+          type: number
+      n_steps:
+        type: integer
+        minimum: 2
+  implementation_py: |
+    def run(ctx, args):
+        import numpy as np
+        
+        pattern = args.get("pattern_type", "bipartite")
+        threshold_or_peaks = args.get("threshold_or_peaks", [])
+        n_steps = args.get("n_steps", 4)
+        
+        N = 1000  # Discretization
+        domain = 2.0
+        dx = domain / N
+        
+        h = np.zeros(N)
+        
+        if pattern == "bipartite":
+            # Single threshold: h(x) = 1 for x < a, h(x) = 0 for x >= a
+            # integral = a * 1 + (2-a) * 0 = a, so set a=1 for integral=1
+            a = 1.0
+            for i in range(N):
+                x = i * dx
+                if x < a:
+                    h[i] = 1.0
+                else:
+                    h[i] = 0.0
+        
+        elif pattern == "multi_modal":
+            # Multiple peaks with integral=1
+            if len(threshold_or_peaks) >= 2:
+                peaks = threshold_or_peaks[:min(4, len(threshold_or_peaks))]
+                # Create triangular peaks
+                for peak_pos in peaks:
+                    width = 0.3
+                    for i in range(N):
+                        x = i * dx
+                        dist = abs(x - peak_pos)
+                        if dist < width / 2:
+                            h[i] = min(1.0, (width/2 - dist) / (width/2))
+                # Normalize to integral=1
+                integral = np.sum(h) * dx
+                if integral > 0:
+                    h = h / integral
+            else:
+                # Fallback to bipartite
+                a = 1.0
+                for i in range(N):
+                    x = i * dx
+                    h[i] = 1.0 if x < a else 0.0
+        
+        elif pattern == "sparse":
+            # Few steps: h(x) = c_i on intervals [t_i, t_{i+1})
+            n_intervals = n_steps
+            interval_width = 2.0 / n_intervals
+            for j in range(n_intervals):
+                h[j*n_intervals:(j+1)*n_intervals] = 1.0 / n_intervals
+        
+        # Ensure h in [0,1] and integral=1
+        h = np.clip(h, 0.0, 1.0)
+        integral = np.sum(h) * dx
+        if abs(integral - 1.0) > 1e-6:
+            # Renormalize
+            h = h / integral
+        
+        # Format as Python array string
+        h_str = ", ".join([f"{hi:.6f}" for hi in h])
+        return {"h": f"array({h_str})", "pattern": pattern, "n_steps": n_steps,
+                "integral_check": float(integral)}
+new_skills:
+- name: direct-generation-strategy
+  description: Generate step functions directly with constraint satisfaction, bypassing the broken optimizer.
+  body: "# Direct Generation Strategy for Erdos C5\n\n## Core Principle\nCreate valid step functions from scratch with integral(h)=1, bypassing the seed's broken optimizer.\n\n## Step-by-Step Workflow\n\n1. CALL step_function_generator to create 3-5 diverse step functions\n   - Use pattern_type: bipartite, multi_modal, or sparse\n   - Each satisfies integral=1 by construction\n\n2. CALL probe_solution on each candidate\n   - Screen for c5_bound < 0.381\n   - Keep the best 1-2\n\n3. CALL evaluate_solution on selected candidates\n   - If combined_score > 1.0, finish\n\n4. If no improvement, REPEAT with different patterns\n   - Try bipartite, then multi-modal, then sparse\n   - Adjust threshold_or_peaks and n_steps\n\n## Key Rules\n- ALWAYS start with step_function_generator\n- NEVER trust the seed's optimizer - it has bugs (Pattern 14 incomplete)\n- Use probe_solution before full evaluation\n- Evaluate only candidates with c5_bound < 0.381"

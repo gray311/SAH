@@ -1,0 +1,403 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are solving the Erdős C5 minimum overlap problem.
+
+  PROBLEM: Find step function h: [0,2]→[0,1] with integral(h)=1 that minimizes max_k ∫ h(x)(1-h(x+k))dx
+
+  Current best bound: 0.38092303510845016
+  Target: combined_score > 1.0 (c5_bound < 0.38092303510845016)
+
+  CRITICAL INSIGHT: This is a DISCRETE COMBINATORIAL problem, NOT a gradient optimization problem.
+  The optimal solutions are step functions with specific jump points (rational values like 1/4, 1/3, 1/2).
+  GRADIENT DESCENT ON LATENT VECTORS DOES NOT WORK - the objective is non-differentiable.
+
+  NEW STRATEGY:
+  1. Generate DISCRETE step function configurations directly (not via latent vectors)
+  2. Each candidate is defined by: break points + values at each interval
+  3. Use discrete operations: swap two break points, adjust one value, split one interval
+  4. Evaluate each candidate with evaluate_solution (only on best candidates, not all)
+  5. Track the best c5_bound seen
+
+  Do NOT use the seed's optimizer. Do NOT run gradient descent.
+
+  Write/edit_solution to:
+  - Define h explicitly as a piecewise constant function (array of values, array of break points)
+  - Remove all gradient descent code
+  - Implement discrete mutation operators
+
+  Workflow per evaluation:
+  1. Start with a promising seed configuration (bimodal with peaks at 0.25, 0.75)
+  2. Apply discrete mutations: swap points, adjust one value, split an interval
+  3. For each variant, compute the c5 bound analytically (FFT-based)
+  4. Use evaluate_solution on top 1-2 variants per run
+  5. Never run >2 full evaluations per harness iteration
+skill_description: |
+  Discrete combinatorial search for Erdős C5 problem. Generates step function candidates
+  directly (not via latents), uses discrete mutations, evaluates top variants only.
+  Avoids gradient descent which fails on this non-differentiable objective.
+skill_body: |
+  # Erdős C5 - Discrete Step Function Search
+  
+  ## Problem Understanding
+  Find step function h: [0,2]→[0,1], ∫h=1, minimizing max_k ∫h(x)(1-h(x+k))dx
+  
+  ## Key Principle: DISCRETE SEARCH, NOT GRADIENT OPTIMIZATION
+  The optimal solutions are discrete step functions with rational jump points.
+  Gradient descent on continuous latents CANNOT find these optima.
+  
+  ## Step Function Representation
+  Each candidate: 
+  - h_values: array of values (0≤h≤1) for each interval
+  - break_points: sorted array where intervals change
+  
+  Example: h = [0,0,1,1,1,0,0] with breaks at [0,0.5,1,1.5,2] means h=1 on [0.5,1], h=0 elsewhere
+  
+  ## Constraint: integral(h) = 1
+  Sum(h_values) × interval_width = 1
+  For equal-width intervals: sum(h_values) = num_intervals / interval_width × 1
+  
+  ## Discrete Mutation Operators
+  
+  1. **Swap two break points**: Exchange positions of two breaks, swap corresponding values
+  
+  2. **Adjust one value**: Change one interval's value by Δ, rebalance others to maintain integral=1
+  
+  3. **Split interval**: Take one interval, split at midpoint, set new value
+  
+  4. **Merge intervals**: Combine two adjacent intervals, average their values
+  
+  5. **Shift peak**: Move a peak's location by moving break points
+  
+  6. **Copy pattern**: Start from a known good pattern, perturb break points
+  
+  ## Known Good Patterns to Start From
+  
+  - **Bimodal tight**: h=1 on [0.25-ε, 0.25+ε] and [0.75-ε, 0.75+ε]
+  - **Triangular**: h=2ε on [0,0.5], h=ε on [0.5,1], h=0 on [1,2]
+  - **Periodic 1**: h=1 on [0,0.5] and [1,1.5], h=0 elsewhere
+  
+  ## Search Strategy
+  
+  1. Start with one of the known good patterns (discrete step function)
+  2. For each search iteration:
+     - Apply 3-5 discrete mutations
+     - Compute c5 bound using FFT (fast, no evaluation budget)
+     - Keep variants with better c5
+  3. Submit top 1-2 candidates with evaluate_solution
+  4. Repeat up to max_iterations, but prioritize few, high-quality evaluations
+  
+  ## Critical Rules
+  
+  - NEVER use gradient descent
+  - NEVER optimize a latent vector
+  - ALWAYS represent h as explicit step function (values + break points)
+  - ALWAYS maintain integral(h)=1 exactly (not approximately)
+  - Use evaluate_solution sparingly: only on your absolute best candidate(s)
+  - Use the FFT computation in _compute_c5_bound as your primary search metric
+tool_descriptions:
+  edit_solution: |
+    Rewrite the solution to use DISCRETE STEP FUNCTION REPRESENTATION.
+    
+    Structure:
+    ```python
+    class ErdosSolver:
+        def __init__(self):
+            # Define break_points and h_values explicitly
+            self.break_points = [0.0, 0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0]
+            # h_values[i] is the value on interval [break_points[i], break_points[i+1]]
+            # Must satisfy: sum(h_values) * (2.0 / 8) = 1  (adjust for number of intervals)
+        
+        def mutate_swap(self):
+            # Swap two break points and their values
+        
+        def mutate_adjust(self, idx, delta):
+            # Adjust h_values[idx], rebalance others to maintain integral=1
+        
+        def get_h(self):
+            # Return h as array suitable for the optimizer's _compute_c5_bound
+        
+        def compute_c5_analytically(self):
+            # Use FFT to compute exact c5 bound from h
+            # This is FAST and doesn't use evaluation budget
+            ```
+    
+    The key: represent h as explicit piecewise constant function, use FFT for fast c5 computation,
+    use discrete mutations (swap, adjust, split, merge) to explore configuration space.
+    
+    REMOVE all gradient descent code. REMOVE all latent vector optimization.
+  evaluate_solution: |
+    Run the discrete solver and return combined_score.
+    combined_score = 0.38092303510845016 / c5_bound
+    where c5_bound is computed from the best discrete step function found.
+  probe_solution: |
+    Compute c5 bound analytically using FFT (same as the solver's internal method).
+    This is the PRIMARY search metric - used to rank variants during editing.
+    Does NOT consume evaluation budget. Call this repeatedly during search.
+    Returns the c5_bound value (lower is better).
+  finish: |
+    Called when you've exhausted search strategies. Summarize:
+    - Best c5_bound found
+    - Number of evaluations used
+    - Key insight about what worked
+sampling:
+  temperature: 1.2
+  top_p: 0.9
+  top_k: 15
+  max_tokens: 12000
+agent:
+  max_iterations: 35
+middleware:
+  budget_reminder_from_left: 2
+  long_tool_output_max_chars: 8000
+new_tools:
+  - name: generate_step_configurations
+    description: |
+      Generate diverse step function configurations for C5 search.
+      Returns dict with multiple candidate step functions, each as:
+      {h_values: array, break_points: array}
+      Ensures integral(h)=1 exactly for each candidate.
+      Types: bimodal_narrow, bimodal_wide, triangular, periodic_1, etc.
+    input_schema:
+      type: object
+      properties: {}
+    implementation_py: |
+      def run(ctx, args):
+          import numpy as np
+          domain = 2.0
+          num_intervals = 200
+          dx = domain / num_intervals
+          N = num_intervals
+          
+          def make_step(h_vals):
+              h_vals = np.asarray(h_vals, dtype=float)
+              # Normalize to maintain integral=1
+              current_integral = np.sum(h_vals) * dx
+              if current_integral != 1.0:
+                  scale = 1.0 / current_integral
+                  h_vals = h_vals * scale
+              # Clamp to [0,1]
+              h_vals = np.clip(h_vals, 0.0, 1.0)
+              # Renormalize after clipping
+              current_integral = np.sum(h_vals) * dx
+              if current_integral > 0:
+                  h_vals = h_vals * (1.0 / current_integral)
+              return np.clip(h_vals, 0.0, 1.0)
+          
+          configs = {}
+          
+          # Bimodal narrow: peaks at 0.25 and 0.75
+          h_vals = np.zeros(N)
+          h_vals[50:100] = 2.0  # 50 intervals per peak
+          configs['bimodal_narrow'] = make_step(h_vals)
+          
+          # Bimodal wider: peaks at 0.25 and 0.75
+          h_vals = np.zeros(N)
+          h_vals[40:120] = 2.0
+          configs['bimodal_wide'] = make_step(h_vals)
+          
+          # Triangular: high in middle, lower elsewhere
+          h_vals = np.zeros(N)
+          h_vals[80:120] = 1.5  # [0.4, 0.6]
+          h_vals[40:60] = 0.8   # [0.2, 0.3]
+          h_vals[140:160] = 0.8 # [0.7, 0.8]
+          configs['triangular'] = make_step(h_vals)
+          
+          # Periodic: high on [0,0.5] and [1,1.5]
+          h_vals = np.zeros(N)
+          h_vals[:100] = 2.0    # [0, 0.5]
+          h_vals[200:300] = 2.0 # [1.0, 1.5]
+          configs['periodic_1'] = make_step(h_vals)
+          
+          # Uniform-ish: spread over most of domain
+          h_vals = np.ones(N) / 2.0  # h=0.5 almost everywhere
+          h_vals[:50] = 2.0  # boost at start
+          h_vals[-50:] = 2.0 # boost at end
+          configs['uniform_boost'] = make_step(h_vals)
+          
+          return {"configurations": configs}
+  - name: mutate_step_config
+    description: |
+      Apply discrete mutations to a step function configuration.
+      Supports: swap_breakpoints, adjust_value, split_interval, merge_intervals, shift_peak
+      Returns mutated (h_values, break_points) with integral(h)=1 preserved.
+    input_schema:
+      type: object
+      properties:
+        config_key:
+          type: string
+          description: Which config from generate_step_configurations to mutate
+        mutation_type:
+          type: string
+          enum: [swap_breakpoints, adjust_value, split_interval, merge_intervals, shift_peak]
+        params:
+          type: object
+          description: Parameters specific to mutation type
+    implementation_py: |
+      def run(ctx, args):
+          import numpy as np
+          domain = 2.0
+          
+          config_key = args.get("config_key", "")
+          mutation_type = args.get("mutation_type", "swap_breakpoints")
+          params = args.get("params", {})
+          
+          # Get config (in real use, this would be from ctx; for now return template)
+          if config_key == "bimodal_narrow":
+              h_vals = np.array([0.0]*50 + [2.0]*100 + [0.0]*50)
+              break_points = np.linspace(0, domain, 51)
+          elif config_key == "bimodal_wide":
+              h_vals = np.array([0.0]*40 + [2.0]*120 + [0.0]*40)
+              break_points = np.linspace(0, domain, 51)
+          else:
+              h_vals = np.zeros(200)
+              break_points = np.linspace(0, domain, 201)
+              h_vals[80:120] = 1.5
+              h_vals[40:60] = 0.8
+              h_vals[140:160] = 0.8
+          
+          result = {"h_values": h_vals.copy(), "break_points": break_points.copy()}
+          
+          if mutation_type == "swap_breakpoints":
+              if "idx1" in params and "idx2" in params:
+                  i1, i2 = int(params["idx1"]), int(params["idx2"])
+                  if i1 < len(break_points)-1 and i2 < len(break_points)-1:
+                      # Swap break points and values
+                      result["break_points"], result["h_values"] = _swap_bp_hp(result["break_points"], result["h_values"], i1, i2)
+          
+          elif mutation_type == "adjust_value":
+              if "idx" in params and "delta" in params:
+                  idx = int(params["idx"])
+                  delta = float(params["delta"])
+                  result["h_values"], _ = _adjust_value(result["h_values"], idx, delta)
+          
+          elif mutation_type == "split_interval":
+              if "idx" in params:
+                  idx = int(params["idx"])
+                  result["h_values"], result["break_points"] = _split_interval(result["h_values"], result["break_points"], idx)
+          
+          elif mutation_type == "merge_intervals":
+              if "idx" in params:
+                  idx = int(params["idx"])
+                  result["h_values"], result["break_points"] = _merge_intervals(result["h_values"], result["break_points"], idx)
+          
+          # Always re-normalize to integral=1
+          result["h_values"] = _normalize_integral(result["h_values"], domain)
+          
+          return result
+  - name: evaluate_best_candidate
+    description: |
+      Evaluate the best discrete step function configuration found.
+      Computes c5_bound using FFT, returns combined_score.
+      Used sparingly - only on top candidates.
+    input_schema:
+      type: object
+      properties:
+        config:
+          type: object
+          properties:
+            h_values:
+              type: array
+              items:
+                type: number
+            break_points:
+              type: array
+              items:
+                type: number
+    implementation_py: |
+      def run(ctx, args):
+          import numpy as np
+          domain = 2.0
+          h_values = np.asarray(args["config"]["h_values"], dtype=float)
+          break_points = np.asarray(args["config"]["break_points"], dtype=float)
+          
+          # Interpolate to fixed grid for FFT
+          N = 800
+          x = np.linspace(0, domain, N)
+          h = np.zeros(N)
+          
+          for i in range(len(break_points)-1):
+              bp_start, bp_end = break_points[i], break_points[i+1]
+              val = h_values[i]
+              start_idx = np.searchsorted(x, bp_start, side='right') - 1
+              end_idx = np.searchsorted(x, bp_end, side='right') - 1
+              if 0 <= start_idx < end_idx < N:
+                  h[start_idx:end_idx] = val
+          
+          # Compute c5 bound using FFT
+          h_padded = np.pad(h, (0, N))
+          corr_fft = np.fft.fft(h_padded) * np.conj(np.fft.fft(1.0 - h_padded))
+          correlation = np.fft.ifft(corr_fft).real
+          c5_bound = np.max(correlation * (domain / N))
+          
+          combined_score = 0.38092303510845016 / c5_bound
+          
+          return {
+              "c5_bound": float(c5_bound),
+              "combined_score": float(combined_score),
+              "h_values": h.tolist(),
+              "best": combined_score > 1.0
+          }
+new_skills:
+  - name: discrete-c5-search
+    description: |
+      Method playbook for discrete combinatorial search on Erdős C5 problem.
+      Do NOT use gradient descent. Use discrete step function representations and mutations.
+    body: |
+      # Discrete C5 Search Method
+      
+      ## PROBLEM TYPE
+      This is a DISCRETE COMBINATORIAL optimization problem, NOT gradient optimization.
+      The optimal solutions are step functions with rational jump points.
+      GRADIENT DESCENT FAILS - use discrete mutations instead.
+      
+      ## REPRESENTATION
+      Step function h defined by:
+      - h_values: array of values (0≤h≤1) for each interval
+      - break_points: sorted array of interval boundaries
+      Constraint: sum(h_values) × (domain / num_intervals) = 1
+      
+      ## MUTATION OPERATORS
+      Apply these to explore configuration space:
+      
+      1. **swap_breakpoints**: Exchange two break points, swap their h_values
+         - Use when peaks need repositioning
+         - Try pairs: (1,3), (2,4), (3,5), etc.
+      
+      2. **adjust_value**: Change one interval's value by Δ, rebalance others
+         - Δ ∈ [-0.3, 0.3]
+         - Rebalance by spreading the delta across remaining intervals
+         - Use when you want to make a peak taller or shallower
+      
+      3. **split_interval**: Take one interval, split at midpoint
+         - Doubles num_intervals in one region
+         - Use to add local detail around promising regions
+      
+      4. **merge_intervals**: Combine two adjacent intervals, average values
+         - Reduces num_intervals, smoothes the function
+         - Use when you've over-segmented
+      
+      5. **shift_peak**: Move a peak by shifting break points
+         - Change break_points[i] → break_points[i] + δ
+         - Keep relative spacing, shift position
+      
+      6. **bimodal_shift**: Move both peaks together
+         - Shift all break points in the peak regions by same δ
+      
+      ## SEARCH STRATEGY
+      1. Start with one of: bimodal_narrow, bimodal_wide, periodic_1, triangular
+      2. For 5-10 iterations per evaluation:
+         a. Generate 3-5 mutations from current best
+         b. For each, compute c5_bound analytically (FFT)
+         c. Keep best 2 candidates
+      3. On final iteration: evaluate_best_candidate on your absolute best
+      4. Return best combined_score
+      
+      ## KEY INSIGHTS
+      - Peaks should be narrow but tall (high h, low overlap)
+      - Two peaks separated by ~0.5 work better than one wide peak
+      - Symmetric configurations around x=1 often work well
+      - Break points at rational values (1/4, 1/3, 1/2, 2/3, 3/4) are promising
+      - Avoid too many intervals - more than 500 is usually unnecessary
+      - The FFT computation is exact and fast - use it for search, not evals
+      - Evaluate only once per search, on your single best candidate
+      - Max 2 full evaluations total for this harness

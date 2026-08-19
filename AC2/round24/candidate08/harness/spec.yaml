@@ -1,0 +1,168 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are an expert in functional analysis for C2 maximization.
+
+  Current best: 0.8962799441554086 (step functions). Your harness achieved 1.042 (c2≈0.934).
+
+  CRITICAL INSIGHT: The seed's step patterns are local optima within the step-function class. To exceed 0.896, you MUST explore NEW FUNCTION FAMILIES, not just refine existing parameters.
+
+  STRATEGY - ARCHITECTURAL DIVERSIFICATION:
+
+  PHASE 1 (iterations 1-10): EXPLORE DIVERSE FUNCTION FAMILIES
+  1. Call generate_family_variant to propose a completely different function architecture
+     (Gaussian hybrids, spline-based, polynomial-cutoff, mixed step-smooth)
+  2. Call probe_solution on 2-3 proposed families
+  3. Call evaluate_solution on TOP 1 that beats record
+
+  PHASE 2 (iterations 11-20): HYBRIDIZATION & TUNING
+  1. If a new family outperforms step functions: refine its parameters using small perturbations
+  2. Try hybridizing step-function base with smooth tails (Gaussian-like decay at boundaries)
+  3. Probe 2-3 hybrid variants, evaluate best
+
+  PHASE 3 (iterations 21-30): AGGRESSIVE ARCHITECTURE SEARCH
+  1. If no improvement: generate more exotic families (Fourier-space optimized, fractal-like)
+  2. Use gradients on promising families for final tuning
+  3. Submit if c2 > 0.8962799441554086
+
+  RULES:
+  - ALWAYS try new function families before refining - the seed is a local optimum
+  - Use probes to screen 5-6 different architectures before full eval
+  - Step functions are a starting point, not the answer
+  - Generate diverse variants: Gaussian tails, polynomial cutoffs, spline-based, hybrid step-smooth
+tool_descriptions:
+  edit_solution: |
+    Edit the EVOLVE-BLOCK to construct new function architectures:
+    - Gaussian hybrids: combine step function with exp(-x^2) decay
+    - Spline-based: use piecewise polynomial with continuous derivatives
+    - Polynomial cutoff: step function x (1 + e·x^2) for smooth transitions
+    - Mixed architectures: step base + smooth boundary layers
+    Use JAX array mutation: f = f.at[start:end].set(value) or blend existing with new terms.
+  evaluate_solution: 'Full evaluation. Budget: 30 total. Call ONLY after probe_solution ranking. Evaluate top 1-2 novel architectures.'
+  probe_solution: |
+    Approximate score on 10% subsample. FAST (~10s vs minutes for full eval).
+    Use aggressively to screen diverse function families: call on 2-5 variants per iteration.
+    Phase 1: probe different families (Gaussian hybrid, spline, polynomial cutoff).
+    Phase 2-3: probe hybrids, refinements, exotic families.
+  finish: 'Report best combined_score, the winning function architecture (family type), and key insights.'
+sampling:
+  temperature: 1.2
+  top_p: 0.9
+  top_k: 50
+  max_tokens: 16384
+agent:
+  max_iterations: 30
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 20000
+new_tools:
+- name: generate_family_variant
+  description: |
+    Generate a completely different function architecture from the step-function baseline.
+    Explore: Gaussian hybrids, spline-based functions, polynomial-cutoff steps, hybrid step-smooth,
+    or Fourier-space optimized designs. Call this 1-2x per iteration to escape local optima.
+    Ensure f(x) >= 0 and integrability.
+  input_schema:
+    type: object
+    properties: {}
+  implementation_py: |
+    def run(ctx, args):
+        import random
+        best_f = ctx.get_best_program()
+        # Choose random family type
+        family = random.choice(['gaussian_hybrid', 'spline', 'poly_cutoff', 'hybrid_step', 'fractal'])
+        
+        n = ctx.hypers.num_intervals if hasattr(ctx, 'hypers') else 600
+        
+        if family == 'gaussian_hybrid':
+            # Step function modulated by Gaussian
+            f = jax.numpy.exp(-((jnp.arange(n) - n/2)**2) / (2 * (0.15*n)**2))
+            f = f + 0.3 * jax.numpy.exp(-((jnp.arange(n) - n/2)**2) / (2 * (0.1*n)**2))
+        
+        elif family == 'spline':
+            # Piecewise quadratic spline
+            f = jnp.zeros(n)
+            knots = jnp.array([0.2, 0.35, 0.5, 0.65, 0.8, 1.0])
+            for i, k in enumerate(knots[:-1]):
+                start = int(k * n)
+                end = int((k + 0.1) * n)
+                f = f.at[start:end].set(0.8 + 0.3 * jnp.linspace(0, 1, end-start))
+        
+        elif family == 'poly_cutoff':
+            # Step with polynomial smooth edges
+            f = jnp.ones(n) * 1.2
+            # Smooth edges using quadratic polynomial
+            edge_width = int(0.05 * n)
+            f = f.at[:edge_width].set(f[:edge_width] * (jnp.linspace(0, 1, edge_width)**2 + 0.3))
+            f = f.at[-edge_width:].set(f[-edge_width:] * (jnp.linspace(1, 0, edge_width)**2 + 0.3))
+        
+        elif family == 'hybrid_step':
+            # Core step + smooth boundary
+            f = jnp.zeros(n)
+            core_start = int(0.2 * n)
+            core_end = int(0.8 * n)
+            f = f.at[core_start:core_end].set(1.5)
+            # Add Gaussian tails
+            f = f + 0.2 * jax.numpy.exp(-((jnp.arange(n) - n/2)**2) / (2 * (0.2*n)**2))
+        
+        elif family == 'fractal':
+            # Self-similar multi-scale structure
+            f = jnp.zeros(n)
+            scale = 0.2
+            f = f.at[int(scale*n):int(scale*2*n)].set(0.5)
+            f = f.at[int(scale*3*n):int(scale*4*n)].set(0.5)
+            f = f.at[int(scale*5*n):int(scale*6*n)].set(1.8)
+            f = f.at[int(1-scale*n):int(1-scale*2*n)].set(0.5)
+            f = f.at[int(1-scale*3*n):int(1-scale*4*n)].set(0.5)
+        
+        # Ensure non-negativity
+        f = jax.nn.relu(f)
+        
+        return {"family": family, "new_code": f.astype(jnp.float32).tolist(), "note": f"Generated {family} variant"}
+new_skills:
+- name: family-exploration-protocol
+  description: Systematically explore diverse function families (Gaussian hybrids, splines, polynomial cutoffs) before refining. Escape step-function local optima.
+  body: |
+    # Family Exploration Protocol for C2 Maximization
+    
+    ## Core Principle
+    The seed step function is a LOCAL OPTIMUM within the step-function class.
+    To exceed C2 = 0.89628, you MUST explore NEW FUNCTION ARCHITECTURES.
+    
+    ## Phase 1: Diverse Family Exploration (iterations 1-10)
+    
+    Step 1: Generate New Families
+    - Call generate_family_variant 1-2 times to get different architectures
+    - Types to try:
+      * Gaussian hybrid: step x Gaussian envelope
+      * Spline-based: piecewise polynomial with smooth transitions
+      * Polynomial cutoff: step function with polynomial-smoothed edges
+      * Hybrid step: core step + Gaussian tails
+      * Fractal-like: multi-scale self-similar structure
+    
+    Step 2: Rapid Screening
+    - Call probe_solution on 2-3 different families
+    - Rank by probe score
+    
+    Step 3: Initial Evaluation
+    - Call evaluate_solution on TOP 1 that beats current c2
+    
+    ## Phase 2: Hybridization & Tuning (iterations 11-20)
+    
+    Step 1: If new family outperforms:
+    - Refine its parameters with small perturbations (plus-minus 5 percent)
+    - Try hybridizing with step-function base
+    
+    Step 2: Probe 2-3 hybrid variants
+    - Evaluate best
+    
+    ## Phase 3: Exotic Architecture Search (iterations 21-30)
+    
+    Step 1: Generate more exotic families (Fourier-optimized, multi-modal)
+    Step 2: Use gradients on promising candidates for final tuning
+    Step 3: Submit if c2 > 0.8962799441554086
+    
+    ## Key Rules
+    - Step functions are a STARTING POINT, not the answer
+    - Always try new architectures before refining existing ones
+    - Use probes to screen 5+ different families before full eval
+    - Temperature 1.2 encourages architectural diversity

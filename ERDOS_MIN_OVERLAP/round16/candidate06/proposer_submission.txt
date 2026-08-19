@@ -1,0 +1,143 @@
+schema: h2spec/1.0
+system_prompt: |
+  Task: Find a step function h: [0,2] -> [0,1] with integral(h)=1 that minimizes max_k integral h(x)(1-h(x+k)) dx.
+  Current best bound: C5 ≤ 0.38092303510845016. Goal: achieve combined_score > 1.0.
+
+  KEY INSIGHT: The seed's _get_best_initialization always samples 12 patterns and picks the best. To escape, you must MODIFY _get_best_initialization to use a SINGLE, hand-crafted pattern.
+
+  STRATEGY:
+  1. Rewrite _get_best_initialization to return ONLY a piecewise-constant function (e.g., h=0.5 on [0,1), h=1 on [1,2])
+  2. Ensure integral(h)=1 by adjusting the function or using penalty in _objective_fn
+  3. Test with num_restarts=1, seed_start=0
+  4. Use probe_solution to quickly check c5_bound < 0.37
+  5. Call evaluate_solution only if probe passes
+
+  CRITICAL: The edit must be COMPLETE and VALID Python code. Do not leave TODOs or incomplete edits.
+
+  Steps:
+  1. Call construct_piecewise to generate a valid h(x) with integral=1
+  2. WRITE this h(x) directly into _get_best_initialization as the ONLY return value
+  3. Set hyperparameters: num_restarts=1, base_learning_rate=0.01, penalty_strength=100
+  4. Call probe_solution to verify c5_bound
+  5. If c5_bound < 0.37, call evaluate_solution
+  6. If no improvement after 2-3 attempts, try a DIFFERENT piecewise structure (e.g., 3 levels)
+tool_descriptions:
+  edit_solution: 'Edit the EVOLVE-BLOCK to modify _get_best_initialization. REPLACE the entire _get_best_initialization method with a single return statement using the provided piecewise function. Also update hyperparameters: num_restarts=1, base_learning_rate=0.01, penalty_strength=100.'
+  evaluate_solution: 'Run full evaluation, returns combined_score. Use only after probe confirms c5_bound < 0.37.'
+  probe_solution: 'Quick approximate evaluation (500 intervals). Returns c5_bound estimate. Use to screen candidates before full evaluation.'
+  construct_piecewise: 'Generate a piecewise-constant function h: [0,2] -> [0,1] with integral(h)=1. Creates 2-3 level functions with specified breakpoints. Returns levels as list of (value, start, end) tuples.'
+  finish: 'Submit when combined_score > 1.0 or after exhausting all 50 iterations.'
+sampling:
+  temperature: 0.3
+  top_p: 0.9
+  top_k: 10
+  max_tokens: 12000
+agent:
+  max_iterations: 50
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 8000
+new_tools:
+- name: construct_piecewise
+  description: |
+    Generate a piecewise-constant function h: [0,2] -> [0,1] with integral(h)=1.
+    Creates 2-3 level functions with specified breakpoints. Returns levels as list of (value, start, end) tuples.
+  input_schema:
+    type: object
+    properties:
+      num_levels:
+        type: integer
+        default: 2
+  implementation_py: |
+    def run(ctx, args):
+        import numpy as np
+        num_levels = args.get("num_levels", 2)
+        levels = []
+        if num_levels == 2:
+            # h = 0.5 on [0,2] gives integral = 0.5*2 = 1 ✓
+            levels = [(0.5, 0.0, 2.0)]
+        elif num_levels == 3:
+            # Try asymmetric: h = 0.6 on [0,1), h = 0.4 on [1,2) -> integral = 0.6 + 0.4 = 1 ✓
+            levels = [(0.6, 0.0, 1.0), (0.4, 1.0, 2.0)]
+        else:
+            # 4 levels: h = 0.5, 0.5, 0.5, 0.5 on [0,0.5), [0.5,1), [1,1.5), [1.5,2)
+            # integral = 0.5*2 = 1 ✓
+            levels = [(0.5, 0.0, 0.5), (0.5, 0.5, 1.0), (0.5, 1.0, 1.5), (0.5, 1.5, 2.0)]
+        return {"levels": levels, "num_levels": len(levels), "integral_check": sum((v*(e-s) for v,s,e in levels))}
+new_skills:
+- name: piecewise-constant-strategy
+  description: |
+    Replace _get_best_initialization with a single piecewise-constant h(x). Use construct_piecewise to generate valid h, then hardcode it into _get_best_initialization as the only pattern.
+  body: |
+    # Piecewise Constant Initialization Strategy
+
+    ## Problem
+    The seed's _get_best_initialization samples 12 patterns and picks the best. This wastes computation and may not explore diverse regions.
+
+    ## Solution
+    Replace _get_best_initialization with a SINGLE hand-crafted piecewise-constant function that you KNOW has integral=1.
+
+    ## How to Edit
+    1. Call construct_piecewise to generate levels (e.g., [(0.6, 0.0, 1.0), (0.4, 1.0, 2.0)])
+    2. Edit _get_best_initialization to:
+       - Remove the 12 pattern loop
+       - Return a latent vector that, after sigmoid, gives exactly these h values
+       - Use piecewise linear latent: latent[i] = log(h_i/(1-h_i)) for each interval's midpoint
+
+    ## Example Edit
+    Old _get_best_initialization (remove):
+    ```python
+    def _get_best_initialization(self, seed: int) -> jnp.ndarray:
+        # 12 patterns...
+    ```
+
+    New _get_best_initialization (replace with):
+    ```python
+    def _get_best_initialization(self, seed: int) -> jnp.ndarray:
+        # h = 0.6 on [0,1), h = 0.4 on [1,2)
+        N = self.hypers.num_intervals
+        latent = jnp.zeros(N)
+        mid_1 = int(N * 1.0 / 2.0)
+        # log(0.6/0.4) = log(1.5) ≈ 0.405
+        # log(0.4/0.6) = log(0.667) ≈ -0.405
+        latent[:mid_1] = 0.405
+        latent[mid_1:] = -0.405
+        return latent
+    ```
+
+    ## Hyperparameters
+    Set: num_restarts=1, base_learning_rate=0.01, penalty_strength=100, seed_start=0
+new_middlewares:
+- name: validate_before_eval
+  hook: before_model
+  description: |
+    Remind the executor to validate that edits produce integral(h)=1 before spending evaluations.
+  implementation_py: |
+    def before_model(hook_input):
+        state = hook_input.get("state", {})
+        evals_left = state.get("evals_left", 0)
+        iteration = state.get("iteration", 0)
+        if iteration > 0 and evals_left > 3:
+            return (
+                "VERIFY that your edit to _get_best_initialization produces h with integral=1.\n"
+                "Check: sum(h_values) * dx ≈ 1.0 (dx = 2.0 / 800 = 0.0025)\n"
+                "If integral ≠ 1, the penalty will dominate and training will fail.\n"
+                "Use probe_solution to check before calling evaluate_solution."
+            )
+        return None
+- name: force_simplify
+  hook: before_model
+  description: |
+    Push the executor to simplify _get_best_initialization if it's still using the 12-pattern approach.
+  implementation_py: |
+    def before_model(hook_input):
+        state = hook_input.get("state", {})
+        iteration = state.get("iteration", 0)
+        if iteration > 5:
+            return (
+                "Your _get_best_initialization may still be using the 12-pattern loop.\n"
+                "REPLACE it with a SINGLE piecewise-constant pattern.\n"
+                "The 12 patterns are all Gaussian/sigmoid and won't escape the local minimum.\n"
+                "You need a DIFFERENT STRUCTURE: piecewise constant with asymmetric levels."
+            )
+        return None

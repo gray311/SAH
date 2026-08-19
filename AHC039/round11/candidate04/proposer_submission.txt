@@ -1,0 +1,219 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are a C++ polygon optimizer for axis-aligned fish capture. Goal: maximize (mackerels - sardines + 1).
+  
+  SEARCH STRATEGY:
+  1. INITIAL POLYGON: Start with minimal valid rectangle (4 vertices). Use greedy approach to try small rectangles at various locations.
+  2. MIDDLEWARE-AWARE SEARCH: Use injected grid analysis summary to focus search.
+  3. MIDDLEWARE-DRIVEN RESTARTS: Do 10-15 restarts with different seed coordinates and rectangle sizes.
+  4. HILL CLIMBING: Expand each edge by 50, 100, 150, 200 units. Keep expansion that improves (mackerels - sardines).
+  5. VALIDATION: Ensure 4-1000 vertices, perimeter <= 400000, integer coords in [0,100000].
+  6. OUTPUT FORMAT: Print m, then m lines of x y coordinates.
+  
+  Tools:
+  - edit_solution: Replace EVOLVE-BLOCK with C++ implementing above strategy
+  - evaluate_solution: Run C++ program, get score (~2.0s time budget)
+  - probe_solution: Test polygon candidates cheaply
+  - finish: Submit when you have a working solution with multiple restarts
+  
+  KEY DIFFERENCE: Use simpler restart-based search with direct polygon expansions, rather than complex grid corridors.
+skill_description: Restart-based polygon expansion with direct edge growth. Start with minimal rectangles, expand edges by 50-200 units, keep improvements. Run 10-15 restarts.
+skill_body: |
+  # Restart-Based Polygon Optimization Strategy
+  
+  ## Phase 1: Seed Rectangle Selection
+  - Try creating minimal rectangles at various positions using grid of candidate top-left corners (every 2000 units)
+  - For each candidate, create rectangle of initial size (10000 x 10000)
+  - Pick rectangle with highest (mackerels - sardines)
+  
+  ## Phase 2: Directional Expansion
+  For each seed rectangle, expand in all 4 directions:
+  - Try expanding each edge by: 50, 100, 150, 200, 250 units
+  - Count fish inside after each expansion
+  - Keep expansion that maximizes (mackerels - sardines)
+  
+  ## Phase 3: Multi-Edge Simultaneous Expansion
+  - Expand multiple edges simultaneously (e.g., top and bottom both by 100)
+  - This creates larger polygons capturing more fish
+  
+  ## Phase 4: Local Search Refinement
+  - Shift each vertex by +10, +20, +30, -10, -20, -30 units in all directions
+  - Try adding or removing vertices to change shape
+  
+  ## Phase 5: Multiple Restarts
+  - Run 10-15 restarts with different configurations:
+    - Different seed rectangle top-left positions
+    - Different initial rectangle sizes
+    - Different expansion amounts
+  - Track best polygon across all restarts
+  - Output single best polygon
+  
+  ## C++ Implementation Notes
+  - Use fast fish counting: iterate over all fish and check if inside
+  - Time per evaluation: < 2.0s
+  - Use integer math to avoid floating-point issues
+tool_descriptions:
+  edit_solution: |
+    Replace EVOLVE-BLOCK with C++ implementing restart-based polygon optimization: try minimal rectangles at grid positions, expand each edge by 50-250 units, run 10-15 restarts with different seeds, output best polygon
+  evaluate_solution: |
+    Run C++ program. Returns score (mackerels-sardines+1)
+  probe_solution: |
+    Test polygon candidates cheaply by running C++ with relaxed constraints
+  finish: |
+    End when you have submitted a working restart-based polygon optimizer
+sampling:
+  temperature: 1.3
+  top_p: 0.95
+  top_k: 25
+  max_tokens: 14336
+agent:
+  max_iterations: 40
+middleware:
+  budget_reminder_from_left: 8
+  long_tool_output_max_chars: 18000
+new_tools:
+  - name: quick_polygon_score
+    description: Score a polygon by counting fish inside it. Returns mackerel count, sardine count, and net score (m-s+1).
+    input_schema:
+      type: object
+      properties:
+        vertices:
+          type: array
+          items:
+            type: object
+            properties:
+              x:
+                type: integer
+              y:
+                type: integer
+          minItems: 4
+          maxItems: 1000
+        perimeter_limit:
+          type: integer
+          default: 400000
+    implementation_py: |
+      def run(ctx, args):
+          vertices = args.get("vertices", [])
+          if len(vertices) < 4:
+              return {"error": "need at least 4 vertices", "score": 0}
+          
+          perimeter = 0
+          for i in range(len(vertices)):
+              p1 = vertices[i]
+              p2 = vertices[(i + 1) % len(vertices)]
+              perimeter += abs(p1["x"] - p2["x"]) + abs(p1["y"] - p2["y"])
+          
+          if perimeter > 400000:
+              return {"error": "perimeter exceeds limit", "score": 0, "mackerels": 0, "sardines": 0}
+          
+          program_text = ctx.get_program()
+          all_coords = []
+          
+          for line in program_text.split('\n'):
+              coords = re.findall(r'(\d+)\s*(x|X)', line)
+              coords_y = re.findall(r'(\d+)\s*(y|Y)', line)
+              if coords and coords_y:
+                  for i in range(min(len(coords), len(coords_y))):
+                      all_coords.append((int(coords[i][0]), int(coords_y[i][0])))
+          
+          mackerels = all_coords[:5000]
+          sardines = all_coords[5000:10000]
+          mackerels = [(x, y) for (x, y) in mackerels if 0 <= x <= 100000 and 0 <= y <= 100000]
+          sardines = [(x, y) for (x, y) in sardines if 0 <= x <= 100000 and 0 <= y <= 100000]
+          
+          m_count = 0
+          s_count = 0
+          
+          for mx, my in mackerels:
+              if point_in_polygon((mx, my), vertices):
+                  m_count += 1
+          
+          for sx, sy in sardines:
+              if point_in_polygon((sx, sy), vertices):
+                  s_count += 1
+          
+          score = max(0, m_count - s_count + 1)
+          
+          return {"mackerels": m_count, "sardines": s_count, "score": score, "perimeter": perimeter}
+
+      def point_in_polygon(pt, vertices):
+          x, y = pt
+          n = len(vertices)
+          inside = False
+          j = n - 1
+          for i in range(n):
+              vi = vertices[i]
+              vj = vertices[j]
+              if ((vi["y"] > y) != (vj["y"] > y)):
+                  xi = vi["x"] - (vi["y"] - vj["y"]) * (vi["x"] - vj["x"]) / (vi["y"] - vj["y"])
+                  if x < xi:
+                      inside = not inside
+              j = i
+          return inside
+
+new_skills:
+  - name: simple-polygon-optimizer
+    description: Use simple axis-aligned polygon with edge expansions and multiple restarts. Focus on expanding good rectangles.
+    body: |
+      # Simple Polygon Optimization for Fish Capture
+      
+      ## Core Strategy
+      Start with minimal rectangles, expand edges, and use multiple restarts to find optimal polygons.
+      
+      ## Step 1: Grid-Based Seed Selection
+      - Scan coordinate space at regular intervals (every 2000 units)
+      - For each position, try creating rectangle of various sizes
+      - Track which rectangles capture most mackerels relative to sardines
+      
+      ## Step 2: Edge Expansion
+      For each promising rectangle:
+      - Expand each edge outward by: 50, 100, 150, 200, 250, 300 units
+      - After each expansion, count fish inside
+      - Keep expansion that improves score
+      
+      ## Step 3: Multi-Direction Expansion
+      - Try expanding opposite edges together (e.g., top and bottom both by 100)
+      - This creates larger, more efficient polygons
+      
+      ## Step 4: Local Search
+      - Shift each vertex by +10, +20, +30, -10, -20, -30 units in all directions
+      
+      ## Step 5: Multiple Restarts
+      - Run 10-15 restarts with different configurations:
+        - Different seed positions (perturb by +5000 or -5000 randomly)
+        - Different initial rectangle sizes
+        - Different expansion strategies
+      - Output best polygon found
+      
+      ## Validation
+      - Ensure polygon has 4-1000 vertices
+      - Ensure perimeter <= 400000
+      - Ensure all coordinates are integers in [0, 100000]
+      
+      ## Key Success Factors
+      - Use quick scoring to test many expansion options
+      - Focus on expanding existing good rectangles
+      - Run enough restarts to explore diverse starting points
+      - Keep C++ code simple and efficient
+new_middlewares:
+  - name: seed_guide
+    hook: before_model
+    description: Guide the model to use grid-based seed selection and edge expansion.
+    implementation_py: |
+      def before_model(hook_input):
+          return "Use grid-based seed selection: try rectangles at positions 0, 2000, 4000... Expand edges by 50-300 units. Run 10-15 restarts with different seeds."
+  - name: perimeter_warning
+    hook: before_tool
+    description: Warn if perimeter is too large before polygon evaluation.
+    implementation_py: |
+      def before_tool(hook_input):
+          if hook_input.get("tool_name") == "evaluate_solution":
+              vertices = hook_input.get("program_output", {}).get("vertices", [])
+              if len(vertices) >= 4:
+                  perimeter = sum(
+                      abs(v1["x"] - v2["x"]) + abs(v1["y"] - v2["y"])
+                      for v1, v2 in zip(vertices, vertices[1:] + [vertices[0]])
+                  )
+                  if perimeter > 400000:
+                      return "WARNING: Perimeter {} exceeds 400000 limit.".format(perimeter)
+          return None

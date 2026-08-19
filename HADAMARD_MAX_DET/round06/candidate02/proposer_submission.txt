@@ -1,0 +1,220 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are optimizing a 29x29 ±1 matrix to maximize |det(H)|.
+  n=29 ≡ 3 mod 4, so use Paley construction with quadratic residues: {0,1,4,5,6,7,9,13,16,20,22,23,24,25,28}.
+  
+  Build the Paley matrix where H[i][j] = 1 if (i-j) mod 29 in residues, else -1.
+  
+  Then run simulated annealing hill climbing from this base. Use ONLY numpy.linalg.det for speed.
+  
+  STRATEGY PER EVALUATION:
+  1. Build 6 different Paley base matrices using 6 different random seeds for the construction phase
+  2. From each base, run independent hill climbing with 15,000 iterations, T=3.0, cool_rate=0.997
+  3. Among all 6 results, pick the best determinant
+  4. Also try: perturb the best base matrix with 100 random ±1 flips, then hill climb 5,000 more iterations
+  
+  Total operations: ~100k flips with numpy det = ~100 seconds, well under 350s budget.
+  
+  You have 350 seconds per evaluate_solution call. NEVER timeout - keep total < 180s.
+  
+  Always call probe_solution on different variants BEFORE evaluate_solution. Probe is cheap (~10s) and you have 30 probe budget.
+  
+  Use edit_solution to replace EVOLVE-BLOCK with complete working code. Call evaluate_solution once per full evaluation attempt.
+  
+  DO NOT use Bareiss during search. DO NOT exceed 180s runtime. DO NOT use more than 6 starting seeds.
+skill_description: |
+  Paley Hadamard optimizer for n=29. Build matrix from quadratic residues, run 6 parallel hill climbs of 15k iters each with T=3.0, cool=0.997. Add perturbation phase. Use probe_solution to screen variants before evaluate.
+skill_body: |
+  # Paley Hadamard Optimizer for n=29
+  
+  ## Step 1: Build 6 Paley Base Matrices
+  Quadratic residues mod 29: {0,1,4,5,6,7,9,13,16,20,22,23,24,25,28}
+  
+  For each seed in [1,2,3,4,5,6]:
+    - Build Paley matrix with random seed
+    - Set this as base matrix for this run
+  
+  ## Step 2: Parallel Hill Climbing
+  For each of the 6 bases:
+    - Set best_det = det(base), best_mat = base
+    - Set T = 3.0
+    - For 15,000 iterations:
+        * Pick random (i,j), flip H[i,j]
+        * new_det = numpy.linalg.det(H)
+        * delta = new_det - best_det
+        * If delta > 0: accept flip, best_det = new_det
+        * Else if T > 1e-10 and random() < exp(delta/T): accept flip
+        * Else: undo flip
+        * T *= 0.997
+        * If new_det > best_det: best_det = new_det, best_mat = H.copy()
+    - Store result (best_mat, best_det) for this seed
+  
+  ## Step 3: Perturbation Phase
+  - Take the BEST result from Step 2
+  - Make 100 random ±1 flips to create perturbed matrix
+  - Run 5,000 more hill climbing iterations with T=2.0, cool=0.998
+  - Track best during this phase
+  
+  ## Step 4: Return Best
+  Return the matrix with highest determinant across all phases.
+  
+  ## CRITICAL RULES
+  - Use numpy.linalg.det for ALL determinant computations during search
+  - Total runtime MUST be < 180 seconds
+  - Always use exactly 6 starting seeds for parallel hill climbs
+  - DO NOT use Bareiss during search
+tool_descriptions:
+  edit_solution: |
+    Replace EVOLVE-BLOCK with complete working code implementing:
+    1. Build 6 Paley base matrices with seeds [1,2,3,4,5,6]
+    2. Run parallel hill climbing: 15k iters each, T=3.0, cool=0.997
+    3. Perturbation phase: 100 random flips + 5k iters on best
+    4. Use numpy.linalg.det for ALL iterations
+    5. Ensure total runtime < 180s
+    Return the matrix with highest determinant.
+  evaluate_solution: |
+    Run your code through evaluator. Returns combined_score. Budget: 20 evals.
+    Call probe_solution FIRST to test different construction strategies.
+  probe_solution: |
+    Cheap approximate scoring on a matrix (subsampled det calculation, ~10s).
+    Use to test 3-5 different hill climbing strategies or parameter variations
+    before calling evaluate_solution. You have 30 probe budget per session.
+  finish: |
+    End when eval budget exhausted (20 evals) or no improvement after trying all strategies.
+sampling:
+  temperature: 1.2
+  top_p: 0.95
+  top_k: 40
+  max_tokens: 14336
+agent:
+  max_iterations: 50
+middleware:
+  budget_reminder_from_left: 1
+  long_tool_output_max_chars: 12000
+new_tools:
+  - name: check_hadamard_quality
+    description: |
+      Quick check on a 29x29 ±1 matrix. Computes:
+      - Number of rows/columns that are identical
+      - Pairwise dot products distribution (sampled)
+      - Whether the matrix looks Hadamard-like (entries ±1, good orthogonality)
+      This is O(n²) and returns a score 0-100 for "Hadamard-likeness".
+      Call this on constructed bases BEFORE hill climbing to filter weak starts.
+    input_schema:
+      type: object
+      properties: {}
+    implementation_py: |
+      def run(ctx, args):
+          import numpy as np
+          code = ctx.get_program()
+          # Extract matrix from current program state (last returned matrix)
+          # We need to recompute from ctx.get_best_program()
+          try:
+              exec(code)
+              if hasattr(eval('matrix'), '__getitem__'):
+                  m = np.array(matrix, dtype=int)
+                  if m.shape == (29, 29) and np.all(np.abs(m) == 1):
+                      # Compute Hadamard-likeness score
+                      # 1. Orthogonality: rows should have dot product ~0 for different rows
+                      rows = m.astype(float)
+                      n = len(rows)
+                      scores = []
+                      for i in range(n):
+                          for j in range(i+1, n):
+                              dot = np.dot(rows[i], rows[j])
+                              scores.append(abs(dot))
+                      avg_dot = np.mean(scores)
+                      ideal = 0.0
+                      ortho_score = max(0, 1.0 - avg_dot / 29.0)
+                      
+                      # 2. Row norm check (should all be 29)
+                      norm_score = 1.0 if np.all(np.sum(rows**2, axis=1)) == 29 else 0.9
+                      
+                      # Combined score
+                      had_score = 0.5 * ortho_score + 0.5 * norm_score
+                      return {
+                          "hadamard_score": float(had_score * 100),
+                          "orthogonality_avg": float(avg_dot),
+                          "orthogonality_score": float(ortho_score),
+                          "norm_score": float(norm_score),
+                          "recommendation": "Good base" if had_score > 95 else "Consider perturbation"
+                      }
+                  else:
+                      return {"error": "Matrix not 29x29 ±1", "hadamard_score": 0.0}
+              else:
+                  return {"error": "No matrix found", "hadamard_score": 0.0}
+          except Exception as e:
+              return {"error": str(e), "hadamard_score": 0.0}
+remove_tools: []
+new_skills:
+  - name: hadamard-n29-efficient-search
+    description: |
+      Efficient search for n=29 Hadamard near-optimal matrices.
+      Use 6 parallel hill climbs of 15k iters, T=3.0, cool=0.997.
+      Always use probe_solution before evaluate_solution.
+      Total time < 180s, numpy.det only.
+    body: |
+      # Efficient Hadamard Search for n=29
+      
+      ## Construction
+      Build Paley matrix from quadratic residues mod 29:
+      {0,1,4,5,6,7,9,13,16,20,22,23,24,25,28}
+      H[i][j] = 1 if (i-j) mod 29 in residues else -1
+      
+      ## Search Strategy
+      Run 6 parallel hill climbs:
+      - Start from 6 different random seeds for construction
+      - Each: 15,000 iterations, T=3.0, cool_rate=0.997
+      - Use numpy.linalg.det for ALL determinant calculations
+      
+      ## Perturbation Phase
+      - Take best result from parallel searches
+      - Apply 100 random ±1 flips
+      - Run additional 5,000 iterations with T=2.0, cool_rate=0.998
+      
+      ## Budget Discipline
+      - Total runtime MUST be < 180 seconds
+      - Call probe_solution to test parameter variations before evaluate_solution
+      - NEVER use Bareiss during search (causes timeout)
+      - Use exactly 6 starting seeds
+      
+      ## Workflow
+      1. Construct 6 Paley bases with seeds [1,2,3,4,5,6]
+      2. Run parallel hill climbs (15k iters each)
+      3. Apply perturbation to best result
+      4. Use check_hadamard_quality on bases if available
+      5. Call probe_solution on different parameter variants
+      6. Call evaluate_solution on the best variant
+      7. Iterate with more seeds/iterations if budget allows
+new_middlewares:
+  - name: enforce_budget
+    hook: before_model
+    description: |
+      Warn if code looks like it will exceed 180s runtime or use Bareiss.
+    implementation_py: |
+      def before_model(hook_input):
+          code = hook_input.get('code', '')
+          import re
+          
+          # Check for Bareiss in search - CRITICAL
+          if 'bareiss' in code.lower():
+              return "🚫 CRITICAL: Bareiss during search causes TIMEOUT! Use numpy.linalg.det only for hill climbing."
+          
+          # Check iteration budget
+          iters = re.findall(r'(\d+)[,\s]*iters?', code)
+          if iters:
+              total = sum(int(i) for i in iters[:10])
+              if total > 500000:
+                  return "⚠️ WARNING: >500k iterations may exceed 180s. Reduce iterations or seeds."
+          
+          # Check seed count
+          seeds = re.findall(r'seeds?\s*=\s*(\[[^\]]+\])', code)
+          if seeds:
+              try:
+                  seed_list = eval(seeds[0])
+                  if isinstance(seed_list, list) and len(seed_list) > 6:
+                      return "⚠️ WARNING: >6 seeds may exceed time budget. Use ≤6 parallel seeds."
+              except:
+                  pass
+          
+          return None

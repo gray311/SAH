@@ -1,0 +1,199 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are optimizing a program to find a 29x29 matrix with entries +/-1 that maximizes the absolute determinant.
+
+  KEY MATH FACT: For n=29 (which is 3 mod 4), the Paley construction creates a Hadamard-like matrix using the Legendre symbol. The correct construction is:
+  - Compute Legendre symbol (a/29) for each offset a = (i-j) mod 29
+  - H[i][j] = +1 if (i-j) mod 29 is a quadratic residue mod 29, else -1
+  - Quadratic residues mod 29 are: 1, 4, 5, 6, 7, 9, 13, 16, 20, 22, 23, 24, 25, 28
+
+  CRITICAL: The seed program's Paley implementation has a BUG - it doesn't properly handle the Legendre symbol. You MUST use the correct construction.
+
+  Strategy:
+  1. FIRST: Use probe_solution to quickly test different construction approaches
+  2. Try the CORRECT Paley construction (using Legendre symbol properly)
+  3. Then apply hill climbing with MANY iterations (15000-20000) and proper annealing
+  4. Use multiple independent restarts (10-15 seeds)
+  5. Before any full evaluation, probe 3-5 variants and only evaluate the best
+  6. Always stay under 200 seconds total runtime
+
+  Tools: edit_solution, evaluate_solution, probe_solution, finish
+skill_description: |
+  Maximize |det(H)| for 29x29 +/-1 matrix. Fix the flawed Paley construction in the seed. Use correct Legendre symbol approach, then extensive hill climbing with many restarts. Probe variants before evaluating.
+skill_body: |
+  # Correct Hadamard-like Matrix Construction for n=29
+
+  ## THE BUG IN THE SEED PROGRAM
+  The seed's Paley construction is INCORRECT. It doesn't use the proper Legendre symbol.
+  We MUST fix this first.
+
+  ## Method 1: CORRECT Paley Construction with Legendre Symbol
+  For n=29 (prime, n congruent to 3 mod 4):
+  - Quadratic residues mod 29: 1, 4, 5, 6, 7, 9, 13, 16, 20, 22, 23, 24, 25, 28
+  - For entry (i,j): compute a = (i - j) mod 29
+  - If a is in quadratic residues: H[i][j] = +1
+  - If a is NOT in quadratic residues: H[i][j] = -1
+  - Ensure diagonal H[i][i] = +1 (when a=0, treat as residue)
+
+  PSEUDO-CODE for correct Paley:
+  residues = {0, 1, 4, 5, 6, 7, 9, 13, 16, 20, 22, 23, 24, 25, 28}
+  for i in range(29):
+    for j in range(29):
+      offset = (i - j) % 29
+      H[i][j] = 1 if offset in residues else -1
+
+  ## Method 2: Improved Hill Climbing (after correct construction)
+  - Start from the CORRECT Paley matrix (not the buggy seed version)
+  - 15000-20000 iterations per run (NOT 10000)
+  - Better cooling: T starts at 3.0, cool_rate = 0.9985
+  - Accept improving moves unconditionally
+  - Accept worsening moves with prob exp((|new| - |old|) / max(1, T))
+  - Use seeds: 0, 100, 200, 300, 400, 500, 600, 700, 800, 900, 1000, 1100, 1200, 1300, 1400, 1500
+
+  ## Method 3: Random perturbations from correct Paley
+  - Take correct Paley matrix
+  - Flip 5-10 random entries to create variation
+  - Run hill climbing from this perturbed start
+
+  ## Method 4: Cyclic structure search
+  - Start from correct Paley
+  - Try cyclically shifting columns by small amounts
+  - Evaluate with probe, keep best
+
+  ## Workflow
+  1. IMPLEMENT the CORRECT Paley construction (FIX THE BUG!)
+  2. Run 15 independent hill climbing trials from correct Paley
+  3. Each trial: 18000 iterations, proper annealing
+  4. Use probe_solution to quickly compare top 3 trials
+  5. Evaluate only the probe winner with evaluate_solution
+  6. If score improves, try further perturbations
+  7. Finish when no improvement or budget exhausted
+
+  ## Timing constraints
+  - Total per-eval time: less than 180 seconds
+  - Paley construction: less than 0.5 seconds
+  - Hill climbing: 120-150 seconds
+  - Keep iterations high but time-bounded
+
+  ## Why this works
+  The seed's Paley construction was mathematically incorrect. The correct Legendre symbol approach
+  produces a starting matrix much closer to optimal. Combined with longer hill climbing and more
+  restarts, this should find significantly better solutions.
+
+  ## Tools reminder
+  - edit_solution: Rewrite the EVOLVE-BLOCK with CORRECT code
+  - probe_solution: Test 3-5 variants before full eval
+  - evaluate_solution: Final scoring (budget: 20)
+  - finish: Submit best solution
+tool_descriptions:
+  edit_solution: |
+    Change the EVOLVE-BLOCK. MUST fix the Paley construction bug first!
+    Use SEARCH/REPLACE to swap the broken residues calculation with correct Legendre-based approach.
+    Or provide a full rewrite of construct_hadamard_matrix.
+    Keep runtime under 180 seconds total.
+  evaluate_solution: |
+    Run and score. Combined_score higher-is-better. Budget: 20 evals.
+    Only evaluate after you have probed variants and selected a strong candidate.
+  probe_solution: |
+    CHEAP approximate scoring (about 10 seconds). Separate budget of 30 probes.
+    Use to: compare multiple hill-climbing trials, test parameter changes,
+    verify paley construction correctness quickly. DO NOT use for final selection.
+    Ideal: create 3 variants, probe all, evaluate the winner only.
+  finish: |
+    End when no improvement possible or eval budget exhausted. Best program auto-submitted.
+sampling:
+  temperature: 1.2
+  top_p: 0.95
+  top_k: 30
+  max_tokens: 14336
+agent:
+  max_iterations: 60
+middleware:
+  budget_reminder_from_left: 2
+  long_tool_output_max_chars: 12000
+new_tools:
+  - name: compute_paley_correct
+    description: |
+      Compute the CORRECT Paley construction matrix using Legendre symbol.
+      Quadratic residues mod 29 are: 0, 1, 4, 5, 6, 7, 9, 13, 16, 20, 22, 23, 24, 25, 28.
+      This fixes the seed's buggy implementation. Call this ONCE at start.
+    input_schema: {type: object, properties: {}}
+    implementation_py: |
+      def run(ctx, args):
+          residues = {0, 1, 4, 5, 6, 7, 9, 13, 16, 20, 22, 23, 24, 25, 28}
+          n = 29
+          matrix = []
+          for i in range(n):
+              row = []
+              for j in range(n):
+                  offset = (i - j) % n
+                  if offset in residues:
+                      row.append(1)
+                  else:
+                      row.append(-1)
+              matrix.append(row)
+          return {"matrix": matrix, "n": n, "note": "Correct Paley with Legendre symbol"}
+new_skills:
+- name: fix-paley-bug
+  description: |
+    Critical skill: The seed's Paley construction is mathematically WRONG. Must use Legendre symbol approach.
+    Quadratic residues mod 29: 0, 1, 4, 5, 6, 7, 9, 13, 16, 20, 22, 23, 24, 25, 28. Use these for H[i][j] where offset equals (i-j) mod 29.
+  body: |
+    # FIX THE PALEY CONSTRUCTION BUG - CRITICAL!
+
+    The seed program's Paley construction is MATHEMATICALLY INCORRECT and must be fixed.
+
+    ## The Bug
+    Seed code computes residues as {(i*i) % 29 for i in 1 to 28} which is WRONG.
+    For Paley construction with n=29 (prime, n congruent to 3 mod 4), we need the actual quadratic residues.
+
+    ## The Fix
+    Quadratic residues mod 29 (numbers that are perfect squares mod 29):
+    {0, 1, 4, 5, 6, 7, 9, 13, 16, 20, 22, 23, 24, 25, 28}
+
+    Verify: 1 squared equals 1, 2 squared equals 4, 3 squared equals 9, 4 squared equals 16, 5 squared equals 25, 
+    6 squared equals 36 which is 7 mod 29, 7 squared equals 49 which is 20 mod 29, 8 squared equals 64 which is 6 mod 29, 
+    9 squared equals 81 which is 24 mod 29, 10 squared equals 100 which is 13 mod 29, 11 squared equals 121 which is 5 mod 29, 
+    12 squared equals 144 which is 28 mod 29.
+
+    ## Correct Construction
+    For each entry H[i][j]:
+    - Compute offset = (i - j) mod 29
+    - If offset is in {0, 1, 4, 5, 6, 7, 9, 13, 16, 20, 22, 23, 24, 25, 28}: H[i][j] = +1
+    - Otherwise: H[i][j] = -1
+
+    ## Implementation
+    residues = {0, 1, 4, 5, 6, 7, 9, 13, 16, 20, 22, 23, 24, 25, 28}
+    def create_paley_correct(n):
+        matrix = []
+        for i in range(n):
+            row = []
+            for j in range(n):
+                offset = (i - j) % n
+                row.append(1 if offset in residues else -1)
+            matrix.append(row)
+        return matrix
+
+    ## After fixing Paley
+    1. Run 15 to 20 hill climbing trials from correct Paley
+    2. Use 15000 to 18000 iterations per trial
+    3. Better annealing: T equals 3.0, cool_rate equals 0.9985
+    4. Use probe_solution to rank top trials before full eval
+    5. Expected: Much better scores than seed's buggy Paley
+new_middlewares:
+- name: paley_bug_reminder
+  hook: before_model
+  description: |
+    REMINDER: The seed's Paley construction is BUGGED. Always use correct Legendre symbol approach.
+    Residues mod 29: 0, 1, 4, 5, 6, 7, 9, 13, 16, 20, 22, 23, 24, 25, 28. Fix construction before any evaluation!
+  implementation_py: |
+    def before_model(hook_input):
+        return "CRITICAL: Seed's Paley is BUGGED! Must use correct Legendre symbol. Residues mod 29: 0, 1, 4, 5, 6, 7, 9, 13, 16, 20, 22, 23, 24, 25, 28. Fix construction before evaluating. Use compute_paley_correct tool or rewrite Paley directly."
+- name: long_search_reminder
+  hook: before_model
+  description: |
+    REMINDER: Use long hill climbing with 15000 plus iterations and proper annealing. Probe variants before full eval.
+  implementation_py: |
+    def before_model(hook_input):
+        return "Use 15000 to 18000 iterations, T equals 3.0, cool_rate equals 0.9985, 15 to 20 restarts. Probe 3 to 5 variants before evaluate_solution."
+remove_tools: []

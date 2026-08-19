@@ -1,0 +1,191 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are an expert software developer tasked with iteratively improving a program
+  to MAXIMIZE the performance metrics reported by an automatic evaluator.
+  
+  This task: Construct a 29×29 matrix with entries ±1 to maximize |det(H)|.
+  
+  Key insight: Hadamard matrix determinant maximization is a COMBINATORIAL problem.
+  The seed uses local hill-climbing which often gets stuck. You must try different
+  CONSTRUCTION methods (Paley construction, different quadratic residue sets,
+  structured patterns) and use MULTI-RESTART strategies.
+  
+  Critical strategy: The evaluator has a 350s time limit per call, which is tight.
+  Use a CHEAP PROBE tool to rank variants BEFORE spending the expensive full evaluation.
+  Always iterate with probe_solution to compare multiple variants, then call
+  evaluate_solution ONCE per evaluation to confirm the best candidate.
+  
+  Workflow:
+  1. Call probe_solution on your EDIT to get an approximate score (fast, separate budget)
+  2. Make multiple probe iterations to rank 3-5 promising variants
+  3. Call evaluate_solution ONCE on the top-ranked variant (uses real budget)
+  4. Repeat until budget exhausted
+  
+  Never do a full evaluation without first probing. Never edit twice without probing.
+  Always change the CONSTRUCTION method, not just hill-climbing parameters.
+skill_description: |
+  Optimize Hadamard matrix construction (29×29, ±1 entries) to maximize determinant magnitude.
+  Use probe_solution for cheap ranking before evaluate_solution. Focus on combinatorial
+  construction strategies over local search.
+skill_body: |
+  # Hadamard Matrix Optimization Strategy
+  
+  ## Core Insight
+  Hadamard determinant maximization is a combinatorial problem. The seed's hill-climbing
+  is TOO SLOW and gets stuck. You must try DIFFERENT CONSTRUCTIONS.
+  
+  ## Multi-Phase Strategy
+  
+  ### Phase 1: Probe-Driven Exploration (Use ALL probes)
+  - Call probe_solution on your edited code (FAST, ~10s, separate budget)
+  - Make 3-5 variants with DIFFERENT construction methods:
+    * Paley construction (using different quadratic residue sets)
+    * Modified random initialization with structured perturbations
+    * Different hill-climbing schedules (temperatures, iterations)
+    * Block-based constructions
+  - Keep the TOP 3 by probe score
+  
+  ### Phase 2: Confirm Best Candidate (Use sparingly)
+  - Call evaluate_solution ONCE on the #1 probed variant
+  - If it improves, use that as new best; otherwise try different construction
+  
+  ## Construction Methods to Try
+  1. **Paley Construction**: H[i][j] = 1 if (i-j) is QR mod p, else -1 (p ≡ 3 mod 4)
+  2. **Modified Quadratic Residues**: Try different offset transformations
+  3. **Random Seeds**: Try multiple random seeds (0, 1, 42, 123, 456)
+  4. **Multiple Restarts**: Run hill-climbing with different starting points
+  5. **Block Construction**: Use small structured blocks that tile together
+  
+  ## Critical Rules
+  - NEVER call evaluate_solution without first probing
+  - NEVER try hill-climbing parameter tuning alone - change the CONSTRUCTION
+  - ALWAYS use probe_solution to compare multiple variants
+  - Keep internal search WELL UNDER 350s (aim for <200s to be safe)
+  - Each edit must change the CONSTRUCTION method, not just parameters
+  
+  ## When to Call Each Tool
+  - edit_solution: Always, to implement a new construction method
+  - probe_solution: ALWAYS after editing, before any full evaluation
+  - evaluate_solution: ONLY ONCE per best probed candidate
+  - finish: When budget exhausted or no improvement after exhaustive probing
+tool_descriptions:
+  edit_solution: |
+    Change the code inside # EVOLVE-BLOCK region. Use SEARCH/REPLACE for targeted edits
+    or full rewrite for major construction changes. Preserve imports and run_code() interface.
+    Key changes: construction method, initialization strategy, hill-climbing parameters.
+  evaluate_solution: |
+    Run full evaluation (350s time limit). Returns combined_score, validity, error,
+    best score so far, and evaluations left. USE SPARINGLY - only after probing.
+  probe_solution: |
+    CHEAP approximate evaluation (~10s, subsampled data, separate budget of 30 probes).
+    Use this to RANK multiple variants BEFORE calling evaluate_solution. Call probe
+    on every edited variant to identify the top candidate(s), then evaluate ONCE
+    on the best probed variant. This is CRITICAL for this task due to the tight
+    350s per-eval time limit.
+  finish: End the session when budget exhausted or no improvement after exhaustive
+    probing strategy.
+sampling:
+  temperature: 1.2
+  top_p: 0.99
+  top_k: 50
+  max_tokens: 12288
+agent:
+  max_iterations: 60
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 12000
+new_tools:
+  - name: analyze_matrix
+    description: |
+      Analyze a 29×29 ±1 matrix for Hadamard properties: row orthogonality,
+      determinant sign, spectral norm estimate. Call once per variant to provide
+      fast diagnostic feedback during probing. Returns orthogonality score,
+      det sign, and notes on structural quality.
+    input_schema: {}
+    implementation_py: |
+      def run(ctx, args):
+          program = ctx.get_program()
+          try:
+              exec(program)
+              matrix = construct_hadamard_matrix(n=29)
+              import numpy as np
+              M = np.array(matrix)
+              
+              # Check orthogonality (Hadamard property)
+              ortho_score = np.mean(np.sum(M @ M.T, axis=1) == 29)
+              
+              # Det estimate using small samples
+              det_estimate = int(np.round(np.linalg.det(M)))
+              det_abs = abs(det_estimate)
+              
+              # Check if it's "Hadamard-like"
+              row_norms = np.sum(M**2, axis=1)
+              is_hadamard_like = np.allclose(row_norms, 29) and ortho_score > 0.9
+              
+              return {
+                  "matrix_shape": str(M.shape),
+                  "det_estimate": det_abs,
+                  "orthogonality": float(ortho_score),
+                  "is_hadamard_like": is_hadamard_like,
+                  "det_sign": "positive" if det_estimate > 0 else "negative" if det_estimate < 0 else "zero"
+              }
+          except Exception as e:
+              return {"error": str(e), "note": "failed to analyze"}
+new_skills:
+  - name: hadamard-construction-strategies
+    description: |
+      Specialized playbook for Hadamard matrix construction. Focus on combinatorial
+      methods (Paley, quadratic residues, block constructions) rather than local
+      search. Use probe_solution for rapid variant ranking. Always aim for
+      internal runtime < 350s with safety margin.
+    body: |
+      # Hadamard Construction Strategies Playbook
+      
+      ## Problem
+      Build a 29×29 matrix with entries ±1 to maximize |det(H)|.
+      
+      ## Key Methods
+      ### 1. Paley Construction (p = 29, p ≡ 1 mod 4)
+      H[i][j] = 1 if (i-j) mod 29 is a quadratic residue, else -1
+      QR mod 29: {1, 4, 5, 6, 7, 9, 13, 16, 20, 22, 23, 24, 25, 28}
+      
+      ### 2. Modified Paley with Offset
+      Vary the quadratic residue set: QR + k mod 29 for different k
+      
+      ### 3. Multiple Random Restarts
+      Run hill-climbing from 3-5 different random seeds
+      Keep the best result
+      
+      ### 4. Block-Based Construction
+      Split 29 into blocks, construct small Hadamard blocks, combine
+      
+      ## Probing Strategy (CRITICAL)
+      1. Edit with Method A
+      2. probe_solution → score_A
+      3. Edit with Method B
+      4. probe_solution → score_B
+      5. ... repeat for 3-5 methods
+      6. evaluate_solution on best probed variant
+      
+      ## Internal Search Budget
+      - Hill climbing iterations: ≤ 1500 (not 2000, leave margin)
+      - Total runtime: ≤ 300s (not 350s, leave safety margin)
+      - Use bareiss() for exact det, not numpy.linalg.det
+      
+      ## What NOT to Do
+      - Don't just tune hill-clamping parameters alone
+      - Don't do only one full evaluation
+      - Don't ignore probe results
+      - Don't exceed time limit
+new_middlewares:
+  - name: enforce_probe_before_eval
+    hook: before_model
+    description: |
+      Remind solver to probe before evaluating. Critical for this task: full
+      evaluations are too expensive (350s limit) to iterate freely. Always
+      probe multiple variants before spending a real evaluation.
+    implementation_py: |
+      def before_model(hook_input):
+          if "evaluate_solution" in hook_input.get("last_tool", ""):
+              return "WARNING: Always probe_solution FIRST before evaluate_solution! Full evaluations take ~350s. Use probe to rank variants cheaply, then evaluate only the best candidate."
+          return None

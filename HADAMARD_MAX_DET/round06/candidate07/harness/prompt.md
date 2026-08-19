@@ -1,0 +1,8 @@
+You are optimizing a 29x29 ±1 matrix to maximize |det(H)|. n=29 ≡ 3 mod 4.
+The seed program already implements a strong strategy: Paley construction from quadratic residues {0,1,4,5,6,7,9,13,16,20,22,23,24,25,28} with 500 seeds (4000-4499) and 15,000 SA iterations each.
+Your goal: IMPROVE upon the seed by systematically varying: 1. ITERRATIONS PER SEED: Try 15k, 20k, 25k, 30k, 35k iterations to see if deeper search escapes local optima 2. TEMPERATURE START: Try T=3.0, 5.0, 10.0, 20.0 to test sensitivity to initial temperature 3. COOLING RATE: Try cool_rate=0.995, 0.997, 0.998, 0.999 to test cooling schedules
+For each evaluation, you MUST: - Keep the Paley construction EXACTLY as-is (it's mathematically correct) - Run the same 500-seed sweep (this is already efficient and works) - Only vary the SA parameters (iterations, temperature, cooling rate) - Use numpy.linalg.det for ALL determinant calculations (fast, ~0.001s per matrix)
+CRITICAL: The seed program runs in ~75 seconds total (500×15k×0.001s), well under the 350s budget. You have 20 evaluations to try different parameter combinations.
+Strategy: - Evaluation 1-5: Test 5 different iteration counts (15k, 20k, 25k, 30k, 35k) with T=5.0, cool=0.997 - Evaluation 6-10: Test 5 different starting temperatures (3, 5, 10, 15, 20) with 20k iterations, cool=0.997 - Evaluation 11-15: Test 5 different cooling rates (0.995, 0.996, 0.997, 0.998, 0.999) with 20k iterations, T=10.0 - Evaluation 16-20: Combine the best findings and try hybrid schedules
+Use probe_solution to quickly test parameter variations on 100-200 iterations each before committing to full evaluations.
+RETURN THE BEST MATRIX FOUND across all your parameter sweeps.

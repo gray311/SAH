@@ -1,0 +1,272 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are an expert at constructing near-Hadamard matrices to maximize |det(H)| for n=29.
+  
+  KEY FACTS FOR THIS TASK:
+  - n=29 does NOT have a perfect Hadamard matrix (Hadamard conjecture requires n=1,2,4k).
+  - Best known constructions for n=29: Paley-type constructions using quadratic residues,
+    plus additional randomization or local search.
+  - The determinant of ±1 matrices grows roughly as n^(n/2); for n=29, maximal |det| is around 2^29.
+  - Your code runs inside a 350-second time limit. Avoid expensive operations inside evaluation.
+  - Use probe_solution to quickly rank construction strategies (cheap, approximate score), then
+    commit promising variants with evaluate_solution.
+  
+  WORKFLOW:
+  1. Load the discovery-optimization skill.
+  2. Edit the EVOLVE-BLOCK to implement a construction strategy (try Paley construction with
+     QR mod 29, OR general quadratic residues, OR seeded random initialization).
+  3. Call probe_solution to quickly compare your candidate against baseline (this is fast, doesn't
+     use evaluation budget).
+  4. If probe_score is promising, call evaluate_solution for the full score.
+  5. Iterate: try different seeds, different construction parameters, different local search
+     strategies.
+  6. If you have high evaluation budget left and probe_solution shows no improvement, try completely
+     different constructions (e.g., structured initialization from known Hadamard matrices of
+     smaller order, or use exterior product constructions).
+  7. When budget is low or no improvement found, call finish with your best strategy summary.
+  
+  CRITICAL: Use probe_solution extensively to prune bad ideas early. Each full evaluation is precious—
+  only spend it on strategies that probe_solution suggests are promising. Prefer constructions that
+  have a chance at high determinant from the start (good initialization) rather than relying
+  on expensive local search that may hit the time limit.
+skill_description: |
+  Construct near-Hadamard matrices for n=29 using mathematical constructions (Paley, quadratic
+  residues) and local optimization, with probe_solution to quickly rank variants before full evaluation.
+skill_body: |
+  # Hadamard Matrix Optimization for n=29
+  
+  ## Understanding the Problem
+  You're creating a 29×29 matrix with ±1 entries to maximize |det(H)|. Since 29 is not of form 4k,
+  no perfect Hadamard matrix exists, but we can construct near-Hadamard matrices with high determinants.
+  
+  ## Known Constructions to Try
+  1. **Paley Construction (for prime p=29)**: Use quadratic residues mod 29.
+     - QR mod 29 = {1,4,5,6,7,9,13,16,20,22,23,24,25,28}
+     - Set H[i,j] = 1 if (i-j mod 29) in QR, else -1
+   
+  2. **Seeded Random Initialization**: Create random ±1 matrix, then optimize.
+   
+  3. **Hybrid Approaches**: 
+     - Start with structured initialization (QR-based or from known Hadamard matrices)
+     - Apply local search (flip entries to increase |det|)
+     - Use simulated annealing or randomized hill climbing with many iterations
+   
+  4. **Parameter Variations**:
+     - Try different random seeds for initialization
+     - Vary the number of local search iterations (within 350s time limit)
+     - Adjust annealing schedule
+   
+  ## Use probe_solution Strategically
+  - probe_solution gives a FAST approximate score (sampled determinant) without consuming your evaluation budget.
+  - Use it to quickly compare construction strategies, seeds, or parameter settings.
+  - Only call evaluate_solution when probe_solution indicates a promising variant.
+  - With 20 evaluation budget, you can't afford to evaluate every variant—use probes to prune.
+  
+  ## Evaluation Workflow
+  1. Edit EVOLVE-BLOCK with a construction strategy.
+  2. Call probe_solution immediately to check if this strategy is promising.
+  3. If probe_score is reasonable, call evaluate_solution for full score.
+  4. Based on feedback, try variations or completely new strategies.
+  5. Keep track of the best score; you can revert to it automatically.
+  6. When out of evaluations or no improvements possible, call finish.
+  
+  ## Time Budget Considerations
+  - Each evaluation has 350s limit. Your code must complete within this.
+  - Expensive operations: computing full determinant 1000+ times will TLE.
+  - Prefer: good initialization + moderate local search, or fast scoring strategies.
+  - Use probe_solution to validate that your approach is directionally correct before spending evaluation budget.
+  
+  ## Remember
+  - The evaluator checks validity (matrix is 29×29, all entries ±1) and returns combined_score.
+  - Higher |det| is better. For n=29, expect |det| in range 10^14 to 10^17.
+  - Use probe_solution to filter: if your construction gives very low probe_score, try something different.
+tool_descriptions:
+  edit_solution: 'Change the code inside # EVOLVE-BLOCK. Use targeted SEARCH/REPLACE diffs for small changes,
+    or full rewrite for major rewrites. Keep the function signature and entry point intact.'
+  evaluate_solution: 'Run the full program and get exact |det(H)| score. Limited budget—use wisely.
+    Returns combined_score (higher is better), validity, error if any, best_so_far, evaluations_left.'
+  probe_solution: 'FAST approximate determinant evaluation using subsampled rows. Computes determinant on a
+    subsample of the matrix data (fast, ~10s vs minutes for full eval). Scores are approximate and NOT comparable
+    to evaluate_solution, but RANKING of strategies is reliable: if A probes higher than B, A likely evaluates higher.
+    Use this to quickly compare: different construction methods, seeds, annealing schedules. Only call evaluate_solution
+    when probe_solution indicates a promising variant. With 20 evaluation budget, use probe_solution to prune bad strategies.'
+  finish: 'End session when budget exhausted or no improvements found. Summarize your best construction strategy.'
+sampling:
+  temperature: 0.9
+  top_p: 0.9
+  top_k: 30
+  max_tokens: 12288
+agent:
+  max_iterations: 50
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 10000
+new_tools:
+  - name: analyze_hadamard_construction
+    description: |
+      Inspect the current EVOLVE-BLOCK code to identify what Hadamard construction method is being used,
+      extract key parameters (seed, max_iters, temp0), and provide structured analysis.
+      Helps diagnose current approach before making edits. Call this at the start of each iteration
+      to understand what strategy is currently in the code.
+    input_schema: {type: object, properties: {}}
+    implementation_py: |
+      def run(ctx, args):
+          import re
+          code = ctx.get_program()
+          
+          # Detect construction approach
+          code_lower = code.lower()
+          
+          has_structured = 'quadratic' in code_lower or 'paley' in code_lower or 'structured' in code_lower or 'residue' in code_lower
+          has_hill_climb = 'hill' in code_lower or 'climb' in code_lower or 'annealing' in code_lower or 'simulated' in code_lower
+          has_random = 'random' in code_lower
+          has_numpy = 'numpy' in code_lower
+          has_bareiss = 'bareiss' in code_lower
+          
+          analysis = {
+              "construction_type": "unknown",
+              "has_structured_init": has_structured,
+              "has_optimization": has_hill_climb,
+              "has_randomness": has_random,
+              "uses_numpy": has_numpy,
+              "has_determinant_calc": has_bareiss,
+              "code_length": len(code)
+          }
+          
+          # Extract seed if present
+          seed_val = None
+          seed_match = re.search(r'seed=(\d+)', code)
+          if seed_match:
+              seed_val = int(seed_match.group(1))
+              analysis["has_seed"] = True
+          
+          # Extract max_iters if present
+          iters_match = re.search(r'max_iters=(\d+)', code)
+          if iters_match:
+              analysis["max_iters"] = int(iters_match.group(1))
+              analysis["has_max_iters"] = True
+          
+          # Extract temp0 if present
+          temp_match = re.search(r'temp0=([\d.]+)', code)
+          if temp_match:
+              analysis["temp0"] = float(temp_match.group(1))
+              analysis["has_temp0"] = True
+          
+          # Extract QR set if present
+          qr_match = re.search(r'quadratic_residues\s*=\s*\{([^}]+)\}', code)
+          if qr_match:
+              qr_str = qr_match.group(1)
+              qr_nums = [int(x.strip()) for x in qr_str.split(',') if x.strip().isdigit()]
+              analysis["qr_set"] = qr_nums
+              analysis["has_qr_set"] = True
+          
+          analysis["construction_type"] = "structured_paley" if has_structured and has_qr else "hill_climb" if has_hill_climb else "random"
+          
+          return analysis
+new_skills:
+  - name: hadamard-construction-strategy
+    description: |
+      Concrete strategies for constructing near-Hadamard matrices when n=29 (not 4k).
+      Use probe_solution to rank variants, then evaluate_solution for promising ones.
+      Call analyze_hadamard_construction at the start of each iteration to diagnose current strategy.
+    body: |
+      # Hadamard Construction Strategies for n=29
+  
+      ## Background
+      - Perfect Hadamard matrices only exist for n=1,2,4k. For n=29, we need near-Hadamard.
+      - Maximal |det| for n=29 is conjectured around 2^29 ≈ 5.36×10^8, but achievable |det| is likely 10^14-10^17.
+  
+      ## Strategy 1: Paley Construction with Quadratic Residues
+      - For prime p=29 (≡1 mod 4), use QR mod 29:
+        QR = {1,4,5,6,7,9,13,16,20,22,23,24,25,28}
+      - Construct: H[i,j] = 1 if (i-j mod 29) in QR, else -1
+      - May need additional randomization or local optimization
+  
+      ## Strategy 2: Random Initialization + Local Search
+      - Start with random ±1 matrix
+      - Apply hill climbing: flip entry (i,j) if |det| increases
+      - Use simulated annealing to escape local optima
+      - Typical iterations: 5000-10000 (within 350s budget)
+  
+      ## Strategy 3: Hybrid Structured + Optimization
+      - Start with Paley/QR construction (good structural seed)
+      - Apply local search with moderate iterations
+      - More efficient than pure random search
+  
+      ## Strategy 4: Multiple Seeds Evaluation
+      - Try 3-5 different random seeds with same construction
+      - Use probe_solution to quickly rank seeds
+      - Evaluate only top 2-3 with full score
+  
+      ## Strategy 5: Exterior Product / Kronecker Construction
+      - Use known Hadamard matrices of order 28 (if available)
+      - Extend to 29 with careful augmentation
+      - May require modification for exact dimensions
+  
+      ## Probing Strategy
+      - For each construction variant:
+        1. Call probe_solution to get approximate score
+        2. If probe_score < 0.3 * baseline, abandon
+        3. If probe_score in [0.3, 0.8] * baseline, consider full eval
+        4. If probe_score > baseline, evaluate immediately
+  
+      ## Iteration Pattern
+      - Iteration 1: Probe baseline (Paley construction)
+      - Iteration 2-4: Probe variations (different seeds, temp0 values)
+      - Iteration 5: Evaluate best probe candidate
+      - Iteration 6-10: Refine with local changes, probe each
+      - Iteration 11+: Evaluate new strategies if probes look promising
+  
+      ## Time Budget Discipline
+      - Full eval: 350s max. If your code has loops >1000 iterations, TLE risk.
+      - Use probe_solution to validate approach before committing to full eval.
+      - If probe shows <20% improvement over seed, try fundamentally different construction.
+  - name: fast-matrix-scoring
+    description: |
+      Quick scoring techniques for ±1 matrices. Use when you need many evaluations fast.
+      Combine with probe_solution for strategy ranking.
+      Use analyze_hadamard_construction to understand your current approach.
+    body: |
+      # Fast Scoring for Hadamard Matrices
+  
+      ## Determinant Computation Options
+      1. **Bareiss Algorithm**: Exact integer determinant, O(n³). For n=29, ~24,389 ops per det.
+         - Advantages: Exact, no precision errors
+         - Disadvantages: Slow if called many times
+  
+      2. **LU Decomposition with Integer Arithmetic**: Similar to Bareiss, ~same speed.
+  
+      3. **Circulant Matrix Exploitation**: If your construction has structure, compute det via eigenvalues.
+  
+      ## Optimization Tips
+  
+      - **Pre-compute**: If iterating over seeds, share common computations
+      - **Batch Evaluation**: Process multiple candidate matrices in parallel if possible
+      - **Early Termination**: If |det| stops improving for 100 iterations, consider aborting
+  
+      ## When to Use Fast Scoring
+      - probe_solution is always preferred over full scoring for strategy ranking
+      - Use full scoring only when:
+        - You need exact score for submission
+        - probe_solution indicates strong potential
+        - You're at end of probe budget
+  
+      ## Avoid
+      - Re-computing determinant more than necessary
+      - Calling full eval on every parameter variation
+      - Using expensive operations inside evaluation loops
+  
+      ## Score Interpretation
+      - For n=29, |det| in range 10^12 to 10^17 is expected
+      - Higher |det| is always better (no minimum threshold)
+      - Validity: matrix must be 29×29 with all entries ±1
+      - If validity=0, fix the structural issue first before optimizing det
+new_middlewares:
+  - name: probe_reminder
+    hook: before_model
+    description: |
+      Remind the solver to use probe_solution before calling evaluate_solution.
+      Encourages efficient use of evaluation budget by filtering with cheap probes.
+    implementation_py: |
+      def before_model(hook_input):
+          return "REMEMBER: Call probe_solution first to quickly rank your variants cheaply. Only call evaluate_solution on promising strategies. Each evaluation costs precious budget."

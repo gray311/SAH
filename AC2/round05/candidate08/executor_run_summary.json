@@ -1,0 +1,276 @@
+[
+  {
+    "task_id": "eft__math__second_autocorr_ineq",
+    "source": "eft",
+    "best_score": 1.0287207504545426,
+    "seed_score": 1.0266517990950754,
+    "best_metrics": {
+      "c2": 0.9220217767689074,
+      "combined_score": 1.0287207504545426,
+      "loss": -0.922021746635437,
+      "n_points": 350,
+      "eval_time": 38.660078048706055
+    },
+    "best_program": "# EVOLVE-BLOCK-START\nimport jax\nimport jax.numpy as jnp\nimport optax\nimport numpy as np\nfrom dataclasses import dataclass\nfrom typing import Tuple\n\n\n@dataclass\nclass OptimizerHyperparameters:\n    \"\"\"Hyperparameters with increased intervals for better resolution.\"\"\"\n    num_intervals: int = 350\n    learning_rate: float = 0.125\n    num_steps: int = 40000\n    warmup_steps: int = 4000\n    best_c2: float = 0.0\n    stagnation_window: int = 100\n    reinit_fraction: float = 0.11\n    reinit_std: float = 0.021\n    reinit_interval: int = 190\n\n\nclass C2Optimizer:\n    def __init__(self, hypers: OptimizerHyperparameters):\n        self.hypers = hypers\n        self.best_f = None\n        self.best_c2 = hypers.best_c2\n\n    def _objective_fn(self, f_values: jnp.ndarray) -> jnp.ndarray:\n        f_non_negative = jax.nn.relu(f_values)\n        N = self.hypers.num_intervals\n        padded_f = jnp.pad(f_non_negative, (0, N))\n        fft_f = jnp.fft.fft(padded_f)\n        convolution = jnp.fft.ifft(fft_f * fft_f).real\n\n        num_conv_points = len(convolution)\n        h = 1.0 / (num_conv_points + 1)\n        y_points = jnp.concatenate([jnp.array([0.0]), convolution, jnp.array([0.0])])\n        y1, y2 = y_points[:-1], y_points[1:]\n        l2_norm_squared = jnp.sum((h / 3) * (y1**2 + y1 * y2 + y2**2))\n\n        norm_1 = jnp.sum(jnp.abs(convolution)) / (len(convolution) + 1)\n        norm_inf = jnp.max(jnp.abs(convolution))\n        denominator = norm_1 * norm_inf\n        c2_ratio = l2_norm_squared / denominator\n        return -c2_ratio\n\n    def _create_step_initializer(self, key, pattern_idx):\n        \"\"\"Step function initializations.\"\"\"\n        n = self.hypers.num_intervals\n        f = jnp.zeros(n)\n        \n        if pattern_idx == 0:\n            start = int(0.25 * n)\n            end = int(0.75 * n)\n            h = 1.0\n            f = f.at[start:end].set(h)\n        elif pattern_idx == 1:\n            start = int(0.33 * n)\n            end = int(0.67 * n)\n            h = 1.18\n            f = f.at[start:end].set(h)\n        elif pattern_idx == 2:\n            f = f.at[int(0.2*n):int(0.3*n)].set(1.0)\n            f = f.at[int(0.4*n):int(0.6*n)].set(2.0)\n            f = f.at[int(0.7*n):int(0.8*n)].set(1.5)\n            h = 1.0\n        elif pattern_idx == 3:\n            start = int(0.25 * n)\n            end = int(0.75 * n)\n            h = 1.1\n            f = f.at[start:end].set(h)\n        elif pattern_idx == 4:\n            start = int(0.3*n)\n            end = int(0.7*n)\n            h = 1.3\n            f = f.at[start:end].set(h)\n        elif pattern_idx == 5:\n            start = int(0.15 * n)\n            end = int(0.55 * n)\n            h = 1.15\n            f = f.at[start:end].set(h)\n        elif pattern_idx == 6:\n            start = int(0.2*n)\n            end = int(0.8*n)\n            h = 0.9\n            f = f.at[start:end].set(h)\n        elif pattern_idx == 7:\n            f = f.at[int(0.1*n):int(0.25*n)].set(1.2)\n            f = f.at[int(0.25*n):int(0.6*n)].set(1.8)\n            f = f.at[int(0.6*n):int(0.85*n)].set(1.1)\n            h = 1.0\n        elif pattern_idx == 8:\n            f = f.at[int(0.1*n):int(0.35*n)].set(1.4)\n            f = f.at[int(0.55*n):int(0.9*n)].set(0.85)\n            h = 1.0\n        else:\n            start = int(0.3*n)\n            end = int(0.7*n)\n            h = 1.0\n            f = f.at[start:end].set(h)\n        \n        return f\n\n    def _create_multi_start(self, num_starts=9):\n        initializations = []\n        for i in range(num_starts):\n            key = jax.random.PRNGKey(42 + i * 100)\n            init = self._create_step_initializer(key, i)\n            initializations.append((init, key))\n        return initializations\n\n    def _local_reinitialization(self, f_values: jnp.ndarray, key) -> jnp.ndarray:\n        n = len(f_values)\n        num_reinit = int(self.hypers.reinit_fraction * n)\n        key, subkey = jax.random.split(key)\n        reinit_indices = jax.random.permutation(subkey, n)[:num_reinit]\n        perturbation = jax.random.normal(subkey, f_values.shape) * self.hypers.reinit_std\n        f_new = f_values.at[reinit_indices].set(f_values[reinit_indices] + perturbation[reinit_indices])\n        f_new = jax.nn.relu(f_new)\n        return f_new\n\n    def _check_stagnation(self, c2_history: list, step_count: int) -> bool:\n        if step_count < self.hypers.stagnation_window:\n            return False\n        recent_c2s = c2_history[-self.hypers.stagnation_window:]\n        improvement = recent_c2s[-1] - recent_c2s[0]\n        if improvement > 1e-6:\n            return False\n        return True\n\n    def _train_step(self, f_values: jnp.ndarray, opt_state, optimizer) -> Tuple:\n        loss, grads = jax.value_and_grad(self._objective_fn)(f_values)\n        updates, opt_state = optimizer.update(grads, opt_state, f_values)\n        f_values = optax.apply_updates(f_values, updates)\n        return f_values, opt_state, loss, grads\n\n    def run_optimization(self) -> Tuple:\n        initializations = self._create_multi_start(num_starts=9)\n        best_f = None\n        best_c2 = 0.0\n        \n        for idx, (init_f, seed_key) in enumerate(initializations):\n            print(f\"\\n=== Starting optimization from step function {idx + 1}/9 ===\")\n            schedule1 = optax.warmup_cosine_decay_schedule(\n                init_value=0.0,\n                peak_value=self.hypers.learning_rate * 1.4,\n                warmup_steps=self.hypers.warmup_steps,\n                decay_steps=self.hypers.num_steps // 2 - self.hypers.warmup_steps,\n                end_value=self.hypers.learning_rate * 0.15,\n            )\n            optimizer1 = optax.adam(learning_rate=schedule1, eps=1e-8)\n            key = jax.random.PRNGKey(42 + idx * 100)\n            f_values = init_f + 0.05 * jax.random.normal(key, init_f.shape)\n            opt_state = optimizer1.init(f_values)\n            reinit_key = jax.random.PRNGKey(42 + idx * 1000)\n            c2_history = []\n            \n            train_step_jit1 = jax.jit(lambda fv, os: self._train_step(fv, os, optimizer1))\n            for step in range(self.hypers.num_steps // 2):\n                f_values, opt_state, loss, grads = train_step_jit1(f_values, opt_state)\n                step_count = step + 1\n                current_c2 = -loss\n                c2_history.append(float(current_c2))\n                if self._check_stagnation(c2_history, step_count):\n                    if step_count % self.hypers.reinit_interval == 0:\n                        f_values = self._local_reinitialization(f_values, reinit_key)\n                        reinit_key, _ = jax.random.split(reinit_key)\n                if float(current_c2) > float(best_c2):\n                    best_c2 = current_c2\n                    best_f = f_values.copy()\n                if step % 5000 == 0 or step == self.hypers.num_steps // 2 - 1:\n                    print(f\"  Step {step:5d} | C2 \u2248 {-loss:.8f} | Best: {best_c2:.8f}\")\n            \n            schedule2 = optax.warmup_cosine_decay_schedule(\n                init_value=0.0,\n                peak_value=self.hypers.learning_rate * 0.35,\n                warmup_steps=500,\n                decay_steps=self.hypers.num_steps // 2 - 500,\n                end_value=self.hypers.learning_rate * 1e-4,\n            )\n            optimizer2 = optax.adam(learning_rate=schedule2, eps=1e-8)\n            key = jax.random.PRNGKey(43 + idx * 100)\n            f_values = best_f + 0.04 * jax.random.normal(key, best_f.shape)\n            opt_state = optimizer2.init(f_values)\n            \n            print(f\"\\n=== Phase 2 fine-tuning for step function {idx + 1} ===\")\n            train_step_jit2 = jax.jit(lambda fv, os: self._train_step(fv, os, optimizer2))\n            step_count = 0\n            reinit_key = jax.random.PRNGKey(43 + idx * 1000)\n            c2_history = []\n            \n            for step in range(self.hypers.num_steps // 2):\n                f_values, opt_state, loss, grads = train_step_jit2(f_values, opt_state)\n                step_count = step + 1\n                current_c2 = -loss\n                c2_history.append(float(current_c2))\n                if self._check_stagnation(c2_history, step_count):\n                    if step_count % self.hypers.reinit_interval == 0:\n                        f_values = self._local_reinitialization(f_values, reinit_key)\n                        reinit_key, _ = jax.random.split(reinit_key)\n                if float(current_c2) > float(best_c2):\n                    best_c2 = current_c2\n                    best_f = f_values.copy()\n                if step % 5000 == 0 or step == self.hypers.num_steps // 2 - 1:\n                    print(f\"  Step {step:5d} | C2 \u2248 {-loss:.8f} | Best: {best_c2:.8f}\")\n\n        return jax.nn.relu(best_f), best_c2 if best_f is not None else 0.0\n\n\ndef run():\n    hypers = OptimizerHyperparameters(best_c2=0.8962799441554086)\n    optimizer = C2Optimizer(hypers)\n    optimized_f, final_c2_val = optimizer.run_optimization()\n    f_values_np = np.array(optimized_f)\n    return f_values_np, float(final_c2_val), float(-final_c2_val), hypers.num_intervals\n# EVOLVE-BLOCK-END",
+    "stop_reason": "completed",
+    "ledger": {
+      "max_evaluator_calls": 20,
+      "evaluator_calls": 4,
+      "max_probe_calls": 30,
+      "probe_calls": 17,
+      "edit_calls": 17,
+      "llm_input_tokens": 0,
+      "llm_output_tokens": 0,
+      "llm_calls": 39,
+      "sandbox_seconds": 251.93758153915405
+    },
+    "steps": [
+      {
+        "step": 0,
+        "kind": "seed",
+        "edit_mode": "seed",
+        "edit_note": "seed program",
+        "combined_score": 1.0266517990950754,
+        "validity": 1.0,
+        "error": null,
+        "wall_s": 44.68026351928711,
+        "is_new_best": true
+      },
+      {
+        "step": 1,
+        "kind": "probe",
+        "edit_mode": "probe",
+        "edit_note": "subsample=2000",
+        "combined_score": 0.9821545873986595,
+        "validity": 1.0,
+        "error": null,
+        "wall_s": 47.38247108459473,
+        "is_new_best": false
+      },
+      {
+        "step": 2,
+        "kind": "probe",
+        "edit_mode": "probe",
+        "edit_note": "subsample=2000",
+        "combined_score": 1.0033543169593957,
+        "validity": 1.0,
+        "error": null,
+        "wall_s": 39.82038354873657,
+        "is_new_best": false
+      },
+      {
+        "step": 3,
+        "kind": "probe",
+        "edit_mode": "probe",
+        "edit_note": "subsample=2000",
+        "combined_score": 0.9823352519370169,
+        "validity": 1.0,
+        "error": null,
+        "wall_s": 48.582884788513184,
+        "is_new_best": false
+      },
+      {
+        "step": 4,
+        "kind": "probe",
+        "edit_mode": "probe",
+        "edit_note": "subsample=2000",
+        "combined_score": 0.9815658223554614,
+        "validity": 1.0,
+        "error": null,
+        "wall_s": 41.375892877578735,
+        "is_new_best": false
+      },
+      {
+        "step": 5,
+        "kind": "probe",
+        "edit_mode": "probe",
+        "edit_note": "subsample=2000",
+        "combined_score": 0.9827368563734248,
+        "validity": 1.0,
+        "error": null,
+        "wall_s": 57.83797764778137,
+        "is_new_best": false
+      },
+      {
+        "step": 6,
+        "kind": "probe",
+        "edit_mode": "probe",
+        "edit_note": "subsample=2000",
+        "combined_score": 0.9817714170066676,
+        "validity": 1.0,
+        "error": null,
+        "wall_s": 51.08712911605835,
+        "is_new_best": false
+      },
+      {
+        "step": 7,
+        "kind": "probe",
+        "edit_mode": "probe",
+        "edit_note": "subsample=2000",
+        "combined_score": 0.0,
+        "validity": 0.0,
+        "error": "Incompatible types for broadcasting: input type=float32[400] and requested type=float32[264]",
+        "wall_s": 3.2701241970062256,
+        "is_new_best": false
+      },
+      {
+        "step": 8,
+        "kind": "probe",
+        "edit_mode": "probe",
+        "edit_note": "subsample=2000",
+        "combined_score": 0.0,
+        "validity": 0.0,
+        "error": "Incompatible types for broadcasting: input type=float32[400] and requested type=float32[264]",
+        "wall_s": 3.0697154998779297,
+        "is_new_best": false
+      },
+      {
+        "step": 9,
+        "kind": "probe",
+        "edit_mode": "probe",
+        "edit_note": "subsample=2000",
+        "combined_score": 0.9826288633401217,
+        "validity": 1.0,
+        "error": null,
+        "wall_s": 70.95408821105957,
+        "is_new_best": false
+      },
+      {
+        "step": 10,
+        "kind": "full_rewrite",
+        "edit_mode": "full_rewrite",
+        "edit_note": "spliced new EVOLVE-BLOCK",
+        "combined_score": 0.9826288633401217,
+        "validity": 1.0,
+        "error": null,
+        "wall_s": 59.2510130405426,
+        "is_new_best": false
+      },
+      {
+        "step": 11,
+        "kind": "probe",
+        "edit_mode": "probe",
+        "edit_note": "subsample=2000",
+        "combined_score": 1.0224201852303152,
+        "validity": 1.0,
+        "error": null,
+        "wall_s": 54.897138357162476,
+        "is_new_best": false
+      },
+      {
+        "step": 12,
+        "kind": "full_rewrite",
+        "edit_mode": "full_rewrite",
+        "edit_note": "spliced new EVOLVE-BLOCK",
+        "combined_score": 1.0224201852303152,
+        "validity": 1.0,
+        "error": null,
+        "wall_s": 44.88634133338928,
+        "is_new_best": false
+      },
+      {
+        "step": 13,
+        "kind": "probe",
+        "edit_mode": "probe",
+        "edit_note": "subsample=2000",
+        "combined_score": 1.0159515640888044,
+        "validity": 1.0,
+        "error": null,
+        "wall_s": 45.58115530014038,
+        "is_new_best": false
+      },
+      {
+        "step": 14,
+        "kind": "probe",
+        "edit_mode": "probe",
+        "edit_note": "subsample=2000",
+        "combined_score": 1.0068941007044578,
+        "validity": 1.0,
+        "error": null,
+        "wall_s": 60.59841465950012,
+        "is_new_best": false
+      },
+      {
+        "step": 15,
+        "kind": "probe",
+        "edit_mode": "probe",
+        "edit_note": "subsample=2000",
+        "combined_score": 1.0060406408099338,
+        "validity": 1.0,
+        "error": null,
+        "wall_s": 48.68222951889038,
+        "is_new_best": false
+      },
+      {
+        "step": 16,
+        "kind": "probe",
+        "edit_mode": "probe",
+        "edit_note": "subsample=2000",
+        "combined_score": 1.0224201852303152,
+        "validity": 1.0,
+        "error": null,
+        "wall_s": 58.84481143951416,
+        "is_new_best": false
+      },
+      {
+        "step": 17,
+        "kind": "full_rewrite",
+        "edit_mode": "full_rewrite",
+        "edit_note": "spliced new EVOLVE-BLOCK",
+        "combined_score": 1.0224201852303152,
+        "validity": 1.0,
+        "error": null,
+        "wall_s": 62.30328607559204,
+        "is_new_best": false
+      },
+      {
+        "step": 18,
+        "kind": "probe",
+        "edit_mode": "probe",
+        "edit_note": "subsample=2000",
+        "combined_score": 1.0287207504545426,
+        "validity": 1.0,
+        "error": null,
+        "wall_s": 65.62355852127075,
+        "is_new_best": false
+      },
+      {
+        "step": 19,
+        "kind": "full_rewrite",
+        "edit_mode": "full_rewrite",
+        "edit_note": "spliced new EVOLVE-BLOCK",
+        "combined_score": 1.0287207504545426,
+        "validity": 1.0,
+        "error": null,
+        "wall_s": 40.81667757034302,
+        "is_new_best": true
+      },
+      {
+        "step": 20,
+        "kind": "probe",
+        "edit_mode": "probe",
+        "edit_note": "subsample=2000",
+        "combined_score": 1.0162159749450272,
+        "validity": 1.0,
+        "error": null,
+        "wall_s": 51.38037061691284,
+        "is_new_best": false
+      },
+      {
+        "step": 21,
+        "kind": "probe",
+        "edit_mode": "probe",
+        "edit_note": "subsample=2000",
+        "combined_score": 1.0044962739330208,
+        "validity": 1.0,
+        "error": null,
+        "wall_s": 57.0885910987854,
+        "is_new_best": false
+      }
+    ],
+    "error": null,
+    "mode": "agent",
+    "delta": 0.002068951359467164,
+    "evaluations": 4
+  }
+]

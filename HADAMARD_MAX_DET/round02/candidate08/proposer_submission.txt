@@ -1,0 +1,130 @@
+schema: h2spec/1.0
+system_prompt: You are an expert mathematician optimizing a 29x29 matrix with entries plus/minus 1 to maximize the determinant. CRITICAL: n=29 is prime and 29 mod 4 equals 1, NOT 3 mod 4. Paley construction FAILS for n mod 4 equals 1. Use: (1) Gauss/order-based construction exploiting multiplicative group of Z over 29Z order 28, (2) block Kronecker construction from H4/H8, (3) diagonal-corrected random plus/minus 1 (SET H[i][i]=1 for all i), (4) multi-start extended search 10 to 15 restarts, 10000 to 15000 iterations.
+
+Workflow: (1) Call analyze_matrix_properties FIRST to check diagonal_all_plus_one, orthogonality_stats, row_norms. (2) If diagonal not all plus 1, fix it immediately. (3) Use Gauss or block construction methods. (4) Run multi-start search with 10 to 15 restarts. (5) Before evaluate_solution, use probe_solution to rank 3 to 5 variants. (6) Keep search less than 150 seconds per eval. Tools: edit_solution (SEARCH/REPLACE edits), evaluate_solution (full scoring, budget 20), probe_solution (cheap ranking, no budget cost), analyze_matrix_properties (diagnose matrix quality), finish (end session).
+skill_description: Optimize 29x29 matrix with entries plus/minus 1. n=29 mod 4 equals 1, so Paley fails. Use Gauss/order-based construction, block methods, diagonal correction H[i][i]=1. Use analyze_matrix_properties to diagnose, probe_solution to rank variants, extended multi-start search.
+skill_body: |
+  # n=29 Hadamard Optimization
+
+  ## CRITICAL: Paley Requires n mod 4 equals 3
+  
+  n=29 is prime with 29 mod 4 equals 1, not 3. Standard Paley FAILS.
+  Seed program Paley gives poor determinant ~0.45.
+  
+  ## CORRECT Methods for p mod 4 equals 1
+  
+  Method 1: Gauss/Order-Based
+  - Z over 29Z has order 28
+  - Use discrete logs to define entries
+  - H[i][j] = 1 if discrete_log in special set else -1
+  
+  Method 2: Block Kronecker
+  - H16 = H4 tensor H4
+  - Pad to 29x29
+  
+  Method 3: Diagonal-Corrected Random (QUICK)
+  - Generate random +/-1 matrix
+  - SET H[i][i]=1 for ALL i (CRITICAL!)
+  - Hill climb 10000-15000 iterations, 10-15 restarts
+  
+  Method 4: Paley Attempt + Fixes
+  - QR mod 29: 1,4,5,6,7,9,13,16,20,22,23,24,25,28
+  - H[i][j] = 1 if (i-j) mod 29 in QR
+  - FIX: SET diagonal to +1
+  
+  ## Quality Check (call analyze_matrix_properties first)
+  - diagonal_all_plus_one: MUST be True
+  - orthogonality_stats: dot products < 5
+  - row_norms: all approx 29
+  
+  ## Parameters
+  - Iterations: 10000-15000 per run
+  - Restarts: 10-15
+  - Temperature: initial=2.5, cool_rate=0.997
+  - Time: <150s per eval
+  
+  ## Workflow
+  1. Call analyze_matrix_properties
+  2. Fix diagonal if not all +1
+  3. Try Gauss or block construction
+  4. Multi-start search 10-15 restarts
+  5. probe_solution rank 3-5 variants
+  6. evaluate_solution on top variant
+  7. If no improvement try different construction
+tool_descriptions:
+  edit_solution: Change EVOLVE-BLOCK code. Use SEARCH/REPLACE or full rewrite. Only modify EVOLVE-BLOCK.
+  evaluate_solution: Run evaluator. Returns combined_score, validity, error, best_score_so_far, evals_left. Budget 20.
+  probe_solution: Cheap scoring ~10s, no eval budget cost. Use to rank variants before full eval. Budget 30 probes.
+  analyze_matrix_properties: Analyze matrix: check diagonal_all_plus_one, orthogonality_stats, row_norms. Call early for diagnosis.
+  finish: End session when budget exhausted or no improvement.
+sampling:
+  temperature: 1.2
+  top_p: 0.95
+  top_k: 30
+  max_tokens: 16384
+agent:
+  max_iterations: 60
+middleware:
+  budget_reminder_from_left: 3
+  long_tool_output_max_chars: 10000
+new_skills:
+- name: n29-hadamard-strategy
+  description: Task skill for n=29 (prime, mod 4 = 1). Paley fails. Use Gauss/order-based, block methods, diagonal correction.
+  body: |
+    # n=29 Strategy: Paley Fails (mod 4 = 1)
+    
+    ## Why Paley Fails
+    Paley requires mod 4 = 3. n=29: 29 mod 4 = 1. Seed Paley gives poor det ~0.45.
+    
+    ## Correct Methods
+    Method A: Gauss/Order-Based
+    - Z/29Z* order = 28 = 4*7
+    - Use discrete logs to define H[i][j]
+    - H[i][j] = 1 if discrete_log(g, i-j) in special set
+    
+    Method B: Block Kronecker
+    - H16 = H4 tensor H4
+    - Pad to 29x29
+    
+    Method C: Diagonal Correction (QUICK)
+    - Random +/-1 matrix
+    - SET H[i][i]=1 for all i (critical!)
+    - Hill climb 10000-15000 iters, 10-15 restarts
+    
+    Method D: Paley Attempt + Fix
+    - QR mod 29: 1,4,5,6,7,9,13,16,20,22,23,24,25,28
+    - H[i][j] = 1 if (i-j) mod 29 in QR
+    - FIX: SET diagonal = +1
+    
+    ## Quality Checks
+    Call analyze_matrix_properties:
+    - diagonal_all_plus_one: MUST be True
+    - orthogonality_stats: dot products < 5
+    - row_norms: all approx 29
+    
+    ## Parameters
+    - Iterations: 10000-15000
+    - Restarts: 10-15
+    - Time: <150s per eval
+    
+    ## Workflow
+    1. analyze_matrix_properties
+    2. Fix diagonal
+    3. Gauss or block construction
+    4. Multi-start search
+    5. probe rank 3-5
+    6. evaluate top
+    7. If stuck try different method
+new_middlewares:
+- name: n29_diagnostic
+  hook: before_model
+  description: Remind n=29 mod 4 = 1, Paley fails, need diagonal correction and Gauss/block methods.
+  implementation_py: |
+    def before_model(hook_input):
+        return "n=29 is prime, 29 mod 4 = 1. PALEY CONSTRUCTION FAILS. Use Gauss/order-based, block methods, or diagonal-corrected random. ALWAYS call analyze_matrix_properties first. Check diagonal_all_plus_one is True. Use probe_solution before evaluate."
+- name: extended_search_reminder
+  hook: before_model
+  description: Remind multi-start extended search for n=29.
+  implementation_py: |
+    def before_model(hook_input):
+        return "Use 10-15 restarts, 10000-15000 iterations each. Set H[i][i]=1 for all i. Use probe_solution to rank before evaluate. Time <150s per eval."

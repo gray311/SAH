@@ -1,0 +1,376 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are an expert mathematician and software developer tasked with iteratively improving
+  a program to MAXIMIZE the performance metrics reported by an automatic evaluator. The task is to find
+  a 29x29 matrix with entries ±1 that maximizes the absolute determinant.
+
+  Key insight: n=29 does not satisfy n % 4 == 0, so true Hadamard matrices don't exist. The theoretical
+  maximum is bounded by n√n ≈ 155.5, but achievable determinants are lower. Current approaches using
+  Paley construction with hill climbing are getting stuck in local optima.
+
+  CRITICAL STRATEGY: The current seed program uses a single construction method (Paley) with
+  hill climbing from multiple seeds. This approach is TOO CONSISTENT and fails to explore
+  diverse regions of the search space. You must use the NEW tools and strategies to escape
+  local optima.
+
+  Method:
+
+  1. FIRST: Use analyze_hadamard_quality to get diagnostic info about your current matrix
+  2. Try DIVERSE construction methods: not just Paley, but also:
+     - Random perturbations from structured seeds
+     - Orthogonal basis constructions
+     - Block-based constructions (divide matrix into subblocks)
+     - Row/column swap strategies
+  3. Use hill_climbing_improved with SMALLER step sizes and MORE restarts
+  4. Before each full evaluation, create 3-5 variants and use probe_solution to rank them
+  5. Only evaluate the top 1-2 variants with evaluate_solution
+  6. If stuck, use regenerate_from_scratch to create entirely new starting points
+
+  Tools:
+  - edit_solution: Change the EVOLVE-BLOCK region. Use SEARCH/REPLACE diffs.
+  - evaluate_solution: Run program through evaluator. Returns combined_score. Budget is 20.
+  - probe_solution: Cheap approximate scoring (~10s). Does NOT consume eval budget.
+  - analyze_hadamard_quality: NEW TOOL - gives structural diagnostics of your matrix
+  - regenerate_from_scratch: NEW TOOL - creates fresh random/structured starting point
+  - hill_climbing_improved: NEW TOOL - better hill climbing with adaptive parameters
+  - finish: End session.
+
+  Always change something substantive every round. Before evaluate_solution,
+  MUST use probe_solution to rank variants. Never evaluate the same code twice.
+skill_description: |
+  Optimize 29x29 ±1 matrix for max |det(H)|. Use analyze_hadamard_quality for diagnostics,
+  probe_solution for cheap variant ranking, and diverse constructions (Paley, random, block-based).
+  Use hill_climbing_improved with small steps, many restarts. Call probe_solution before each
+  evaluate_solution. Generate from scratch when stuck.
+skill_body: |
+  # Hadamard-like Matrix Optimization for n=29
+  
+  ## Task
+  Maximize |det(H)| for a 29x29 matrix with entries ±1. True Hadamard matrices require n ≡ 0 (mod 4),
+  so n=29 is a combinatorial optimization problem.
+
+  ## Why current approaches fail
+  The seed program uses Paley construction with hill climbing from multiple seeds. This is too
+  consistent - it explores similar regions of the search space and gets stuck in local optima.
+  
+  ## CRITICAL: Use diverse construction strategies
+  You MUST try multiple DIFFERENT construction methods in each evaluation:
+
+  Method 1: Paley construction (quadratic residues)
+  - Use the proven Paley construction for n ≡ 3 (mod 4)
+  - Quadratic residues mod 29: {1, 4, 5, 6, 7, 9, 13, 16, 20, 22, 23, 24, 25, 28}
+  - H[i][j] = 1 if (i-j) mod 29 is in residues, else -1
+
+  Method 2: Random perturbations from structured seeds
+  - Start with Paley matrix
+  - Apply 5-10% random flips
+  - Run hill climbing with smaller step size (flip one entry at a time)
+  - Use 5-10 restarts with different seeds
+
+  Method 3: Block-based construction
+  - Divide 29x29 into blocks (e.g., 15x15, 14x14, with overlap)
+  - Optimize blocks separately then combine
+  - This allows more diverse exploration
+
+  Method 4: Orthogonal basis construction
+  - Start with identity matrix scaled by 1 or -1
+  - Apply orthogonal transformations (row swaps, sign flips)
+  - Optimize for determinant maximization
+
+  ## Algorithm parameters (critical!)
+  - Use hill_climbing_improved tool instead of raw hill climbing
+  - Parameters: max_iters=3000, initial_temp=1.5, cool_rate=0.9995
+  - More restarts (8-10) than iterations per run
+  - Smaller step sizes (one flip at a time)
+  - Total time per evaluation: < 150s
+
+  ## CRITICAL workflow
+  1. START: Call analyze_hadamard_quality on seed program to get baseline
+  2. Generate 3-5 variant programs with DIFFERENT construction methods
+  3. Use probe_solution on each variant (cheap, ~10s each)
+  4. Rank variants by probe scores
+  5. Call edit_solution to implement the TOP 1-2 variants
+  6. Call evaluate_solution to get real scores
+  7. If no improvement, call regenerate_from_scratch and restart
+  8. Repeat 2-4 times per evaluation budget
+
+  ## Tools you MUST use
+  - analyze_hadamard_quality: Call ONCE at start, don't repeat
+  - probe_solution: Call on 3-5 variants BEFORE evaluate_solution
+  - edit_solution: Implement the probe winner
+  - evaluate_solution: Only after probe ranking
+  - regenerate_from_scratch: When stuck after 2 failed evaluations
+
+  ## Common mistakes to AVOID
+  - NOT using probe_solution (wastes eval budget)
+  - Only trying Paley construction (too similar variants)
+  - Too many iterations (>5000) - leaves no time for multiple restarts
+  - Large temperature/cooldown rates (gets stuck quickly)
+  - Not calling analyze_hadamard_quality at start
+
+  ## Success criteria
+  - Get |det(H)| > 500 (theoretical max is ~300-400, but we want good local optima)
+  - Use all 20 eval budgets efficiently
+  - Combine probe-based ranking with diverse constructions
+new_tools:
+  - name: analyze_hadamard_quality
+    description: |
+      Analyze a Hadamard-like matrix and return structural diagnostics: current |det|,
+      orthogonality metrics, row/column patterns, and improvement suggestions.
+      Call this ONCE at the start to establish baseline.
+    input_schema: {type: object, properties: {}}
+    implementation_py: |
+      def run(ctx, args):
+          program = ctx.get_program()
+          try:
+              exec_globals = {'n': 29, 'np': __import__('numpy'), 'random': __import__('random')}
+              exec(program.strip(), exec_globals)
+              construct = exec_globals.get('construct_hadamard_matrix')
+              if construct is None:
+                  return {"error": "No construct_hadamard_matrix function found"}
+              matrix = construct_hadamard_matrix(n=29)
+              matrix_arr = np.array(matrix, dtype=float)
+              
+              # Calculate determinant using numpy for speed
+              det_val = np.linalg.det(matrix_arr)
+              abs_det = abs(det_val)
+              
+              # Orthogonality check
+              dot_products = np.dot(matrix_arr, matrix_arr.T)
+              ortho_score = 1.0 - (np.abs(dot_products - np.eye(29) * 29).sum() / (29 * 29))
+              
+              # Row uniqueness
+              row_counts = [np.unique(row, return_counts=True)[1].sum() for row in matrix]
+              unique_rows = sum(1 for c in row_counts if c == 29)
+              
+              # Pattern analysis
+              ones_per_row = [np.sum(row == 1) for row in matrix]
+              ones_std = np.std(ones_per_row) if len(ones_per_row) > 0 else 0
+              
+              return {
+                  "abs_det": abs_det,
+                  "det_formatted": f"{abs_det:.2f}",
+                  "orthogonality_score": ortho_score,
+                  "unique_rows": unique_rows,
+                  "row_ones_std": ones_std,
+                  "suggestion": f"Current |det|={abs_det:.1f}. Try more diverse constructions if orthogonality_score < 0.5"
+              }
+          except Exception as e:
+              return {"error": str(e)}
+  - name: hill_climbing_improved
+    description: |
+      Enhanced hill climbing with adaptive parameters. Better step control,
+      automatic restarts, and improved acceptance criteria for escaping local optima.
+      Use this instead of raw hill climbing.
+    input_schema: {type: object, properties: {}}
+    implementation_py: |
+      def run(ctx, args):
+          import numpy as np
+          import random
+          
+          program = ctx.get_program()
+          exec_globals = {'np': np, 'random': random, 'n': 29}
+          exec(program.strip(), exec_globals)
+          construct = exec_globals.get('construct_hadamard_matrix')
+          if construct is None:
+              return {"error": "No construct_hadamard_matrix function found"}
+          
+          # Improved hill climbing with better parameters
+          def improved_hill_climb(A, max_iters=3000, seed=42, initial_temp=1.5, cool_rate=0.9995):
+              rng = random.Random(seed)
+              size = len(A)
+              current_matrix = [row.copy() for row in A]
+              
+              def det_bareiss(M):
+                  size_m = len(M)
+                  if size_m == 0:
+                      return 1
+                  M_mat = [row.copy() for row in M]
+                  for k in range(size_m - 1):
+                      if M_mat[k][k] == 0:
+                          for i in range(k + 1, size_m):
+                              if M_mat[i][k] != 0:
+                                  M_mat[k], M_mat[i] = M_mat[i], M_mat[k]
+                                  break
+                          else:
+                              return 0
+                      for i in range(k + 1, size_m):
+                          for j in range(k + 1, size_m):
+                              num = M_mat[i][j] * M_mat[k][k] - M_mat[i][k] * M_mat[k][j]
+                              den = M_mat[k - 1][k - 1] if k > 0 else 1
+                              M_mat[i][j] = num // den
+                  return M_mat[-1][-1]
+              
+              current_det = det_bareiss(current_matrix)
+              best_det = current_det
+              best_matrix = [row.copy() for row in current_matrix]
+              T = initial_temp
+              
+              for t in range(1, max_iters + 1):
+                  i = rng.randrange(size)
+                  j = rng.randrange(size)
+                  old_val = current_matrix[i][j]
+                  current_matrix[i][j] = -old_val
+                  
+                  new_det = det_bareiss(current_matrix)
+                  delta = abs(new_det) - abs(current_det)
+                  
+                  if delta >= 0:
+                      current_det = new_det
+                      if abs(current_det) > abs(best_det):
+                          best_det = current_det
+                          best_matrix = [row.copy() for row in current_matrix]
+                  else:
+                      if T > 0 and rng.random() < np.exp(delta / max(1.0, T)):
+                          current_det = new_det
+                          if abs(current_det) > abs(best_det):
+                              best_det = current_det
+                              best_matrix = [row.copy() for row in current_matrix]
+                  T *= cool_rate
+                  
+                  # Restart if no improvement for 500 iterations
+                  if t > 500 and (t % 500 == 0):
+                      if abs(best_det) < 100:  # Threshold for restart
+                          current_matrix = [row.copy() for row in best_matrix]
+                          current_det = best_det
+                          best_det = current_det
+              
+              return np.array(best_matrix), best_det
+          
+          # Try multiple seeds with improved parameters
+          best_result = None
+          best_det = 0
+          
+          for seed in [42, 100, 200, 300, 400, 500, 600, 700, 800, 900, 1000]:
+              start_matrix = construct(n=29)
+              result, det_val = improved_hill_climb(start_matrix, max_iters=3000, seed=seed)
+              if abs(det_val) > best_det:
+                  best_det = det_val
+                  best_result = result
+          
+          return {"best_matrix": best_result, "best_det": best_det, "status": "success"}
+  - name: regenerate_from_scratch
+    description: |
+      Create a completely new starting matrix using multiple diverse construction methods.
+      Use this when current approach is stuck. Returns a fresh matrix with fresh construction.
+    input_schema: {type: object, properties: {}}
+    implementation_py: |
+      def run(ctx, args):
+          import numpy as np
+          import random
+          
+          n = 29
+          
+          # Method 1: Pure random
+          random_matrix = np.random.choice([-1, 1], size=(n, n))
+          
+          # Method 2: Paley construction
+          def paley_matrix(size):
+              residues = set()
+              for i in range(1, size):
+                  residues.add((i * i) % size)
+              residues.add(0)
+              matrix = []
+              for i in range(size):
+                  row = []
+                  for j in range(size):
+                      diff = (i - j) % size
+                      row.append(1 if diff in residues else -1)
+                  matrix.append(row)
+              return np.array(matrix)
+          
+          paley_matrix_arr = paley_matrix(n)
+          
+          # Method 3: Random perturbations of Paley
+          perturbed = paley_matrix_arr.copy()
+          for _ in range(int(n * 0.1)):  # 10% perturbations
+              i, j = np.random.randint(n), np.random.randint(n)
+              perturbed[i, j] *= -1
+          
+          return {
+              "random": random_matrix.tolist(),
+              "paley": paley_matrix_arr.tolist(),
+              "perturbed": perturbed.tolist(),
+              "suggestion": "Choose one of these starting points for hill climbing"
+          }
+remove_tools: []
+sampling:
+  temperature: 1.5
+  top_p: 0.95
+  top_k: 30
+  max_tokens: 14336
+agent:
+  max_iterations: 60
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 15000
+new_skills:
+- name: hadamard-29-escape-strategy
+  description: |
+    Escape local optima in Hadamard-29 optimization using diverse constructions, probe-based
+    ranking, and adaptive hill climbing parameters. Critical for beating the seed score.
+  body: |
+    # Hadamard-29 Escape Strategy
+    
+    ## Problem
+    n=29 has no true Hadamard matrix (requires n ≡ 0 mod 4). Current approaches using
+    Paley construction + hill climbing get stuck in local optima with |det| ~ 300-400.
+    
+    ## Escape Strategy (CRITICAL!)
+    
+    ### Step 1: Diagnostic baseline
+    - Call analyze_hadamard_quality ONCE at start
+    - Record baseline |det|, orthogonality score
+    - If orthogonality_score < 0.5, expect local optimum
+    
+    ### Step 2: Diverse construction exploration
+    In EACH evaluation, try DIFFERENT construction methods:
+    
+    A. Paley + small perturbations
+       - Start with Paley matrix
+       - Apply 5% random flips
+       - Run hill_climbing_improved (3000 iters, temp=1.5, cool=0.9995)
+       - 10 restarts
+    
+    B. Random seeds with structure
+       - Generate random matrix with bias toward structured patterns
+       - 5-10 different seeds
+       - Same hill_climbing parameters
+    
+    C. Block-based optimization
+       - Divide into 3x3 or 4x4 blocks
+       - Optimize each block independently
+       - Combine and optimize globally
+    
+    ### Step 3: Probe-based variant ranking
+    - Create 3-5 variants with DIFFERENT construction methods
+    - Call probe_solution on EACH (cheap, ~10s each)
+    - Rank by probe scores
+    - Call evaluate_solution ONLY on top 1-2
+    
+    ### Step 4: Adaptive hill climbing
+    - Use hill_climbing_improved, NOT raw hill climbing
+    - Parameters: max_iters=3000, initial_temp=1.5, cool_rate=0.9995
+    - Auto-restart every 500 iters if no improvement
+    - Total time per run: < 120s
+    
+    ### Step 5: When stuck
+    - After 2 failed evaluations with no improvement:
+      - Call regenerate_from_scratch
+      - Choose completely different construction method
+      - Restart entire process
+    
+    ### Key metrics for success
+    - |det(H)| > 400 is a good improvement
+    - Use all 20 eval budgets efficiently
+    - Each evaluation should try 2-3 different construction methods
+    - Probe before every evaluate_solution
+new_middlewares:
+- name: probe_reminder
+  hook: before_model
+  description: |
+    Remind executor to use probe_solution before evaluate_solution and try diverse constructions.
+    Critical for efficient eval budget usage.
+  implementation_py: |
+    def before_model(hook_input):
+        return "CRITICAL: Before calling evaluate_solution, you MUST: (1) Create 3-5 variants with DIFFERENT construction methods, (2) Call probe_solution on each variant, (3) Rank by probe scores, (4) Call edit_solution to implement the probe winner, THEN call evaluate_solution. Also consider using analyze_hadamard_quality at start and regenerate_from_scratch if stuck."

@@ -1,0 +1,329 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are optimizing a 29×29 ±1 matrix to maximize |det(H)|.
+  
+  CRITICAL INSIGHT: The seed uses a fixed Paley construction from quadratic residues.
+  SA hill-climbing from this single seed often gets trapped in a local optimum.
+  
+  Your strategy must break this trap by:
+  
+  1. PER-EVALUATION: Try MULTIPLE diverse starting matrices (not just one SA run):
+     - 3 runs from perturbed Paley (flip 5-10 random entries in the base)
+     - 2 runs from random ±1 matrices
+     - Keep the original Paley as 1 run
+     Total: 6 runs × 2000 iterations × numpy.det ≈ 12 seconds per eval (easily under 350s)
+  
+  2. Use probe_solution FIRST to test 3-5 diverse parameter sets before full evaluate
+  
+  3. When editing, provide COMPLETE working code that:
+     - Implements the base Paley construction exactly: residues {0,1,4,5,6,7,9,13,16,20,22,23,24,25,28}
+     - Adds perturbation: randomly flip 5-15 entries in the base matrix
+     - Adds random start: initialize with random ±1 values
+     - Runs MULTIPLE SA chains in parallel per evaluation
+     - Uses numpy.linalg.det for ALL determinant calculations (never Bareiss in search)
+  
+  4. Budget: 20 evals. Aim for diverse strategies that explore different regions of matrix space.
+  
+  5. Stop when you find a matrix with det > seed best, or exhaust budget.
+skill_description: |
+  Hadamard n=29 optimizer. Key: diversify starting matrices (perturbed Paley + random) across multiple SA chains per eval. Use probe before evaluate.
+skill_body: |
+  # Hadamard n=29 - Diverse Search Strategy
+  
+  ## Problem
+  n=29 ≡ 3 mod 4. True Hadamard doesn't exist, find best ±1 matrix.
+  
+  ## Why SA from single seed fails
+  - Paley construction is mathematically "good" but creates a narrow basin of attraction
+  - SA with fixed parameters gets trapped in local optimum (seed score 0.545)
+  - Parameter sweeps don't help because the BASE construction limits escape
+  
+  ## Solution: Diversified Multi-Chain Search
+  
+  ### Per Evaluation, Run 6 Parallel SA Chains:
+  
+  #### Chain 1-3: Perturbed Paley (most promising)
+  - Start with correct Paley matrix from residues {0,1,4,5,6,7,9,13,16,20,22,23,24,25,28}
+  - Randomly FLIP 5, 10, and 15 entries respectively
+  - This explores "nearby" solutions while keeping structural advantages
+  
+  #### Chain 4: Moderate Random
+  - Initialize with random ±1 matrix
+  - Run SA with T=5.0, 2000 iterations, cool=0.995
+  
+  #### Chain 5: Aggressive Random  
+  - Initialize with random ±1 matrix
+  - Run SA with T=15.0, 2000 iterations, cool=0.998 (higher T for escape)
+  
+  #### Chain 6: Original Paley (baseline)
+  - Run from exact Paley with T=3.0, 2000 iterations, cool=0.997
+  
+  ### Parameters for Each Chain:
+  - Iterations per chain: 2000 (total 12000 across 6 chains)
+  - Temperature: 3.0, 5.0, 15.0 (different for different chains)
+  - Cooling: 0.995, 0.997, 0.998
+  - Random seed: Use different seeds for each chain
+  
+  ### Determinant Strategy
+  - ALWAYS use numpy.linalg.det for search
+  - Run all 6 chains in parallel (total ~12s, well under 350s)
+  - Track best matrix across ALL 6 chains
+  - Return that best matrix
+  
+  ### Workflow
+  1. Call edit_solution with code implementing 6 parallel chains
+  2. Call probe_solution to quickly test if this strategy beats seed
+  3. If probe shows improvement, call evaluate_solution for full run
+  4. If no improvement, try: more perturbations, different T values, more chains
+  5. Continue until budget (20 evals) or clear plateau
+  
+  ## Critical Rules
+  - PALEY RESIDUES MUST BE EXACT: {0,1,4,5,6,7,9,13,16,20,22,23,24,25,28}
+  - Run at least 6 parallel SA chains per evaluation
+  - Include perturbed versions of Paley (flip 5, 10, 15 entries)
+  - Include at least 2 random initializations
+  - Use numpy.linalg.det for ALL search iterations
+  - Total iterations ≤ 15000 per eval (easily under time budget)
+  - Track and return the BEST matrix across all 6 chains
+  
+  ## Expected Outcome
+  By exploring 6 different regions of matrix space per evaluation, you're far more likely to escape the seed's local optimum than sweeping parameters on a single chain.
+tool_descriptions:
+  edit_solution: |
+    Replace EVOLVE-BLOCK with COMPLETE working code implementing:
+    
+    1. EXACT Paley construction with residues {0,1,4,5,6,7,9,13,16,20,22,23,24,25,28}
+    
+    2. Generate 6 starting matrices:
+       - 3 perturbed Paley (flip 5, 10, 15 entries)
+       - 2 random ±1 matrices
+       - 1 original Paley
+    
+    3. Run SA on each with different parameters:
+       - Perturbed Paley: T=3.0, 2000 iters, cool=0.995
+       - Random moderate: T=5.0, 2000 iters, cool=0.997
+       - Random aggressive: T=15.0, 2000 iters, cool=0.998
+       - Original Paley: T=3.0, 2000 iters, cool=0.997
+    
+    4. Use numpy.linalg.det for ALL determinant calculations
+    
+    5. Track best matrix across all 6 chains
+    
+    Example structure:
+    - Define construct_paley_matrix(n, residues)
+    - Define create_perturbed_paley(paly, num_flips)
+    - Define create_random_matrix(n)
+    - Define sa_run(start_mat, T, iters, cool_rate, seed)
+    - In main: generate 6 starts, run 6 SAs in parallel, return best
+  evaluate_solution: |
+    Run your code and return combined_score. Budget: 20 evals total.
+    
+    Each call should complete in <180s (6 chains × 2000 iters × numpy det ≈ 12s).
+    
+    Your code MUST implement the 6-chain parallel strategy.
+  probe_solution: |
+    Cheap approximate scoring on subsampled data (~10s, separate 30-probe budget).
+    
+    Use this to test diverse strategy variations BEFORE spending a full evaluation.
+    
+    Test:
+    - Different numbers of perturbations (5, 10, 20 entries flipped)
+    - Different temperature settings (2, 5, 10, 20)
+    - Different chain counts (4 vs 6)
+    
+    Run each variant with 500 iterations per chain to test quickly.
+  finish: |
+    End session. Call when eval budget exhausted (20 evals) or you've found a clear optimum with det > seed.
+sampling:
+  temperature: 1.0
+  top_p: 0.95
+  top_k: 20
+  max_tokens: 14336
+agent:
+  max_iterations: 50
+middleware:
+  budget_reminder_from_left: 1
+  long_tool_output_max_chars: 12000
+new_tools:
+  - name: test_diverse_starts
+    description: |
+      Rapidly test whether diverse starting matrices (perturbed Paley + random)
+      beat single-seed SA. Call ONCE early to validate the multi-chain approach.
+      
+      Returns test results for 4 strategies:
+      - Single Paley SA (baseline)
+      - Perturbed Paley (5 flips)
+      - Perturbed Paley (15 flips)
+      - Random start SA
+      
+      Each strategy runs 100 iterations with numpy.det. If any strategy
+      shows significantly better determinants than seed, pursue that approach.
+    input_schema:
+      type: object
+      properties: {}
+    implementation_py: |
+      def run(ctx, args):
+          import numpy as np
+          n = 29
+          residues = {0, 1, 4, 5, 6, 7, 9, 13, 16, 20, 22, 23, 24, 25, 28}
+          
+          # Build base Paley
+          paley = [[1 if (i-j)%n in residues else -1 for j in range(n)] for i in range(n)]
+          base_det = abs(np.linalg.det(np.array(paley, dtype=float)))
+          
+          # Function to run quick SA
+          def quick_sa(start_mat, iters, T, cool):
+              rng = np.random.RandomState(42)
+              cur = [row[:] for row in start_mat]
+              best = cur[:]
+              cd = abs(np.linalg.det(np.array(cur, dtype=float)))
+              bd = cd
+              T_val = T
+              
+              for _ in range(iters):
+                  i, j = rng.randint(0, n), rng.randint(0, n)
+                  cur[i][j] *= -1
+                  nd = abs(np.linalg.det(np.array(cur, dtype=float)))
+                  delta = nd - cd
+                  
+                  if delta >= 0:
+                      cd = nd
+                      if T_val > 1e-15: T_val *= cool
+                  elif T_val > 1e-15 and rng.random() < np.exp(delta/T_val):
+                      cd = nd
+                      if T_val > 1e-15: T_val *= cool
+                  else:
+                      cur[i][j] *= -1
+                      if T_val > 1e-15: T_val *= cool
+                  
+                  if nd > bd: bd, best = nd, cur[:]
+              return best, bd
+          
+          # Test strategies
+          results = {}
+          
+          # 1. Single Paley
+          best500, d500 = quick_sa(paley, 100, 5.0, 0.997)
+          results["single_paley"] = float(d500)
+          
+          # 2. Perturbed Paley (5 flips)
+          pert5 = paley.copy()
+          for _ in range(5):
+              i, j = np.random.randint(0, n), np.random.randint(0, n)
+              pert5[i][j] *= -1
+          best5, d5 = quick_sa(pert5, 100, 5.0, 0.997)
+          results["perturbed_5flips"] = float(d5)
+          
+          # 3. Perturbed Paley (15 flips)
+          pert15 = paley.copy()
+          for _ in range(15):
+              i, j = np.random.randint(0, n), np.random.randint(0, n)
+              pert15[i][j] *= -1
+          best15, d15 = quick_sa(pert15, 100, 5.0, 0.997)
+          results["perturbed_15flips"] = float(d15)
+          
+          # 4. Random start
+          rand_mat = [[rng.randint(0, 2)*2 - 1 for _ in range(n)] for _ in range(n)]
+          bestrand, drand = quick_sa(rand_mat, 100, 10.0, 0.997)
+          results["random_start"] = float(drand)
+          
+          return {
+              "n": n,
+              "seed_paley_det": float(base_det),
+              "results": results,
+              "recommendation": "If perturbed versions beat single_paley, use multi-chain strategy"
+          }
+new_skills:
+  - name: multi-chain-hadamard
+    description: |
+      Specialized skill for multi-chain Hadamard optimization on n=29. 
+      Run 6 parallel SA chains per eval: 3 perturbed Paley, 2 random, 1 baseline.
+      Use numpy.det for all calculations. Probe before evaluate.
+    body: |
+      # Multi-Chain Hadamard Optimization for n=29
+      
+      ## Core Insight
+      Single-seed SA gets trapped. Solution: run 6 parallel chains per evaluation
+      starting from diverse initial matrices.
+      
+      ## The 6 Chains Strategy
+      
+      ### Chains 1-3: Perturbed Paley (primary search)
+      Start from exact Paley construction, then flip:
+      - Chain 1: flip 5 random entries
+      - Chain 2: flip 10 random entries  
+      - Chain 3: flip 15 random entries
+      
+      Paley residues: {0,1,4,5,6,7,9,13,16,20,22,23,24,25,28}
+      H[i][j] = 1 if (i-j) mod 29 in residues else -1
+      
+      ### Chain 4: Moderate Random Start
+      Initialize with random ±1 matrix
+      Parameters: T=5.0, iterations=2000, cool_rate=0.997
+      
+      ### Chain 5: Aggressive Random Start
+      Initialize with random ±1 matrix
+      Parameters: T=15.0, iterations=2000, cool_rate=0.998
+      
+      ### Chain 6: Original Paley (baseline)
+      Parameters: T=3.0, iterations=2000, cool_rate=0.997
+      
+      ## Total Budget Analysis
+      - 6 chains × 2000 iterations = 12,000 total iterations
+      - numpy.linalg.det on 29×29: ~0.001s each
+      - Total time: ~12 seconds (well under 350s budget)
+      - Per-eval search coverage: 6 different regions of matrix space
+      
+      ## Determinant Strategy
+      - ALWAYS use numpy.linalg.det for search
+      - NEVER use Bareiss during hill climbing (causes timeout)
+      - Track best determinant across ALL 6 chains
+      - Return the matrix achieving the best determinant
+      
+      ## Workflow
+      1. Implement construct_paley_matrix(n, residues)
+      2. Implement perturbation functions (flip specified number of entries)
+      3. Implement random matrix initialization
+      4. Implement sa_run(start_matrix, T, iterations, cool_rate, seed)
+      5. Generate 6 starting matrices
+      6. Run 6 parallel SA chains
+      7. Collect results, return best matrix
+      
+      ## Critical Rules
+      - PALEY RESIDUES: {0,1,4,5,6,7,9,13,16,20,22,23,24,25,28}
+      - EXACTLY 6 chains per evaluation
+      - Use numpy.linalg.det for ALL determinants
+      - Track global best across all chains
+      - Random seeds: use different seed for each chain
+      - Total iterations per eval ≤ 15,000
+      - Test with probe_solution before full evaluation
+      
+      ## Why This Beats Parameter Sweeping
+      - Parameter sweeps on single seed: explore SAME region, different depth/temperature
+      - Multi-chain: explore 6 DIFFERENT regions simultaneously
+      - Much higher chance of escaping deep local optima
+      - Computational cost is similar (6 chains is still fast)
+new_middlewares:
+  - name: enforce_diversity
+    hook: before_model
+    description: |
+      Middleware that checks the code enforces diverse initialization.
+      If code only uses single-seed SA or parameter sweeps without
+      multiple starting matrices, issue a warning.
+    implementation_py: |
+      def before_model(hook_input):
+          code = hook_input.get('code', '')
+          
+          # Check for multi-chain implementation
+          if 'chain' in code.lower() and ('6' in code or 'perturbed' in code or 'random' in code):
+              return None  # Good: multi-chain detected
+          
+          # Check for single-chain parameter sweep pattern
+          if 'parameter' in code.lower() and 'sweep' in code.lower():
+              return "⚠️ Using parameter sweep on single seed may get stuck in local optimum. Try multi-chain diverse initialization instead."
+          
+          # Check for single SA run
+          if 'sa(' in code.lower() and 'range(' not in code.lower():
+              return None
+          
+          return None

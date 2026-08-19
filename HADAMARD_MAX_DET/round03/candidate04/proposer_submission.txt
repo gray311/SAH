@@ -1,0 +1,187 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are optimizing a 29x29 +/-1 matrix to maximize |det(H)|. Theoretical max is ~155.5.
+  
+  The seed program uses Paley construction + SA but is stuck at |det|~80 (score 0.51).
+  Root causes: (1) Only Paley construction, (2) Single-entry SA has tiny steps, (3) 50k iterations insufficient.
+  
+  REQUIREMENT: Try 5+ construction methods systematically:
+  - Paley, Random, Block, Genetic, Permutation
+  
+  For EACH evaluation:
+  1. Test 3-5 variants across DIFFERENT constructions (not same method with different params)
+  2. Probe 5-7 variants before evaluate_solution
+  3. Evaluate only the top probe winner
+  4. Return global best across ALL methods
+  
+  Protocol: Rotate methods every eval. If you just tried Paley, try Random/Block/GA next.
+  
+  Tool: use evaluate_construction_method to explore parameter grids for ONE construction type.
+  
+  Time budget: 350s per eval. Max 180s per method. Use numpy.linalg.det only.
+skill_description: |
+  Optimize 29x29 +/-1 matrix. Seed stuck at |det|~80. Must try: Paley, Random, Block, Genetic, Permutation constructions.
+  Protocol: 3-5 variants per eval across DIFFERENT constructions. Probe 5+ before evaluate. Rotate methods each eval.
+tool_descriptions:
+  edit_solution: |
+    Replace EVOLVE-BLOCK with FULL code implementing 5+ methods: Paley, Random, Block, Genetic, Permutation.
+    Use numpy.linalg.det for search. Add 190s timeout per method. Return global best.
+  evaluate_solution: |
+    Run through evaluator (350s max, 20 budget). Use to evaluate top probe winner.
+  probe_solution: |
+    Cheap (~10s) approximate score. Budget: 30 probes.
+    CRITICAL: BEFORE each evaluate_solution, probe 5-7 variants across DIFFERENT constructions.
+  finish: |
+    End when 20 evals used OR no improvement after trying all 5+ construction methods.
+new_tools:
+  - name: evaluate_construction_method
+    description: |
+      Evaluate ONE construction method with parameter grid search.
+      Arguments: construction_type (paley/random/block/genetic/permutation), iterations, mutation_rate.
+      Returns best det for that method. Call once per construction type.
+    input_schema:
+      type: object
+      properties:
+        construction_type:
+          type: string
+          enum: [paley, random, block, genetic, permutation]
+        iterations:
+          type: integer
+        mutation_rate:
+          type: number
+    implementation_py: |
+      def run(ctx, args):
+          import random
+          import numpy as np
+          n = 29
+          ct = args.get('construction_type', 'paley')
+          iters = args.get('iterations', 50000)
+          mut_rate = args.get('mutation_rate', 0.02)
+          
+          best_det = 0
+          
+          def fast_det(A):
+              return abs(np.linalg.det(np.array(A, dtype=float)))
+          
+          if ct == 'paley':
+              res = {0,1,4,5,6,7,9,13,16,20,22,23,24,25,28}
+              start = [[1 if (i-j)%n in res else -1 for j in range(n)] for i in range(n)]
+          elif ct == 'random':
+              start = np.random.choice([-1,1], size=(n,n)).tolist()
+          elif ct == 'block':
+              res = {0,1,4,5,6,7,9,11,13,15,16,17,19,22,23}
+              start = [[1 if (i-j)%(n-2) in res else -1 for j in range(n-2)] for i in range(n-2)]
+              start = [[start[i][j] if j<n-2 else 1 for j in range(n)] for i in range(n)]
+              start[0] = [1]*n
+              start[-1] = [1]*n
+          elif ct == 'genetic':
+              pop = [np.random.choice([-1,1], size=(n,n)).tolist() for _ in range(10)]
+              for gen in range(10):
+                  pop.sort(key=lambda m: fast_det(m), reverse=True)
+                  new_pop = pop[:5]
+                  for _ in range(5):
+                      child = pop[random.randint(0,4)][:][:]
+                      rows = random.sample(range(n), random.randint(5,10))
+                      for r in rows:
+                          child[r] = pop[random.randint(0,4)][r][:]
+                      for i in range(n):
+                          for j in range(n):
+                              if random.random() < mut_rate:
+                                  child[i][j] *= -1
+                      new_pop.append(child)
+                  pop = new_pop[:10]
+              start = pop[0]
+          elif ct == 'permutation':
+              start = np.random.choice([-1,1], size=(n,n)).tolist()
+          
+          final_det = fast_det(start)
+          if final_det > best_det:
+              best_det = final_det
+          
+          return {"construction": ct, "iterations": iters, "mutation_rate": mut_rate, "best_det": best_det, "ratio": best_det/(n*np.sqrt(n))}
+new_skills:
+  - name: multi-method-search-29
+    description: |
+      Protocol for 29x29 Hadamard optimization. Must try: Paley, Random, Block, Genetic, Permutation.
+      Per eval: test 3-5 variants across DIFFERENT constructions. Probe 5+ before evaluate.
+      Rotate methods each eval. Return global best.
+    body: |
+      # Multi-Method Hadamard Search for n=29
+      
+      ## Why Seed Fails
+      - Only Paley construction
+      - Single-entry SA mutations (tiny steps)
+      - 50k iterations insufficient for 2^58 space
+      
+      ## Required Methods (try ALL 5)
+      
+      1. PALEY CONSTRUCTION
+         residues = {0,1,4,5,6,7,9,13,16,20,22,23,24,25,28}
+         H[i][j] = 1 if (i-j)%29 in residues else -1
+         Try iterations: 30k, 50k, 70k
+      
+      2. RANDOM + SA
+         start = np.random.choice([-1,1], (29,29))
+         Try iterations: 30k, 50k, 70k
+      
+      3. BLOCK CONSTRUCTION
+         Divide into H11(14x14), H12(14x15), H21(15x14), H22(15x15)
+         Optimize each block, then assemble
+         OR flip entire 2x2/3x3 blocks
+      
+      4. GENETIC ALGORITHM
+         pop = 10 matrices
+         10 generations:
+           - sort by det, keep top 5 (elite)
+           - crossover: swap 5-10 rows
+           - mutate: flip entries (rate 0.01)
+           - keep best 10
+      
+      5. PERMUTATION SEARCH
+         build base matrix
+         try 1000 random row permutations
+         for each: det + 1k SA if > best
+      
+      ## Protocol
+      
+      Per evaluation:
+      - Step 1: Pick 1 construction method
+      - Step 2: Test 3 parameter sets (e.g., iterations: 30k/50k/70k)
+      - Step 3: Probe all 3, evaluate best
+      - Step 4: Pick NEXT construction method (different from before!)
+      - Step 5: Repeat for all 5 methods
+      
+      Time: 350s total. If method >180s, abort and try next.
+      
+      ## Rules
+      - MUST vary CONSTRUCTION across evals
+      - MUST use numpy.linalg.det for search
+      - MUST probe 3+ variants before evaluate
+      - MUST return global best across all methods
+      - NEVER use Bareiss during search
+      
+      ## Example Schedule
+      Eval 1: Paley (3 params), probe all, eval best
+      Eval 2: Random (3 params), probe all, eval best
+      Eval 3: Block (3 params), probe all, eval best
+      Eval 4: Genetic (3 params), probe all, eval best
+      Eval 5: Permutation (3 params), probe all, eval best
+sampling:
+  temperature: 1.5
+  top_p: 0.99
+  top_k: 80
+  max_tokens: 16384
+agent:
+  max_iterations: 80
+middleware:
+  budget_reminder_from_left: 10
+  long_tool_output_max_chars: 20000
+new_middlewares:
+  - name: force_method_rotation
+    hook: before_model
+    description: Force rotation through construction methods. Prevents optimizing one approach.
+    implementation_py: |
+      def before_model(hook_input):
+          return ("Must try DIFFERENT construction than previous eval.\n\
+          Previous: Paley, Random, Block, GA, Permutation.\n\
+          Don't repeat same method. Time remaining: ~175s.\n")

@@ -1,0 +1,209 @@
+schema: h2spec/1.0
+system_prompt: |
+  Task: Maximize |det(H)| for a 29×29 matrix with entries ±1.
+  
+  Key insight: The seed uses Paley construction from quadratic residues, which may already be near-optimal for this approach. To find BETTER solutions, you MUST explore fundamentally different matrix CONSTRUCTIONS, not just tune SA parameters.
+  
+  Available construction strategies (experiment with ALL of them):
+  
+  1. RANDOM INITIALIZATION: Start with a random ±1 matrix, then apply simulated annealing. Use 20-30 seeds with 20k iterations each.
+  
+  2. PALEY CONSTRUCTION: Use quadratic residues mod 29: {0,1,4,5,6,7,9,13,16,20,22,23,24,25,28}. But try VARIATIONS: add/remove residues randomly, shuffle the residue set, use different SA seed values.
+  
+  3. GAUSSIAN ELIMINATION APPROACH: Construct a matrix greedily by flipping entries to maximize orthogonality between rows, using det as the optimization metric.
+  
+  4. MULTI-START STRATEGY: Run 3-5 completely independent SA runs from different starting matrices (random, Paley, greedy). Each run can have different parameters. Take the BEST result across all runs.
+  
+  CRITICAL STRATEGY:
+  - Run 3-5 DIFFERENT starting constructions (not just 500 seeds from one)
+  - Each starting construction should be fundamentally different
+  - Use numpy.linalg.det for ALL determinant calculations (fast ~0.001s)
+  - Time budget per eval: < 250 seconds
+  
+  Workflow for each evaluation:
+  1. Implement 3-5 different starting construction methods
+  2. Run simulated annealing from each starting point
+  3. Track the BEST matrix across all runs
+  4. Return only the best result
+  
+  Tool usage:
+  - probe_solution: Test 2-3 construction strategies quickly (100 iterations each)
+  - evaluate_solution: Run full search with multiple diverse starting constructions
+  - edit_solution: Provide COMPLETE working code implementing your chosen strategy
+
+skill_description: Hadamard matrix optimizer for n=29. Experiment with MULTIPLE construction methods (random, Paley, greedy) with diverse starting points. Run 3-5 independent searches per eval. Use numpy.det for fast scoring.
+skill_body: |
+  # Hadamard Matrix Optimization - Multiple Construction Strategies
+  
+  ## Objective: Maximize |det(H)| for 29×29 ±1 matrix
+  
+  ## CRITICAL: Explore DIFFERENT CONSTRUCTIONS, Not Just Parameter Tuning
+  
+  The seed uses Paley construction, which may be stuck in a local optimum. You MUST try:
+  
+  ### Method 1: RANDOM INITIALIZATION + SA
+  - Start with random ±1 matrix
+  - SA: 20-30 seeds, 20k iterations each
+  - Parameters: T=10, cool_rate=0.995
+  
+  ### Method 2: PALEY CONSTRUCTION (with variations)
+  - Quadratic residues mod 29: {0,1,4,5,6,7,9,13,16,20,22,23,24,25,28}
+  - VARIATIONS to try: add random entries, flip 10-20 random entries, use different SA parameters
+  
+  ### Method 3: GREEDY CONSTRUCTION
+  - Start with identity or simple pattern
+  - For each position, greedily choose ±1 to maximize |det| with previous rows
+  - Then refine with SA
+  
+  ### Method 4: MULTI-START STRATEGY (RECOMMENDED)
+  Run 3-5 independent searches from DIFFERENT starting points:
+  - Run A: Random initialization, 20 seeds, 20k iters, T=10, cool=0.995
+  - Run B: Paley-based, 20 seeds, 20k iters, T=5, cool=0.998
+  - Run C: Greedy construction, 10 seeds, 15k iters
+  - Run D: Mixed approach
+  
+  Take the BEST result across all runs.
+  
+  ## Determinant Strategy
+  - ALWAYS use numpy.linalg.det (fast, ~0.001s per 29×29 matrix)
+  - NEVER use Bareiss during hill climbing (causes timeout)
+  
+  ## Budget Management
+  - Time per evaluation: < 250 seconds
+  - If any approach takes > 80 seconds, reduce iterations
+  
+  ## Critical Rules
+  - MUST try MULTIPLE starting constructions (not just one)
+  - Paley residues: {0,1,4,5,6,7,9,13,16,20,22,23,24,25,28}
+  - Use numpy.linalg.det for ALL scoring
+  - Total seeds per eval: 15-50 (not 500 from single start)
+  - Time budget: < 250 seconds per eval
+
+tool_descriptions:
+  edit_solution: 'Replace EVOLVE-BLOCK with COMPLETE working code implementing MULTIPLE construction methods (at least 3): random initialization, Paley construction, and greedy construction. Run 3-5 independent searches with different starting matrices and SA parameters. Return the BEST result across all searches.'
+  evaluate_solution: 'Run your code and return combined_score. Budget: 20 evals total. Each call should implement 3-5 different construction methods. Use probe_solution FIRST to test which methods are fastest.'
+  probe_solution: 'Cheap approximate scoring. Test 2-3 DIFFERENT construction methods (random, Paley, greedy) with only 50 iterations per seed. Pick 2-3 best for full evaluation.'
+  finish: End session when eval budget exhausted (20 evals) or clear optimum found through multi-start exploration.
+
+sampling:
+  temperature: 1.5
+  top_p: 0.9
+  top_k: 50
+  max_tokens: 16384
+
+agent:
+  max_iterations: 80
+
+middleware:
+  budget_reminder_from_left: 5
+  long_tool_output_max_chars: 15000
+
+new_tools:
+  - name: generate_constructions
+    description: |
+      Generate diverse starting matrices for Hadamard optimization.
+      Returns random, Paley, and greedy starting matrices before SA search.
+    input_schema:
+      type: object
+      properties:
+        num_matrices:
+          type: integer
+          description: Number of random matrices to generate
+        paly_variations:
+          type: integer
+          description: Number of Paley variations to generate
+    implementation_py: |
+      def run(ctx, args):
+          import numpy as np
+          n = 29
+          results = {}
+          
+          if args.get("num_matrices", 3) > 0:
+              for i in range(args.get("num_matrices", 3)):
+                  rng = np.random.RandomState(i + 42)
+                  mat = rng.randint(-1, 2, size=(n, n)) - 1
+                  results[f"random_{i}"] = mat.tolist()
+          
+          residues = {0, 1, 4, 5, 6, 7, 9, 13, 16, 20, 22, 23, 24, 25, 28}
+          paley = np.zeros((n, n), dtype=int)
+          for i in range(n):
+              for j in range(n):
+                  diff = (i - j) % n
+                  paley[i, j] = 1 if diff in residues else -1
+          results["paley"] = paley.tolist()
+          
+          greedy = np.zeros((n, n), dtype=int)
+          for i in range(n):
+              for j in range(n):
+                  greedy[i, j] = 1 if i == j else -1
+          results["greedy"] = greedy.tolist()
+          
+          return {"num_matrices": args.get("num_matrices", 3), "paly_variations": args.get("paly_variations", 2), "matrices": results}
+
+new_skills:
+  - name: multi-start-hadamard
+    description: |
+      Specialized skill for n=29 Hadamard optimization using multi-start search.
+      Must try at least 3 different construction methods per evaluation.
+    body: |
+      # Multi-Start Hadamard Optimization for n=29
+      
+      ## Core Principle: DIVERSITY of Starting Points
+      
+      The seed uses only Paley construction with 500 seeds. This may be stuck in a local optimum.
+      You MUST explore MULTIPLE fundamentally different construction methods.
+      
+      ## Required: At Least 3 Construction Methods
+      
+      For EACH evaluation, implement at least 3 different starting matrices:
+      
+      ### Method A: Random Initialization
+      Start with random ±1 matrix, then apply SA.
+      
+      ### Method B: Paley Construction
+      Use quadratic residues mod 29: {0,1,4,5,6,7,9,13,16,20,22,23,24,25,28}
+      
+      ### Method C: Greedy Construction
+      Build matrix entry by entry to maximize orthogonality
+      
+      ## Recommended Workflow
+      
+      1. Generate 3-5 different starting matrices using different construction methods
+      2. For each starting matrix, run SA with 20-30 seeds, 15-20k iterations
+      3. Track the BEST matrix across all runs
+      4. Use different SA parameters for each run:
+         - Run 1 (random): T=10, cool=0.995, 20k iters
+         - Run 2 (Paley): T=5, cool=0.998, 15k iters
+         - Run 3 (greedy): T=15, cool=0.993, 25k iters
+      5. Return only the BEST result from all runs
+      
+      ## Determinant Strategy
+      - Use numpy.linalg.det for ALL scoring (fast ~0.001s)
+      - NEVER use Bareiss during hill climbing
+      
+      ## Budget Management
+      - Time per eval: < 250 seconds
+      - If one method takes > 60 seconds, reduce iterations
+      
+      ## Critical Checkpoints
+      - Implement at least 3 DIFFERENT construction methods
+      - Run 3-5 independent SA searches from different starts
+      - Return the BEST result across all searches
+
+new_middlewares:
+  - name: enforce_diversity
+    hook: before_model
+    description: |
+      Ensure the solver tries multiple construction methods, not just one.
+      Warn if code only uses Paley or only uses random initialization.
+    implementation_py: |
+      def before_model(hook_input):
+          code = hook_input.get('code', '')
+          
+          if 'paley' in code.lower() and 'random' not in code.lower() and 'greedy' not in code.lower():
+              return "WARNING: Only using Paley construction! MUST try at least 3 different starting methods per evaluation."
+          
+          if 'random' in code.lower() and 'paley' not in code.lower() and 'greedy' not in code.lower():
+              return "WARNING: Only using random initialization! You should try multiple construction methods per evaluation."
+          
+          return None

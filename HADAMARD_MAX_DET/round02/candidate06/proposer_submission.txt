@@ -1,0 +1,271 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are an expert mathematician and software developer tasked with iteratively improving
+  a program to MAXIMIZE the performance metrics reported by an automatic evaluator. The task is to find
+  a 29x29 matrix with entries ±1 that maximizes the absolute determinant.
+
+  Key insight: n=29 does NOT satisfy n % 4 == 0, so true Hadamard matrices don't exist.
+  The theoretical maximum is ~29√29 ≈ 155.5, but the seed program is stuck at a very low score (0.456713),
+  which suggests the BAREISS determinant implementation is either failing or producing invalid matrices.
+
+  CRITICAL DIAGNOSIS: The seed program's det_bareiss function has a BUG when M[k][k] == 0:
+  It only swaps rows if M[i][k] != 0, but if all entries in column k below row k are 0, it returns 0 immediately.
+  This is incorrect — it should pivot by swapping with any row below that has a non-zero in column k,
+  and if ALL are zero, the matrix is singular (det=0), which is correct. However, the function may also
+  fail on non-integer intermediate values or overflow. More importantly, the Hill Climbing with Simulated
+  Annealing may not be exploring enough of the search space with only 10,000 iterations and a single
+  cooling schedule. The seed also only tries 10 seeds total (20000 total flips), which may be insufficient.
+
+  METHOD: We need to fix the core search strategy and add robustness.
+
+  1. FIX THE DET_calculator: Use numpy.linalg.det for fast approximation during search, then
+     validate with Bareiss only on promising candidates. This avoids timeout and incorrect pivoting.
+
+  2. EXTEND SEARCH SPACE: The seed does 10000 iterations per seed × 10 seeds = 100,000 flips total.
+     This is borderline but may not be enough for n=29. We should do 20,000-50,000 iterations per seed
+     and try 3-5 seeds per evaluation. Total: 60,000-150,000 flips, well under 350s if we use fast numpy det.
+
+  3. BETTER CONSTRUCTION: The Paley construction is good for n ≡ 3 mod 4 (29 ≡ 3 mod 4, so this is valid!).
+     But we need to implement it CORRECTLY: H[i][j] = legendre((i-j) mod 29) where legendre(0)=0,
+     and we map 0→+1, quadratic residues→+1, non-residues→-1. The seed's create_paley_matrix does this
+     but may have bugs. Let's make it explicit.
+
+  4. MULTI-LEVEL SEARCH: 
+     - Start with Paley construction (correctly implemented)
+     - Run simulated annealing with 3 different cooling schedules
+     - Try random perturbations on 3-5 different seeds
+     - Use the BEST result from all searches
+
+  5. TIME BUDGET: With numpy, 50,000 iterations of a 29x29 determinant is ~10-15 seconds.
+     We can comfortably do 2-3 full searches per evaluation.
+
+  6. USE probe_solution AGGRESSIVELY: Before each full evaluation, run 2-3 different
+     parameter configurations, probe them all (cheap), then evaluate only the top one.
+
+  7. MONITOR FOR TIMEOUT: If any search takes >180s, immediately reduce iterations and try again.
+
+  Tools:
+  - edit_solution: Change the EVOLVE-BLOCK region. Use SEARCH/REPLACE diffs for targeted changes.
+    PREFERRED approach: Provide full working code, not partial diffs.
+  - evaluate_solution: Run program through evaluator. Returns combined_score (higher-is-better).
+    Budget is 20. Use feedback to guide next edit. Best version auto-kept.
+  - probe_solution: Cheap approximate scoring on subsampled data (~10s). Does NOT consume eval budget.
+    Separate probe budget of 30. Use to rank 2-3 variants before evaluate_solution.
+  - finish: End session. Call when eval budget exhausted or no improvement.
+
+  Always change something substantive every round. Never evaluate the same code twice.
+  If stuck, try: more iterations, different cooling schedule, different starting construction.
+skill_description: |
+  Optimize Hadamard-like matrix construction for n=29 (max |det(H)|). n=29 ≡ 3 mod 4, so Paley construction applies.
+  Fix the seed's buggy Bareiss determinant, use numpy for fast search, extend iterations to 20000-50000 per seed,
+  try 3-5 seeds per evaluation, and use probe_solution to rank 2-3 variants before full evaluation.
+skill_body: |
+  # Hadamard-like Matrix Optimization for n=29
+
+  ## Critical mathematical fact
+  True Hadamard matrices exist only for n = 1, 2, or n ≡ 0 mod 4.
+  For n=29 (which is 3 mod 4), the best we can do is approximate the theoretical max of n√n ≈ 155.5.
+  The seed program's score of 0.456713 suggests it's NOT achieving good determinants — likely due to:
+  - Buggy or slow Bareiss determinant causing timeouts or incorrect results
+  - Insufficient search (only 10,000 iterations × 10 seeds = 100,000 total flips)
+  - Suboptimal cooling schedule
+
+  ## RECOMMENDED APPROACH: Fast Search with Correct Paley Construction
+
+  ### Step 1: Correct Paley Construction for n=29
+  Quadratic residues mod 29: {0, 1, 4, 5, 6, 7, 9, 13, 16, 20, 22, 23, 24, 25, 28}
+  For i, j in 0..28:
+    diff = (i - j) mod 29
+    H[i][j] = 1 if diff in residues else -1
+
+  ### Step 2: Fast Determinant Calculation
+  - Use numpy.linalg.det for all iterations (fast, approximate, good for search)
+  - Only use Bareiss on final candidates to confirm
+  - This avoids timeouts and allows more iterations
+
+  ### Step 3: Extended Search Parameters
+  - Iterations: 20,000-30,000 per seed (not 10,000)
+  - Seeds: 3-5 different starting seeds (not just 10 total across all methods)
+  - Cooling schedule: Try multiple schedules:
+    * Schedule A: T = 2.5, cool_rate = 0.995
+    * Schedule B: T = 1.0, cool_rate = 0.998
+    * Schedule C: T = 5.0, cool_rate = 0.992
+  - Total operations: 3 seeds × 25,000 iterations = 75,000 flips → ~15 seconds with numpy
+
+  ### Step 4: Multiple Construction Methods
+  Try these in parallel or sequence:
+  A. Correct Paley construction + hill climbing (3 seeds, 25k iters each)
+  B. Random matrix (seed-based) + hill climbing (3 seeds, 10k iters each)
+  C. Perturb Paley with random ±1 flips (3 seeds, 10k iters each)
+  Pick the BEST result across all methods.
+
+  ### Step 5: Budget Management
+  - Total time per evaluation: MUST be < 180 seconds
+  - If any method exceeds 60s, reduce iterations and try again
+  - Use probe_solution to test 2-3 parameter variations before full evaluation
+
+  ### Step 6: Implementation Checklist
+  1. Implement correct Paley construction (use quadratic residues list above)
+  2. Replace Bareiss with numpy.linalg.det for search phase
+  3. Set iterations = 25000, seeds = 5, total flips = 125,000
+  4. Try 3 cooling schedules
+  5. Wrap everything in try-except with timeout guard
+  6. Call edit_solution with full working code
+  7. Call probe_solution on 2-3 variants, then evaluate_solution on the winner
+
+  ### Common Pitfalls to Avoid
+  - ❌ Using Bareiss for all iterations (causes timeout)
+  - ❌ Only trying 1-2 seeds (insufficient exploration)
+  - ❌ Using only one cooling schedule
+  - ❌ Running searches longer than 180s total
+  - ❌ Not implementing Paley correctly (check quadratic residues)
+  - ❌ Not using probe_solution to pre-filter variants
+
+  ### Workflow
+  1. Write code with correct Paley + numpy det + 25k iters + 5 seeds + 3 cooling schedules
+  2. Call edit_solution
+  3. Call probe_solution on variants with different cooling schedules
+  4. Call evaluate_solution on the probe winner
+  5. If score improves, try: more iterations, different seed range, etc.
+  6. If score doesn't improve, try: random starts, perturbations, different constructions
+  7. Repeat until budget exhausted or clear improvement
+tool_descriptions:
+  edit_solution: |
+    Change code in # EVOLVE-BLOCK-START to # EVOLVE-BLOCK-END. 
+    PREFERRED: Provide FULL working code (not partial diffs). 
+    The executor will replace the entire EVOLVE-BLOCK with your code.
+    Must import numpy, use correct Paley construction, use numpy.linalg.det for search.
+  evaluate_solution: |
+    Run program through evaluator. Returns: combined_score (higher-is-better), validity, error, best_score_so_far, evals_left.
+    Budget is 20. Each call takes ~350s max. Use feedback to guide next edit. Best version auto-kept.
+  probe_solution: |
+    Cheap approximate scoring on subsampled data (~10s). Does NOT consume eval budget.
+    Separate probe budget of 30. Use to: (1) test different cooling schedules, (2) compare construction methods, (3) validate parameters.
+    Scores are approximate but reliable for ranking. BEFORE each evaluate_solution, probe 2-3 variants.
+  finish: |
+    End session. Call when eval budget exhausted (20 evals used) or no improvement after trying all strategies.
+sampling:
+  temperature: 1.2
+  top_p: 0.95
+  top_k: 30
+  max_tokens: 16384
+agent:
+  max_iterations: 60
+middleware:
+  budget_reminder_from_left: 2
+  long_tool_output_max_chars: 15000
+new_tools:
+  - name: analyze_paley_params
+    description: |
+      Analyze and report on Paley construction parameters for n=29. 
+      Returns: quadratic residues list, expected det range, and recommended search parameters.
+      Call this ONCE at the start to validate your construction is correct.
+    input_schema: {type: object, properties: {}}
+    implementation_py: |
+      def run(ctx, args):
+          n = 29
+          residues = {0, 1, 4, 5, 6, 7, 9, 13, 16, 20, 22, 23, 24, 25, 28}
+          H = np.zeros((n, n), dtype=int)
+          for i in range(n):
+              for j in range(n):
+                  diff = (i - j) % n
+                  H[i, j] = 1 if diff in residues else -1
+          det_val = abs(np.linalg.det(H))
+          # Expected range for n=29 Hadamard-like: 100-180
+          expected_range = (100, 180)
+          return {
+              "n": n,
+              "quadratic_residues": sorted(list(residues)),
+              "paley_det": float(det_val),
+              "expected_det_range": [expected_range[0], expected_range[1]],
+              "recommendations": {
+                  "iterations_per_seed": 25000,
+                  "num_seeds": 5,
+                  "cooling_schedules": [
+                      {"initial_temp": 2.5, "cool_rate": 0.995},
+                      {"initial_temp": 1.0, "cool_rate": 0.998},
+                      {"initial_temp": 5.0, "cool_rate": 0.992}
+                  ],
+                  "use_numpy_det": True,
+                  "total_expected_time_seconds": 15
+              }
+          }
+remove_tools: []
+new_skills:
+- name: hadamard-n29-optimizer
+  description: |
+    Specialized skill for n=29 Hadamard optimization. n=29 ≡ 3 mod 4, so Paley construction applies.
+    Use correct Paley construction, numpy det for fast search, 25k+ iterations, 5 seeds, 3 cooling schedules.
+    Always probe before evaluate.
+  body: |
+    # Hadamard Matrix Optimization for n=29 (Specialized)
+
+    ## Task
+    Maximize |det(H)| for a 29×29 matrix with entries ±1.
+    Since 29 ≡ 3 (mod 4), true Hadamard matrices don't exist, but we can find near-optimal solutions.
+
+    ## CRITICAL: Correct Paley Construction
+    Quadratic residues mod 29: {0, 1, 4, 5, 6, 7, 9, 13, 16, 20, 22, 23, 24, 25, 28}
+    
+    For each entry H[i][j]:
+      diff = (i - j) mod 29
+      H[i][j] = 1 if diff in quadratic_residues else -1
+
+    This construction is mathematically sound for n ≡ 3 mod 4.
+
+    ## Determinant Calculation Strategy
+    - SEARCH PHASE: Use numpy.linalg.det (fast, ~0.001s per 29×29 matrix)
+    - VALIDATION PHASE: Use Bareiss only on final candidates to confirm exact integer det
+    - NEVER use Bareiss during hill climbing (causes timeout)
+
+    ## Recommended Parameters
+    - Iterations per seed: 25,000 (not 10,000)
+    - Number of seeds: 5 (not 3-4)
+    - Total flips: 125,000
+    - Expected time with numpy: ~15 seconds (well under 350s budget)
+    - Cooling schedules to try:
+      1. T=2.5, cool_rate=0.995
+      2. T=1.0, cool_rate=0.998
+      3. T=5.0, cool_rate=0.992
+
+    ## Multi-Method Search
+    Try these constructions in parallel:
+    A. Paley + hill climbing (5 seeds, 25k iters each)
+    B. Random matrix + hill climbing (3 seeds, 10k iters each)
+    C. Perturbed Paley (3 seeds, 10k iters each)
+    
+    Pick the BEST result across all methods.
+
+    ## Budget Management
+    - Total time per evaluation: MUST be < 180 seconds
+    - If any method exceeds 60s, immediately reduce iterations
+    - Use probe_solution to test 2-3 parameter variations BEFORE evaluate_solution
+
+    ## Workflow
+    1. Start with correct Paley construction
+    2. Replace Bareiss with numpy.linalg.det for search
+    3. Set: iterations=25000, seeds=5, 3 cooling schedules
+    4. Call edit_solution with full working code
+    5. Call probe_solution on variants with different cooling schedules
+    6. Call evaluate_solution on the probe winner
+    7. If score improves, try: more iterations, different seed range
+    8. If score doesn't improve, try: random starts, perturbations
+    9. Repeat until budget exhausted or clear plateau
+
+    ## Checkpoints
+    - ✅ Paley residues correct: {0, 1, 4, 5, 6, 7, 9, 13, 16, 20, 22, 23, 24, 25, 28}
+    - ✅ Using numpy.linalg.det for search
+    - ✅ 25,000 iterations per seed
+    - ✅ 5 seeds per evaluation
+    - ✅ 3 cooling schedules tried
+    - ✅ probe_solution used before evaluate_solution
+    - ✅ Total time < 180s
+new_middlewares:
+- name: enforcenumpydet
+  hook: before_model
+  description: |
+    CRITICAL middleware: Ensure numpy det is used, not Bareiss. 
+    Reminds solver to use fast determinant for search phase.
+  implementation_py: |
+    def before_model(hook_input):
+        return "⚠️ WARNING: Using Bareiss determinant during search WILL CAUSE TIMEOUT. MUST use numpy.linalg.det for all hill climbing iterations. Only use Bareiss on final validation. Current best practice: 25k iters × 5 seeds with numpy det = ~15 seconds."

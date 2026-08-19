@@ -1,0 +1,341 @@
+[
+  {
+    "task_id": "eft__math__erdos_min_overlap",
+    "source": "eft",
+    "best_score": 0.9999680864358138,
+    "seed_score": 0.9999680864358138,
+    "best_metrics": {
+      "c5_bound": 0.3809351921081543,
+      "combined_score": 0.9999680864358138,
+      "n_points": 800,
+      "eval_time": 141.31385445594788
+    },
+    "best_program": "# EVOLVE-BLOCK-START\nimport jax\nimport jax.numpy as jnp\nimport optax\nimport numpy as np\nfrom dataclasses import dataclass\nimport tqdm\n\n\n@dataclass\nclass Hyperparameters:\n    num_intervals: int = 800\n    base_learning_rate: float = 0.0062\n    num_steps: int = 59000\n    penalty_strength: float = 61.0\n    num_restarts: int = 3\n    seed_start: int = 0\n\n\nclass ErdosOptimizer:\n    \"\"\"\n    Finds a step function h that minimizes the maximum overlap integral.\n    Uses multi-restart strategy with improved initialization.\n    \"\"\"\n\n    def __init__(self, hypers: Hyperparameters):\n        self.hypers = hypers\n        self.domain_width = 2.0\n        self.dx = self.domain_width / self.hypers.num_intervals\n\n    def _compute_c5_bound(self, h: jnp.ndarray) -> float:\n        \"\"\"Compute the C5 bound from h without penalty.\"\"\"\n        j_val = 1.0 - h\n        N = self.hypers.num_intervals\n        h_padded = jnp.pad(h, (0, N))\n        j_padded = jnp.pad(j_val, (0, N))\n        corr_fft = jnp.fft.fft(h_padded) * jnp.conj(jnp.fft.fft(j_padded))\n        correlation = jnp.fft.ifft(corr_fft).real\n        c5_bound = jnp.max(correlation * self.dx)\n        return float(c5_bound)\n\n    def _get_best_initialization(self, seed: int) -> jnp.ndarray:\n        \"\"\"Get the best initialization from several pattern variations.\"\"\"\n        N = self.hypers.num_intervals\n        key = jax.random.PRNGKey(seed)\n        \n        best_latent = None\n        best_obj = jnp.inf\n        \n        # Pattern 0: Random normal\n        key, subkey = jax.random.split(key)\n        latent = jax.random.normal(subkey, (N,))\n        \n        # Pattern 1: Uniform\n        key, subkey = jax.random.split(key)\n        latent = latent + jax.random.uniform(subkey, (N,), minval=-2, maxval=2)\n        \n        # Pattern 2: Sinusoidal\n        x = jnp.linspace(0, 2, N)\n        key, subkey = jax.random.split(key)\n        latent = latent + jnp.sin(2 * jnp.pi * x) * 2.0 + jnp.cos(4 * jnp.pi * x) * 1.0\n        \n        # Pattern 3: Random normal scaled\n        key, subkey = jax.random.split(key)\n        latent = latent + jax.random.normal(subkey, (N,)) * 1.5\n        \n        # Pattern 4: Uniform scaled\n        key, subkey = jax.random.split(key)\n        latent = latent + jax.random.uniform(subkey, (N,)) * 2.0 - 1.0\n        \n        # Pattern 5: Threshold > 0.5\n        key, subkey = jax.random.split(key)\n        x = jnp.linspace(0, 2, N)\n        latent = latent + jnp.where(x > 0.5, 3.5, -3.5)\n        \n        # Pattern 6: Threshold < 1.0\n        key, subkey = jax.random.split(key)\n        x = jnp.linspace(0, 2, N)\n        latent = latent + jnp.where(x < 1.0, 3.5, -3.5)\n        \n        # Pattern 7: Small random\n        key, subkey = jax.random.split(key)\n        latent = latent + jax.random.normal(subkey, (N,)) * 0.5\n        \n        # Pattern 8: Threshold < 2/3\n        key, subkey = jax.random.split(key)\n        x = jnp.linspace(0, 2, N)\n        latent = latent + jnp.where(x < 2/3, 3.0, -3.0)\n        \n        # Pattern 9: Threshold > 1/3\n        key, subkey = jax.random.split(key)\n        x = jnp.linspace(0, 2, N)\n        latent = latent + jnp.where(x > 1/3, 3.0, -3.0)\n        \n        # Pattern 10: Middle region\n        key, subkey = jax.random.split(key)\n        x = jnp.linspace(0, 2, N)\n        latent = latent + jnp.where((x >= 0.5) & (x < 1.0), 3.0, -1.0)\n        \n        # Pattern 11: Wide region\n        key, subkey = jax.random.split(key)\n        x = jnp.linspace(0, 2, N)\n        latent = latent + jnp.where((x >= 0.25) & (x <= 1.75), 2.5, -2.5)\n        \n        # Pattern 12: Golomb ruler-like\n        key, subkey = jax.random.split(key)\n        x = jnp.linspace(0, 2, N)\n        marks = jnp.array([0.0, 0.4, 0.8, 1.2, 1.6])\n        latent = jnp.zeros(N)\n        for m in marks:\n            mask = jnp.abs(x - m) < 0.1\n            latent = latent.at[mask].set(4.0)\n        latent = latent - 2.0\n        \n        # Pattern 13: Bipartite\n        key, subkey = jax.random.split(key)\n        x = jnp.linspace(0, 2, N)\n        a = 0.5\n        latent = latent + jnp.where(x < a, 3.0, -3.0)\n        \n        # Pattern 14: Tri-modal\n        key, subkey = jax.random.split(key)\n        x = jnp.linspace(0, 2, N)\n        latent = latent + jnp.zeros(N)\n        for center in [0.4, 1.0, 1.6]:\n            mask = jnp.abs(x - center) < 0.12\n            latent = latent.at[mask].set(4.0)\n        latent = latent - 1.9\n        \n        # Add small random noise to each pattern\n        key, subkey = jax.random.split(key)\n        latent = latent + jax.random.normal(subkey, (N,)) * 0.3\n        key, subkey = jax.random.split(key)\n        \n        latent = jax.lax.stop_gradient(latent)\n        h = jax.nn.sigmoid(latent)\n        j_val = 1.0 - h\n        h_padded = jnp.pad(h, (0, N))\n        j_padded = jnp.pad(j_val, (0, N))\n        corr_fft = jnp.fft.fft(h_padded) * jnp.conj(jnp.fft.fft(j_padded))\n        correlation = jnp.fft.ifft(corr_fft).real\n        obj = jnp.max(correlation * self.dx)\n        \n        if obj < best_obj:\n            best_obj = obj\n            best_latent = latent\n        \n        return best_latent\n\n    def _objective_fn(self, latent_h_values: jnp.ndarray) -> jnp.ndarray:\n        \"\"\"The loss function.\"\"\"\n        h = jax.nn.sigmoid(latent_h_values)\n        j_val = 1.0 - h\n        N = self.hypers.num_intervals\n        h_padded = jnp.pad(h, (0, N))\n        j_padded = jnp.pad(j_val, (0, N))\n        corr_fft = jnp.fft.fft(h_padded) * jnp.conj(jnp.fft.fft(j_padded))\n        correlation = jnp.fft.ifft(corr_fft).real\n        scaled_correlation = correlation * self.dx\n        objective_loss = jnp.max(scaled_correlation)\n\n        integral_h = jnp.sum(h) * self.dx\n        constraint_loss = (integral_h - 1.0) ** 2\n\n        total_loss = objective_loss + self.hypers.penalty_strength * constraint_loss\n        return total_loss\n\n    def _optimize_single_run(self, seed: int):\n        \"\"\"Run a single optimization with given seed.\"\"\"\n        initial_latent = self._get_best_initialization(seed)\n        \n        optimizer = optax.adam(self.hypers.base_learning_rate)\n        opt_state = optimizer.init(initial_latent)\n\n        @jax.jit\n        def train_step(latent_h_values, opt_state):\n            loss, grads = jax.value_and_grad(lambda v: self._objective_fn(v))(latent_h_values)\n            updates, opt_state = optimizer.update(grads, opt_state)\n            latent_h_values = optax.apply_updates(latent_h_values, updates)\n            return latent_h_values, opt_state, loss\n\n        best_latent = initial_latent.copy()\n        current_latent = initial_latent\n        current_opt_state = opt_state\n\n        for step in tqdm.tqdm(range(self.hypers.num_steps), desc=f\"Run {seed}\"):\n            current_latent, current_opt_state, loss = train_step(current_latent, current_opt_state)\n            \n            if loss < self._objective_fn(best_latent):\n                best_latent = current_latent.copy()\n\n        final_h = jax.nn.sigmoid(best_latent)\n        return float(self._compute_c5_bound(final_h)), final_h\n\n    def run_optimization(self):\n        best_c5_bound = jnp.inf\n        best_h = None\n\n        print(f\"Running {self.hypers.num_restarts} restarts...\")\n        for restart in range(self.hypers.num_restarts):\n            seed = self.hypers.seed_start + restart\n            c5_bound, final_h = self._optimize_single_run(seed)\n            \n            if c5_bound < best_c5_bound:\n                best_c5_bound = c5_bound\n                best_h = final_h\n            \n            print(f\"Restart {seed}: c5_bound = {c5_bound:.8f}\")\n\n        print(f\"Optimization complete. Best C5 upper bound: {best_c5_bound:.8f}\")\n        return best_h, float(best_c5_bound)\n\n\ndef run():\n    hypers = Hyperparameters()\n    optimizer = ErdosOptimizer(hypers)\n    final_h_values, c5_bound = optimizer.run_optimization()\n\n    return final_h_values, c5_bound, hypers.num_intervals\n# EVOLVE-BLOCK-END",
+    "stop_reason": "completed",
+    "ledger": {
+      "max_evaluator_calls": 30,
+      "evaluator_calls": 27,
+      "max_probe_calls": 30,
+      "probe_calls": 0,
+      "edit_calls": 27,
+      "llm_input_tokens": 0,
+      "llm_output_tokens": 0,
+      "llm_calls": 56,
+      "sandbox_seconds": 2997.812829017639
+    },
+    "steps": [
+      {
+        "step": 0,
+        "kind": "seed",
+        "edit_mode": "seed",
+        "edit_note": "seed program",
+        "combined_score": 0.9999680864358138,
+        "validity": 1.0,
+        "error": null,
+        "wall_s": 143.0732660293579,
+        "is_new_best": true
+      },
+      {
+        "step": 1,
+        "kind": "full_rewrite",
+        "edit_mode": "full_rewrite",
+        "edit_note": "spliced new EVOLVE-BLOCK",
+        "combined_score": 0.0,
+        "validity": 0.0,
+        "error": "'NoneType' object has no attribute 'shape'",
+        "wall_s": 3.4703476428985596,
+        "is_new_best": false
+      },
+      {
+        "step": 2,
+        "kind": "full_rewrite",
+        "edit_mode": "full_rewrite",
+        "edit_note": "spliced new EVOLVE-BLOCK",
+        "combined_score": 0.0,
+        "validity": 0.0,
+        "error": "ErdosOptimizer._generate_candidate() missing 1 required positional argument: 'seed'",
+        "wall_s": 1.5162346363067627,
+        "is_new_best": false
+      },
+      {
+        "step": 3,
+        "kind": "full_rewrite",
+        "edit_mode": "full_rewrite",
+        "edit_note": "spliced new EVOLVE-BLOCK",
+        "combined_score": 0.0,
+        "validity": 0.0,
+        "error": "'NoneType' object has no attribute 'shape'",
+        "wall_s": 3.3184759616851807,
+        "is_new_best": false
+      },
+      {
+        "step": 4,
+        "kind": "full_rewrite",
+        "edit_mode": "full_rewrite",
+        "edit_note": "spliced new EVOLVE-BLOCK",
+        "combined_score": 0.0,
+        "validity": 0.0,
+        "error": "Integral of h is not close to 1. Got: 0.002500",
+        "wall_s": 3.0204148292541504,
+        "is_new_best": false
+      },
+      {
+        "step": 5,
+        "kind": "full_rewrite",
+        "edit_mode": "full_rewrite",
+        "edit_note": "spliced new EVOLVE-BLOCK",
+        "combined_score": 0.9982744179463129,
+        "validity": 1.0,
+        "error": null,
+        "wall_s": 137.62664699554443,
+        "is_new_best": false
+      },
+      {
+        "step": 6,
+        "kind": "full_rewrite",
+        "edit_mode": "full_rewrite",
+        "edit_note": "spliced new EVOLVE-BLOCK",
+        "combined_score": 0.0,
+        "validity": 0.0,
+        "error": "Integral of h is not close to 1. Got: 0.002500",
+        "wall_s": 4.222619295120239,
+        "is_new_best": false
+      },
+      {
+        "step": 7,
+        "kind": "full_rewrite",
+        "edit_mode": "full_rewrite",
+        "edit_note": "spliced new EVOLVE-BLOCK",
+        "combined_score": 0.0,
+        "validity": 0.0,
+        "error": "Integral of h is not close to 1. Got: 0.002500",
+        "wall_s": 3.1196298599243164,
+        "is_new_best": false
+      },
+      {
+        "step": 8,
+        "kind": "full_rewrite",
+        "edit_mode": "full_rewrite",
+        "edit_note": "spliced new EVOLVE-BLOCK",
+        "combined_score": 0.0,
+        "validity": 0.0,
+        "error": "Integral of h is not close to 1. Got: 0.002500",
+        "wall_s": 3.2189419269561768,
+        "is_new_best": false
+      },
+      {
+        "step": 9,
+        "kind": "full_rewrite",
+        "edit_mode": "full_rewrite",
+        "edit_note": "spliced new EVOLVE-BLOCK",
+        "combined_score": 0.0,
+        "validity": 0.0,
+        "error": "Integral of h is not close to 1. Got: 0.002500",
+        "wall_s": 3.2190005779266357,
+        "is_new_best": false
+      },
+      {
+        "step": 10,
+        "kind": "full_rewrite",
+        "edit_mode": "full_rewrite",
+        "edit_note": "spliced new EVOLVE-BLOCK",
+        "combined_score": 0.0,
+        "validity": 0.0,
+        "error": "non-default argument 'seed_start' follows default argument",
+        "wall_s": 1.537745714187622,
+        "is_new_best": false
+      },
+      {
+        "step": 11,
+        "kind": "full_rewrite",
+        "edit_mode": "full_rewrite",
+        "edit_note": "spliced new EVOLVE-BLOCK",
+        "combined_score": 0.0,
+        "validity": 0.0,
+        "error": "Integral of h is not close to 1. Got: 0.002500",
+        "wall_s": 3.544778347015381,
+        "is_new_best": false
+      },
+      {
+        "step": 12,
+        "kind": "full_rewrite",
+        "edit_mode": "full_rewrite",
+        "edit_note": "spliced new EVOLVE-BLOCK",
+        "combined_score": 0.0,
+        "validity": 0.0,
+        "error": "h(x) is not in [0, 1]. Range: [1.0013082724080746e-10, 1.0013076066970825]",
+        "wall_s": 258.9702763557434,
+        "is_new_best": false
+      },
+      {
+        "step": 13,
+        "kind": "full_rewrite",
+        "edit_mode": "full_rewrite",
+        "edit_note": "spliced new EVOLVE-BLOCK",
+        "combined_score": 0.0,
+        "validity": 0.0,
+        "error": "h(x) is not in [0, 1]. Range: [1.0013082724080746e-10, 1.0013076066970825]",
+        "wall_s": 220.03632807731628,
+        "is_new_best": false
+      },
+      {
+        "step": 14,
+        "kind": "full_rewrite",
+        "edit_mode": "full_rewrite",
+        "edit_note": "spliced new EVOLVE-BLOCK",
+        "combined_score": 0.8380401030078859,
+        "validity": 1.0,
+        "error": null,
+        "wall_s": 215.6055817604065,
+        "is_new_best": false
+      },
+      {
+        "step": 15,
+        "kind": "full_rewrite",
+        "edit_mode": "full_rewrite",
+        "edit_note": "spliced new EVOLVE-BLOCK",
+        "combined_score": 0.0,
+        "validity": 0.0,
+        "error": "Integral of h is not close to 1. Got: 0.195000",
+        "wall_s": 66.60454726219177,
+        "is_new_best": false
+      },
+      {
+        "step": 16,
+        "kind": "full_rewrite",
+        "edit_mode": "full_rewrite",
+        "edit_note": "spliced new EVOLVE-BLOCK",
+        "combined_score": 0.0,
+        "validity": 0.0,
+        "error": "Integral of h is not close to 1. Got: 0.195000",
+        "wall_s": 45.42463302612305,
+        "is_new_best": false
+      },
+      {
+        "step": 17,
+        "kind": "full_rewrite",
+        "edit_mode": "full_rewrite",
+        "edit_note": "spliced new EVOLVE-BLOCK",
+        "combined_score": 0.9999337437104535,
+        "validity": 1.0,
+        "error": null,
+        "wall_s": 245.74194955825806,
+        "is_new_best": false
+      },
+      {
+        "step": 18,
+        "kind": "full_rewrite",
+        "edit_mode": "full_rewrite",
+        "edit_note": "spliced new EVOLVE-BLOCK",
+        "combined_score": 0.0,
+        "validity": 0.0,
+        "error": "Timeout after 330s",
+        "wall_s": 330.02718472480774,
+        "is_new_best": false
+      },
+      {
+        "step": 19,
+        "kind": "full_rewrite",
+        "edit_mode": "full_rewrite",
+        "edit_note": "spliced new EVOLVE-BLOCK",
+        "combined_score": 0.9990775034224604,
+        "validity": 1.0,
+        "error": null,
+        "wall_s": 224.31580877304077,
+        "is_new_best": false
+      },
+      {
+        "step": 20,
+        "kind": "full_rewrite",
+        "edit_mode": "full_rewrite",
+        "edit_note": "spliced new EVOLVE-BLOCK",
+        "combined_score": 0.9996948962630336,
+        "validity": 1.0,
+        "error": null,
+        "wall_s": 110.36334013938904,
+        "is_new_best": false
+      },
+      {
+        "step": 21,
+        "kind": "full_rewrite",
+        "edit_mode": "full_rewrite",
+        "edit_note": "spliced new EVOLVE-BLOCK",
+        "combined_score": 0.9997827106604878,
+        "validity": 1.0,
+        "error": null,
+        "wall_s": 186.7096848487854,
+        "is_new_best": false
+      },
+      {
+        "step": 22,
+        "kind": "full_rewrite",
+        "edit_mode": "full_rewrite",
+        "edit_note": "spliced new EVOLVE-BLOCK",
+        "combined_score": 0.9999680864358138,
+        "validity": 1.0,
+        "error": null,
+        "wall_s": 117.57429623603821,
+        "is_new_best": false
+      },
+      {
+        "step": 23,
+        "kind": "full_rewrite",
+        "edit_mode": "full_rewrite",
+        "edit_note": "spliced new EVOLVE-BLOCK",
+        "combined_score": 0.9998570091518167,
+        "validity": 1.0,
+        "error": null,
+        "wall_s": 106.00555753707886,
+        "is_new_best": false
+      },
+      {
+        "step": 24,
+        "kind": "full_rewrite",
+        "edit_mode": "full_rewrite",
+        "edit_note": "spliced new EVOLVE-BLOCK",
+        "combined_score": 0.9999680864358138,
+        "validity": 1.0,
+        "error": null,
+        "wall_s": 108.65652966499329,
+        "is_new_best": false
+      },
+      {
+        "step": 25,
+        "kind": "full_rewrite",
+        "edit_mode": "full_rewrite",
+        "edit_note": "spliced new EVOLVE-BLOCK",
+        "combined_score": 0.9999680864358138,
+        "validity": 1.0,
+        "error": null,
+        "wall_s": 142.40164184570312,
+        "is_new_best": false
+      },
+      {
+        "step": 26,
+        "kind": "full_rewrite",
+        "edit_mode": "full_rewrite",
+        "edit_note": "spliced new EVOLVE-BLOCK",
+        "combined_score": 0.9998501263011702,
+        "validity": 1.0,
+        "error": null,
+        "wall_s": 148.25806736946106,
+        "is_new_best": false
+      },
+      {
+        "step": 27,
+        "kind": "full_rewrite",
+        "edit_mode": "full_rewrite",
+        "edit_note": "spliced new EVOLVE-BLOCK",
+        "combined_score": 0.9999680864358138,
+        "validity": 1.0,
+        "error": null,
+        "wall_s": 160.22930002212524,
+        "is_new_best": false
+      }
+    ],
+    "error": null,
+    "mode": "agent",
+    "delta": 0.0,
+    "evaluations": 27
+  }
+]

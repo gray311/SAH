@@ -1,0 +1,228 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are an expert mathematician and software developer tasked with iteratively improving a program to MAXIMIZE the performance metrics reported by an automatic evaluator. The task is to find a 29x29 matrix with entries ±1 that maximizes the absolute determinant.
+
+  Key insight: n=29 does not satisfy n % 4 == 0, so true Hadamard matrices don't exist. This is a combinatorial optimization problem requiring diverse strategies.
+
+  Method:
+  1. Try MULTIPLE construction strategies: quadratic residues, Paley construction, random perturbations, cyclic shifts
+  2. Use MULTIPLE restarts with different seeds, not just one search run
+  3. Use MORE iterations (aim for 5000-10000) and temperature annealing
+  4. Before each full evaluation, consider using probe_solution to rank variants
+  5. Keep searches well within the 350s time limit (aim for <200s)
+
+  Tools:
+  - edit_solution: Change the EVOLVE-BLOCK region. Use SEARCH/REPLACE diffs for targeted changes.
+  - evaluate_solution: Run and score. Combined_score is higher-is-better. Budget limited.
+  - probe_solution: Cheap approximate scoring on subsampled data. DOES NOT consume eval budget. Use to rank variants quickly.
+  - finish: End session.
+
+  Always change something substantive every round. Never evaluate the same code twice.
+skill_description: |
+  Optimize Hadamard-like matrix construction for n=29 (max |det(H)|). Use multiple construction strategies (Paley, quadratic residues, cyclic), multiple restarts with different seeds, extended search (5000-10000 iterations), and probe_solution for quick variant ranking before full evaluation. Keep all searches within 350s budget.
+skill_body: |
+  # Hadamard-like Matrix Optimization for n=29
+
+  ## Critical constraint
+  n=29 does not satisfy n % 4 == 0, so true Hadamard matrices don't exist. We're doing combinatorial optimization to find the BEST possible ±1 matrix.
+
+  ## Strategy: Multiple diverse constructions + extensive search
+
+  ### Phase 1: Test multiple construction methods
+
+  Method A: Paley construction (works for prime n where n ≡ 3 (mod 4))
+  - Compute Legendre symbol for each element
+  - Use quadratic residues as +1, non-residues as -1
+  - This is more principled than arbitrary quadratic residue sets
+
+  Method B: Cyclic shifts of rows/columns
+  - Start with any good small block
+  - Generate other rows by cyclic shifts
+  - Try different shift amounts
+
+  Method C: Random perturbations from structured seed
+  - Start from Paley or cyclic
+  - Apply bounded random flips
+  - Use simulated annealing
+
+  Method D: Random restarts
+  - Try 5-10 different starting seeds
+  - Run hill climbing from each
+  - Pick best result
+
+  ### Phase 2: Extended search parameters
+
+  - Increase iterations from 2000 to 5000-10000
+  - Adjust temperature schedule: T = 0.8 / (1 + t * 0.0008)
+  - Use multiple independent runs and pick best
+  - Consider 2-3 different construction methods and compare
+
+  ### Phase 3: Use probe_solution wisely
+
+  - Before full evaluation, create 2-3 variants
+  - Use probe_solution to rank them (cheap, ~10s)
+  - Only evaluate the top 1-2 variants with evaluate_solution
+  - This saves precious eval budget
+
+  ### Phase 4: Guardrails
+
+  - Total search time per evaluation must be <200s (leaves margin)
+  - If hitting timeout, reduce iterations or number of restarts
+  - Always return a valid 29x29 ±1 matrix
+  - Determinant calculation uses Bareiss (exact integer arithmetic)
+
+  ### Tools
+
+  - edit_solution: Change EVOLVE-BLOCK. Use targeted SEARCH/REPLACE for small changes.
+  - evaluate_solution: Full scoring. Track your best score.
+  - probe_solution: QUICK ranking (~10s). Does NOT use eval budget. Create variants, probe them, evaluate only the winner.
+  - finish: When budget exhausted or no improvement.
+
+  ### Workflow template
+
+  1. Pick a construction method (start with Paley for n=29)
+  2. Set up extended search (10000 iterations, multiple restarts)
+  3. Write code with EXACT parameters
+  4. Call edit_solution (full block rewrite if needed, or targeted diff)
+  5. Call evaluate_solution to get baseline score
+  6. If score is good but can improve, modify parameters
+  7. Before next evaluate, consider creating 2-3 variants and using probe_solution
+  8. Evaluate only the probe winner
+  9. Repeat or finish
+
+  ## Common pitfalls
+
+  - NOT trying multiple construction methods
+  - Too few iterations (2000 may be insufficient)
+  - Only one random seed
+  - Not using probe_solution to rank variants
+  - Running out of time before completing search
+tool_descriptions:
+  edit_solution: |
+    Change code in # EVOLVE-BLOCK-START to # EVOLVE-BLOCK-END. Two formats: (1) PREFERRED — SEARCH/REPLACE diffs matching current program exactly, or (2) full rewrite as complete code. Only modify the EVOLVE-BLOCK; imports and run_code() outside are frozen. After editing, call evaluate_solution.
+  evaluate_solution: |
+    Run program through evaluator. Returns: combined_score (higher-is-better), validity, error, best_score_so_far, evals_left. Budget is 20. Use feedback to guide next edit. Best version auto-kept.
+  probe_solution: |
+    Cheap approximate scoring on subsampled data (~10s vs ~200s). Does NOT consume eval budget. Separate probe budget of 30. Scores are approximate but reliable for ranking. Use to: (1) rank multiple variants before full eval, (2) quickly test parameter changes, (3) confirm direction before expensive eval. Ideal for Hadamard optimization where you need to compare construction methods.
+  finish: |
+    End session. Call when eval budget exhausted or no improvement possible. Best-scoring program auto-submitted.
+sampling:
+  temperature: 1.0
+  top_p: 0.9
+  top_k: 30
+  max_tokens: 12288
+agent:
+  max_iterations: 50
+middleware:
+  budget_reminder_from_left: 3
+  long_tool_output_max_chars: 10000
+new_tools:
+  - name: fast_det_probe
+    description: |
+      Calculate determinant using numpy.linalg.det (floating point) on the CURRENT program.
+      This is extremely fast (~50ms) and gives a quick direction indicator.
+      Use this to test whether parameter changes move toward better solutions BEFORE
+      calling probe_solution (subsampled) or evaluate_solution (full).
+      Return: {det_float: float, abs_det: float, direction: "improve|worse|same"}
+    input_schema:
+      type: object
+      properties: {}
+    implementation_py: |
+      def run(ctx, args):
+          import numpy as np
+          try:
+              matrix_text = ctx.get_program()
+              # Find EVOLVE-BLOCK boundaries
+              start = matrix_text.find("# EVOLVE-BLOCK-START") + len("# EVOLVE-BLOCK-START")
+              end = matrix_text.find("# EVOLVE-BLOCK-END")
+              code = matrix_text[:end]
+
+              # Execute and get matrix
+              exec_globals = {}
+              exec(code, exec_globals)
+
+              if not exec_globals or "construct_hadamard_matrix" not in exec_globals:
+                  return {"error": "Cannot find construct_hadamard_matrix"}
+
+              mat = construct_hadamard_matrix(n=29)
+              det_float = float(np.linalg.det(mat))
+              abs_det = abs(det_float)
+
+              best_score = ctx.best_score()
+              if best_score is None or abs_det > best_score * 1.5:
+                  direction = "improve"
+              elif abs_det < best_score * 0.7:
+                  direction = "worse"
+              else:
+                  direction = "same"
+
+              return {"det_float": det_float, "abs_det": abs_det,
+                      "direction": direction, "best_so_far": best_score}
+          except Exception as e:
+              return {"error": str(e)}
+new_skills:
+  - name: hadamard-matrix-optimization
+    description: |
+      Task-specific skill for maximizing |det(H)| of 29x29 ±1 matrix. n=29 has no true Hadamard, so use combinatorial optimization with multiple construction methods (Paley, cyclic shifts) and extended search.
+    body: |
+      # Hadamard-like Matrix Optimization for n=29
+
+      ## Task: Maximize |det(H)| for 29x29 matrix with entries ±1
+
+      ## Key mathematical insight
+      True Hadamard matrices require n to be 1, 2, or a multiple of 4.
+      For n=29, we cannot achieve the theoretical max of n√n = 29√29 ≈ 155.5.
+      We need combinatorial optimization to find near-optimal matrices.
+
+      ## Construction methods to try (in order)
+
+      Method 1: Paley construction (best for n ≡ 3 mod 4)
+      Quadratic residues mod 29: {1, 4, 5, 6, 7, 9, 13, 16, 20, 22, 23, 24, 25, 28}
+      For each entry (i,j): H[i][j] = 1 if (i-j) mod 29 is quadratic residue, else -1
+      Add diagonal correction: H[i][i] should be +1
+
+      Method 2: Cyclic shifts
+      Start with any 29x29 ±1 matrix (e.g., from Method 1)
+      Generate additional rows by cyclically shifting the first row
+      H[i] = shift(H[0], i * k) for some shift amount k
+
+      Method 3: Random perturbations with annealing
+      Start from structured matrix
+      For t = 1 to 10000:
+        Randomly flip one entry
+        Calculate determinant (Bareiss for exact, or numpy for fast check)
+        Accept if |det| improves, else with prob exp((|new|-|old|)/T)
+        Schedule: T = 0.8 / (1 + t * 0.0008)
+
+      Method 4: Multi-start optimization
+      For seed in range(5, 15):
+        Generate starting matrix (Paley or random)
+        Run hill climbing from this seed
+        Track best result
+
+      ## Implementation tips
+
+      - Use Bareiss algorithm for exact integer determinant (avoids floating point errors)
+      - Total search time MUST be < 200 seconds per evaluation
+      - Try at least 2 different construction methods per evaluation
+      - Use fast_det_probe to quickly check direction before probe_solution
+      - Use probe_solution to rank variants before evaluate_solution
+
+      ## Workflow
+
+      1. Choose construction method (start with Paley + multi-start)
+      2. Set iterations = 5000-10000, restarts = 5-10
+      3. Write/edit code for this specific configuration
+      4. Call edit_solution, then evaluate_solution
+      5. If score is good, try parameter variations
+      6. Before next evaluate, probe 2-3 variants
+      7. Evaluate only the probe winner
+      8. Repeat or finish
+new_middlewares:
+  - name: hadamard_check
+    hook: before_model
+    description: |
+      Remind the solver to use Paley construction and multiple restarts for n=29, and to use fast_det_probe or probe_solution before full evaluation.
+    implementation_py: |
+      def before_model(hook_input):
+          return "REMEMBER: n=29 has no true Hadamard. Use Paley construction with quadratic residues {1,4,5,6,7,9,13,16,20,22,23,24,25,28}. Try 5-10 restarts with seeds 42,100,200,300,400,500,600,700,800,900. Aim for 5000-10000 iterations per run. Before evaluate_solution, use probe_solution to rank 2-3 variants, then only evaluate the probe winner. Check if you used fast_det_probe for quick direction."

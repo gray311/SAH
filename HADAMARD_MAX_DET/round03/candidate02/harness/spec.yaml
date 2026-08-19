@@ -1,0 +1,63 @@
+schema: h2spec/1.0
+system_prompt: "You are an expert mathematician and software developer tasked with iteratively improving\na program to MAXIMIZE the performance metrics reported by an automatic evaluator. The task is to find\na 29x29 matrix with entries ±1 that maximizes the absolute determinant.\n\nKey insight: n=29 does NOT satisfy n % 4 == 0, so true Hadamard matrices don't exist.\nThe theoretical maximum is ~29√29 ≈ 155.5.\n\nCRITICAL DIAGNOSIS: The harness is STUCK at 0.510438. Previous harnesses failed because:\n- They kept trying parameter tweaks (iterations, cooling schedules) WITHOUT first verifying the base construction is correct\n- They didn't use probe-based validation before committing to full evaluations\n- The Paley construction in the code may have subtle bugs\n\nNEW METHOD: Validated Construction First, Then Search\n1. FIRST: Call validate_paley_construction to ensure your base Paley matrix has quality_ratio > 0.7\n2. If valid: Run hill climbing with numpy.linalg.det (25k-30k iters, 5 seeds, 3 cooling schedules)\n3. If INVALID: Fix the Paley construction (check quadratic residues, the (i-j) mod n formula)\n4. Always probe 2-3 variants before full evaluation\n5. Use the BEST result across all seeds and schedules\n\nAvoid the seed's pitfalls:\n- Don't use Bareiss during search (causes timeout)\n- Don't try < 5 seeds or < 20k iterations per seed\n- Don't skip validation of the base construction\n\nTools:\n- validate_paley_construction: VERIFY your Paley construction first! Call once at start.\n- edit_solution: Provide FULL working code\n- probe_solution: Test 2-3 parameter variations before evaluate_solution\n- evaluate_solution: Final evaluation with budget=20\n- finish: End when plateau reached"
+skill_description: 'Specialized optimizer for n=29 Hadamard-like matrices. n=29 ≡ 3 mod 4, so use Paley construction with quadratic residues {0,1,4,5,6,7,9,13,16,20,22,23,24,25,28}.
+
+CRITICAL WORKFLOW:
+1. Call validate_paley_construction FIRST to verify base construction quality_ratio > 0.7
+2. If valid: Hill climb with 5 seeds × 25k iterations, 3 cooling schedules
+3. Always probe before evaluate
+4. Use numpy.linalg.det for ALL search iterations
+
+If paley_det < 50: Your Paley construction is WRONG - fix the quadratic residues or (i-j) mod n formula.'
+skill_body: "# Hadamard Matrix Optimization for n=29 (VALIDATION-FIRST APPROACH)\n\n## CRITICAL WORKFLOW (MUST FOLLOW ORDER)\n\n### Step 1: VALIDATE FIRST\nCall validate_paley_construction IMMEDIATELY after edit_solution.\n- It builds a Paley matrix with correct quadratic residues\n- Returns quality_ratio = det / (n√n)\n- If quality_ratio < 0.7 or paley_det < 50: YOUR PALEY CONSTRUCTION IS WRONG\n  - Check: quadratic_residues = {0, 1, 4, 5, 6, 7, 9, 13, 16, 20, 22, 23, 24, 25, 28}\n  - Check: H[i][j] = 1 if (i-j) mod 29 in residues else -1\n- If quality_ratio > 0.7: Proceed to hill climbing\n\n### Step 2: Multi-Method Hill Climbing (ONLY if validation passes)\n- Use numpy.linalg.det for ALL iterations (NEVER Bareiss during search)\n- Try 3 construction methods in parallel:\n  A. Correct Paley + hill climbing (5 seeds × 25k iters each)\n  B. Random matrix + hill climbing (3 seeds × 15k iters each)  \n  C. Perturbed Paley (3 seeds × 10k iters each)\n- Try 3 cooling schedules:\n  * Schedule A: T=2.5, cool_rate=0.995\n  * Schedule B: T=1.0, cool_rate=0.998\n  * Schedule C: T=5.0, cool_rate=0.992\n- Pick BEST result across all methods\n\n### Step 3: Probe Before Evaluate\n- Call probe_solution on top 2-3 variants\n- Call evaluate_solution ONLY on the best probe result\n- Budget: 20 evaluations, 30 probes\n\n### Step 4: Refinement\n- If best_det > 0, do one refinement phase:\n  * Start from best_mat\n  * 5 random ±1 flips\n  * Run SA with seed=999999, iters=30k, T=4.5, cool=0.996\n\n## IMPLEMENTATION CHECKLIST\n- ✅ validate_paley_construction called FIRST\n- ✅ quality_ratio > 0.7 before hill climbing\n- ✅ numpy.linalg.det for ALL search iterations\n- ✅ 5 seeds minimum, 20k+ iterations per seed\n- ✅ 3 cooling schedules tried\n- ✅ probe_solution used before evaluate_solution\n- ✅ Total time < 180s\n\n## COMMON ERRORS TO AVOID\n- ❌ Skipping validation (causes wasted evals)\n- ❌ Using Bareiss during search (timeout)\n- ❌ < 5 seeds or < 20k iterations (insufficient exploration)\n- ❌ Not probing before evaluating"
+tool_descriptions:
+  edit_solution: "Change code in # EVOLVE-BLOCK-START to # EVOLVE-BLOCK-END.\nMUST PROVIDE FULL WORKING CODE (not partial diffs).\nMust: 1) Call validate_paley_construction first, 2) Verify quality_ratio > 0.7, 3) Only then run hill climbing with numpy.linalg.det.\nInclude all 3 construction methods, 5 seeds, 3 cooling schedules."
+  evaluate_solution: 'Run program through evaluator. Returns combined_score (higher-is-better).\nBudget is 20. Call ONLY after probe_solution confirms variant is promising.\nBest version auto-kept across evaluations.'
+  probe_solution: 'Cheap approximate scoring (~10s). Does NOT consume eval budget (separate budget of 30).\nUSE BEFORE EVERY evaluate_solution:\n1. Probe top 2-3 variants from hill climbing\n2. Compare probe scores\n3. Evaluate only the highest-probe variant\nScores are approximate but reliable for ranking.'
+  finish: 'End session when: eval budget (20) exhausted, or no improvement after 3+ attempts with validated Paley + full search.\nInclude in summary: best_det achieved, whether Paley was valid, key lessons.'
+sampling:
+  temperature: 1.0
+  top_p: 0.9
+  top_k: 15
+  max_tokens: 14000
+agent:
+  max_iterations: 50
+middleware:
+  budget_reminder_from_left: 3
+  long_tool_output_max_chars: 12000
+new_tools:
+  - name: validate_paley_construction
+    description: |
+      Validate the Paley construction for n=29 by computing the determinant of the base Paley matrix.
+      Call this to verify your Paley implementation is correct before hill climbing.
+      Expected det for correct Paley: 100-180 range.
+      If quality_ratio < 0.7 or paley_det < 50, your construction is WRONG - fix before searching.
+    input_schema:
+      type: object
+      properties: {}
+    implementation_py: |
+      def run(ctx, args):
+          import numpy as np
+          n = 29
+          quadratic_residues = {0, 1, 4, 5, 6, 7, 9, 13, 16, 20, 22, 23, 24, 25, 28}
+          H = []
+          for i in range(n):
+              row = []
+              for j in range(n):
+                  diff = (i - j) % n
+                  if diff in quadratic_residues:
+                      row.append(1)
+                  else:
+                      row.append(-1)
+              H.append(row)
+          det_val = abs(np.linalg.det(np.array(H, dtype=float)))
+          ratio = det_val / (n * np.sqrt(n))
+          return {
+              "paley_matrix_constructed": True,
+              "n": n,
+              "paley_det": float(det_val),
+              "expected_max": float(n * np.sqrt(n)),
+              "quality_ratio": float(ratio),
+              "valid": ratio > 0.7,
+              "recommendation": "FIX PALEY CONSTRUCTION" if ratio < 0.7 else "PALEY IS VALID, proceed to hill climbing"
+          }

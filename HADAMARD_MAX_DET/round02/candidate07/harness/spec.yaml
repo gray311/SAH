@@ -1,0 +1,230 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are optimizing a 29x29 ±1 matrix to MAXIMIZE |det(H)|. n=29 is prime ≡ 3 (mod 4), so use Paley construction as foundation.
+  
+  CRITICAL: Each full evaluation has a 350s time limit. The determinant calculation via Bareiss is EXACT but SLOW (~5-10s for n=29).
+  
+  METHOD:
+  1. Use Paley construction with quadratic residues mod 29: QR = {0,1,4,5,6,7,9,13,16,20,22,23,24,25,28}
+  2. For fast search iterations, use a proxy score computed via numpy (trace of AᵀA) that runs in <0.1s
+  3. Only use exact Bareiss determinant at the END of each search, not inside loops
+  4. Run 3-5 independent searches per evaluation, each with 2000-3000 iterations
+  5. Total time per evaluation must stay <200s
+  6. Use edit_solution to make targeted edits, then evaluate_solution
+  7. Use probe_solution for fast ranking of final variants before full eval
+  
+  Tools:
+  - edit_solution: Change EVOLVE-BLOCK. Use SEARCH/REPLACE or full rewrite of construct_hadamard_matrix
+  - evaluate_solution: Full scoring with Bareiss. Returns combined_score, budget info
+  - probe_solution: Quick approximate score using subsampling. Doesn't consume eval budget (30 available)
+  - finish: End when done or no improvement possible
+  
+  BEFORE EACH SEARCH: Consider using numpy trace(A.T @ A) for rapid iteration proxy scoring. ONLY call Bareiss once per search.
+skill_description: |
+  Optimize 29x29 ±1 matrix for maximal |det(H)| using Paley construction. Use numpy trace(A^T @ A) for fast search loops, Bareiss only once per search. Run 3-5 independent searches (<200s total). Use probe_solution for variant ranking.
+skill_body: |
+  # 29x29 Hadamard-like Matrix Optimization
+  
+  ## Mathematical Context
+  - n=29 is prime ≡ 3 (mod 4), no true Hadamard exists (n√n ≈ 155.5 is theoretical max)
+  - Paley construction is the best starting point for primes ≡ 3 (mod 4)
+  - QR mod 29 = {0,1,4,5,6,7,9,13,16,20,22,23,24,25,28}
+  
+  ## FAST Search Strategy (CRITICAL)
+  
+  ### Step 1: Use numpy proxy scoring inside search loops
+  Inside hill climbing, NEVER call exact Bareiss determinant repeatedly.
+  Instead use: proxy_score(A) = |trace(A^T @ A) - n²|
+  These run in <0.1s for n=29 and correlate with |det| direction.
+  
+  ### Step 2: Structure each search to complete quickly
+  - Each search: 2000-3000 iterations max (proxy score for each step)
+  - Run 3-5 searches per evaluation
+  - Only compute exact Bareiss determinant ONCE at the end of each search
+  - Total time target: <200s per evaluation
+  
+  ### Step 3: Multi-start with diverse seeds
+  For each search:
+  - Start from Paley matrix
+  - Try 3-5 different random perturbations before hill climb
+  - Use seeds: 42, 123, 456, 789, 1011
+  - Different perturbation patterns (corner, center, diagonal flips)
+  
+  ### Step 4: Acceptance criteria in hill climbing
+  - Accept improvements always (when proxy score improves)
+  - Accept worsened with prob: exp((|new_proxy| - |old_proxy|) / T)
+  - Temperature schedule: T = 2.0 → 0.1 over iterations
+  - Cooling rate: 0.9985
+  
+  ### Step 5: Use probe_solution for final variant ranking
+  - After all searches complete, you have multiple candidate matrices
+  - Create 2-3 "finalized" variants (cleaned up, validated)
+  - Use probe_solution to rank them (~10s each)
+  - Evaluate only the top 1-2 candidates with evaluate_solution
+  
+  ## Time Budget Discipline
+  - Total evaluation time MUST stay < 200s (leaves margin)
+  - If a search takes >30s, it's too slow - reduce iterations
+  - Allowed proxy iterations per search: ~3000 (each <0.1s)
+  - Allowed exact Bareiss calls per eval: ≤5 (each 5-10s)
+  
+  ## Complete Code Structure Template
+  ```python
+  def construct_hadamard_matrix():
+      # 1. Build Paley matrix once
+      paley = build_paley_matrix(29, qr={0,1,4,5,6,7,9,13,16,20,22,23,24,25,28})
+      
+      candidates = []
+      max_total_time = 180  # seconds
+      
+      start_time = time.time()
+      
+      # 2. Run 3-5 searches
+      for search_num in range(3):
+          if time.time() - start_time > max_total_time:
+              break
+          
+          # 3. Perturb starting matrix 3-5 ways
+          perturbations = get_perturbations(paley, n_perturb=5)
+          best_for_search = None
+          best_det = 0
+          
+          for pert_idx, pert in enumerate(perturbations):
+              if time.time() - start_time > max_total_time:
+                  break
+              
+              # 4. Hill climb with PROXY scoring (NOT Bareiss!)
+              A, proxy_best = hill_climb_proxy(pert, n_iter=2500)
+              
+              # 5. Only NOW compute exact determinant (Bareiss once per perturbation)
+              exact_det = compute_bareiss(A)
+              if abs(exact_det) > best_det:
+                  best_det = abs(exact_det)
+                  best_for_search = A
+          
+          if best_for_search is not None:
+              candidates.append((best_for_search, best_det))
+      
+      # 6. Pick best overall candidate
+      best = max(candidates, key=lambda x: abs(x[1])) if candidates else paley
+      return best[0] if candidates else paley
+  ```
+  
+  ## Tools Usage
+  - edit_solution: Full rewrite of construct_hadamard_matrix if structure needs changing
+  - evaluate_solution: Call after search completes. Track your best combined_score.
+  - probe_solution: Before final evaluate, create 2-3 finalized variants, probe them, pick winner
+  - finish: When you've exhausted meaningful improvements
+  
+  ## Common Errors to Avoid
+  - ❌ Calling Bareiss inside hill climbing loop (causes timeout)
+  - ❌ Too many iterations (>5000 per search)
+  - ❌ Only one search per evaluation (not enough exploration)
+  - ❌ Ignoring time budget (always check elapsed time)
+  - ✅ Use numpy trace for fast iteration proxy scoring
+  - ✅ Only call exact Bareiss once per search (or at most once per perturbation)
+  - ✅ Run 3-5 searches per evaluation
+  - ✅ Use probe_solution before final evaluate
+tool_descriptions:
+  edit_solution: |
+    Change code in # EVOLVE-BLOCK-START to # EVOLVE-BLOCK-END. 
+    Format: (1) SEARCH/REPLACE diffs matching current code exactly, OR (2) full rewrite of construct_hadamard_matrix function.
+    Only modify EVOLVE-BLOCK; imports and run_code() outside are frozen.
+    After editing, call evaluate_solution to score.
+    
+    CRITICAL: Ensure your search uses proxy scoring (numpy trace(A^T @ A)) inside loops,
+    and only calls exact Bareiss determinant ONCE per search (not inside loops).
+    Total time per evaluation must stay <200s.
+  evaluate_solution: |
+    Run program through evaluator. Returns: combined_score (higher-is-better), validity, error, best_score_so_far, evals_left.
+    Budget: 20 evaluations. Each call should complete your search within ~200s.
+    
+    Use feedback to guide next edit. Best version auto-kept.
+  probe_solution: |
+    Cheap approximate scoring on subsampled data (~10s). 
+    Does NOT consume eval budget. Separate probe budget of 30 probes available.
+    
+    USE BEFORE FINAL EVALUATE:
+    - After your search completes, you have multiple candidate matrices
+    - Create 2-3 finalized, cleaned variants
+    - Call probe_solution on each (~10s each, 30 total available)
+    - Pick the probe winner, then call evaluate_solution ONCE on that variant
+    
+    This saves precious eval budget while ensuring quality selection.
+  finish: |
+    End session. Call when: (1) eval budget exhausted, (2) no meaningful improvement possible, (3) time limit approaching.
+    Best-scoring program auto-submitted.
+sampling:
+  temperature: 0.8
+  top_p: 0.95
+  top_k: 30
+  max_tokens: 14336
+agent:
+  max_iterations: 60
+middleware:
+  budget_reminder_from_left: 4
+  long_tool_output_max_chars: 12000
+new_skills:
+- name: fast-hadamard-search
+  description: |
+    Task-specific skill for fast 29x29 Hadamard optimization. Uses numpy trace for proxy scoring in search loops,
+    multi-start exploration, and strict time budget discipline. Call before each evaluation.
+  body: |
+    # Fast Hadamard Search for n=29
+    
+    ## CRITICAL TIME DISCIPLINE
+    - Total evaluation time MUST stay <200s (leaves 150s margin)
+    - Each exact Bareiss determinant takes 5-10s for n=29
+    - Use numpy trace(A.T @ A) for ALL search loop iterations (<0.1s each)
+    - Only call exact Bareiss ONCE at end of each search
+    
+    ## Search Structure
+    1. Build Paley matrix once (QR mod 29 = {0,1,4,5,6,7,9,13,16,20,22,23,24,25,28})
+    2. Run 3-5 independent searches per evaluation
+    3. Each search: 2000-3000 proxy iterations + 1 exact Bareiss
+    4. Use multiple seeds: 42, 123, 456, 789, 1011
+    5. For each seed: 2-3 perturbations before hill climbing
+    6. Pick best candidate from all searches
+    
+    ## Proxy Scoring Strategy
+    - proxy_score(A) = |trace(A^T @ A) - n²|
+    - This correlates with |det(A)| for ±1 matrices
+    - Use for ALL move acceptance in hill climbing
+    - ONLY call exact Bareiss at the END of each search
+    
+    ## Hill Climbing Parameters
+    - Iterations: 2500 per search (proxy-scoring only)
+    - Initial temperature: T = 2.0
+    - Cooling rate: 0.9985
+    - Accept improvements always (proxy score improvement)
+    - Accept worsened with prob: exp(-(proxy_new - proxy_old)/T)
+    
+    ## Final Selection
+    - After all searches, you have multiple candidates
+    - Create 2-3 finalized variants (validate structure)
+    - Use probe_solution to rank (~10s each)
+    - Evaluate only the probe winner with evaluate_solution
+    
+    ## Common Pitfalls
+    - ❌ Calling Bareiss inside search loop (causes timeout)
+    - ❌ Too few searches (not enough exploration)
+    - ❌ Ignoring time budget
+    - ✅ Always use numpy trace for proxy scoring
+    - ✅ Always limit exact Bareiss to once per search
+    - ✅ Always run 3-5 searches per evaluation
+new_middlewares:
+- name: time_budget_guard
+  hook: before_model
+  description: |
+    Middleware that reminds the solver to respect the 200s time budget per evaluation.
+    Ensures they use proxy scoring and limit exact determinant calls.
+  implementation_py: |
+    def before_model(hook_input):
+        return "TIME BUDGET: <200s per eval. Use numpy trace(A.T@A) for fast proxy scoring in loops. ONLY call Bareiss once per search. Run 3-5 searches total. Track time.time()!"
+- name: multi_search_reminder
+  hook: before_tool
+  description: |
+    Reminds solver to use multi-start search strategy and not rely on single-search approach.
+  implementation_py: |
+    def before_tool(hook_input):
+        return "MULTI-SEARCH CHECK: Running 3-5 independent searches? Each: 2500 proxy iterations + 1 Bareiss. Don't do only 1 search or call Bareiss in loops!"

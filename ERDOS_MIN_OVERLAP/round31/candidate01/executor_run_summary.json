@@ -1,0 +1,264 @@
+[
+  {
+    "task_id": "eft__math__erdos_min_overlap",
+    "source": "eft",
+    "best_score": 0.9986157977254123,
+    "seed_score": 0.0,
+    "best_metrics": {
+      "c5_bound": 0.3814510405063629,
+      "combined_score": 0.9986157977254123,
+      "n_points": 800,
+      "eval_time": 100.24778246879578
+    },
+    "best_program": "# EVOLVE-BLOCK-START\nimport jax\nimport jax.numpy as jnp\nimport optax\nfrom dataclasses import dataclass\nimport tqdm\n\n\n@dataclass\nclass Hyperparameters:\n    num_intervals: int = 800\n    base_learning_rate: float = 0.005\n    num_steps: int = 50000\n    penalty_strength: float = 80.0\n    num_restarts: int = 3\n    seed_start: int = 0\n\n\nclass ErdosOptimizer:\n    def __init__(self, hypers):\n        self.hypers = hypers\n        self.dx = 2.0 / self.hypers.num_intervals\n        self.N = self.hypers.num_intervals\n\n    def _compute_c5_bound(self, h):\n        j_val = 1.0 - h\n        h_padded = jnp.pad(h, (0, self.N))\n        j_padded = jnp.pad(j_val, (0, self.N))\n        corr_fft = jnp.fft.fft(h_padded) * jnp.conj(jnp.fft.fft(j_padded))\n        correlation = jnp.fft.ifft(corr_fft).real\n        return float(jnp.max(correlation * self.dx))\n\n    def _create_valid_h(self, pattern, x=None):\n        \"\"\"Create a valid step function with integral=1 exactly.\"\"\"\n        if x is None:\n            x = jnp.linspace(0, 2, self.N)\n        \n        if pattern == \"half\":\n            h = jnp.where(x < 1.0, 1.0, 0.0)\n        elif pattern == \"third\":\n            h = jnp.where(x < 0.33, 1.0, 0.0)\n        elif pattern == \"two_thirds\":\n            h = jnp.where(x < 0.66, 1.0, 0.0)\n        elif pattern == \"quarter_both\":\n            h = jnp.zeros(self.N)\n            h = h.at[(x >= 0) & (x < 0.4)].set(1.0)\n            h = h.at[(x >= 1.6) & (x < 2.0)].set(1.0)\n        elif pattern == \"uniform\":\n            h = jnp.ones(self.N) * 0.5\n        elif pattern == \"two_peaks\":\n            h = jnp.zeros(self.N)\n            h = h.at[(x >= 0.2) & (x < 0.4)].set(1.0)\n            h = h.at[(x >= 1.6) & (x < 1.8)].set(1.0)\n        elif pattern == \"three_peaks\":\n            h = jnp.zeros(self.N)\n            h = h.at[(x >= 0.2) & (x < 0.35)].set(1.0)\n            h = h.at[(x >= 0.85) & (x < 1.0)].set(1.0)\n            h = h.at[(x >= 1.65) & (x < 1.8)].set(1.0)\n        elif pattern == \"four_peaks\":\n            h = jnp.zeros(self.N)\n            h = h.at[(x >= 0.2) & (x < 0.28)].set(1.0)\n            h = h.at[(x >= 0.62) & (x < 0.7)].set(1.0)\n            h = h.at[(x >= 1.0) & (x < 1.08)].set(1.0)\n            h = h.at[(x >= 1.4) & (x < 1.48)].set(1.0)\n        else:\n            h = jnp.where(x < 1.0, 1.0, 0.0)\n        \n        # Normalize to get integral=1\n        integral = jnp.sum(h) * self.dx\n        if integral > 1e-10:\n            h = h / integral\n        \n        # Clip to [0,1]\n        h = jnp.clip(h, 0.0, 1.0)\n        \n        # Renormalize\n        integral = jnp.sum(h) * self.dx\n        if integral > 1e-10:\n            h = h / integral\n        \n        return h\n\n    def _get_best_initialization(self, seed):\n        x = jnp.linspace(0, 2, self.N)\n        \n        # Start with the best pattern from previous success\n        h = self._create_valid_h(\"half\", x)\n        \n        # Evaluate all patterns and pick best\n        patterns = [\n            \"half\", \"third\", \"two_thirds\", \"quarter_both\", \"uniform\",\n            \"two_peaks\", \"three_peaks\", \"four_peaks\"\n        ]\n        \n        best_latent = None\n        best_obj = jnp.inf\n        \n        for pattern in patterns:\n            h = self._create_valid_h(pattern, x)\n            \n            j_val = 1.0 - h\n            h_padded = jnp.pad(h, (0, self.N))\n            j_padded = jnp.pad(j_val, (0, self.N))\n            corr_fft = jnp.fft.fft(h_padded) * jnp.conj(jnp.fft.fft(j_padded))\n            correlation = jnp.fft.ifft(corr_fft).real\n            obj = jnp.max(correlation * self.dx)\n            \n            if obj < best_obj:\n                best_obj = obj\n                h_safe = jnp.clip(h, 0.0001, 0.9999)\n                best_latent = jnp.log(h_safe / (1.0 - h_safe))\n        \n        return best_latent\n\n    def _objective_fn(self, latent_h_values):\n        h = jax.nn.sigmoid(latent_h_values)\n        j_val = 1.0 - h\n        h_padded = jnp.pad(h, (0, self.N))\n        j_padded = jnp.pad(j_val, (0, self.N))\n        corr_fft = jnp.fft.fft(h_padded) * jnp.conj(jnp.fft.fft(j_padded))\n        correlation = jnp.fft.ifft(corr_fft).real\n        objective_loss = jnp.max(correlation * self.dx)\n        integral_h = jnp.sum(h) * self.dx\n        constraint_loss = (integral_h - 1.0) ** 2\n        return objective_loss + self.hypers.penalty_strength * constraint_loss\n\n    def _optimize_single_run(self, seed):\n        initial_latent = self._get_best_initialization(seed)\n        \n        if initial_latent is None:\n            return 10.0, jnp.zeros(self.N)\n        \n        optimizer = optax.adam(self.hypers.base_learning_rate)\n        opt_state = optimizer.init(initial_latent)\n\n        @jax.jit\n        def train_step(latent_h_values, opt_state):\n            loss, grads = jax.value_and_grad(lambda v: self._objective_fn(v))(latent_h_values)\n            updates, opt_state = optimizer.update(grads, opt_state)\n            latent_h_values = optax.apply_updates(latent_h_values, updates)\n            return latent_h_values, opt_state, loss\n\n        best_latent = initial_latent.copy()\n        current_latent = initial_latent\n        current_opt_state = opt_state\n\n        for step in tqdm.tqdm(range(self.hypers.num_steps), desc=f\"Run {seed}\", leave=False):\n            current_latent, current_opt_state, loss = train_step(current_latent, current_opt_state)\n            if loss < self._objective_fn(best_latent):\n                best_latent = current_latent.copy()\n\n        final_h = jax.nn.sigmoid(best_latent)\n        return float(self._compute_c5_bound(final_h)), final_h\n\n    def run_optimization(self):\n        best_c5_bound = jnp.inf\n        best_h = None\n\n        print(f\"Running {self.hypers.num_restarts} restarts...\")\n        for restart in range(self.hypers.num_restarts):\n            seed = self.hypers.seed_start + restart\n            c5_bound, final_h = self._optimize_single_run(seed)\n            if c5_bound < best_c5_bound:\n                best_c5_bound = c5_bound\n                best_h = final_h\n            print(f\"Restart {seed}: c5_bound = {c5_bound:.8f}\")\n\n        return best_h, float(best_c5_bound)\n\n\ndef run():\n    hypers = Hyperparameters()\n    optimizer = ErdosOptimizer(hypers)\n    final_h_values, c5_bound = optimizer.run_optimization()\n    return final_h_values, c5_bound, hypers.num_intervals\n# EVOLVE-BLOCK-END",
+    "stop_reason": "completed",
+    "ledger": {
+      "max_evaluator_calls": 60,
+      "evaluator_calls": 5,
+      "max_probe_calls": 30,
+      "probe_calls": 15,
+      "edit_calls": 15,
+      "llm_input_tokens": 0,
+      "llm_output_tokens": 0,
+      "llm_calls": 40,
+      "sandbox_seconds": 673.700715303421
+    },
+    "steps": [
+      {
+        "step": 0,
+        "kind": "seed",
+        "edit_mode": "seed",
+        "edit_note": "seed program",
+        "combined_score": 0.0,
+        "validity": 0.0,
+        "error": "Timeout after 270s",
+        "wall_s": 270.02021384239197,
+        "is_new_best": false
+      },
+      {
+        "step": 1,
+        "kind": "probe",
+        "edit_mode": "probe",
+        "edit_note": "subsample=2000",
+        "combined_score": 0.0,
+        "validity": 0.0,
+        "error": "'NoneType' object has no attribute 'copy'",
+        "wall_s": 43.77666163444519,
+        "is_new_best": false
+      },
+      {
+        "step": 2,
+        "kind": "probe",
+        "edit_mode": "probe",
+        "edit_note": "subsample=2000",
+        "combined_score": 0.0,
+        "validity": 0.0,
+        "error": "axis -1 is out of bounds for array of dimension 0",
+        "wall_s": 3.3723971843719482,
+        "is_new_best": false
+      },
+      {
+        "step": 3,
+        "kind": "probe",
+        "edit_mode": "probe",
+        "edit_note": "subsample=2000",
+        "combined_score": 0.0,
+        "validity": 0.0,
+        "error": "Integral of h is not close to 1. Got: 0.998239",
+        "wall_s": 142.01753616333008,
+        "is_new_best": false
+      },
+      {
+        "step": 4,
+        "kind": "probe",
+        "edit_mode": "probe",
+        "edit_note": "subsample=2000",
+        "combined_score": 0.0,
+        "validity": 0.0,
+        "error": "Timeout after 150s",
+        "wall_s": 150.01381540298462,
+        "is_new_best": false
+      },
+      {
+        "step": 5,
+        "kind": "probe",
+        "edit_mode": "probe",
+        "edit_note": "subsample=2000",
+        "combined_score": 0.0,
+        "validity": 0.0,
+        "error": "Integral of h is not close to 1. Got: 0.998971",
+        "wall_s": 47.68000388145447,
+        "is_new_best": false
+      },
+      {
+        "step": 6,
+        "kind": "probe",
+        "edit_mode": "probe",
+        "edit_note": "subsample=2000",
+        "combined_score": 0.9985795194267383,
+        "validity": 1.0,
+        "error": null,
+        "wall_s": 99.10107278823853,
+        "is_new_best": false
+      },
+      {
+        "step": 7,
+        "kind": "full_rewrite",
+        "edit_mode": "full_rewrite",
+        "edit_note": "spliced new EVOLVE-BLOCK",
+        "combined_score": 0.9985795194267383,
+        "validity": 1.0,
+        "error": null,
+        "wall_s": 100.5523636341095,
+        "is_new_best": true
+      },
+      {
+        "step": 8,
+        "kind": "probe",
+        "edit_mode": "probe",
+        "edit_note": "subsample=2000",
+        "combined_score": 0.0,
+        "validity": 0.0,
+        "error": "Integral of h is not close to 1. Got: 0.000000",
+        "wall_s": 3.869400978088379,
+        "is_new_best": false
+      },
+      {
+        "step": 9,
+        "kind": "probe",
+        "edit_mode": "probe",
+        "edit_note": "subsample=2000",
+        "combined_score": 0.0,
+        "validity": 0.0,
+        "error": "Integral of h is not close to 1. Got: 0.000000",
+        "wall_s": 4.119762897491455,
+        "is_new_best": false
+      },
+      {
+        "step": 10,
+        "kind": "probe",
+        "edit_mode": "probe",
+        "edit_note": "subsample=2000",
+        "combined_score": 0.0,
+        "validity": 0.0,
+        "error": "Timeout after 150s",
+        "wall_s": 150.0107491016388,
+        "is_new_best": false
+      },
+      {
+        "step": 11,
+        "kind": "probe",
+        "edit_mode": "probe",
+        "edit_note": "subsample=2000",
+        "combined_score": 0.0,
+        "validity": 0.0,
+        "error": "Integral of h is not close to 1. Got: 1.001134",
+        "wall_s": 40.31624507904053,
+        "is_new_best": false
+      },
+      {
+        "step": 12,
+        "kind": "probe",
+        "edit_mode": "probe",
+        "edit_note": "subsample=2000",
+        "combined_score": 0.9895403405528758,
+        "validity": 1.0,
+        "error": null,
+        "wall_s": 15.987147331237793,
+        "is_new_best": false
+      },
+      {
+        "step": 13,
+        "kind": "full_rewrite",
+        "edit_mode": "full_rewrite",
+        "edit_note": "spliced new EVOLVE-BLOCK",
+        "combined_score": 0.9895403405528758,
+        "validity": 1.0,
+        "error": null,
+        "wall_s": 15.83686876296997,
+        "is_new_best": false
+      },
+      {
+        "step": 14,
+        "kind": "probe",
+        "edit_mode": "probe",
+        "edit_note": "subsample=2000",
+        "combined_score": 0.9986157977254123,
+        "validity": 1.0,
+        "error": null,
+        "wall_s": 106.21468663215637,
+        "is_new_best": false
+      },
+      {
+        "step": 15,
+        "kind": "full_rewrite",
+        "edit_mode": "full_rewrite",
+        "edit_note": "spliced new EVOLVE-BLOCK",
+        "combined_score": 0.9986157977254123,
+        "validity": 1.0,
+        "error": null,
+        "wall_s": 101.90203833580017,
+        "is_new_best": true
+      },
+      {
+        "step": 16,
+        "kind": "probe",
+        "edit_mode": "probe",
+        "edit_note": "subsample=2000",
+        "combined_score": 0.0,
+        "validity": 0.0,
+        "error": "Timeout after 150s",
+        "wall_s": 150.0106315612793,
+        "is_new_best": false
+      },
+      {
+        "step": 17,
+        "kind": "probe",
+        "edit_mode": "probe",
+        "edit_note": "subsample=2000",
+        "combined_score": 0.9951024475320883,
+        "validity": 1.0,
+        "error": null,
+        "wall_s": 80.57501602172852,
+        "is_new_best": false
+      },
+      {
+        "step": 18,
+        "kind": "full_rewrite",
+        "edit_mode": "full_rewrite",
+        "edit_note": "spliced new EVOLVE-BLOCK",
+        "combined_score": 0.9951024475320883,
+        "validity": 1.0,
+        "error": null,
+        "wall_s": 78.82616114616394,
+        "is_new_best": false
+      },
+      {
+        "step": 19,
+        "kind": "probe",
+        "edit_mode": "probe",
+        "edit_note": "subsample=2000",
+        "combined_score": 0.9986157977254123,
+        "validity": 1.0,
+        "error": null,
+        "wall_s": 120.83505868911743,
+        "is_new_best": false
+      },
+      {
+        "step": 20,
+        "kind": "full_rewrite",
+        "edit_mode": "full_rewrite",
+        "edit_note": "spliced new EVOLVE-BLOCK",
+        "combined_score": 0.9986157977254123,
+        "validity": 1.0,
+        "error": null,
+        "wall_s": 106.56306958198547,
+        "is_new_best": false
+      }
+    ],
+    "error": null,
+    "mode": "agent",
+    "delta": 0.9986157977254123,
+    "evaluations": 5
+  }
+]

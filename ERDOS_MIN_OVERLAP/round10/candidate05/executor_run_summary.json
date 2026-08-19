@@ -1,0 +1,297 @@
+[
+  {
+    "task_id": "eft__math__erdos_min_overlap",
+    "source": "eft",
+    "best_score": 0.9998552102157963,
+    "seed_score": 0.9998552102157963,
+    "best_metrics": {
+      "c5_bound": 0.38097819685935974,
+      "combined_score": 0.9998552102157963,
+      "n_points": 800,
+      "eval_time": 116.01607012748718
+    },
+    "best_program": "# EVOLVE-BLOCK-START\nimport jax\nimport jax.numpy as jnp\nimport optax\nimport numpy as np\nfrom dataclasses import dataclass\nimport tqdm\n\n\n@dataclass\nclass Hyperparameters:\n    num_intervals: int = 800\n    base_learning_rate: float = 0.007\n    num_steps: int = 59000\n    penalty_strength: float = 60.0\n    num_restarts: int = 3\n    seed_start: int = 0\n\n\nclass ErdosOptimizer:\n    \"\"\"\n    Finds a step function h that minimizes the maximum overlap integral.\n    Uses multi-restart strategy with improved initialization.\n    \"\"\"\n\n    def __init__(self, hypers: Hyperparameters):\n        self.hypers = hypers\n        self.domain_width = 2.0\n        self.dx = self.domain_width / self.hypers.num_intervals\n\n    def _compute_c5_bound(self, h: jnp.ndarray) -> float:\n        \"\"\"Compute the C5 bound from h without penalty.\"\"\"\n        j = 1.0 - h\n        N = self.hypers.num_intervals\n        h_padded = jnp.pad(h, (0, N))\n        j_padded = jnp.pad(j, (0, N))\n        corr_fft = jnp.fft.fft(h_padded) * jnp.conj(jnp.fft.fft(j_padded))\n        correlation = jnp.fft.ifft(corr_fft).real\n        c5_bound = jnp.max(correlation * self.dx)\n        return float(c5_bound)\n\n    def _get_best_initialization(self, seed: int) -> jnp.ndarray:\n        \"\"\"Get the best initialization from several pattern variations.\"\"\"\n        N = self.hypers.num_intervals\n        key = jax.random.PRNGKey(seed)\n        \n        best_latent = None\n        best_obj = jnp.inf\n        \n        for pattern in range(12):\n            if pattern == 0:\n                latent = jax.random.normal(key, (N,))\n            elif pattern == 1:\n                latent = jax.random.uniform(key, (N,), minval=-2, maxval=2)\n            elif pattern == 2:\n                x = jnp.linspace(0, 2, N)\n                latent = jnp.sin(2 * jnp.pi * x) * 2.0 + jnp.cos(4 * jnp.pi * x) * 1.0\n            elif pattern == 3:\n                latent = jax.random.normal(key, (N,)) * 1.5\n            elif pattern == 4:\n                latent = jax.random.uniform(key, (N,)) * 2.0 - 1.0\n            elif pattern == 5:\n                x = jnp.linspace(0, 2, N)\n                latent = jnp.where(x > 0.5, 3.0, -3.0)\n            elif pattern == 6:\n                x = jnp.linspace(0, 2, N)\n                latent = jnp.where(x < 1.0, 3.0, -3.0)\n            elif pattern == 7:\n                latent = jax.random.normal(key, (N,)) * 0.5\n            elif pattern == 8:\n                x = jnp.linspace(0, 2, N)\n                latent = jnp.where(x < 2/3, 3.0, -3.0)\n            elif pattern == 9:\n                x = jnp.linspace(0, 2, N)\n                latent = jnp.where(x > 1/3, 3.0, -3.0)\n            elif pattern == 10:\n                x = jnp.linspace(0, 2, N)\n                latent = jnp.where((x >= 0.5) & (x < 1.0), 3.0, -1.0)\n            elif pattern == 11:\n                x = jnp.linspace(0, 2, N)\n                latent = jnp.where((x >= 0.25) & (x <= 1.75), 2.5, -2.5)\n            \n            key, subkey = jax.random.split(key)\n            latent = latent + jax.random.normal(key, (N,)) * 0.3\n            key, subkey = jax.random.split(key)\n            \n            latent = jax.lax.stop_gradient(latent)\n            h = jax.nn.sigmoid(latent)\n            j = 1.0 - h\n            h_padded = jnp.pad(h, (0, N))\n            j_padded = jnp.pad(j, (0, N))\n            corr_fft = jnp.fft.fft(h_padded) * jnp.conj(jnp.fft.fft(j_padded))\n            correlation = jnp.fft.ifft(corr_fft).real\n            obj = jnp.max(correlation * self.dx)\n            \n            if obj < best_obj:\n                best_obj = obj\n                best_latent = latent\n        \n        return best_latent\n\n    def _objective_fn(self, latent_h_values: jnp.ndarray) -> jnp.ndarray:\n        \"\"\"The loss function.\"\"\"\n        h = jax.nn.sigmoid(latent_h_values)\n        j = 1.0 - h\n        N = self.hypers.num_intervals\n        h_padded = jnp.pad(h, (0, N))\n        j_padded = jnp.pad(j, (0, N))\n        corr_fft = jnp.fft.fft(h_padded) * jnp.conj(jnp.fft.fft(j_padded))\n        correlation = jnp.fft.ifft(corr_fft).real\n        scaled_correlation = correlation * self.dx\n        objective_loss = jnp.max(scaled_correlation)\n\n        integral_h = jnp.sum(h) * self.dx\n        constraint_loss = (integral_h - 1.0) ** 2\n\n        total_loss = objective_loss + self.hypers.penalty_strength * constraint_loss\n        return total_loss\n\n    def _optimize_single_run(self, seed: int):\n        \"\"\"Run a single optimization with given seed.\"\"\"\n        initial_latent = self._get_best_initialization(seed)\n        \n        optimizer = optax.adam(self.hypers.base_learning_rate)\n        opt_state = optimizer.init(initial_latent)\n\n        @jax.jit\n        def train_step(latent_h_values, opt_state):\n            loss, grads = jax.value_and_grad(lambda v: self._objective_fn(v))(latent_h_values)\n            updates, opt_state = optimizer.update(grads, opt_state)\n            latent_h_values = optax.apply_updates(latent_h_values, updates)\n            return latent_h_values, opt_state, loss\n\n        best_latent = initial_latent.copy()\n        current_latent = initial_latent\n        current_opt_state = opt_state\n\n        for step in tqdm.tqdm(range(self.hypers.num_steps), desc=f\"Run {seed}\"):\n            current_latent, current_opt_state, loss = train_step(current_latent, current_opt_state)\n            \n            if loss < self._objective_fn(best_latent):\n                best_latent = current_latent.copy()\n\n        final_h = jax.nn.sigmoid(best_latent)\n        return float(self._compute_c5_bound(final_h)), final_h\n\n    def run_optimization(self):\n        best_c5_bound = jnp.inf\n        best_h = None\n\n        print(f\"Running {self.hypers.num_restarts} restarts...\")\n        for restart in range(self.hypers.num_restarts):\n            seed = self.hypers.seed_start + restart\n            c5_bound, final_h = self._optimize_single_run(seed)\n            \n            if c5_bound < best_c5_bound:\n                best_c5_bound = c5_bound\n                best_h = final_h\n            \n            print(f\"Restart {seed}: c5_bound = {c5_bound:.8f}\")\n\n        print(f\"Optimization complete. Best C5 upper bound: {best_c5_bound:.8f}\")\n        return best_h, float(best_c5_bound)\n\n\ndef run():\n    hypers = Hyperparameters()\n    optimizer = ErdosOptimizer(hypers)\n    final_h_values, c5_bound = optimizer.run_optimization()\n\n    return final_h_values, c5_bound, hypers.num_intervals\n# EVOLVE-BLOCK-END",
+    "stop_reason": "completed",
+    "ledger": {
+      "max_evaluator_calls": 30,
+      "evaluator_calls": 23,
+      "max_probe_calls": 30,
+      "probe_calls": 0,
+      "edit_calls": 23,
+      "llm_input_tokens": 0,
+      "llm_output_tokens": 0,
+      "llm_calls": 48,
+      "sandbox_seconds": 790.6547613143921
+    },
+    "steps": [
+      {
+        "step": 0,
+        "kind": "seed",
+        "edit_mode": "seed",
+        "edit_note": "seed program",
+        "combined_score": 0.9998552102157963,
+        "validity": 1.0,
+        "error": null,
+        "wall_s": 118.4384286403656,
+        "is_new_best": true
+      },
+      {
+        "step": 1,
+        "kind": "full_rewrite",
+        "edit_mode": "full_rewrite",
+        "edit_note": "spliced new EVOLVE-BLOCK",
+        "combined_score": 0.0,
+        "validity": 0.0,
+        "error": "module 'candidate' has no attribute 'run'",
+        "wall_s": 1.316354751586914,
+        "is_new_best": false
+      },
+      {
+        "step": 2,
+        "kind": "full_rewrite",
+        "edit_mode": "full_rewrite",
+        "edit_note": "spliced new EVOLVE-BLOCK",
+        "combined_score": 0.0,
+        "validity": 0.0,
+        "error": "module 'candidate' has no attribute 'run'",
+        "wall_s": 1.2678124904632568,
+        "is_new_best": false
+      },
+      {
+        "step": 3,
+        "kind": "full_rewrite",
+        "edit_mode": "full_rewrite",
+        "edit_note": "spliced new EVOLVE-BLOCK",
+        "combined_score": 0.7570018979914037,
+        "validity": 1.0,
+        "error": null,
+        "wall_s": 2.4696836471557617,
+        "is_new_best": false
+      },
+      {
+        "step": 4,
+        "kind": "full_rewrite",
+        "edit_mode": "full_rewrite",
+        "edit_note": "spliced new EVOLVE-BLOCK",
+        "combined_score": 0.0,
+        "validity": 0.0,
+        "error": "not enough values to unpack (expected 6, got 3)",
+        "wall_s": 1.818324327468872,
+        "is_new_best": false
+      },
+      {
+        "step": 5,
+        "kind": "full_rewrite",
+        "edit_mode": "full_rewrite",
+        "edit_note": "spliced new EVOLVE-BLOCK",
+        "combined_score": 0.0,
+        "validity": 0.0,
+        "error": "not enough values to unpack (expected 6, got 3)",
+        "wall_s": 1.6666779518127441,
+        "is_new_best": false
+      },
+      {
+        "step": 6,
+        "kind": "full_rewrite",
+        "edit_mode": "full_rewrite",
+        "edit_note": "spliced new EVOLVE-BLOCK",
+        "combined_score": 0.0,
+        "validity": 0.0,
+        "error": "'float' object has no attribute 'shape'",
+        "wall_s": 2.120185613632202,
+        "is_new_best": false
+      },
+      {
+        "step": 7,
+        "kind": "full_rewrite",
+        "edit_mode": "full_rewrite",
+        "edit_note": "spliced new EVOLVE-BLOCK",
+        "combined_score": 0.0,
+        "validity": 0.0,
+        "error": "'float' object has no attribute 'shape'",
+        "wall_s": 2.122230291366577,
+        "is_new_best": false
+      },
+      {
+        "step": 8,
+        "kind": "full_rewrite",
+        "edit_mode": "full_rewrite",
+        "edit_note": "spliced new EVOLVE-BLOCK",
+        "combined_score": 0.0,
+        "validity": 0.0,
+        "error": "h(x) is not in [0, 1]. Range: [0.0, 1.9230769872665405]",
+        "wall_s": 2.120879650115967,
+        "is_new_best": false
+      },
+      {
+        "step": 9,
+        "kind": "full_rewrite",
+        "edit_mode": "full_rewrite",
+        "edit_note": "spliced new EVOLVE-BLOCK",
+        "combined_score": 0.0,
+        "validity": 0.0,
+        "error": "Integral of h is not close to 1. Got: 0.000000",
+        "wall_s": 1.8677270412445068,
+        "is_new_best": false
+      },
+      {
+        "step": 10,
+        "kind": "full_rewrite",
+        "edit_mode": "full_rewrite",
+        "edit_note": "spliced new EVOLVE-BLOCK",
+        "combined_score": 0.0,
+        "validity": 0.0,
+        "error": "name 'idx' is not defined",
+        "wall_s": 2.418365240097046,
+        "is_new_best": false
+      },
+      {
+        "step": 11,
+        "kind": "full_rewrite",
+        "edit_mode": "full_rewrite",
+        "edit_note": "spliced new EVOLVE-BLOCK",
+        "combined_score": 0.0,
+        "validity": 0.0,
+        "error": "Gradient only defined for scalar-output functions. Output was (JitTracer(float32[]), JitTracer(float32[])).",
+        "wall_s": 2.619842767715454,
+        "is_new_best": false
+      },
+      {
+        "step": 12,
+        "kind": "full_rewrite",
+        "edit_mode": "full_rewrite",
+        "edit_note": "spliced new EVOLVE-BLOCK",
+        "combined_score": 0.0,
+        "validity": 0.0,
+        "error": "module 'optax' has no attribute 'state'",
+        "wall_s": 2.5190608501434326,
+        "is_new_best": false
+      },
+      {
+        "step": 13,
+        "kind": "full_rewrite",
+        "edit_mode": "full_rewrite",
+        "edit_note": "spliced new EVOLVE-BLOCK",
+        "combined_score": 0.0,
+        "validity": 0.0,
+        "error": "Timeout after 210s",
+        "wall_s": 210.01661491394043,
+        "is_new_best": false
+      },
+      {
+        "step": 14,
+        "kind": "full_rewrite",
+        "edit_mode": "full_rewrite",
+        "edit_note": "spliced new EVOLVE-BLOCK",
+        "combined_score": 0.0,
+        "validity": 0.0,
+        "error": "DirectEvaluator.generate_and_evaluate.<locals>.<lambda>() takes 2 positional arguments but 6 were given",
+        "wall_s": 1.5673413276672363,
+        "is_new_best": false
+      },
+      {
+        "step": 15,
+        "kind": "full_rewrite",
+        "edit_mode": "full_rewrite",
+        "edit_note": "spliced new EVOLVE-BLOCK",
+        "combined_score": 0.0,
+        "validity": 0.0,
+        "error": "h(x) is not in [0, 1]. Range: [0.0, 5.000000476837158]",
+        "wall_s": 2.6181864738464355,
+        "is_new_best": false
+      },
+      {
+        "step": 16,
+        "kind": "full_rewrite",
+        "edit_mode": "full_rewrite",
+        "edit_note": "spliced new EVOLVE-BLOCK",
+        "combined_score": 0.0,
+        "validity": 0.0,
+        "error": "invalid syntax. Maybe you meant '==' or ':=' instead of '='? (candidate.py, line 97)",
+        "wall_s": 0.11492753028869629,
+        "is_new_best": false
+      },
+      {
+        "step": 17,
+        "kind": "full_rewrite",
+        "edit_mode": "full_rewrite",
+        "edit_note": "spliced new EVOLVE-BLOCK",
+        "combined_score": 0.7618460702169003,
+        "validity": 1.0,
+        "error": null,
+        "wall_s": 2.371558904647827,
+        "is_new_best": false
+      },
+      {
+        "step": 18,
+        "kind": "full_rewrite",
+        "edit_mode": "full_rewrite",
+        "edit_note": "spliced new EVOLVE-BLOCK",
+        "combined_score": 0.0,
+        "validity": 0.0,
+        "error": "Timeout after 210s",
+        "wall_s": 210.01426100730896,
+        "is_new_best": false
+      },
+      {
+        "step": 19,
+        "kind": "full_rewrite",
+        "edit_mode": "full_rewrite",
+        "edit_note": "spliced new EVOLVE-BLOCK",
+        "combined_score": 0.0,
+        "validity": 0.0,
+        "error": "The truth value of an array with more than one element is ambiguous. Use a.any() or a.all()",
+        "wall_s": 2.1170618534088135,
+        "is_new_best": false
+      },
+      {
+        "step": 20,
+        "kind": "full_rewrite",
+        "edit_mode": "full_rewrite",
+        "edit_note": "spliced new EVOLVE-BLOCK",
+        "combined_score": 0.7618460702169003,
+        "validity": 1.0,
+        "error": null,
+        "wall_s": 3.5198912620544434,
+        "is_new_best": false
+      },
+      {
+        "step": 21,
+        "kind": "full_rewrite",
+        "edit_mode": "full_rewrite",
+        "edit_note": "spliced new EVOLVE-BLOCK",
+        "combined_score": 0.0,
+        "validity": 0.0,
+        "error": "Timeout after 210s",
+        "wall_s": 210.01223731040955,
+        "is_new_best": false
+      },
+      {
+        "step": 22,
+        "kind": "full_rewrite",
+        "edit_mode": "full_rewrite",
+        "edit_note": "spliced new EVOLVE-BLOCK",
+        "combined_score": 0.0,
+        "validity": 0.0,
+        "error": "cannot unpack non-iterable int object",
+        "wall_s": 1.2666923999786377,
+        "is_new_best": false
+      },
+      {
+        "step": 23,
+        "kind": "full_rewrite",
+        "edit_mode": "full_rewrite",
+        "edit_note": "spliced new EVOLVE-BLOCK",
+        "combined_score": 0.7618460702169003,
+        "validity": 1.0,
+        "error": null,
+        "wall_s": 4.2704150676727295,
+        "is_new_best": false
+      }
+    ],
+    "error": null,
+    "mode": "agent",
+    "delta": 0.0,
+    "evaluations": 23
+  }
+]

@@ -1,0 +1,177 @@
+[
+  {
+    "task_id": "eft__math__second_autocorr_ineq",
+    "source": "eft",
+    "best_score": 0.7814796048020631,
+    "seed_score": 0.0,
+    "best_metrics": {
+      "c2": 0.7004244965505839,
+      "combined_score": 0.7814796048020631,
+      "loss": -0.7006580233573914,
+      "n_points": 600,
+      "eval_time": 1.267101526260376
+    },
+    "best_program": "# EVOLVE-BLOCK-START\nimport jax\nimport jax.numpy as jnp\nimport optax\nfrom dataclasses import dataclass\nfrom typing import Tuple\n\n\n@dataclass\nclass OptimizerHyperparameters:\n    \"\"\"Same structure as original baseline.\"\"\"\n    num_intervals: int = 600\n    learning_rate: float = 0.15\n    num_steps: int = 10000  # Reduced for faster testing\n    best_c2: float = 0.8962799441554086\n    stagnation_window: int = 100\n\n\ndef compute_c2_raw(f_vals):\n    \"\"\"Direct C2 computation returning a float.\"\"\"\n    f_clean = jnp.maximum(0.0, f_vals)\n    N = len(f_clean)\n    pad_len = 4 * N\n    padded = jnp.pad(f_clean, (0, pad_len))\n    fft_padded = jnp.fft.fft(padded)\n    convolution = jnp.fft.ifft(fft_padded * fft_padded).real\n    \n    # Compute L2 norm with trapezoidal rule\n    num_points = len(convolution)\n    h = 1.0 / (num_points)\n    y_points = jnp.concatenate([jnp.array([0.0]), convolution, jnp.array([0.0])])\n    y1, y2 = y_points[:-1], y_points[1:]\n    l2_squared = jnp.sum((h / 3) * (y1**2 + y1 * y2 + y2**2))\n    \n    norm_1 = jnp.sum(jnp.abs(convolution)) / (len(convolution) + 1)\n    norm_inf = jnp.max(jnp.abs(convolution))\n    denominator = norm_1 * norm_inf\n    \n    c2_result = l2_squared / denominator\n    return float(c2_result) if denominator > 1e-15 else 0.0\n\n\ndef create_optimized_pattern(n: int, pattern_type: str) -> jnp.ndarray:\n    \"\"\"Create initial functions of different architectural families.\"\"\"\n    f = jnp.zeros(n)\n    \n    if pattern_type == \"step_basic\":\n        # Refined baseline step pattern\n        left_edge = int(0.22 * n)\n        right_edge = int(0.68 * n)\n        center_start = int(0.35 * n)\n        center_end = int(0.65 * n)\n        \n        f = f.at[left_edge:center_start].set(1.50)\n        f = f.at[center_start:center_end].set(2.15)\n        f = f.at[center_end:right_edge].set(1.50)\n        f = f.at[:left_edge].set(0.90)\n        f = f.at[right_edge:].set(0.90)\n    \n    elif pattern_type == \"step_wider_peak\":\n        # Wider high-peak\n        mid_start = int(0.28 * n)\n        mid_end = int(0.72 * n)\n        f = f.at[:mid_start].set(1.0)\n        f = f.at[mid_start:mid_end].set(2.80)\n        f = f.at[mid_end:].set(1.0)\n    \n    elif pattern_type == \"step_multipeak\":\n        # Multiple peaks pattern\n        f = f.at[int(0.15*n):int(0.22*n)].set(1.10)\n        f = f.at[int(0.22*n):int(0.28*n)].set(2.70)\n        f = f.at[int(0.35*n):int(0.41*n)].set(2.70)\n        f = f.at[int(0.48*n):int(0.54*n)].set(2.70)\n        f = f.at[int(0.61*n):int(0.67*n)].set(2.70)\n        f = f.at[int(0.74*n):int(0.81*n)].set(2.70)\n        f = f.at[:int(0.15*n)].set(1.10)\n        for i in range(len(f)):\n            if 0 <= i < int(0.15*n) or int(0.28*n) <= i < int(0.35*n) or int(0.41*n) <= i < int(0.48*n):\n                f = f.at[i].set(1.10)\n    \n    return f\n\n\ndef run():\n    \"\"\"\n    Replicates baseline signature.\n    Returns: f_np_array, c2_float, negative_c2_float, n_points_int\n    \"\"\"\n    hypers = OptimizerHyperparameters()\n    n = hypers.num_intervals\n    \n    # Test all three pattern architectures\n    all_results = []\n    names = [\"step_basic\", \"step_wider_peak\", \"step_multipeak\"]\n    \n    for pat_name in names:\n        pattern = create_optimized_pattern(n, pat_name)\n        c2_val = compute_c2_raw(pattern)\n        f_np = jnp.array(pattern)\n        combined = c2_val / hypers.best_c2\n        all_results.append({\n            'name': pat_name,\n            'f': f_np,\n            'c2': c2_val,\n            'combined': combined\n        })\n        \n        print(f\"\\nArchitectures Tested in this program ({pat_name}):\")\n        print(f\"  - {pat_name}\")\n        print(f\"    C2={c2_val:.8f}\")\n        print(f\"    combined_score = {combined:.4f}\")\n    \n    # Find best pattern\n    best = max(all_results, key=lambda x: x['c2'])\n    \n    print(f\"\\n{'='*60}\")\n    print(f\"RESULT SUMMARY:\")\n    print(f\"{'='*60}\")\n    print(f\"Best Pattern: {best['name']}\")\n    print(f\"Best C2: {best['c2']:.8f}\")\n    print(f\"Best combined_score: {best['combined']:.4f}\")\n    \n    # Return tuple matching baseline signature\n    return (best['f'], best['c2'], -best['c2'], n)\n\n\nif __name__ == \"__main__\":\n    f_val, c2_val, loss_val, n_pts = run()\n    print(f\"\\nFinal Output:\")\n    print(f\"  Function shape: {f_val.shape}\")\n    print(f\"  C2: {c2_val:.6f}\")\n    print(f\"  Combined score vs baseline: {c2_val/0.8962799441554086:.4f}\")\n# EVOLVE-BLOCK-END",
+    "stop_reason": "completed",
+    "ledger": {
+      "max_evaluator_calls": 30,
+      "evaluator_calls": 12,
+      "max_probe_calls": 30,
+      "probe_calls": 0,
+      "edit_calls": 15,
+      "llm_input_tokens": 0,
+      "llm_output_tokens": 0,
+      "llm_calls": 29,
+      "sandbox_seconds": 374.80566143989563
+    },
+    "steps": [
+      {
+        "step": 0,
+        "kind": "seed",
+        "edit_mode": "seed",
+        "edit_note": "seed program",
+        "combined_score": 0.0,
+        "validity": 0.0,
+        "error": "Timeout after 330s",
+        "wall_s": 330.01304173469543,
+        "is_new_best": false
+      },
+      {
+        "step": 1,
+        "kind": "full_rewrite",
+        "edit_mode": "full_rewrite",
+        "edit_note": "spliced new EVOLVE-BLOCK",
+        "combined_score": 0.0,
+        "validity": 0.0,
+        "error": "unsupported operand type(s) for +: 'ArrayImpl' and 'tuple'",
+        "wall_s": 9.927953958511353,
+        "is_new_best": false
+      },
+      {
+        "step": 2,
+        "kind": "full_rewrite",
+        "edit_mode": "full_rewrite",
+        "edit_note": "spliced new EVOLVE-BLOCK",
+        "combined_score": 0.0,
+        "validity": 0.0,
+        "error": "module 'candidate' has no attribute 'run'",
+        "wall_s": 1.4666483402252197,
+        "is_new_best": false
+      },
+      {
+        "step": 3,
+        "kind": "full_rewrite",
+        "edit_mode": "full_rewrite",
+        "edit_note": "spliced new EVOLVE-BLOCK",
+        "combined_score": 0.0,
+        "validity": 0.0,
+        "error": "invalid syntax (candidate.py, line 40)",
+        "wall_s": 0.11867928504943848,
+        "is_new_best": false
+      },
+      {
+        "step": 4,
+        "kind": "full_rewrite",
+        "edit_mode": "full_rewrite",
+        "edit_note": "spliced new EVOLVE-BLOCK",
+        "combined_score": 0.0,
+        "validity": 0.0,
+        "error": "module 'candidate' has no attribute 'run'",
+        "wall_s": 1.31754732131958,
+        "is_new_best": false
+      },
+      {
+        "step": 5,
+        "kind": "full_rewrite",
+        "edit_mode": "full_rewrite",
+        "edit_note": "spliced new EVOLVE-BLOCK",
+        "combined_score": 0.0,
+        "validity": 0.0,
+        "error": "iteration over a 0-d array",
+        "wall_s": 3.019075393676758,
+        "is_new_best": false
+      },
+      {
+        "step": 6,
+        "kind": "full_rewrite",
+        "edit_mode": "full_rewrite",
+        "edit_note": "spliced new EVOLVE-BLOCK",
+        "combined_score": 0.0,
+        "validity": 0.0,
+        "error": "iteration over a 0-d array",
+        "wall_s": 2.9684858322143555,
+        "is_new_best": false
+      },
+      {
+        "step": 7,
+        "kind": "full_rewrite",
+        "edit_mode": "full_rewrite",
+        "edit_note": "spliced new EVOLVE-BLOCK",
+        "combined_score": 0.0,
+        "validity": 0.0,
+        "error": "iteration over a 0-d array",
+        "wall_s": 2.8195247650146484,
+        "is_new_best": false
+      },
+      {
+        "step": 8,
+        "kind": "full_rewrite",
+        "edit_mode": "full_rewrite",
+        "edit_note": "spliced new EVOLVE-BLOCK",
+        "combined_score": 0.0,
+        "validity": 0.0,
+        "error": "cannot unpack non-iterable float object",
+        "wall_s": 2.618352174758911,
+        "is_new_best": false
+      },
+      {
+        "step": 9,
+        "kind": "full_rewrite",
+        "edit_mode": "full_rewrite",
+        "edit_note": "spliced new EVOLVE-BLOCK",
+        "combined_score": 0.0,
+        "validity": 0.0,
+        "error": "name 'dataclass' is not defined",
+        "wall_s": 1.4667668342590332,
+        "is_new_best": false
+      },
+      {
+        "step": 10,
+        "kind": "full_rewrite",
+        "edit_mode": "full_rewrite",
+        "edit_note": "spliced new EVOLVE-BLOCK",
+        "combined_score": 0.0,
+        "validity": 0.0,
+        "error": "cannot unpack non-iterable float object",
+        "wall_s": 13.283390998840332,
+        "is_new_best": false
+      },
+      {
+        "step": 11,
+        "kind": "full_rewrite",
+        "edit_mode": "full_rewrite",
+        "edit_note": "spliced new EVOLVE-BLOCK",
+        "combined_score": 0.0,
+        "validity": 0.0,
+        "error": "list index out of range",
+        "wall_s": 2.918152332305908,
+        "is_new_best": false
+      },
+      {
+        "step": 12,
+        "kind": "full_rewrite",
+        "edit_mode": "full_rewrite",
+        "edit_note": "spliced new EVOLVE-BLOCK",
+        "combined_score": 0.7814796048020631,
+        "validity": 1.0,
+        "error": null,
+        "wall_s": 2.868042469024658,
+        "is_new_best": true
+      }
+    ],
+    "error": null,
+    "mode": "agent",
+    "delta": 0.7814796048020631,
+    "evaluations": 12
+  }
+]

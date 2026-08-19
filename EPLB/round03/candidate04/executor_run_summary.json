@@ -1,0 +1,277 @@
+[
+  {
+    "task_id": "adrs__eplb",
+    "source": "adrs",
+    "best_score": 0.12672312594873622,
+    "seed_score": 0.1267102474366009,
+    "best_metrics": {
+      "balancedness_score_gpu": 0.6651413239536415,
+      "balancedness_score_expert": 0.25059911075530844,
+      "times_algorithm": 0.33880632612007583,
+      "times_inference": 0.7024590282446959,
+      "speed_score": 0.002847141142163976,
+      "combined_score": 0.12672312594873622
+    },
+    "best_program": "# SPDX-License-Identifier: Apache-2.0\n\"\"\"\nExpert parallelism load balancer (EPLB) for vLLM.\n\nThis module implements the core rearrangement algorithm.\n\nThe rearrangement algorithm is adapted from\n[DeepSeek EPLB](https://github.com/deepseek-ai/eplb).\n\nPlease find at [#12](https://github.com/deepseek-ai/EPLB/issues/12) an example\non how the EPLB algorithm works.\n\"\"\"\n\n# EVOLVE-BLOCK-START\nimport torch\n\n\ndef balanced_packing(weight: torch.Tensor,\n                     num_packs: int) -> tuple[torch.Tensor, torch.Tensor]:\n    num_layers, num_groups = weight.shape\n    assert num_groups % num_packs == 0\n    groups_per_pack = num_groups // num_packs\n\n    if groups_per_pack == 1:\n        pack_index = torch.arange(num_groups, dtype=torch.int64, device=weight.device).expand(num_layers, -1)\n        rank_in_pack = torch.zeros_like(weight, dtype=torch.int64)\n        return pack_index, rank_in_pack\n\n    sorted_indices = []\n    for i in range(num_layers):\n        sidx = weight[i].float().sort(-1, descending=True).indices.cpu()\n        sorted_indices.append(sidx.tolist())\n\n    pack_index = torch.full((num_layers, num_groups), -1, dtype=torch.int64, device=weight.device)\n    rank_in_pack = torch.zeros_like(pack_index, dtype=torch.int64)\n\n    for i, indices in enumerate(sorted_indices):\n        pack_weights = [0.0] * num_packs\n        pack_items = [0] * num_packs\n        \n        for group in indices:\n            valid = [p for p in range(num_packs) if pack_items[p] < groups_per_pack]\n            if not valid:\n                continue\n            \n            min_items_val = min(pack_items[p] for p in valid)\n            min_item_packs = [p for p in valid if pack_items[p] == min_items_val]\n            \n            if len(min_item_packs) > 1:\n                best_pack = min(min_item_packs, key=lambda p: pack_weights[p])\n            else:\n                best_pack = min_item_packs[0]\n            \n            pack_index[i, group] = best_pack\n            rank_in_pack[i, group] = pack_items[best_pack]\n            pack_weights[best_pack] += weight[i, group]\n            pack_items[best_pack] += 1\n    \n    return pack_index, rank_in_pack\n\n\ndef replicate_experts(weight: torch.Tensor, num_phy: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:\n    n, num_log = weight.shape\n    num_redundant = num_phy - num_log\n    assert num_redundant >= 0\n    device = weight.device\n    phy2log = torch.arange(num_phy, dtype=torch.int64, device=device).repeat(n, 1)\n    rank = torch.zeros(n, num_phy, dtype=torch.int64, device=device)\n    logcnt = torch.ones(n, num_log, dtype=torch.int64, device=device)\n    arangen = torch.arange(n, dtype=torch.int64, device=device)\n    for i in range(num_log, num_phy):\n        redundant_indices = (weight / logcnt).max(dim=-1).indices\n        phy2log[:, i] = redundant_indices\n        rank[:, i] = logcnt[arangen, redundant_indices]\n        logcnt[arangen, redundant_indices] += 1\n    return phy2log, rank, logcnt\n\n\ndef rebalance_experts_hierarchical(weight: torch.Tensor, num_physical_experts: int, num_groups: int, num_nodes: int, num_gpus: int):\n    num_layers, num_logical_experts = weight.shape\n    assert num_logical_experts % num_groups == 0\n    group_size = num_logical_experts // num_groups\n    assert num_groups % num_nodes == 0\n    groups_per_node = num_groups // num_nodes\n    assert num_gpus % num_nodes == 0\n    assert num_physical_experts % num_gpus == 0\n    phy_experts_per_gpu = num_physical_experts // num_gpus\n\n    def inverse(perm: torch.Tensor) -> torch.Tensor:\n        inv = torch.empty_like(perm)\n        inv.scatter_(1, perm, torch.arange(perm.size(1), dtype=torch.int64, device=perm.device).expand(perm.shape))\n        return inv\n\n    tokens_per_group = weight.unflatten(-1, (num_groups, group_size)).sum(-1)\n    group_pack_index, group_rank_in_pack = balanced_packing(tokens_per_group, num_nodes)\n    \n    log2mlog = (((group_pack_index * groups_per_node + group_rank_in_pack) * group_size).unsqueeze(-1) +\n                torch.arange(group_size, dtype=torch.int64, device=group_pack_index.device)).flatten(-2)\n    mlog2log = inverse(log2mlog)\n\n    tokens_per_mlog = weight.gather(-1, mlog2log).view(-1, num_logical_experts // num_nodes)\n    phy2mlog, phyrank, mlogcnt = replicate_experts(tokens_per_mlog, num_physical_experts // num_nodes)\n\n    tokens_per_phy = (tokens_per_mlog / mlogcnt).gather(-1, phy2mlog)\n    pack_index, rank_in_pack = balanced_packing(tokens_per_phy, num_gpus // num_nodes)\n    \n    phy2pphy = pack_index * phy_experts_per_gpu + rank_in_pack\n    pphy2phy = inverse(phy2pphy)\n\n    pphy2mlog = phy2mlog.gather(-1, pphy2phy)\n    pphy2mlog = (pphy2mlog.view(num_layers, num_nodes, -1) + torch.arange(0, num_logical_experts, num_logical_experts // num_nodes, device=group_pack_index.device).view(1, -1, 1)).flatten(-2)\n    pphy2log = mlog2log.gather(-1, pphy2mlog)\n    pphyrank = phyrank.gather(-1, pphy2phy).view(num_layers, -1)\n    logcnt = mlogcnt.view(num_layers, -1).gather(-1, log2mlog)\n    return pphy2log, pphyrank, logcnt\n\n\ndef rebalance_experts(weight: torch.Tensor, num_replicas: int, num_groups: int, num_nodes: int, num_gpus: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:\n    num_layers, num_logical_experts = weight.shape\n    weight = weight.float().cpu()\n    if num_groups % num_nodes == 0:\n        phy2log, phyrank, logcnt = rebalance_experts_hierarchical(weight, num_replicas, num_groups, num_nodes, num_gpus)\n    else:\n        phy2log, phyrank, logcnt = rebalance_experts_hierarchical(weight, num_replicas, 1, 1, num_gpus)\n    num_redundant_experts = num_replicas - num_logical_experts\n    maxlogcnt = num_redundant_experts + 1\n    log2phy = torch.full((num_layers, num_logical_experts, maxlogcnt), -1, dtype=torch.int64, device=logcnt.device)\n    log2phy.view(num_layers, -1).scatter_(-1, phy2log * maxlogcnt + phyrank, torch.arange(num_replicas, dtype=torch.int64, device=log2phy.device).expand(num_layers, -1))\n    return phy2log, log2phy, logcnt\n# EVOLVE-BLOCK-END\n__all__ = [\"rebalance_experts\"]",
+    "stop_reason": "completed",
+    "ledger": {
+      "max_evaluator_calls": 20,
+      "evaluator_calls": 20,
+      "max_probe_calls": 30,
+      "probe_calls": 1,
+      "edit_calls": 22,
+      "llm_input_tokens": 0,
+      "llm_output_tokens": 0,
+      "llm_calls": 45,
+      "sandbox_seconds": 124.7906231880188
+    },
+    "steps": [
+      {
+        "step": 0,
+        "kind": "seed",
+        "edit_mode": "seed",
+        "edit_note": "seed program",
+        "combined_score": 0.1267102474366009,
+        "validity": 1.0,
+        "error": null,
+        "wall_s": 12.38701605796814,
+        "is_new_best": true
+      },
+      {
+        "step": 1,
+        "kind": "edit_eval",
+        "edit_mode": "edit_eval",
+        "edit_note": "",
+        "combined_score": 0.1265100820981824,
+        "validity": 1.0,
+        "error": null,
+        "wall_s": 13.087149620056152,
+        "is_new_best": false
+      },
+      {
+        "step": 2,
+        "kind": "probe",
+        "edit_mode": "probe",
+        "edit_note": "subsample=2000",
+        "combined_score": 0.12697396286975995,
+        "validity": 1.0,
+        "error": null,
+        "wall_s": 11.329851865768433,
+        "is_new_best": false
+      },
+      {
+        "step": 3,
+        "kind": "full_rewrite",
+        "edit_mode": "full_rewrite",
+        "edit_note": "spliced new EVOLVE-BLOCK",
+        "combined_score": 0.0,
+        "validity": 0.0,
+        "error": "too many values to unpack (expected 2)",
+        "wall_s": 4.022502899169922,
+        "is_new_best": false
+      },
+      {
+        "step": 4,
+        "kind": "full_rewrite",
+        "edit_mode": "full_rewrite",
+        "edit_note": "spliced new EVOLVE-BLOCK",
+        "combined_score": 0.0,
+        "validity": 0.0,
+        "error": "unexpected indent (candidate.py, line 17)",
+        "wall_s": 3.972529411315918,
+        "is_new_best": false
+      },
+      {
+        "step": 5,
+        "kind": "full_rewrite",
+        "edit_mode": "full_rewrite",
+        "edit_note": "spliced new EVOLVE-BLOCK",
+        "combined_score": 0.0,
+        "validity": 0.0,
+        "error": "too many values to unpack (expected 2)",
+        "wall_s": 4.0200724601745605,
+        "is_new_best": false
+      },
+      {
+        "step": 6,
+        "kind": "full_rewrite",
+        "edit_mode": "full_rewrite",
+        "edit_note": "spliced new EVOLVE-BLOCK",
+        "combined_score": 0.0,
+        "validity": 0.0,
+        "error": "unexpected indent (candidate.py, line 17)",
+        "wall_s": 3.9696571826934814,
+        "is_new_best": false
+      },
+      {
+        "step": 7,
+        "kind": "full_rewrite",
+        "edit_mode": "full_rewrite",
+        "edit_note": "spliced new EVOLVE-BLOCK",
+        "combined_score": 0.0,
+        "validity": 0.0,
+        "error": "name 'torch' is not defined",
+        "wall_s": 3.9191524982452393,
+        "is_new_best": false
+      },
+      {
+        "step": 8,
+        "kind": "full_rewrite",
+        "edit_mode": "full_rewrite",
+        "edit_note": "spliced new EVOLVE-BLOCK",
+        "combined_score": 0.0,
+        "validity": 0.0,
+        "error": "too many values to unpack (expected 2)",
+        "wall_s": 4.020156621932983,
+        "is_new_best": false
+      },
+      {
+        "step": 9,
+        "kind": "full_rewrite",
+        "edit_mode": "full_rewrite",
+        "edit_note": "spliced new EVOLVE-BLOCK",
+        "combined_score": 0.0,
+        "validity": 0.0,
+        "error": "name 'torch' is not defined",
+        "wall_s": 3.970654010772705,
+        "is_new_best": false
+      },
+      {
+        "step": 10,
+        "kind": "full_rewrite",
+        "edit_mode": "full_rewrite",
+        "edit_note": "spliced new EVOLVE-BLOCK",
+        "combined_score": 0.0,
+        "validity": 0.0,
+        "error": "name 'torch' is not defined",
+        "wall_s": 3.9702420234680176,
+        "is_new_best": false
+      },
+      {
+        "step": 11,
+        "kind": "full_rewrite",
+        "edit_mode": "full_rewrite",
+        "edit_note": "spliced new EVOLVE-BLOCK",
+        "combined_score": 0.0,
+        "validity": 0.0,
+        "error": "too many values to unpack (expected 2)",
+        "wall_s": 4.070030212402344,
+        "is_new_best": false
+      },
+      {
+        "step": 12,
+        "kind": "full_rewrite",
+        "edit_mode": "full_rewrite",
+        "edit_note": "spliced new EVOLVE-BLOCK",
+        "combined_score": 0.0,
+        "validity": 0.0,
+        "error": "name 'torch' is not defined",
+        "wall_s": 3.969691276550293,
+        "is_new_best": false
+      },
+      {
+        "step": 13,
+        "kind": "full_rewrite",
+        "edit_mode": "full_rewrite",
+        "edit_note": "spliced new EVOLVE-BLOCK",
+        "combined_score": 0.0,
+        "validity": 0.0,
+        "error": "too many values to unpack (expected 2)",
+        "wall_s": 3.969803810119629,
+        "is_new_best": false
+      },
+      {
+        "step": 14,
+        "kind": "full_rewrite",
+        "edit_mode": "full_rewrite",
+        "edit_note": "spliced new EVOLVE-BLOCK",
+        "combined_score": 0.0,
+        "validity": 0.0,
+        "error": "too many values to unpack (expected 2)",
+        "wall_s": 3.969487190246582,
+        "is_new_best": false
+      },
+      {
+        "step": 15,
+        "kind": "full_rewrite",
+        "edit_mode": "full_rewrite",
+        "edit_note": "spliced new EVOLVE-BLOCK",
+        "combined_score": 0.0,
+        "validity": 0.0,
+        "error": "unexpected indent (candidate.py, line 16)",
+        "wall_s": 4.151242256164551,
+        "is_new_best": false
+      },
+      {
+        "step": 16,
+        "kind": "full_rewrite",
+        "edit_mode": "full_rewrite",
+        "edit_note": "spliced new EVOLVE-BLOCK",
+        "combined_score": 0.1267190210031813,
+        "validity": 1.0,
+        "error": null,
+        "wall_s": 11.681925058364868,
+        "is_new_best": true
+      },
+      {
+        "step": 17,
+        "kind": "full_rewrite",
+        "edit_mode": "full_rewrite",
+        "edit_note": "spliced new EVOLVE-BLOCK",
+        "combined_score": 0.0,
+        "validity": 0.0,
+        "error": "name 'torch' is not defined",
+        "wall_s": 4.120230436325073,
+        "is_new_best": false
+      },
+      {
+        "step": 18,
+        "kind": "full_rewrite",
+        "edit_mode": "full_rewrite",
+        "edit_note": "spliced new EVOLVE-BLOCK",
+        "combined_score": 0.12672312594873622,
+        "validity": 1.0,
+        "error": null,
+        "wall_s": 11.680146932601929,
+        "is_new_best": true
+      },
+      {
+        "step": 19,
+        "kind": "full_rewrite",
+        "edit_mode": "full_rewrite",
+        "edit_note": "spliced new EVOLVE-BLOCK",
+        "combined_score": 0.0,
+        "validity": 0.0,
+        "error": "unexpected indent (candidate.py, line 16)",
+        "wall_s": 4.019452333450317,
+        "is_new_best": false
+      },
+      {
+        "step": 20,
+        "kind": "full_rewrite",
+        "edit_mode": "full_rewrite",
+        "edit_note": "spliced new EVOLVE-BLOCK",
+        "combined_score": 0.12672266498769588,
+        "validity": 1.0,
+        "error": null,
+        "wall_s": 11.684603214263916,
+        "is_new_best": false
+      },
+      {
+        "step": 21,
+        "kind": "full_rewrite",
+        "edit_mode": "full_rewrite",
+        "edit_note": "spliced new EVOLVE-BLOCK",
+        "combined_score": 0.0,
+        "validity": 0.0,
+        "error": "name 'torch' is not defined",
+        "wall_s": 4.134877681732178,
+        "is_new_best": false
+      }
+    ],
+    "error": null,
+    "mode": "agent",
+    "delta": 1.287851213532809e-05,
+    "evaluations": 20
+  }
+]

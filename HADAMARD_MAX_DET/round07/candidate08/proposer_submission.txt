@@ -1,0 +1,156 @@
+schema: h2spec/1.0
+system_prompt: |
+  OPTIMIZE: 29x29 +/-1 matrix to MAXIMIZE |det(H)|.
+
+  SEED SCORE: ~0.545 (local optimum, can be improved).
+
+  APPROACH: You have 20 evaluations. Each evaluation runs ONE search process that can take up to 350 seconds.
+
+  CRITICAL INSIGHT: The Paley construction creates ONE baseline matrix. The problem is ESCAPING the local optimum. Simulated Annealing alone gets stuck.
+
+  BETTER STRATEGY: Use MULTIPLE INDEPENDENT SEARCH ROUNDS per evaluation:
+    - Round 1: Run 200 SA instances with different seeds (restarts) to escape local optima
+    - Round 2: From top 5 best from Round 1, do 2000 iterations each with aggressive mutations
+    - Round 3: Take best result, try 500 perturbed variants (flip 1-5 random cells each)
+
+  WHY THIS WORKS:
+    - Multiple restarts = escape deeper local optima
+    - Aggressive mutations = explore nearby combinatorial space
+    - Perturb-and-search = fine-tune promising candidates
+
+  SEARCH PARAMETERS (start with these, iterate):
+    - SA iterations per run: 2000-5000 (fewer restarts, more diversity)
+    - Number of restarts: 100-200 (get wide coverage)
+    - Top-k to refine: 5-10
+    - Perturbation size: flip 1-3 cells at a time
+    - Temperature: Start high (T=10) for exploration, cool to T=0.1
+    - Cooling rate: 0.995-0.998
+
+  DO NOT: Just sweep SA parameters (iters, T, cool_rate) on a single fixed strategy.
+  DO: Run diverse search strategies internally to explore combinatorial space.
+
+  OUTPUT: Return the matrix with highest |det| found across all search rounds.
+  EVALUATOR: Takes ~20-40 seconds per evaluation with this approach.
+  BUDGET: 20 evaluations total.
+skill_description: |
+  29x29 Hadamard optimizer: Run multi-round internal search (restarts + refinement + perturbation) to escape local optima. Use numpy det for search.
+skill_body: |
+  # 29x29 Hadamard Optimization - Multi-Round Search Strategy
+
+  ## Task
+  Maximize |det(H)| for 29x29 +/-1 matrix.
+  Seed score: ~0.545 (local optimum)
+  Goal: Escape local optima using diverse search.
+
+  ## Why Simple SA Fails
+  - Single SA run gets stuck in deep local optima
+  - 500 random restarts with 15k iters each is not enough diversity
+  - Need to explore COMBINATORIAL SPACE systematically
+
+  ## Multi-Round Search Strategy (per evaluation)
+
+  ### Round 1: Wide Exploration (Diversity)
+  - Seed: Paley construction (baseline)
+  - Restart: 100-150 independent SA instances
+  - Each: 2000 iterations, T=10.0, cool=0.995
+  - Seed each instance differently (e.g., seed=0 to 149)
+  - Collect top 5 best determinants
+  - Rationale: Wide coverage to escape local optima
+
+  ### Round 2: Intensive Refinement
+  - Take top 5 from Round 1
+  - For each: 5000 iterations with aggressive mutations
+  - Temperature: Start T=20.0, cool to T=0.01
+  - Flip 1-2 cells at a time
+  - Track individual best for each starting point
+  - Rationale: Deep search around promising regions
+
+  ### Round 3: Perturbation Search (Fine-tuning)
+  - Take best from Round 2
+  - Generate 500 variants: each flips 1-3 random cells
+  - For each variant: 500 iterations of SA
+  - Collect top 3
+  - Rationale: Fine-tune by exploring nearby matrices
+
+  ## Search Parameters (start here, iterate based on results)
+  - Base iterations: 2000 (per restart)
+  - Total restarts: 150 (gives 300k flips, ~5-10s with numpy)
+  - Refinement iterations: 5000 (per candidate)
+  - Perturbation size: 1-3 cells
+  - Temperature schedule: High start (10-20) for exploration, steep cool
+  - Cooling: 0.995 (balanced)
+
+  ## Determinant Strategy
+  - ALWAYS use numpy.linalg.det (fast, ~0.001s per 29x29)
+  - NO Bareiss during search (slow, causes timeout)
+  - Bareiss only if called by evaluator for final score
+
+  ## Tool Usage
+  1. edit_solution: Provide FULL working code implementing all 3 rounds
+  2. probe_solution: Test with fewer restarts (50) to verify structure works
+  3. evaluate_solution: Run full search with optimal parameters
+
+  ## Critical Rules
+  - PALEY BASE: Quadratic residues {0,1,4,5,6,7,9,13,16,20,22,23,24,25,28} must be used as starting point
+  - NUMPY DET ONLY: Never use Bareiss during search phase
+  - MULTIPLE ROUNDS: Must implement 3 distinct search phases
+  - DIVERSITY: Each round should explore different parts of search space
+  - TIME BUDGET: Total < 350s per evaluation (typically 20-40s with this approach)
+  - EVAL BUDGET: 20 evaluations total
+
+  ## Expected Outcome
+  This multi-round strategy should find determinants 10-20% higher than seed. By exploring via:
+  1. 150 restarts (escape local optima)
+  2. 5 refinement searches (deep dive)
+  3. 500 perturbations (fine-tuning)
+
+  Total: ~700k+ flips, well under 350s with numpy det.
+tool_descriptions:
+  edit_solution: |
+    Replace EVOLVE-BLOCK with COMPLETE working code implementing MULTI-ROUND SEARCH:
+
+    Phase 1: Paley + 150 SA restarts (2000 iters each, T=10, cool=0.995)
+    Phase 2: Top-5 refinement (5000 iters each, T=20->0.01, flip 1-2 cells)
+    Phase 3: Best + 500 perturbations (flip 1-3 cells, 500 iters each)
+
+    Track BEST determinant across all phases. Return that matrix.
+
+    Structure:
+    - construct_hadamard_matrix(n=29)
+    - Phase 1: Generate 150 SA runs, collect top 5
+    - Phase 2: Refine top 5, collect best
+    - Phase 3: Perturb best 1000 times, return best
+    - Use numpy.linalg.det for ALL det calculations
+  evaluate_solution: |
+    Run your multi-round search code. Returns combined_score.
+    Budget: 20 evaluations total.
+    Expected time: 20-40 seconds per evaluation (well under 350s).
+    Use probe_solution FIRST to test structure, then evaluate winner.
+  probe_solution: |
+    Quick test with REDUCED rounds: 50 restarts, no refinement phase.
+    Use this to verify your multi-round structure works (1-2 seconds).
+    Test: 50 restarts, 2000 iters, T=10, collect top 3, return best.
+  finish: |
+    End session. Call when you have searched extensively or found clear optimum.
+sampling:
+  temperature: 1.2
+top_k: 20
+max_tokens: 14336
+agent:
+  max_iterations: 50
+middleware:
+  budget_reminder_from_left: 1
+  long_tool_output_max_chars: 12000
+new_middlewares:
+  - name: enforce_multi_round
+    hook: before_model
+    description: Enforce multi-round search structure is implemented, not single-SA
+    implementation_py: |
+      def before_model(hook_input):
+          code = hook_input.get('code', '')
+          # Must have multiple restarts or phases
+          if 'restart' not in code.lower() and 'phase' not in code.lower() and 'round' not in code.lower():
+              return "WARNING: Must implement MULTI-ROUND search: multiple restarts/phases to escape local optima"
+          if 'bareiss' in code.lower() and 'numpy' not in code.lower():
+              return "CRITICAL: Bareiss during search will timeout. Use numpy.linalg.det."
+          return None

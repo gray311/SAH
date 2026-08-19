@@ -1,0 +1,188 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are an expert algorithm designer optimizing a program to MAXIMIZE |det(H)| for a 29×29 Hadamard-like matrix (entries ±1).
+  
+  The code has an EVOLVE-BLOCK between markers. Keep the fixed entry function and imports outside it.
+  
+  **Task-specific strategy for Hadamard maximization:**
+  1. The seed uses quadratic residue initialization + hill climbing. This often finds local optima quickly.
+  2. **BRANCH INTO MULTIPLE STRATEGIES**: Try at least 3 different initialization methods with short searches:
+     - Random initialization + annealing
+     - Heuristic constructions (e.g., Paley, tensor products, cyclic shifts)
+     - Row/column permutations of known good structures
+  3. **STRUCTURED MUTATIONS**: After finding a candidate, apply targeted edits:
+     - Flip small patterns (2x2 blocks)
+     - Swap entire rows/columns to preserve structure
+     - Try local search with different flip probabilities
+  4. **INTERNAL DIVERSITY**: Use multiple independent searches with different seeds/parameters per evaluation, or run brief searches in parallel within the time limit.
+  5. **CONSTRAINTS**: n=29 (no Hadamard exists, so we maximize approximation). Entries must be exactly ±1. Maximize |determinant|.
+  
+  Method per turn:
+  1. Call `edit_solution` with one concrete change: try a new initialization, add a mutation strategy, or restructure the search loop.
+  2. Call `evaluate_solution` to score. Track best score found.
+  3. If score worsened, diagnose the change and try a different approach (different init, different mutation, different search params).
+  4. When low on budget, consolidate around the best-performing variant.
+  5. Call `finish` when done.
+  
+  **Critical**: Never repeat the same code. Each evaluation must test a genuinely different strategy. The time limit is 350s per eval — keep internal searches well within this (e.g., run 3-5 short searches of 500-1000 iters each).
+  
+  Use the `probe_solution` tool if available to quickly rank variants before full evaluation when optimizing many parameters.
+tool_descriptions:
+  edit_solution: |
+    Change the EVOLVE-BLOCK region. Preferred format: targeted SEARCH/REPLACE diffs matching the current code exactly.
+    For Hadamard tasks, consider editing: initialization logic, search loop parameters, mutation operators, or adding multiple search strategies.
+    Preserve the entry function signature and imports outside the block.
+  evaluate_solution: |
+    Run the program and return combined_score (higher=|det|), validity, error, best_so_far, evals_left.
+    For Hadamard matrices, score is the determinant magnitude. Budget is 20 evals — each must test a different strategic idea.
+  probe_solution: |
+    Cheap approximate score on subsampled data. Does NOT consume evaluation budget but returns approximate scores.
+    For Hadamard tasks with slow determinants, use probes to compare variants before committing to full evaluation.
+    Note: probe scores are NOT comparable to full evaluate scores.
+  finish: |
+    End session when budget exhausted or no improvement possible. Best program submitted automatically.
+sampling:
+  temperature: 1.0
+  top_p: 0.9
+  top_k: 30
+  max_tokens: 12288
+agent:
+  max_iterations: 50
+middleware:
+  budget_reminder_from_left: 2
+  long_tool_output_max_chars: 10000
+skill_description: |
+  Optimize Hadamard matrix construction by trying multiple initialization strategies, structured mutations, and parallel short searches within time limits. Each eval should test a genuinely different approach.
+skill_body: |
+  # Hadamard Matrix Determination Maximization
+  
+  **Goal**: Maximize |det(H)| for a 29×29 matrix with entries ±1. No perfect Hadamard exists for n=29, so we approximate.
+  
+  **Why seed fails**: Quadratic residue + single hill climb gets stuck in local optima quickly.
+  
+  **Strategy**: Multi-strategy exploration
+  - Try RANDOM initialization + annealing
+  - Try PALEY construction (n ≡ 3 mod 4) if applicable
+  - Try CSHIFT/PERMUTATION of base matrices
+  - Try TENSOR or BLOCK constructions
+  
+  **Per-evaluation plan**:
+  1. Pick ONE strategy to fully implement (not just add code)
+  2. Run 3-5 independent searches with different seeds/params (total <350s)
+  3. Return best result
+  4. If score improved, try a related variant (different params)
+  5. If score worsened, switch to a completely different strategy
+  
+  **Mutation ideas for post-construction improvement**:
+  - 2x2 block flips (preserves ±1 constraint, can change det)
+  - Row/column swaps (test many small perms)
+  - Local search: flip one entry, accept if improves, limited iterations
+  
+  **Time budget discipline**:
+  - Single 2000-iter search might hit 350s timeout
+  - Better: 3x 600-iter searches with different seeds
+  - Better still: interleaved parallel searches
+  
+  **Key insight**: Diversity of initialization + structured search beats refined single-path search.
+  **Validation**: Check returned matrix has exactly ±1 entries, is 29×29. Score = |det|.
+new_tools:
+  - name: suggest_mutations
+    description: |
+      Analyze a matrix and suggest targeted mutation strategies. Returns mutation ideas ranked by expected determinant impact (e.g., 2x2 flips, row swaps, local annealing). Call this before applying mutations to save evaluation budget.
+    input_schema:
+      type: object
+      properties:
+        matrix:
+          type: array
+          description: The current matrix as list of rows
+    implementation_py: |
+      def run(ctx, args):
+          import random
+          matrix = args.get('matrix')
+          if not matrix or len(matrix) != 29:
+              return {"note": "Matrix must be 29x29", "suggestions": []}
+          n = len(matrix)
+          suggestions = []
+          det_patterns = set()
+          for i in range(n):
+              row = matrix[i]
+              if row == [1]*n: det_patterns.add("all_ones")
+              if row == [-1]*n: det_patterns.add("all_neg")
+              if row == [1]*n and matrix[0] == row: det_patterns.add("dup_row")
+          if "dup_row" in det_patterns:
+              suggestions.append({"type": "remove_duplicate", "priority": 1.0, "desc": "Remove duplicate rows to restore rank"})
+          suggestions.append({"type": "flip_2x2", "priority": 0.8, "desc": "Flip 2x2 blocks: for positions (i,j),(i+1,j+1) flip signs", "note": "Try all overlapping 2x2 blocks"})
+          suggestions.append({"type": "permute_rows", "priority": 0.7, "desc": "Try swapping rows to improve structure", "note": "Start with adjacent swaps"})
+          suggestions.append({"type": "local_annealing", "priority": 0.6, "desc": "Run local search: flip one entry, accept if improves det", "note": "Run with temp=1.0 for exploration"})
+          return {"analysis": f"Detected patterns: {det_patterns}", "suggestions": suggestions, "recommended_first": suggestions[0]["type"] if suggestions else None}
+new_skills:
+  - name: hadamard-optimization-playbook
+    description: |
+      Playbook for maximizing Hadamard matrix determinants. Focus on multi-strategy exploration: try diverse initializations, use structured mutations, run parallel short searches, and avoid local optima by resetting with new seeds.
+    body: |
+      # Hadamard Determinant Maximization Playbook
+      
+      ## Core Principle: Diversity Over Refinement
+      
+      The seed uses quadratic residues + hill climbing, which finds local optima quickly. For n=29 (no perfect Hadamard), we need **exploration diversity**.
+      
+      ## Strategy 1: Multiple Initializations
+      
+      Per evaluation, run 3-5 independent searches with:
+      - **Random init** + annealing (temp0=0.8, 500 iters, seed=random)
+      - **Paley-like** (if n≡3 mod 4: use quadratic residues mod n)
+      - **Cyclic shift** of random rows
+      - **Tensor product** starting point (smaller Hadamard tensor)
+      - **Block construction** (divide into submatrices, optimize separately)
+      
+      Return the BEST result across all searches.
+      
+      ## Strategy 2: Post-Construction Improvement
+      
+      After finding a candidate matrix, apply targeted mutations:
+      
+      **2x2 Block Flips**:
+      For each top-left corner (i,j), flip the 2x2 block:
+      ```
+      A[i][j]  A[i][j+1]  ->  -A[i][j]  -A[i][j+1]
+      A[i+1][j] A[i+1][j+1]  -A[i+1][j] -A[i+1][j+1]
+      ```
+      Accept only if |det| increases.
+      
+      **Row/Column Swaps**: Try swapping adjacent rows/cols (O(n) per swap). Accept if improves.
+      
+      **Local Annealing**: Flip one entry at a time, accept with probability exp((new-old)/T). Run 500-1000 iters.
+      
+      ## Time Budget Discipline (350s per eval)
+      
+      ❌ DON'T: One 2000-iter search (may timeout)
+      ✅ DO: Three 600-iter searches in parallel with different seeds
+      ✅ DO: Two 800-iter + one 400-iter searches
+      
+      Use `import time; elapsed = time.time() - start; max_iter = int(250 / (elapsed * n**2))` to compute safe iteration counts.
+      
+      ## When to Reset
+      
+      If best score hasn't improved in 3 consecutive evaluations, restart with a **completely different** strategy (new init method, new search type).
+      
+      ## Edge Cases
+      
+      - n=29: No perfect Hadamard exists. Max achievable |det| is likely 2^27 ≈ 1.34e8
+      - If |det| < 10^7, the matrix is likely nearly singular — try breaking duplicate rows
+      - If all entries on diagonals are same, perturb them randomly
+      
+      ## Key Heuristics
+      
+      1. **Early diversity**: Try multiple init methods before refining any one
+      2. **Short parallel searches**: Better than one long search
+      3. **Structure-aware mutations**: 2x2 flips > random flips
+      4. **Timeout-safe loops**: Compute max iterations dynamically
+      5. **Persistent best**: Keep and reuse the highest-scoring matrix across evaluations
+new_middlewares:
+  - name: diversity_reminder
+    hook: before_model
+    description: |
+      Prompt the solver to ensure it's trying diverse strategies, not refining the same approach repeatedly.
+    implementation_py: |
+      def before_model(hook_input):
+          return "Ensure each edit tests a DIFFERENT strategy (new init, new mutation, new search params). Don't just tweak the same approach."

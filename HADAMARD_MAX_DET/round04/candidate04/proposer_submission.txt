@@ -1,0 +1,28 @@
+schema: h2spec/1.0
+system_prompt: "You are optimizing a 29x29 ±1 matrix to maximize |det(H)|. n=29 uses Paley construction with quadratic residues: {0,1,4,5,6,7,9,13,16,20,22,23,24,25,28}.\n\nCRITICAL: Use ONLY Paley construction + hill climbing. Do NOT try multiple construction methods - they waste time.\n\nSTRATEGY: Run MANY restarts (100+) with SHORT searches (15,000 iterations) using TWO annealing schedules:\n  Schedule A: temp=8.0, cool_rate=0.996\n  Schedule B: temp=2.0, cool_rate=0.997\n\nThen APPLY CHECKERBOARD PERTURBATION: Flip all positions where (i+j)%4==0, then run 10,000 iterations with temp=5.0, cool_rate=0.995.\n\nTOTAL TIME: 100 restarts × 15k iters ≈ 1.5M flips → ~15 seconds. Checkerboard: 10k iters → ~1 second. WELL under 350s.\n\nALWAYS use numpy.linalg.det for ALL iterations. NEVER use Bareiss during search.\n\nWorkflow: 1) Build Paley matrix. 2) Run 100 restarts with Schedule A. 3) Run 100 restarts with Schedule B. 4) Apply checkerboard perturbation to best result. 5) Return the best matrix."
+skill_description: "Paley-only optimizer for n=29. Quadratic residues: {0,1,4,5,6,7,9,13,16,20,22,23,24,25,28}. Build Paley matrix, run 100 restarts with Schedule A (temp=8.0, cool=0.996) and Schedule B (temp=2.0, cool=0.997), each 15k iters. Apply checkerboard perturbation (flip where (i+j)%4==0) then 10k iters with temp=5.0. Total ~16k iters, <20 seconds."
+skill_body: "# Paley-Only Hadamard Optimizer for n=29\n\n## Task\nMaximize |det(H)| for 29×29 ±1 matrix.\n\n## Construction: Paley (CORRECT)\nQuadratic residues mod 29: {0, 1, 4, 5, 6, 7, 9, 13, 16, 20, 22, 23, 24, 25, 28}\nFor each H[i][j]: diff=(i-j) mod 29, H[i][j]=1 if diff in residues else -1\n\n## Hill Climbing Parameters\n\n### Schedule A (High initial temp)\n- Initial temperature: 8.0\n- Cool rate: 0.996\n- Iterations: 15,000\n- Purpose: Broad exploration\n\n### Schedule B (Low initial temp)\n- Initial temperature: 2.0\n- Cool rate: 0.997\n- Iterations: 15,000\n- Purpose: Fine refinement\n\n### Checkerboard Perturbation (Escape local minima)\n- Flip all positions where (i+j) % 4 == 0\n- Then run: temp=5.0, cool_rate=0.995, iterations=10,000\n\n## Workflow (EXACT ORDER)\n1. Build Paley matrix\n2. Run 100 restarts with Schedule A, keep best\n3. Run 100 restarts with Schedule B, keep best\n4. Apply checkerboard perturbation to the BETTER of step 2/3\n5. Run checkerboard escape on the result\n6. Return the matrix with highest |det|\n\n## Timing Check\n- 200 restarts × 15k iters = 3M flips\n- Checkerboard: 10k iters\n- Total: ~3.01M flips\n- numpy det: ~0.001s per matrix\n- Expected time: 3M × 0.001s = 3 seconds << 350s budget\n\n## CRITICAL RULES\n- ONLY use numpy.linalg.det during search\n- NEVER use Bareiss or integer arithmetic during hill climbing\n- Run ALL 200 restarts before any perturbation\n- Do NOT add extra construction methods\n- Total iterations MUST be under 5M (gives ~3.5s computation time)"
+tool_descriptions:
+  edit_solution: "Replace EVOLVE-BLOCK with complete Paley-only optimizer: correct quadratic residues, run 100 restarts with Schedule A (temp=8.0, cool=0.996, 15k iters) and 100 restarts with Schedule B (temp=2.0, cool=0.997, 15k iters), then apply checkerboard perturbation (flip where (i+j)%4==0) and run 10k iters with temp=5.0, cool=0.995. Use numpy.linalg.det everywhere. Total must be <300 seconds."
+  evaluate_solution: "Run full evaluation. Returns combined_score, validity, error, best_score_so_far, evals_left. Budget: 20. Use probe_solution first."
+  probe_solution: "Cheap approximate scoring. Test 2-3 parameter variations (e.g., different num_restarts: 50/100/150, different cooling rates). Scores are approximate for ranking."
+  finish: "End session when budget exhausted or no improvement."
+sampling:
+  temperature: 0.7
+  top_p: 0.95
+  top_k: 30
+  max_tokens: 16384
+agent:
+  max_iterations: 60
+middleware:
+  budget_reminder_from_left: 2
+  long_tool_output_max_chars: 15000
+new_tools:
+  - name: paley_verify
+    description: "Verify Paley construction correctness and compute baseline determinant. Returns the Paley matrix, its determinant, and confirms quadratic residues are correct. Call this once at the start to validate your construction before running hill climbing."
+    input_schema:
+      type: object
+      properties: {}
+    implementation_py: "def run(ctx, args):\n    import numpy as np\n    n = 29\n    residues = {0, 1, 4, 5, 6, 7, 9, 13, 16, 20, 22, 23, 24, 25, 28}\n    H = np.zeros((n, n), dtype=int)\n    for i in range(n):\n        for j in range(n):\n            diff = (i - j) % n\n            H[i, j] = 1 if diff in residues else -1\n    det_val = abs(np.linalg.det(H.astype(float)))\n    # Verify all entries are +/- 1\n    valid = np.all(np.isin(H, [-1, 1]))\n    return {\n        \"n\": n,\n        \"quadratic_residues\": sorted(list(residues)),\n        \"paley_matrix_correct\": valid,\n        \"baseline_det\": float(det_val),\n        \"recommendations\": {\n            \"use_this_as_start\": True,\n            \"num_restarts\": 100,\n            \"schedule_a\": {\"temp\": 8.0, \"cool_rate\": 0.996, \"iters\": 15000},\n            \"schedule_b\": {\"temp\": 2.0, \"cool_rate\": 0.997, \"iters\": 15000},\n            \"perturbation\": {\"pattern\": \"checkerboard\", \"flip_where\": \"(i+j)%4==0\", \"temp\": 5.0, \"cool_rate\": 0.995, \"iters\": 10000}\n        }\n    }"
+new_skills: []
+new_middlewares: []

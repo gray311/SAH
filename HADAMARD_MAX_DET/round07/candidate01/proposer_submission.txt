@@ -1,0 +1,388 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are optimizing a 29x29 ±1 matrix to maximize |det(H)|.
+  
+  CRITICAL INSIGHT: The seed uses Paley construction with SA tuning, but this traps you in a local optimum.
+  Your goal is to ESCAPE by trying DIFFERENT matrix construction strategies, not just tuning SA parameters.
+  
+  STRATEGY: Run a "construction competition" where you try 3-5 DIFFERENT matrix generators in parallel:
+  1. Paley construction (as seed) - Quadratic residues mod 29
+  2. Random ±1 matrix with SA refinement
+  3. Low-discrepancy sequence based (Sobol/Halton) initialization
+  4. Block-diagonal / structured patterns
+  5. Perturbed versions of your best results
+  
+  For EACH construction method:
+  - Run 50-100 seeds with 5k-10k iterations (NOT 15k-50k with 500 seeds!)
+  - Use numpy.linalg.det for ALL determinant calculations
+  - Track the best matrix from each method
+  
+  CRITICAL: Keep TOTAL time per evaluation UNDER 180 seconds. With 20 evaluation budget, you cannot afford:
+  - 500 seeds × 20k iterations per evaluation
+  - Bareiss determinant during search
+  
+  Use the new generate_variants tool to create diverse starting matrices, then refine with SA.
+  
+  VARIATIONS TO EXPLORE:
+  - Different initialization methods (random, structured, Paley, Lattice)
+  - Different SA parameters (T, cool_rate, iterations per seed)
+  - Different seed counts (5-50, not 500)
+  - Perturb your best matrix from eval 1 to use as seed for eval 2
+  
+  RETURNS: The matrix with highest |det(H)| found across ALL construction methods and refinements.
+skill_description: |
+  Hadamard 29x29 optimizer. Escape local optima by trying 3-5 different matrix constructions in parallel (Paley, random, low-discrepancy, structured). Use 50-100 seeds with 5k-10k iters each. numpy.linalg.det only. Call generate_variants for diverse starts. Time per eval: <180s.
+skill_body: |
+  # Hadamard Matrix Optimization - Construction Competition Strategy
+  
+  ## WHY STANDARD SA PARAMETER SWEEPING FAILS
+  The seed's Paley construction + SA at 500 seeds/15k iters finds a local optimum at det≈0.545.
+  Parameter tuning alone cannot escape this. You MUST try DIFFERENT construction methods.
+  
+  ## PARALLEL CONSTRUCTION COMPETITION (4-5 methods per evaluation)
+  
+  ### Method A: Paley Construction (quadratic residues mod 29)
+  Residues: {0,1,4,5,6,7,9,13,16,20,22,23,24,25,28}
+  H[i][j] = 1 if (i-j)%29 in residues else -1
+  
+  ### Method B: Random ±1 Matrix
+  Initialize with random entries, then refine with SA (10-50 seeds, 5k iters)
+  
+  ### Method C: Low-Discrepancy (Sobol-like) Initialization
+  Use Thue-Morse or Gray code patterns to create balanced ±1 matrix
+  (approximate: rows alternate patterns to reduce row correlation)
+  
+  ### Method D: Structured Block Construction
+  Build from smaller blocks with specific patterns
+  
+  ### Method E: Perturbation Search
+  Start from your BEST matrix found so far, flip entries randomly (5-10 seeds, 5k iters)
+  
+  ## SA Parameter Guidelines
+  - Iterations per seed: 5,000-10,000 (NOT 15k-50k!)
+  - Number of seeds: 5-50 (NOT 500!)
+  - Starting temperature: 2.0-8.0
+  - Cooling rate: 0.993-0.998
+  
+  ## Determinant Strategy
+  - ALWAYS use numpy.linalg.det for search (fast, ~0.001s per matrix)
+  - NEVER use Bareiss during hill climbing (causes timeout)
+  - Track best |det| across ALL methods and seeds
+  
+  ## Workflow
+  1. Call generate_variants() to get 4-5 diverse starting matrices
+  2. For each variant: run 10-30 seeds with 5k-10k SA iterations
+  3. Track best matrix from each method
+  4. Use perturbation method E to refine your overall best
+  5. Call evaluate_solution with the globally best matrix
+  6. For subsequent evaluations: perturb your best and try new construction
+  
+  ## Budget Management
+  - Total flips across all methods: ≤ 500,000 (50 seeds × 10k iters × 5 methods)
+  - Expected time: ≤ 150 seconds with numpy.linalg.det
+  - NEVER exceed 180 seconds
+  
+  ## Expected Outcome
+  By exploring multiple construction strategies, you should find matrices with |det| significantly better than the Paley local optimum. Look for 20-50% improvement (score 0.7-0.8+).
+tool_descriptions:
+  edit_solution: 'Replace EVOLVE-BLOCK with COMPLETE working code:
+  
+  1. Call generate_variants() to get diverse starting matrices
+  2. Implement 4-5 construction methods (Paley, random, Thue-Morse, structured, perturbation)
+  3. For each variant: run 10-30 seeds with 5k-10k SA iterations
+  4. Use numpy.linalg.det for ALL determinant calculations
+  5. Track best |det| across all methods
+  6. Return the globally best matrix
+  
+  TOTAL flips: ≤ 500,000. Expected time: <180s. NO Bareiss in search.'
+  evaluate_solution: 'Run your code and return combined_score. Budget: 20 evals total.
+  
+  Each call takes ~60-120 seconds (5 methods × 10-30 seeds × 5k-10k iters × numpy det).
+  
+  Strategy: eval 1-5 try different construction combinations, eval 6-10 refine winners, eval 11-15 perturb best results, eval 16-20 combine all strategies.'
+  probe_solution: 'Cheap approximate scoring on subsampled data (~10s, separate 30-probe budget).
+  
+  Use this to test 2-3 construction method variations BEFORE full evaluation.
+  
+  Test:
+  - Different initialization: Paley, random, Thue-Morse, lattice-based
+  - Different SA params: T=2-8, cool=0.993-0.998, iters=5k-10k
+  - Different seed counts: 5, 10, 20, 30
+  
+  Run each with 1k-2k iterations per seed (fast), pick best for full eval.'
+  finish: End session. Call when eval budget exhausted (20 evals) or you find a clear optimum with significant improvement over seed.
+sampling:
+  temperature: 1.2
+  top_p: 0.9
+  top_k: 30
+  max_tokens: 14336
+agent:
+  max_iterations: 60
+middleware:
+  budget_reminder_from_left: 2
+  long_tool_output_max_chars: 15000
+new_tools:
+- name: generate_variants
+  description: |
+    Generate 4-5 diverse starting matrices using DIFFERENT construction heuristics.
+    This gives you actual NEW search starting points beyond just Paley construction.
+    Call this ONCE at the start to get diverse seeds for your construction competition.
+    
+    Methods included:
+    - Paley (quadratic residues mod 29)
+    - Random ±1 matrix
+    - Thue-Morse sequence based
+    - Low-discrepancy lattice pattern
+    - Structured block diagonal
+    
+    Each variant returns a 29x29 ±1 matrix ready for SA refinement.
+  input_schema:
+    type: object
+    properties: {}
+  implementation_py: |
+    def run(ctx, args):
+        import numpy as np
+        
+        n = 29
+        
+        # Method 1: Paley construction (quadratic residues mod 29)
+        paley_residues = {0, 1, 4, 5, 6, 7, 9, 13, 16, 20, 22, 23, 24, 25, 28}
+        paley = np.zeros((n, n), dtype=int)
+        for i in range(n):
+            for j in range(n):
+                diff = (i - j) % n
+                paley[i, j] = 1 if diff in paley_residues else -1
+        
+        # Method 2: Random ±1 matrix
+        random_mat = np.random.choice([-1, 1], size=(n, n))
+        
+        # Method 3: Thue-Morse based pattern (alternating blocks)
+        thue = [0, 1, 1, 0]
+        for _ in range(14):
+            thue += [1-x for x in thue]
+        thue_mat = np.zeros((n, n), dtype=int)
+        for i in range(n):
+            row_pattern = thue[:n]
+            for j in range(n):
+                thue_mat[i, j] = 1 if row_pattern[j] == 0 else -1
+        
+        # Method 4: Van der Corput lattice
+        lattice = np.zeros((n, n), dtype=int)
+        for i in range(n):
+            row_val = 0
+            temp = i + 1
+            for b in range(15):
+                if temp % 2 == 1:
+                    row_val += 2**b
+                temp //= 2
+            row_bits = [(row_val >> k) & 1 for k in range(n)]
+            for j in range(n):
+                lattice[i, j] = 1 if row_bits[j] == 0 else -1
+        
+        # Method 5: Structured block diagonal
+        structured = np.ones((n, n), dtype=int)
+        for block_idx in range(5):
+            start = block_idx * 6
+            if start >= n:
+                break
+            block_size = min(6, n - start)
+            for i in range(block_size):
+                for j in range(block_size):
+                    if (i - j) % 2 == 1:
+                        structured[start + i, start + j] = -1
+        
+        variants = [
+            {"name": "paley", "matrix": paley},
+            {"name": "random", "matrix": random_mat},
+            {"name": "thue_morse", "matrix": thue_mat},
+            {"name": "lattice", "matrix": lattice},
+            {"name": "structured", "matrix": structured}
+        ]
+        
+        return {"variants": variants, "n": n, "methods_used": 5}
+- name: perturb_best
+  description: |
+    Given a best matrix, generate perturbed variants by flipping random entries.
+    This helps escape local optima within a promising region.
+    Call this with your current best from a previous evaluation.
+    
+    Parameters:
+    - num_flips: how many random entries to flip per variant (default 5-20)
+    - num_variants: how many perturbed versions to generate (default 5-10)
+    
+    Each variant is ready for quick SA refinement (10-50 seeds, 2k-5k iters).
+  input_schema:
+    type: object
+    properties:
+      best_matrix:
+        type: array
+        description: 29x29 array of ±1 (flattened or 2D list)
+      num_flips:
+        type: integer
+        default: 10
+      num_variants:
+        type: integer
+        default: 5
+  implementation_py: |
+    def run(ctx, args):
+        import numpy as np
+        
+        n = 29
+        best = args.get("best_matrix")
+        if isinstance(best, np.ndarray):
+            best = best.tolist()
+        else:
+            best = list(best)
+        
+        num_flips = args.get("num_flips", 10)
+        num_variants = args.get("num_variants", 5)
+        
+        variants = []
+        base = [row[:] for row in best]
+        
+        for v in range(num_variants):
+            variant = [row[:] for row in base]
+            flips = np.random.choice(n*n, size=num_flips, replace=False).tolist()
+            for flip_idx in flips:
+                i = flip_idx // n
+                j = flip_idx % n
+                variant[i][j] *= -1
+            variants.append(variant)
+        
+        return {"variants": variants, "num_flips": num_flips, "num_variants": num_variants}
+new_skills:
+- name: hadamard-construction-competition
+  description: |
+    Run a parallel construction competition: try 4-5 different matrix generators
+    simultaneously. This beats parameter-only tuning by exploring fundamentally
+    different search landscapes. Use 50-100 seeds per method, 5k-10k iterations.
+  body: |
+    # Hadamard Construction Competition Strategy
+    
+    ## Core Idea: Parallel Search Across Construction Methods
+    Instead of tuning SA parameters on ONE construction (which gets stuck in local optima),
+    run 4-5 DIFFERENT matrix generators in parallel. Each explores a different search landscape.
+    
+    ## The 5 Methods (run in parallel per evaluation)
+    
+    ### 1. Paley Construction
+    - Quadratic residues mod 29: {0,1,4,5,6,7,9,13,16,20,22,23,24,25,28}
+    - H[i][j] = 1 if (i-j)%29 in residues else -1
+    - Pros: Mathematically sound for n≡3 mod 4
+    - Cons: Creates structured patterns that may trap SA
+    
+    ### 2. Random Initialization
+    - Fill with random ±1 entries
+    - Pros: Truly diverse starting point
+    - Cons: High variance, may need more SA iterations
+    
+    ### 3. Thue-Morse Sequence
+    - Use Thue-Morse pattern (0,1,1,0,1,0,0,1,...) to generate rows
+    - Pros: Low correlation between rows, good balance
+    - Cons: May create some structural dependencies
+    
+    ### 4. Van der Corput Lattice
+    - 1D low-discrepancy sequence for row offsets
+    - Pros: Systematic space filling, good coverage
+    - Cons: May create row patterns similar to Thue-Morse
+    
+    ### 5. Perturbation Search
+    - Start from YOUR BEST matrix found in prior evaluations
+    - Flip 5-20 random entries, refine with SA (10-30 seeds, 2k-5k iters)
+    - Pros: Exploits promising regions found earlier
+    - Cons: Only works if you have a good prior result
+    
+    ## Per-Method SA Settings
+    - Seeds: 10-30 (NOT 500!)
+    - Iterations per seed: 5,000-10,000 (NOT 15k-50k!)
+    - Starting T: 2.0-8.0
+    - Cooling rate: 0.993-0.998
+    
+    ## Total Budget per Evaluation
+    - Total flips: 5 methods × 20 seeds × 7,500 iters = 750,000 (should be < 800k)
+    - Expected time: 150-180 seconds with numpy.linalg.det
+    - Target: Stay under 180 seconds
+    
+    ## Workflow
+    1. Call generate_variants() to get diverse starting matrices
+    2. For each variant: run 10-30 SA seeds with 5k-10k iterations
+    3. Track best |det| from each method
+    4. Use perturb_best() to create variants from your overall winner
+    5. Call evaluate_solution with the globally best matrix
+    6. Next eval: start perturb_best from this result + try a new construction
+    
+    ## Expected Outcome
+    By exploring 5 different landscapes in parallel, you'll find the method that escapes
+    the Paley local optimum. Expect 20-50% improvement over seed score (target: 0.7-0.8+).
+    
+    ## Critical Rules
+    - ALWAYS use numpy.linalg.det for search (never Bareiss!)
+    - Total time MUST be < 180 seconds
+    - Track best matrix from EACH method, not just average
+    - Perturbation search (method 5) is crucial for exploiting good finds
+    - After eval 1: use perturb_best on your winner for all subsequent evals
+tool_descriptions:
+  edit_solution: 'Replace EVOLVE-BLOCK with COMPLETE working code:
+  
+  - Call generate_variants() once at start (get 5 diverse matrices)
+  - Implement SA refinement for each variant (10-30 seeds, 5k-10k iters)
+  - Call perturb_best() with your overall best to generate perturbed variants
+  - Use numpy.linalg.det for ALL determinant calculations
+  - Track best |det| across all methods and perturbed variants
+  - Return the globally best matrix
+  
+  Time budget: <180s. Total flips: ≤800,000. NO Bareiss in search.'
+  evaluate_solution: 'Run your code and return combined_score. Budget: 20 evals total.
+  
+  Expected time: 60-150 seconds (5 constructions × 10-30 seeds × 5k-10k iters × numpy det).
+  
+  Strategy:
+  - Evals 1-3: Test different construction combinations
+  - Evals 4-8: Refine winners from evals 1-3, try perturb_best on best
+  - Evals 9-14: Aggressive perturbation search from your best
+  - Evals 15-20: Combine all strategies, push to limit
+  
+  If score improves >10%, try: more seeds, slightly more iterations, different T/cool combo.'
+  probe_solution: 'Cheap approximate scoring on subsampled data (~10s, separate 30-probe budget).
+  
+  Use to test:
+  - Different constructions: Paley-only vs random + Paley
+  - Different SA params: T=3-7, cool=0.994-0.997, iters=3k-8k
+  - Different seed counts: 5, 10, 20 per method
+  
+  Run with 1k-2k iterations per seed, pick best config for full eval.'
+  finish: End session. Call when eval budget exhausted (20 evals) or when perturb_best search plateaus (3 consecutive evals with <1% improvement).
+remove_tools: []
+new_middlewares:
+- name: enforce_time_budget
+  hook: before_model
+  description: |
+    Middleware that enforces strict time budget (<180s per eval).
+    Warns if code structure suggests timeout risk (too many iterations, wrong det function).
+  implementation_py: |
+    def before_model(hook_input):
+        code = hook_input.get('code', '')
+        
+        # Check for Bareiss - CRITICAL
+        if 'bareiss' in code.lower():
+            if 'numpy.linalg.det' not in code:
+                return "🚨 CRITICAL: Bareiss detected without numpy fallback! This will cause TIMEOUT. Use numpy.linalg.det for all search determinants."
+        
+        # Check iteration budget
+        import re
+        iters_matches = re.findall(r'\d+(?:,\d+)*\s*(?:iters?|iterations?)', code)
+        if iters_matches:
+            total_iters = 0
+            for m in iters_matches[:10]:
+                num_str = re.sub(r'[,\s]', '', m)
+                if num_str.isdigit():
+                    total_iters += int(num_str)
+            
+            if total_iters > 1000000:
+                return "⚠️ WARNING: >1M total iterations may exceed 180s budget. Reduce seeds or iterations per seed."
+        
+        # Check time estimate comment
+        if '350' in code and '180' not in code:
+            return "⚠️ TIP: Your code mentions 350s budget but recommended limit is 180s. Consider reducing iterations."
+        
+        return None

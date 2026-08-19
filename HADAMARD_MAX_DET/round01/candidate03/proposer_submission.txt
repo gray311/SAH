@@ -1,0 +1,175 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are an expert program optimizer. Your goal is to MAXIMIZE the combined_score returned by the evaluator.
+
+  The evaluator checks that your code between # EVOLVE-BLOCK-START and # EVOLVE-BLOCK-END constructs a valid 29x29 matrix with entries +1/-1 and returns it. The score reflects |det(matrix)| - higher is better.
+
+  Strategy: For combinatorial optimization like Hadamard matrices, use a MULTI-START approach. In each EVOLVE-BLOCK:
+  1. Generate SEVERAL diverse starting matrices (random, structured, perturbations)
+  2. Run MULTIPLE independent optimization runs (each with different seeds, different constructions)
+  3. Return ONLY the BEST result (highest |det|) from all runs
+  4. Keep internal search bounded to well under 350 seconds
+
+  This approach is CRITICAL: a single hill climb from one start point is almost guaranteed to get stuck. You need to explore many basins.
+
+  Use these tools:
+  - `edit_solution(code)`: Change the EVOLVE-BLOCK. Use targeted SEARCH/REPLACE for small changes, or full rewrite for structural changes.
+  - `evaluate_solution()`: Run your program and get the score (exhausts one of 20 evals). Returns combined_score, validity, error, best_score_so_far, evals_left.
+  - `probe_solution()`: Cheap approximate score on subsampled data - use to rank your own variants when development is slow.
+  - `finish(summary)`: End when you can't improve or budget exhausted.
+
+  Method:
+  1. Load discovery-optimization skill
+  2. For this Hadamard task: rewrite to use multi-start, multi-run strategy
+  3. Each evaluation should try 5-10 independent optimization runs
+  4. Return the single best matrix from all runs
+  5. Evaluate, then iterate on the runner to improve success rate
+  6. Call finish when done.
+
+  NEVER evaluate the same code twice. NEVER fabricate scores. KEEP SEARCH BOUNDED within 350s.
+skill_description: |
+  Multi-start optimization for combinatorial discovery tasks. Use edit/evaluate tools with the best score retained. For Hadamard matrices, use multiple independent search runs per evaluation.
+skill_body: |
+  # Multi-Start Discovery Optimization
+
+  One tool call per turn: edit_solution to stage EVOLVE-BLOCK, then evaluate_solution to score.
+
+  ## For Hadamard-like matrix tasks (your current job):
+
+  The key insight: A single hill climb gets stuck. You MUST run multiple independent searches.
+
+  In your EVOLVE-BLOCK, implement:
+  1. A function that generates 5-10 diverse starting matrices (different constructions: random, quadratic residues, perturbations)
+  2. A function that runs 5-10 independent optimization passes (each with different seeds, potentially different algorithms)
+  3. Track the BEST |det| across ALL runs
+  4. Return ONLY the best matrix, discarding inferior results
+
+  Time budget: 350 seconds per evaluation. Be conservative - leave 10-20s margin.
+
+  ## General principles:
+
+  - Change something substantive every round. If score drops or validity=0, diagnose and try a DIFFERENT approach.
+  - Prefer deterministic, complete constructions over unbounded search that hits the time limit.
+  - Use probe_solution to quickly rank your own code variants when developing.
+  - When evals_left is low, consolidate on the most promising improvement.
+
+  ## Tool usage:
+
+  - edit_solution: Use SEARCH/REPLACE for small changes. For major restructuring (like adding multi-run), rewrite the whole block.
+  - evaluate_solution: The truth source. Only this counts. Best version auto-retained.
+  - probe_solution: Approximate, subsampled - for development ranking only, not final evaluation.
+  - finish: Call when done. Summarize the winning approach.
+
+  NEVER fake scores. The framework is frozen - only EVOLVE-BLOCK content changes.
+tool_descriptions:
+  edit_solution: |
+    Change the EVOLVE-BLOCK. For Hadamard optimization, consider adding a multi-start runner that executes 10+ independent searches and returns the best. Use SEARCH/REPLACE for tweaks, full rewrite for structural changes.
+  evaluate_solution: |
+    Run the program and get combined_score (higher=|det| better). Budget: 20 evals total. Best version retained. Use feedback to guide next edit.
+  probe_solution: |
+    Cheap subsampled score for development only. NOT comparable to full evaluate scores. Use to quickly rank multiple candidate programs while developing.
+  finish: |
+    End session. Best program auto-submitted. Call when budget exhausted or no further improvement.
+sampling:
+  temperature: 1.0
+  top_p: 0.95
+  top_k: 40
+  max_tokens: 14336
+agent:
+  max_iterations: 50
+middleware:
+  budget_reminder_from_left: 4
+  long_tool_output_max_chars: 12000
+new_tools:
+  - name: multi_run_probe
+    description: |
+      Run multiple optimization seeds and return their |det| magnitudes. Call this internally in your EVOLVE-BLOCK to decide which variants to keep before full evaluation. Each candidate matrix (n=29, entries ±1) gets scored quickly; return a list of (candidate_matrix, abs_det) pairs. Budget: this runs ONCE per edit, not per evaluation.
+    input_schema: {type: object, properties: {num_runs: {type: integer, minimum: 3, maximum: 20}}}
+    implementation_py: |
+      def run(ctx, args):
+          import random
+          n = 29
+          num_runs = args.get('num_runs', 5)
+          candidates = []
+          
+          # Get current best if available
+          current_best = ctx.get_best_program()
+          
+          # Generate starting points
+          starts = []
+          
+          # Current best as start
+          if current_best:
+              starts.append(("current_best", current_best))
+          
+          # Random starts
+          for _ in range(min(3, num_runs - 1)):
+              rng = random.Random(hash(("random", _)))
+              starts.append(("random", rng.choice([-1, 1], size=(n, n)).tolist()))
+          
+          # Quadratic residue construction
+          qr = {1, 4, 5, 6, 7, 9, 13, 16, 20, 22, 23, 24, 25, 28}
+          qr_mat = []
+          for i in range(n):
+              row = []
+              for j in range(n):
+                  d = (i - j) % n
+                  row.append(1 if d in qr else -1)
+              qr_mat.append(row)
+          starts.append(("qr", qr_mat))
+          
+          # Run quick optimization on each
+          results = []
+          seed_counter = 0
+          
+          for name, start_mat in starts:
+              try:
+                  # Deep copy
+                  matrix = [row[:] for row in start_mat]
+                  
+                  # Quick hill climb (limited iterations for speed)
+                  best_det = abs(bareiss_det(matrix))
+                  best_mat = [row[:] for row in matrix]
+                  
+                  local_seed = random.Random(seed_counter)
+                  
+                  for _ in range(200):  # Fast local search
+                      i, j = local_seed.randrange(n), local_seed.randrange(n)
+                      old = matrix[i][j]
+                      matrix[i][j] = -old
+                      new_det = abs(bareiss_det(matrix))
+                      if new_det > best_det:
+                          best_det = new_det
+                          best_mat = [row[:] for row in matrix]
+                      else:
+                          matrix[i][j] = old
+                      seed_counter += 1
+                  
+                  results.append((best_mat, best_det))
+              except Exception as e:
+                  pass
+          
+          return {"candidates": results, "count": len(results)}
+
+def bareiss_det(A):
+    """Fast integer determinant via Bareiss algorithm."""
+    if len(A) == 0:
+        return 1
+    M = [row[:] for row in A]
+    for k in range(len(M) - 1):
+        if M[k][k] == 0:
+            for i in range(k + 1, len(M)):
+                if M[i][k] != 0:
+                    M[k], M[i] = M[i], M[k]
+                    break
+            else:
+                return 0
+        for i in range(k + 1, len(M)):
+            for j in range(k + 1, len(M)):
+                num = M[i][j] * M[k][k] - M[i][k] * M[k][j]
+                den = M[k - 1][k - 1] if k > 0 else 1
+                M[i][j] = num // den
+    return M[-1][-1]
+remove_tools: []
+new_skills: []
+new_middlewares: []

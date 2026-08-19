@@ -1,0 +1,257 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are optimizing a 29x29 ±1 matrix to maximize |det(H)|. n=29 ≡ 3 mod 4.
+
+  The seed uses Paley construction with quadratic residues {0,1,4,5,6,7,9,13,16,20,22,23,24,25,28}, but this likely converges to a suboptimal local optimum.
+
+  YOUR JOB: Explore multiple strategies to escape local optima:
+  
+  1. Try MULTIPLE construction methods in parallel:
+     - Paley construction (as in seed)
+     - Random ±1 matrix as starting point
+     - Perturbed Paley (flip random entries from Paley base)
+     - Diagonal perturbations
+  
+  2. Tune search parameters:
+     - Try different initial temperatures (T=1.0, 2.0, 5.0, 10.0)
+     - Try different cooling rates (0.992, 0.995, 0.997, 0.999)
+     - Try different iteration counts per seed (10k, 25k, 50k, 100k)
+     - Try different numbers of seeds (3, 5, 8, 12)
+
+  3. Use the probe_solution tool EXTENSIVELY:
+     - Test 5-10 variants with probe (cheap, ~10s each)
+     - Compare approximate scores
+     - Pick the 1-2 best variants for full evaluate (expensive, ~350s each)
+     - With 30 probe budget, you can test 30 variants before spending eval budget!
+
+  4. For each evaluation, implement code that:
+     - Runs multiple construction methods
+     - Uses numpy.linalg.det for ALL determinants during search (fast)
+     - Stops within 300 seconds (leave buffer)
+     - Returns the BEST matrix found across all methods
+
+  5. strategy: Use probe_solution to test parameter combinations, then evaluate only the best variant.
+
+  Expected approach: Run 3-5 probe evaluations testing different (construction_method, temperature, iterations, num_seeds) combinations. Pick the winner. Use remaining probes to fine-tune. Then evaluate the best variant.
+
+  Total time MUST be <300s per evaluate call.
+skill_description: |
+  Hadamard optimizer for n=29. Try MULTIPLE construction methods (Paley, random, perturbed Paley). Use probe_solution to test parameters before evaluating. 
+  Key: Use numpy.linalg.det, not Bareiss during search.
+skill_body: |
+  # Hadamard Matrix Optimizer for n=29
+  
+  ## Task
+  Find a 29×29 matrix with entries ±1 that maximizes |det(H)|.
+  
+  ## Construction Methods to Try
+  Since the Paley construction alone may be trapped in a local optimum, try these methods:
+  
+  ### Method A: Paley Construction
+  Quadratic residues mod 29: {0,1,4,5,6,7,9,13,16,20,22,23,24,25,28}
+  For H[i][j]: diff = (i-j) mod 29
+  H[i][j] = 1 if diff in residues else -1
+  
+  ### Method B: Random ±1 Matrix
+  Start with random ±1 entries
+  
+  ### Method C: Perturbed Paley
+  Start with Paley, then flip K random entries (K = 5-20)
+  
+  ## Search Strategy
+  For each method:
+  - Run simulated annealing with simulated annealing
+  - Try multiple (temperature, cooling_rate, iterations_per_seed) combinations
+  - Use numpy.linalg.det for all determinants (fast)
+  
+  ## CRITICAL: Use probe_solution
+  - Call probe_solution with 5-10 different parameter sets
+  - Parameters to vary: T (1-10), cool_rate (0.99-0.999), iterations (10k-100k), num_seeds (3-12), construction_method
+  - Use approximate scores to rank variants
+  - Pick the top 2-3 variants for full evaluate_solution
+  
+  ## Implementation
+  - Write complete code that implements ALL methods
+  - Return the best matrix found
+  - MUST complete in <300 seconds
+  - Use numpy.linalg.det exclusively during search
+  
+  ## Workflow per evaluation
+  1. Implement code with all 3 construction methods
+  2. Test with probe_solution (use 20 probes for fine-grained search)
+  3. Evaluate the best variant with evaluate_solution
+  4. If score improves, iterate with different parameters
+tool_descriptions:
+  edit_solution: |
+    Replace EVOLVE-BLOCK with complete working code implementing:
+    - Multiple construction methods: Paley, random, perturbed Paley
+    - Parameter exploration: vary T, cooling rate, iterations, num_seeds
+    - Use numpy.linalg.det for ALL determinants
+    - Code must complete in <300 seconds
+    - Return the matrix with highest determinant found
+  evaluate_solution: |
+    Run your code and return combined_score. Budget: 20 evals total.
+    Use probe_solution FIRST to test 10-20 parameter combinations, then evaluate the best.
+  probe_solution: |
+    Cheap approximate scoring (separate budget: 30 probes).
+    Use to test DIFFERENT construction methods and parameter combinations BEFORE evaluate:
+    - Vary construction: Paley vs random vs perturbed Paley
+    - Vary temperature: 1.0, 2.5, 5.0, 10.0
+    - Vary cooling rate: 0.992, 0.995, 0.997, 0.998, 0.999
+    - Vary iterations per seed: 10000, 25000, 50000, 75000, 100000
+    - Vary num_seeds: 3, 5, 8, 12
+    Score is approximate but reliable for ranking variants.
+    Call 5-10 probes per evaluation, pick best for evaluate.
+  finish: |
+    End when you've used 20 evals or found no improvement.
+sampling:
+  temperature: 1.2
+  top_p: 0.95
+  top_k: 40
+  max_tokens: 14000
+agent:
+  max_iterations: 50
+middleware:
+  budget_reminder_from_left: 2
+  long_tool_output_max_chars: 12000
+new_tools:
+- name: scan_paley_params
+  description: |
+    Rapidly scan Paley construction parameter combinations.
+    Test: temperatures [1,2,5,10], cooling_rates [0.992,0.995,0.997,0.998,0.999], iterations [10k,25k,50k], seeds [4,6,8].
+    Returns best config with approximate score. Use before full evaluation.
+  input_schema:
+    type: object
+    properties: {}
+  implementation_py: |
+    def run(ctx, args):
+        import numpy as np
+        import random
+        
+        n = 29
+        residues = {0, 1, 4, 5, 6, 7, 9, 13, 16, 20, 22, 23, 24, 25, 28}
+        
+        best_score = 0
+        best_config = None
+        best_matrix = None
+        
+        # Test parameter combinations
+        temps = [1.0, 2.5, 5.0, 10.0]
+        cool_rates = [0.992, 0.995, 0.997, 0.998, 0.999]
+        iterations = [10000, 25000, 50000]
+        num_seeds = [4, 6, 8]
+        
+        rng = random.Random(42)
+        
+        for seed in range(42, 50):  # Quick seed test
+            for T in temps:
+                for cool_rate in cool_rates:
+                    for iters in iterations:
+                        for nseeds in num_seeds:
+                            try:
+                                # Build Paley base
+                                H = np.zeros((n, n), dtype=int)
+                                for i in range(n):
+                                    for j in range(n):
+                                        diff = (i - j) % n
+                                        H[i, j] = 1 if diff in residues else -1
+                                
+                                # Test with simulated annealing
+                                cur = [row[:] for row in H]
+                                cd = float(np.linalg.det(np.array(cur, dtype=float)))
+                                best = cur[:]
+                                bd = cd
+                                T_val = T
+                                
+                                for _ in range(iters):
+                                    i, j = rng.randrange(n), rng.randrange(n)
+                                    cur[i][j] *= -1
+                                    nd = float(np.linalg.det(np.array(cur, dtype=float)))
+                                    delta = nd - cd
+                                    
+                                    if delta >= 0:
+                                        cd = nd
+                                        if T_val > 1e-15:
+                                            T_val *= cool_rate
+                                        else:
+                                            best = cur[:]
+                                    elif T_val > 1e-15 and rng.random() < np.exp(delta/T_val):
+                                        cd = nd; T_val *= cool_rate
+                                    else:
+                                        cur[i][j] *= -1; T_val *= cool_rate
+                                    
+                                    if nd > bd:
+                                        bd, best = nd, cur[:]
+                                
+                                if bd > best_score:
+                                    best_score = bd
+                                    best_config = {"seed": seed, "T": T, "cool_rate": cool_rate, "iters": iters, "seeds": nseeds}
+                            except:
+                                continue
+        
+        return {
+            "best_score_approx": best_score,
+            "best_config": best_config,
+            "note": "Use numpy.linalg.det, not Bareiss"
+        }
+new_skills:
+- name: hadamard-explorer-n29
+  description: |
+    Explore Hadamard optimization for n=29 using multiple construction methods.
+    Key insight: Paley alone is insufficient. Try random starts, perturbed Paley.
+    Use probe_solution extensively (30 probes available) to test parameters before full evaluation.
+  body: |
+    # Hadamard Matrix Explorer for n=29
+    
+    ## KEY INSIGHT
+    The seed program's Paley construction with annealing gets stuck in a local optimum.
+    You MUST explore beyond this.
+    
+    ## Multiple Construction Methods
+    ALWAYS try these in parallel:
+    
+    1. **Paley Construction**
+       Residues mod 29: {0,1,4,5,6,7,9,13,16,20,22,23,24,25,28}
+       H[i][j] = 1 if (i-j)%29 in residues else -1
+    
+    2. **Random ±1 Matrix**
+       Randomly initialize all entries to ±1
+    
+    3. **Perturbed Paley**
+       Start with Paley, flip 5-20 random entries
+    
+    ## Parameter Tuning Strategy
+    Use probe_solution to test these combinations:
+    
+    | Parameter | Range |
+    |-----------|-------|
+    | Initial T | 1.0, 2.5, 5.0, 10.0 |
+    | Cool rate | 0.992, 0.995, 0.997, 0.998, 0.999 |
+    | Iterations/seed | 10k, 25k, 50k, 75k |
+    | Num seeds | 3, 5, 8, 12 |
+    
+    ## CRITICAL RULES
+    - Use numpy.linalg.det for ALL determinants during search (NOT Bareiss)
+    - Complete ALL work within 300 seconds per evaluation
+    - Use probe_solution FIRST: test 10-20 variants, pick best, then evaluate
+    - If probe scores are similar, try MORE construction methods or different seeds
+    
+    ## Workflow per Evaluation
+    1. Implement code with all 3 construction methods
+    2. Call probe_solution with 15 different (method, T, cool, iters, seeds) combos
+    3. Pick top 2 variants by probe score
+    4. Call evaluate_solution on each (if budget allows)
+    5. Return the absolute best matrix
+    
+    ## Example probe call structure
+    Test variants with combinations like:
+    - (Paley, T=5.0, cool=0.997, iters=25k, seeds=6)
+    - (Random, T=2.5, cool=0.995, iters=50k, seeds=8)
+    - (Perturbed_Paley, T=10.0, cool=0.992, iters=10k, seeds=4)
+    
+    ## Checkpoints
+    - ✅ Implemented all 3 construction methods
+    - ✅ Using numpy.linalg.det (not Bareiss)
+    - ✅ Using probe_solution for parameter exploration
+    - ✅ Staying under 300 seconds
+    - ✅ Returning best matrix across all methods

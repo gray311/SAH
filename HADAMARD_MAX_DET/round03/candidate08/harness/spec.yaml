@@ -1,0 +1,276 @@
+schema: h2spec/1.0
+system_prompt: |
+  You are an expert mathematician and software developer tasked with iteratively improving
+  a program to MAXIMIZE the performance metrics reported by an automatic evaluator. The task is to find
+  a 29x29 matrix with entries ±1 that maximizes the absolute determinant.
+  
+  CRITICAL INSIGHT: The current harness is STUCK at 0.510438, barely above the seed's 0.456713.
+  This means simulated annealing on Paley construction is trapped in local optima.
+  
+  BREAKTHROUGH STRATEGY: When standard SA stalls (no improvement after 20k+ iterations),
+  SWITCH TO STRUCTURED MUTATIONS:
+  1. Try BLOCK mutations: flip entire rows or columns (preserves structure better)
+  2. Try SUBBLOCK swaps: exchange 3x3 or 5x5 submatrices between rows
+  3. Try COLUMN CYCLES: cyclically shift columns to create new patterns
+  4. Use the NEW block_mutation_scramble tool to make large jumps out of local optima
+  
+  Use probe_solution aggressively to compare SA vs structured mutation results.
+  If SA fails to improve for 2 consecutive evaluations, switch to structured mutations.
+  
+  Always use numpy.linalg.det for fast search. Only validate final results.
+skill_description: |
+  Optimize 29×29 Hadamard-like matrix for max |det|. n=29≡3 mod 4, use Paley construction.
+  CRITICAL: Standard SA is stuck at 0.510438. When SA stalls, use BLOCK mutations,
+  SUBBLOCK swaps, and COLUMN cycles. Call block_mutation_scramble after each SA run.
+  If SA result < 0.48, immediately try structured mutations instead.
+  Always probe 2-3 variants before full evaluation. Use numpy.linalg.det exclusively.
+skill_body: |
+  # Advanced Hadamard Optimization for n=29 (Escape Local Optima)
+  
+  ## Problem: We're stuck at 0.510438 - SA is trapped in local optima
+  
+  ## Solution: Multi-strategy with structured mutations
+  
+  ### Strategy 1: Enhanced Paley + Simulated Annealing (Baseline)
+  - Correct Paley construction with quadratic residues {0,1,4,5,6,7,9,13,16,20,22,23,24,25,28}
+  - numpy.linalg.det for all iterations (fast ~0.001s per matrix)
+  - 25,000 iterations per seed, 5 seeds, 3 cooling schedules
+  - BUT this alone gives only 0.510438 - we need more!
+  
+  ### Strategy 2: BLOCK Mutations (when SA stalls)
+  - Flip ENTIRE rows: current_matrix[i] = -current_matrix[i]
+  - Flip ENTIRE columns: for all i, current_matrix[i][j] = -current_matrix[i][j]
+  - Why this works: Preserves some structure while making larger jumps
+  
+  ### Strategy 3: SUBBLOCK Swaps
+  - Extract 3x3 or 5x5 subblocks from different rows
+  - Swap these subblocks between row groups
+  - Creates new patterns without completely randomizing
+  
+  ### Strategy 4: COLUMN CYCLES
+  - Cyclically shift columns: col[j] → col[(j + k) mod n]
+  - Test shifts k=1,2,3,...,10 to find improving shifts
+  
+  ### Execution Flow
+  1. Start with Paley + SA (5 seeds, 25k iters each)
+  2. Run block_mutation_scramble on the best SA result
+  3. Compare SA result vs scrambled result via probe
+  4. If scrambled > SA, continue from scrambled
+  5. If neither improves, try: more iterations OR subblock swaps OR column cycles
+  6. ALWAYS use probe before evaluate
+  7. If score < 0.48, immediately switch to structured mutations
+  
+  ### When to use block_mutation_scramble
+  - After each SA run (as a diversification step)
+  - When SA result < 0.48 (clearly stuck)
+  - When you need to escape local optima without random restart
+  
+  ### Tool: block_mutation_scramble
+  - Flips random rows/columns (2-5 at a time)
+  - Flips random 3x3 subblocks
+  - Applies random column cycles (shifts 1-5)
+  - Returns 3 variants to choose from
+  
+  ### Budget Management
+  - Total time: MUST be < 180 seconds
+  - SA (5 seeds × 25k): ~15 seconds
+  - block_mutation_scramble: ~3 seconds
+  -留出 50 seconds for more complex mutations if needed
+tool_descriptions:
+  edit_solution: |
+    Change code in # EVOLVE-BLOCK-START to # EVOLVE-BLOCK-END.
+    PREFERRED: Provide FULL working code (not partial diffs).
+    The executor will replace the entire EVOLVE-BLOCK with your code.
+    Must include block_mutation_scramble function and use numpy.linalg.det for search.
+  evaluate_solution: |
+    Run program through evaluator. Returns: combined_score (higher-is-better), validity,
+    error, best_score_so_far, evals_left. Budget is 20. Use feedback to guide next edit.
+    Best version auto-kept.
+  probe_solution: |
+    Cheap approximate scoring on subsampled data (~10s). Does NOT consume eval budget.
+    Separate probe budget of 30. Use to: (1) compare SA vs block mutation results,
+    (2) test column cycle shifts, (3) validate subblock swaps.
+    BEFORE each evaluate_solution, probe 2-3 variants from different strategies.
+  finish: |
+    End session. Call when eval budget exhausted (20 evals used) or no improvement
+    after trying: enhanced SA, block mutations, subblock swaps, column cycles.
+sampling:
+  temperature: 1.5
+  top_p: 0.9
+  top_k: 30
+  max_tokens: 16384
+agent:
+  max_iterations: 80
+middleware:
+  budget_reminder_from_left: 2
+  long_tool_output_max_chars: 15000
+new_tools:
+  - name: block_mutation_scramble
+    description: |
+      Apply structured mutations to escape local optima in Hadamard search.
+      Generates 3 variants using: (1) random row/column flips, (2) 3x3 subblock swaps,
+      (3) random column cycles. Returns variants with their probe scores.
+      Call this AFTER each SA run when looking to diversify. Returns dict with
+      'variants': [{'matrix': [...], 'score': float, 'mutation_type': str}, ...].
+    input_schema:
+      type: object
+      properties:
+        base_matrix:
+          type: array
+          description: 29x29 matrix as list of lists of ±1
+        seed:
+          type: integer
+          default: 42
+        mutation_budget:
+          type: integer
+          default: 3
+    implementation_py: |
+      def run(ctx, args):
+          import random
+          import numpy as np
+          
+          base = args.get('base_matrix', None)
+          seed = args.get('seed', 42)
+          budget = args.get('mutation_budget', 3)
+          
+          if base is None:
+              base = ctx.get_best_program()
+              
+          rng = random.Random(seed)
+          base_arr = np.array(base, dtype=int) if isinstance(base, list) else base
+          size = base_arr.shape[0]
+          results = []
+          
+          # Variant 1: Random row/column flips
+          for _ in range(min(budget, 2)):
+              variant = base_arr.copy()
+              n_flips = rng.randint(2, 5)
+              for _ in range(n_flips):
+                  if rng.random() < 0.5:
+                      # Flip row
+                      r = rng.randint(0, size-1)
+                      variant[r, :] *= -1
+                  else:
+                      # Flip column
+                      c = rng.randint(0, size-1)
+                      variant[:, c] *= -1
+              score = float(abs(np.linalg.det(variant)))
+              results.append({'matrix': variant.tolist(), 'score': score, 'mutation_type': 'row_col_flip'})
+          
+          # Variant 2: Subblock swaps (3x3)
+          for _ in range(min(budget - len(results), 1)):
+              variant = base_arr.copy()
+              r1, c1 = rng.randint(0, size-3), rng.randint(0, size-3)
+              r2, c2 = rng.randint(0, size-3), rng.randint(0, size-3)
+              while (r1, c1) == (r2, c2):
+                  r2, c2 = rng.randint(0, size-3), rng.randint(0, size-3)
+              
+              # Swap 3x3 blocks
+              for dr in range(3):
+                  for dc in range(3):
+                      variant[r1+dr, c1+dc], variant[r2+dr, c2+dc] = \
+                          variant[r2+dr, c2+dc], variant[r1+dr, c1+dc]
+              score = float(abs(np.linalg.det(variant)))
+              results.append({'matrix': variant.tolist(), 'score': score, 'mutation_type': 'subblock_swap'})
+          
+          # Variant 3: Column cycles
+          for _ in range(min(budget - len(results), 1)):
+              variant = base_arr.copy()
+              shift = rng.randint(1, 10)
+              shifted_cols = np.roll(variant, shift, axis=1)
+              score = float(abs(np.linalg.det(shifted_cols)))
+              results.append({'matrix': shifted_cols.tolist(), 'score': score, 'mutation_type': 'column_cycle'})
+          
+          # Return best variant
+          if results:
+              best = max(results, key=lambda x: x['score'])
+              return {'variants': results, 'best': best}
+          return {'variants': [], 'best': None}
+new_skills:
+  - name: hadamard-escape-strategy
+    description: |
+      Specialized skill to escape local optima in n=29 Hadamard search. When SA stalls
+      (score < 0.48 or no improvement), switch to structured mutations: row/column flips,
+      3x3 subblock swaps, column cycles. Always call block_mutation_scramble after SA.
+      Use probe to compare SA vs mutated results before full evaluation.
+    body: |
+      # Escape Local Optima for n=29 Hadamard Matrix
+      
+      ## CRITICAL: We're stuck at 0.510438 - SA alone is not enough
+      
+      ## Detection: Switch to structured mutations when:
+      - Score < 0.48 after SA runs
+      - No improvement for 2+ consecutive SA evaluations
+      - SA result doesn't beat 0.51 (the plateau)
+      
+      ## Structured Mutation Toolkit
+      
+      ### 1. Row/Column Flips
+      - Flip entire rows: matrix[i] = -matrix[i]
+      - Flip entire columns: all rows have column j negated
+      - Flip 2-5 rows/cols simultaneously
+      - Use sparingly - too aggressive destroys structure
+      
+      ### 2. Subblock Swaps (3x3 or 5x5)
+      - Extract subblock from row group A
+      - Swap with subblock from row group B
+      - Preserves more structure than random flips
+      - Try positions: (0,0)-(r,r), (5,5)-(r+5,r+5), etc.
+      
+      ### 3. Column Cycles
+      - Shift all columns cyclically by k positions
+      - Try shifts: k=1,2,3,5,7,10
+      - Can create new linearly independent patterns
+      
+      ### 4. Hybrid Approach
+      - Start with SA result
+      - Apply block_mutation_scramble
+      - Pick best variant
+      - Run SA from that variant for 10k more iterations
+      
+      ## Execution Protocol
+      1. Run Paley + SA (5 seeds, 25k iters)
+      2. Call block_mutation_scramble on best SA result
+      3. Probe all variants (SA + 3 mutations)
+      4. Pick best, evaluate
+      5. If score < 0.50, repeat with MORE mutations
+      6. If score >= 0.50, try more iterations first
+      
+      ## WARNING: Don't over-mutate
+      - Keep trying SA first (it's faster)
+      - Only use mutations when clearly stuck
+      - Always probe before full evaluation
+new_middlewares:
+  - name: enforcestructuredmutation
+    hook: before_model
+    description: |
+      Middleware that reminds the solver to use block_mutation_scramble when SA stalls.
+      Prevents repeated failures by forcing diversification after plateau.
+    implementation_py: |
+      def before_model(hook_input):
+          current_best = hook_input.get('best_score', 0)
+          last_score = hook_input.get('last_score', 0)
+          iterations = hook_input.get('iterations', 0)
+          
+          # Trigger structured mutation advice if stalled
+          if iterations > 50 and current_best < 0.48:
+              return "🚨 STALLED DETECTED! SA hasn't improved in 5+ evals at score < 0.48. MUST call block_mutation_scramble to escape local optima. Try: row flips, subblock swaps, or column cycles."
+          elif iterations > 30 and last_score < 0.50:
+              return "⚠️ Approaching plateau. Consider calling block_mutation_scramble after next SA run to explore new regions."
+          elif current_best < 0.48:
+              return "📊 Low score detected (< 0.48). SA may be stuck. Add block_mutation_scramble to your strategy for diversification."
+          return None
+  - name: probefirst_enforce
+    hook: before_model
+    description: |
+      Middleware that enforces probing before evaluation to avoid wasting eval budget
+      on poor variants.
+    implementation_py: |
+      def before_model(hook_input):
+          last_action = hook_input.get('last_action', '')
+          
+          if last_action == 'evaluate_solution' or 'evaluate_solution' in last_action:
+              return "✅ Good! You evaluated. Next step: BEFORE next evaluate, you MUST probe 2-3 variants with probe_solution to rank them cheaply."
+          elif last_action == 'edit_solution' and 'block_mutation' not in last_action and 'mutation' not in last_action:
+              return "💡 Tip: Consider adding block_mutation_scramble to escape potential local optima, especially if score < 0.50."
+          return None

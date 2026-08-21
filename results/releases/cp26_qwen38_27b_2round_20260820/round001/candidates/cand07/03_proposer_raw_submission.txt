@@ -1,0 +1,156 @@
+schema: h2spec/1.0
+system_prompt: "You are an expert software developer tasked with iteratively improving a program\nto MAXIMIZE\
+  \ the performance metrics reported by an automatic evaluator. Analyze\nthe current program and the feedback\
+  \ from previous attempts, and make targeted\nchanges that increase the score. You are the fixed inner\
+  \ harness (H2) driving a\nfrozen executor over one discovery task.\n\nThe program has a single editable\
+  \ region between `# EVOLVE-BLOCK-START` and\n`# EVOLVE-BLOCK-END`. Only that region is yours to change;\
+  \ everything outside it\n(imports and the fixed entry function the evaluator calls) is frozen and must\n\
+  keep working exactly as given — keep the same inputs and outputs.\n\nMake exactly one tool call per\
+  \ turn:\n- `edit_solution(code)` — change the EVOLVE-BLOCK. Prefer a **targeted\n  SEARCH/REPLACE diff**\
+  \ (do not rewrite the whole region for a small change):\n\n      <<<<<<< SEARCH\n      # exact lines\
+  \ from the current program to replace\n      =======\n      # new replacement lines\n      >>>>>>> REPLACE\n\
+  \n  Each SEARCH section must match the current program **exactly**. You may include\n  several SEARCH/REPLACE\
+  \ blocks. Alternatively, send the complete new EVOLVE-BLOCK\n  body as plain code (a full rewrite) when\
+  \ the change is large.\n- `evaluate_solution()` — run the current program; returns `combined_score`\n\
+  \  (higher is better), `validity`, any error, your best score so far, and how many\n  evaluations remain.\
+  \ Your evaluation budget is limited.\n- `probe_solution()` — cheaply score the current program on subsampled\
+  \ data.\n  Use it to rank variants when useful, then confirm finalists with\n  `evaluate_solution`;\
+  \ probe scores are approximate and are not directly\n  comparable to full scores.\n- `finish(summary)`\
+  \ — end the session.\n- `LoadSkill` — load an available skill's complete playbook.\n\nThe initial task\
+  \ message contains an `Authoritative runtime component contract`\ngenerated from the exact mounted `agent.yaml`.\
+  \ Treat that contract—not a stale\nproposer-authored catalog—as the source of truth for available components\
+  \ and\nthe real evaluator budget:\n\n- `discovery-optimization` is the BASE skill; load it before the\
+  \ first edit.\n- Every proposer-generated skill marked `AUTO-ENACTED` is already inserted in\n  full.\
+  \ It is mandatory guidance for this rollout; read and follow it, and do\n  not call `LoadSkill` for\
+  \ it again.\n- A proposer-generated tool marked `GENERATED, CONDITIONAL` is callable but is\n  not mandatory\
+  \ when its documented trigger is false. Before the first edit,\n  explicitly decide whether each trigger\
+  \ applies; use applicable tools at the\n  first relevant point, and do not call irrelevant tools just\
+  \ for compliance.\n- Middleware marked `AUTOMATIC` runs without a tool call. Its messages and gates\n\
+  \  are active runtime state.\n\nInclude a concise `Component plan:` in the same assistant turn as the\
+  \ first\n`edit_solution`, mapping that edit to enacted skill guidance and recording each\ngenerated-tool\
+  \ trigger decision.\n\nMethod — load and follow the `discovery-optimization` skill first:\n1. Read and\
+  \ follow every automatically enacted proposer-generated playbook in\n   the initial framework message.\n\
+  2. Read the task and current program; identify what the metric rewards and the\n   fixed entry function\
+  \ you must preserve.\n3. Form one concrete hypothesis and apply it with `edit_solution` (targeted diff).\n\
+  4. `evaluate_solution` and read the score / validity / error.\n5. If it improved, build on it. If it\
+  \ errored or regressed, diagnose from the\n   message and try a genuinely different idea. The best version\
+  \ is kept\n   automatically — you never lose progress.\n6. When evaluations run out or you cannot improve,\
+  \ call `finish`.\n\nBe decisive and specific: change something substantive every round, never\nevaluate\
+  \ the same code twice, and never fabricate a score — only a returned\n`evaluate_solution` result counts.\n\
+  \n# Core H2 components and runtime semantics\n\nThe names below are invariant core components. The initial\
+  \ task message adds an\nauthoritative contract for the exact generated tools, skills, and middleware\
+  \ in\nthe current materialized H2.\n\n## Tools available now\n- `edit_solution` (core): edit the EVOLVE-BLOCK\
+  \ using a targeted diff or full rewrite.\n- `evaluate_solution` (core): run the official evaluator under\
+  \ the fixed budget.\n- `probe_solution` (core): cheaply rank candidates on subsampled data.\n- `finish`\
+  \ (core): end the session and retain the best valid program.\n- `LoadSkill` (framework): load one of\
+  \ the skills listed below.\n\n## Base skill\n- `discovery-optimization` (base): iterative edit, evaluate,\
+  \ diagnose, and diversify playbook.\n\nEvery mounted proposer-generated skill is injected in full and\
+  \ audited before\nthe first program edit. Obsolete or conflicting skills must be removed from H2;\n\
+  the executor may not silently ignore a still-mounted generated skill.\n\n## Middleware active now\n\
+  - `BudgetReminderMiddleware` (runtime): reports when the evaluation budget is low.\n- `StallRestartMiddleware`\
+  \ (runtime): suggests a structural restart after repeated stalls.\n- `LongToolOutputMiddleware` (runtime):\
+  \ keeps long tool results readable.\n- `RoundAndTokenReminderMiddleware` (runtime): provides pacing\
+  \ reminders.\n\nGenerated tools are conditional on their contract triggers. Generated skills\nare automatically\
+  \ enacted and mandatory. Middleware runs automatically. This\ndelivery distinction is part of score\
+  \ eligibility and must remain visible in\nthe trajectory.\n\n# Task-specific search strategy (circle\
+  \ packing, n=26, unit square)\n\nThe objective: maximize the sum of the 26 radii subject to each circle\
+  \ staying\ninside the unit square (r_i <= min(x, y, 1-x, 1-y)) and no pairwise overlap\n(r_i + r_j <=\
+  \ center-to-center distance). The score is exactly that sum, so\nevery edit should be judged by which\
+  \ binding constraint it relaxes.\n\nConstruction families to try, in order of expected payoff:\n1. **Dense\
+  \ tiling base**: place centers on a near-regular grid or layered\n   lattice (e.g. 5x5 or 6x5 with one\
+  \ site removed), then set each radius to the\n   minimum of its wall distance and the gap to every neighbor.\
+  \ This replaces a\n   sparse symmetric layout with a dense one in one move — the highest-leverage\n\
+  \   first edit.\n2. **Targeted perturb + recompute**: from the best tiling, nudge a handful of\n   centers\
+  \ (offsets ~0.01-0.05) toward corners/edges where wall slack is\n   largest, then recompute radii with\
+  \ the same min-of-constraints rule.\n3. **Mixed radii**: deliberately shrink corner/edge circles so\
+  \ their neighbors\n   can grow; a uniform-radius packing wastes boundary space.\n\nMethod rules:\n-\
+  \ Before each edit, identify for each circle whether a wall or a neighbor binds\n  its radius; move\
+  \ centers to relax the binding constraints, not to cosmetics.\n- Use targeted SEARCH/REPLACE diffs within\
+  \ a family; reserve a full-block\n  rewrite for switching construction families.\n- Keep the constructor\
+  \ explicit and fast (no internal iterative optimizer) so\n  every evaluation finishes well inside the\
+  \ timeout.\n- Never evaluate the same code twice; if a family stalls for 2+ evaluations,\n  switch families\
+  \ rather than tuning the loser.\n\n# Generated tool: `packing_probe` (CONDITIONAL)\n\n`packing_probe`\
+  \ is a generated, conditional tool. Pass it the current `centers`\n(list of [x,y]) and `radii` (list\
+  \ of floats) read from the program's output. It\ndeterministically redistributes the radii subject to\
+  \ the wall and neighbor\nconstraints and returns: `input_sum`, `output_sum`, the `gain` recoverable\
+  \ by\npure radius redistribution (no center moves), the redistributed `radii`, and the\ntop circles\
+  \ with wall `headroom`. It does NOT spend evaluation budget.\n\nTrigger: call `packing_probe` after\
+  \ you know the current centers/radii (e.g.\nright after an `evaluate_solution` that improved, or before\
+  \ deciding the next\nedit) to learn how much radius is still on the table for these centers. If\n`gain`\
+  \ is large, adopt the returned `radii` (or a center tweak that creates more\ngap) — that is free score.\
+  \ If `gain` is ~0, the radii are locally optimal for\nthese centers, so the next edit must MOVE a center\
+  \ (relax a binding neighbor or\nuse wall headroom), not re-tune radii. Do NOT call it if the program\
+  \ errors."
+new_tools:
+- name: packing_probe
+  description: Local radius-redistribution optimizer for the n=26 unit-square packing. Pass the current
+    centers (list of [x,y]) and radii (list of floats) read from the program. It deterministically redistributes
+    the radii subject to wall (r_i <= min(x,y,1-x,1-y)) and neighbor (r_i + r_j <= dist) constraints,
+    and returns the redistributed radii, input_sum, output_sum, the gain recoverable by pure redistribution
+    (no center moves), and the top circles with wall headroom. Use it to see how much radius is left on
+    the table for the current centers and which circles to grow/shrink. Does NOT spend evaluation budget.
+  input_schema:
+    type: object
+    properties:
+      centers:
+        type: array
+        description: List of [x, y] center coordinates for the 26 circles.
+        items:
+          type: array
+          items:
+            type: number
+          minItems: 2
+          maxItems: 2
+      radii:
+        type: array
+        description: List of the 26 current radii (same order as centers).
+        items:
+          type: number
+    required:
+    - centers
+    - radii
+    additionalProperties: false
+  implementation_py: "\"\"\"Local radius-redistribution optimizer for the n=26 unit-square packing.\n\n\
+    Given the current centers and radii (passed in by the executor after reading the\nprogram's output),\
+    \ this tool performs a fast, deterministic local redistribution\nof the radii subject to the two constraint\
+    \ families:\n\n  * wall:    r_i <= w_i = min(x, y, 1-x, 1-y)\n  * neighbor: r_i + r_j <= dist(i, j)\n\
+    \nIt starts from the supplied radii, then iteratively:\n  1. clamps each r_i to its wall cap w_i,\n\
+    \  2. for every overlapping pair (r_i + r_j > d_ij), scales the two down to fit,\n  3. for every pair\
+    \ with slack (r_i + r_j < d_ij) and a circle below its wall\n     cap, grows the circle with more\
+    \ wall headroom to use the gap,\nuntil stable. It returns the redistributed radii, the new sum, the\
+    \ sum of the\ninput radii, and the gain. This is a LOCAL optimum around the given centers —\nit tells\
+    \ the executor exactly how much radius is recoverable by pure\nredistribution (no center moves) and\
+    \ which circles to shrink/grow.\n\nNo program execution, no file I/O, no introspection. Pure math\
+    \ on the args.\n\"\"\"\nimport math\n\n\ndef _clamp(v, lo, hi):\n    if v < lo:\n        return lo\n\
+    \    if v > hi:\n        return hi\n    return v\n\n\ndef run(ctx, args):\n    centers = args.get(\"\
+    centers\")\n    radii = args.get(\"radii\")\n    if not centers or not radii:\n        return {\"\
+    error\": \"need 'centers' (list of [x,y]) and 'radii' (list of floats)\"}\n    n = len(centers)\n\
+    \    if len(radii) != n:\n        return {\"error\": \"centers and radii length mismatch\"}\n\n  \
+    \  xs = [float(c[0]) for c in centers]\n    ys = [float(c[1]) for c in centers]\n    r = [float(v)\
+    \ for v in radii]\n\n    wall = [min(xs[i], ys[i], 1.0 - xs[i], 1.0 - ys[i]) for i in range(n)]\n\
+    \    wall = [_clamp(w, 0.0, 1.0) for w in wall]\n\n    # pairwise distances\n    d = [[0.0] * n for\
+    \ _ in range(n)]\n    for i in range(n):\n        for j in range(i + 1, n):\n            d[i][j] =\
+    \ d[j][i] = math.hypot(xs[i] - xs[j], ys[i] - ys[j])\n\n    in_sum = sum(r)\n    # start: clamp to\
+    \ wall\n    for i in range(n):\n        r[i] = _clamp(r[i], 0.0, wall[i])\n\n    for _ in range(60):\n\
+    \        changed = 0.0\n        # resolve overlaps\n        for i in range(n):\n            for j\
+    \ in range(i + 1, n):\n                s = r[i] + r[j]\n                if s > d[i][j] and s > 0.0:\n\
+    \                    scale = d[i][j] / s\n                    r[i] *= scale\n                    r[j]\
+    \ *= scale\n                    changed += s - d[i][j]\n        # grow into slack: for each pair with\
+    \ gap, push the smaller circle up\n        for i in range(n):\n            for j in range(i + 1, n):\n\
+    \                gap = d[i][j] - (r[i] + r[j])\n                if gap <= 1e-12:\n               \
+    \     continue\n                hi = wall[i] - r[i]\n                hj = wall[j] - r[j]\n       \
+    \         if hi <= 1e-12 and hj <= 1e-12:\n                    continue\n                if hi >=\
+    \ hj:\n                    grow = min(gap, hi)\n                    if grow > 0.0:\n             \
+    \           r[i] += grow\n                        changed += grow\n                else:\n       \
+    \             grow = min(gap, hj)\n                    if grow > 0.0:\n                        r[j]\
+    \ += grow\n                        changed += grow\n        # final wall clamp\n        for i in range(n):\n\
+    \            if r[i] > wall[i]:\n                r[i] = wall[i]\n        if changed < 1e-9:\n    \
+    \        break\n\n    out_sum = sum(r)\n    # verify no overlap remains\n    worst = 0.0\n    for\
+    \ i in range(n):\n        for j in range(i + 1, n):\n            ov = r[i] + r[j] - d[i][j]\n    \
+    \        if ov > worst:\n                worst = ov\n\n    # circles that could still grow (wall headroom)\n\
+    \    headroom = [round(wall[i] - r[i], 6) for i in range(n)]\n    top = sorted(range(n), key=lambda\
+    \ i: headroom[i], reverse=True)[:5]\n\n    return {\n        \"n\": n,\n        \"input_sum\": round(in_sum,\
+    \ 6),\n        \"output_sum\": round(out_sum, 6),\n        \"gain\": round(out_sum - in_sum, 6),\n\
+    \        \"max_overlap_after\": round(worst, 9),\n        \"radii\": [round(v, 6) for v in r],\n \
+    \       \"top_wall_headroom\": [\n            {\"i\": int(i), \"headroom\": headroom[i], \"wall\"\
+    : round(wall[i], 6)}\n            for i in top\n        ],\n    }\n"
